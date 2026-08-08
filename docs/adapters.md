@@ -38,6 +38,9 @@ their own repository.
 
   The in-tree `simulation` adapter needs no clone.
 
+  To fetch or update all three reference adapters into `adapters/external/` at once,
+  run `make adapters` from the repository root (clones each, or fast-forwards if already present).
+
 ### If your machine has more than one Python interpreter
 
 Check which `python3` a shell resolves to before installing anything:
