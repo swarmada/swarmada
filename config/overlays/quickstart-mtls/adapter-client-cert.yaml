@@ -1,0 +1,52 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Client certificate for the demo Fleet Adapter.
+#
+# THE SAN IS THE ADAPTER'S IDENTITY. internal/controlstream/identity.go parses
+# <adapter>.<namespace>.svc.cluster.local and takes <adapter> as the FleetAdapter
+# name and <namespace> as its namespace; internal/command/dispatcher.go then keys
+# the live ControlStream under exactly that pair. It MUST therefore read
+# sim-fleet-adapter.warehouse-a.svc.cluster.local to match the FleetAdapter object
+# examples/warehouse-quickstart/run.sh creates and the robots' spec.adapter.name.
+# Change either side and the stream registers under a key nothing looks up, which
+# is silent: telemetry still flows, the adapter still shows Connected, and only
+# command push (validate_action / assign_action) is unreachable.
+#
+# Issued by the same CA as the server cert, because that CA is what the manager
+# mounts as --fleet-adapter-client-ca-file.
+#
+# Lives in the `system` namespace because controlstream-ca-issuer is a namespaced
+# cert-manager Issuer there; the SAN — not the Secret's namespace — is what
+# carries the identity.
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sim-fleet-adapter-client
+  namespace: system
+spec:
+  secretName: sim-fleet-adapter-client-tls
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: sim-fleet-adapter
+  dnsNames:
+    - sim-fleet-adapter.warehouse-a.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer

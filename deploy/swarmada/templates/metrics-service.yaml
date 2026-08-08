@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if .Values.metrics.service.enabled -}}
+# ─────────────────────────────────────────────────────────────────────────────
+# Metrics Service — exposes the manager's /metrics endpoint (RFC-0001 §9.3.8,
+# default port 9090) so a Prometheus can scrape it. Swarmada is only a scrape
+# TARGET; this chart never bundles Prometheus/Grafana/Alertmanager.
+#
+# HOW TO SCRAPE:
+#   1. Prometheus Operator  → set metrics.serviceMonitor.enabled=true (a
+#      ServiceMonitor selecting this Service; see templates/servicemonitor.yaml).
+#   2. NO Prometheus Operator (raw kubernetes_sd pod scrape) → add the annotations
+#      to the manager pod via manager.podAnnotations in values.yaml:
+#        prometheus.io/scrape: "true"
+#        prometheus.io/port:   "{{ .Values.manager.metricsPort }}"
+#        prometheus.io/path:   "/metrics"
+#      (Pod-role service discovery reads pod annotations, so this Service is not
+#      strictly required for that path — but it gives a stable DNS name.)
+# The endpoint is unauthenticated by default (§9.3.8); front it with a network
+# policy or an authenticating proxy in production.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "swarmada.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "swarmada.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

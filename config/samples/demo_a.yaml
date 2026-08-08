@@ -1,0 +1,108 @@
+apiVersion: swarmada.io/v1
+kind: FleetZone
+metadata:
+  name: warehouse-a
+  namespace: warehouse-a
+spec:
+  displayName: "Receiving and staging area — east wing"
+  waypoints:
+    - name: receiving-dock-1
+      x: 5.1
+      "y": 2.1
+      yaw: 3.14
+    - name: staging-shelf-a
+      x: 12.1
+      "y": 8.1
+      yaw: 1.0
+    - name: charging-bay
+      x: 1.1
+      "y": 1.1
+      yaw: 1.57
+---
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: sim-robot-001
+  namespace: warehouse-a
+spec:
+  manufacturer: Simulated
+  model: SimBot-v1
+  adapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  zone: warehouse-a
+  # Declared capabilities the Capability Controller derives into
+  # status.capabilities[] (Active, since no requiredHardware gates them). The
+  # scheduler needs these Active to match the sample FleetActions below.
+  capabilities:
+    - name: navigation
+      type: hardware-native
+      pauseable: false
+    - name: camera_front
+      type: hardware-native
+      pauseable: false
+---
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: sim-robot-002
+  namespace: warehouse-a
+spec:
+  manufacturer: Simulated
+  model: SimBot-v1
+  adapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  zone: warehouse-a
+  capabilities:
+    - name: navigation
+      type: hardware-native
+      pauseable: false
+    - name: camera_front
+      type: hardware-native
+      pauseable: false
+---
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: sim-robot-003
+  namespace: warehouse-a
+spec:
+  manufacturer: Simulated
+  model: SimBot-v1
+  adapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  zone: warehouse-a
+  capabilities:
+    - name: navigation
+      type: hardware-native
+      pauseable: false
+    - name: camera_front
+      type: hardware-native
+      pauseable: false
+---
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: deliver-pallet-001
+  namespace: warehouse-a
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: High
+  requiredCapabilities:
+    - navigation
+---
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: inspect-receiving-dock
+  namespace: warehouse-a
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: Normal
+  requiredCapabilities:
+    - navigation
+    - camera_front

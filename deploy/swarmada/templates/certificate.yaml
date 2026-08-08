@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if and .Values.webhooks.enabled .Values.webhooks.certManager.enabled -}}
+{{- $svc := printf "%s-webhook-service" (include "swarmada.fullname" .) -}}
+# ─────────────────────────────────────────────────────────────────────────────
+# cert-manager serving cert for the webhook server. A self-signed Issuer signs a
+# Certificate whose Secret ({{ include "swarmada.webhookCertSecret" . }}) is mounted
+# by the manager Deployment; the cert-manager ca-injector copies the CA into each
+# webhook configuration's caBundle (via the inject-ca-from annotation).
+#
+# Requires cert-manager installed in the cluster. To install WITHOUT cert-manager,
+# set webhooks.certManager.enabled=false, then provide the serving Secret yourself
+# and set webhooks.caBundle (see values.yaml / the chart README).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "swarmada.fullname" . }}-selfsigned-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "swarmada.fullname" . }}-serving-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ $svc }}.{{ .Release.Namespace }}.svc
+    - {{ $svc }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "swarmada.fullname" . }}-selfsigned-issuer
+  secretName: {{ include "swarmada.webhookCertSecret" . }}
+  {{- with .Values.webhooks.certManager.duration }}
+  duration: {{ . }}
+  {{- end }}
+  {{- with .Values.webhooks.certManager.renewBefore }}
+  renewBefore: {{ . }}
+  {{- end }}
+{{- end }}

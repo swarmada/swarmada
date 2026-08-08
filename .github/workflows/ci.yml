@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Go: tidy · build · lint · test ────────────────────────────────────────────
+  go:
+    name: Go (build · lint · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Tidy and verify modules
+        run: make mod-tidy
+
+      - name: Build controller-manager
+        run: make build
+
+      # golangci-lint v2 (the repo's .golangci.yml is the v2 schema). The install
+      # script with no version arg fetches the latest stable release (v2 line);
+      # append a tag (e.g. ... | sh -s -- -b DIR v2.1.6) to pin.
+      - name: Install golangci-lint v2
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Lint (golangci-lint v2)
+        run: make lint-go
+
+      - name: Test (race detector + coverage)
+        run: make test-go
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.txt
+          if-no-files-found: ignore
+
+  # ── Python: lint · test ───────────────────────────────────────────────────────
+  python:
+    name: Python (lint · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Makefile runs a Go-discovery preflight at parse time (it errors if no
+      # go binary is found), so every `make` target — Python included — needs Go
+      # present even though these targets do not compile Go.
+      - name: Set up Go (Makefile preflight)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          make install-py
+
+      - name: Lint (ruff + mypy)
+        run: make lint-py
+
+      - name: Test (pytest)
+        run: make test-py
+
+  # ── Proto: proto3 conventions · buf lint · buf breaking-vs-main ────────────────
+  proto:
+    name: Proto (lint · breaking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so buf can diff the module against main
+
+      # check-proto3.sh runs `buf breaking --against '.git#branch=main'` only when
+      # a local `main` ref exists. Create one from origin/main (no-op when the
+      # push is already on main, hence `|| true`).
+      - name: Ensure local main ref
+        run: git fetch origin main:main || true
+
+      - name: Set up Go (Makefile preflight)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Proto lint + breaking-change check
+        run: make proto-lint
+
+  # ── Helm: chart-CRD sync · lint · render smoke ────────────────────────────────
+  helm:
+    name: Helm (sync · lint · render)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Makefile runs a Go-discovery preflight at parse time, so even the
+      # helm-only targets need a go binary present.
+      - name: Set up Go (Makefile preflight)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      # Guard the "chart is derived from config/, never a divergent hand-copy" rule:
+      # regenerate the chart CRDs from config/crd/bases and fail if they differ from
+      # what is committed.
+      - name: Verify chart CRDs are in sync with config/crd/bases
+        run: make helm-verify-sync
+
+      - name: Lint chart
+        run: make helm-lint
+
+      - name: Render smoke test (default + metrics toggles)
+        run: make helm-template
+
+  # ── Quickstart: real end-to-end on kind (the anti-rot assertion) ──────────────
+  # Brings the whole control plane up on a kind cluster, applies the sample fleet,
+  # drives the robots Ready, and fails the build unless the REAL scheduler assigns
+  # a FleetTask (examples/warehouse-quickstart/run.sh prints ✅ / exits non-zero).
+  # This is what keeps "getting started" from silently rotting.
+  quickstart:
+    name: Quickstart (kind e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # The manager image build regenerates the Go proto stubs (they are
+      # .gitignored), so protoc + the pinned plugins must be present. Versions
+      # match the Makefile (PROTOC_GEN_GO_VERSION / PROTOC_GEN_GO_GRPC_VERSION).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install proto plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install kind
+        run: |
+          curl -sSLo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+
+      # make quickstart-test creates the kind cluster, builds + loads the image,
+      # deploys the control plane, applies config/samples, drives readiness,
+      # asserts the scheduler assigned a task, and tears the cluster down.
+      - name: Quickstart end-to-end (build · deploy · assign · assert)
+        run: make quickstart-test

@@ -1,0 +1,20 @@
+# buf module config (buf v1). Lives at the proto module root so PACKAGE_DIRECTORY_MATCH
+# resolves: package `fleet_adapter.v1` <-> directory `fleet_adapter/v1`.
+#
+# Run from this directory:  buf lint
+# Breaking vs main:         buf breaking --against '../.git#branch=main,subdir=proto'
+# Install buf:              brew install bufbuild/buf/buf   (or: go install github.com/bufbuild/buf/cmd/buf@latest)
+version: v1
+lint:
+  use:
+    - STANDARD
+  except:
+    # The Fleet Adapter protocol uses domain message names (TelemetryPayload,
+    # EstopRequest/EstopAck) per RFC-0001 §5.3, not the <Method>Request/Response
+    # convention. Everything else in STANDARD (enum prefixes, version suffix,
+    # field casing, directory match, unique req/resp) is enforced.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE

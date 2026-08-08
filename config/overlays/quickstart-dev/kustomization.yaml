@@ -1,0 +1,38 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# DEV/DEMO ONLY — never apply this overlay in production. Builds on top of
+# config/default (the same developer/prototype base `make deploy` uses) and
+# adds:
+#   1. --fleet-adapter-insecure-authz=true on the manager (see
+#      cmd/manager/main.go's flag help) — disables ControlStream per-robot
+#      authorization so a plaintext adapter with no mTLS identity is
+#      authorized for every message. Off by default everywhere else.
+#   2. A Service exposing the ControlStream port (9443) so a local demo
+#      adapter can reach it without a pod-direct port-forward hack.
+#
+# Used by examples/warehouse-quickstart/run.sh's live-scenario path (the
+# interactive picker's non-default scenarios). CI's `make quickstart-test`
+# does NOT use this overlay — it stays on config/default, status-projected,
+# exactly as before.
+
+resources:
+  - ../../default
+  - controlstream-service.yaml
+
+patches:
+  - path: manager-insecure-authz-patch.yaml

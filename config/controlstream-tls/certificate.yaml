@@ -1,0 +1,77 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# cert-manager materials for ControlStream mTLS (RFC-0001 §9.2.7, ADR-0025).
+# ASSUMES cert-manager is installed in the cluster. A self-signed root bootstraps
+# a CA; the CA issues the ControlStream server certificate. The SAME CA is the
+# trust anchor for adapter *client* certificates — the manager mounts this CA's
+# ca.crt as --fleet-adapter-client-ca-file, and each adapter is issued a client
+# cert (by this CA) whose SAN is <adapter>.<namespace>.svc.cluster.local, which
+# internal/controlstream/identity.go parses. Rotate the server cert freely: the
+# manager re-reads the keypair on each handshake (no restart).
+
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: controlstream-selfsigned
+  namespace: system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: controlstream-ca
+  namespace: system
+spec:
+  isCA: true
+  commonName: swarmada-controlstream-ca
+  secretName: controlstream-ca
+  duration: 87600h # 10y root
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: controlstream-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: controlstream-ca-issuer
+  namespace: system
+spec:
+  ca:
+    secretName: controlstream-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: controlstream-server
+  namespace: system
+spec:
+  # tls.crt / tls.key / ca.crt — mounted by the manager patch; TLS 1.3 uses the
+  # ECDSA leaf directly.
+  secretName: controlstream-server-tls
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d; hot-reloaded, no restart (ADR-0025)
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - swarmada-controlstream.system.svc
+    - swarmada-controlstream.system.svc.cluster.local
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer

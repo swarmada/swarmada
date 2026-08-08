@@ -1,0 +1,136 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - discoveredrobots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - discoveredrobots/status
+  - firmwarerollouts/status
+  - fleetadapters/status
+  - fleettasks/status
+  - fleetzones/status
+  - modelpolicies/status
+  - modelrollouts/status
+  - robotclasses/status
+  - robotprobes/status
+  - robots/status
+  - swarmadaconfigs/status
+  - zonemaintenances/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - swarmada.io
+  resources:
+  - firmwarerollouts
+  - fleetadapters
+  - robotclasses
+  - robotprobes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions
+  - fleettasks
+  - robots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions/finalizers
+  - fleettasks/finalizers
+  - robots/finalizers
+  - zonemaintenances/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions/status
+  - fleetzones
+  - modelpolicies
+  - zonemaintenances
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - modelrollouts
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - swarmadaconfigs
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch

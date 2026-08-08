@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if .Values.rbac.clusterRoles -}}
+# ─────────────────────────────────────────────────────────────────────────────
+# The five built-in Swarmada ClusterRoles (RFC-0001 §9.5.3), mirrored VERBATIM
+# from config/rbac/swarmada_{viewer,operator,fleet-manager,admin,robot}_role.yaml.
+#
+# Names are FIXED (swarmada:viewer / :operator / :fleet-manager / :admin / :robot)
+# because they are the contract the server-side SubjectAccessReview checks against
+# (e.g. the FleetZone estop-verb webhook). They are therefore cluster SINGLETONS —
+# NOT release-prefixed. Installing this chart into more than one namespace on the
+# same cluster should enable `rbac.clusterRoles` on only ONE release to avoid
+# ownership conflicts. Bind these to your subjects yourself (this chart does not
+# create RoleBindings for humans/automation).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:viewer
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:operator
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Read-only over all Swarmada resources.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch"]
+  # Full FleetAction management, including the `cancel` custom verb (§9.5.3.2).
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["create", "update", "patch", "delete", "cancel"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:fleet-manager
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Read-only over everything.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch"]
+  # Robot / class / rollout / probe / maintenance management.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - robotclasses
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["zonemaintenances"]
+    verbs: ["create", "delete"]
+  # FleetAction management incl. the cancel custom verb.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["create", "update", "patch", "delete", "cancel"]
+  # Zone management incl. the estop-trigger custom verb — but NOT estop-clear.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones"]
+    verbs: ["create", "update", "delete", "estop-trigger"]
+  # estop-trigger on individual robots (§9.6.2.3 — robot or FleetZone scope).
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots"]
+    verbs: ["estop-trigger"]
+  # DiscoveredRobot admit/reject custom verbs.
+  - apiGroups: ["swarmada.io"]
+    resources: ["discoveredrobots"]
+    verbs: ["admit", "reject"]
+  # Safety audit log: read + verify (NOT export — admin only, §9.5.3.2).
+  - apiGroups: ["swarmada.io"]
+    resources: ["safetyauditlogs"]
+    verbs: ["read", "verify"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:admin
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Full management of every Swarmada resource.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # robots/status writes (admin-only among users; the adapter writes its own).
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots/status"]
+    verbs: ["update", "patch"]
+  # All custom verbs, including estop-clear — admin is the sole holder.
+  - apiGroups: ["swarmada.io"]
+    resources: ["discoveredrobots"]
+    verbs: ["admit", "reject"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["cancel"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones", "robots"]
+    verbs: ["estop-trigger", "estop-clear"]
+  # Safety audit log: read + export + verify.
+  - apiGroups: ["swarmada.io"]
+    resources: ["safetyauditlogs"]
+    verbs: ["read", "export", "verify"]
+  # CRD management.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:robot
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots", "fleetactions", "fleetzones"]
+    verbs: ["get", "list", "watch"]
+  # Write robot status (telemetry projection); scoped to owned robots server-side.
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots/status"]
+    verbs: ["update", "patch"]
+{{- end }}

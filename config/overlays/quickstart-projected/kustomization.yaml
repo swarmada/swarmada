@@ -1,0 +1,35 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# DEMO ONLY — the status-projected quickstart path
+# (examples/warehouse-quickstart/run.sh with LIVE=0, and CI's
+# `make quickstart-test`). Builds on config/default and turns the ControlStream
+# server OFF; see manager-no-controlstream-patch.yaml for why that is required
+# rather than merely tidy.
+#
+# Sibling overlay: config/overlays/quickstart-dev is the LIVE path, which runs a
+# real sim_adapter.py and therefore KEEPS ControlStream enabled.
+#
+# `make deploy` (config/default) is untouched by this and still serves
+# ControlStream — that is the right default for a developer cluster a real
+# adapter will dial into.
+
+resources:
+  - ../../default
+
+patches:
+  - path: manager-no-controlstream-patch.yaml

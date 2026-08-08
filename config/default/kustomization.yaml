@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Developer/prototype deploy overlay (`make deploy` / `make undeploy`) — the
+# single-cluster, single-namespace topology from
+# rfcs/rfc-0001-core-spec/architecture.md's "Developer / Prototype" row.
+#
+# NOT included here: config/webhook/. The admission webhooks need real serving
+# certs (a cert-manager Certificate + CA injection, or an equivalent), which
+# this overlay does not provision yet — see docs/deploy-minikube.md. The
+# manager Deployment runs with ENABLE_WEBHOOKS=false accordingly. Wiring
+# cert-manager and re-enabling webhooks for this overlay is tracked as
+# follow-up work, not part of this change.
+
+resources:
+  - ../crd/bases
+  - ../rbac
+  - ../manager
+
+images:
+  - name: controller
+    newName: swarmada-controller
+    newTag: dev

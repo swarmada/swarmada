@@ -1,0 +1,33 @@
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: sim-robot-001
+  namespace: warehouse-a
+  labels:
+    swarmada.io/manufacturer: SimBot
+    swarmada.io/model: SimBot-250
+spec:
+  manufacturer: SimBot
+  model: SimBot-250
+  adapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  zone: warehouse-a
+# Active health checks are configured via the separate RobotProbe CRD (§5.2.6),
+# not inline on the Robot spec.
+---
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: sim-robot-002
+  namespace: warehouse-a
+  labels:
+    swarmada.io/manufacturer: SimBot
+    swarmada.io/model: SimBot-250
+spec:
+  manufacturer: SimBot
+  model: SimBot-250
+  adapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  zone: warehouse-a

@@ -1,0 +1,37 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Go — tabs (gofmt enforced)
+[*.go]
+indent_style = tab
+indent_size = 4
+
+# Python — spaces (PEP 8 / black)
+[*.py]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+# Protobuf
+[*.proto]
+indent_style = space
+indent_size = 2
+
+# YAML / JSON
+[*.{yaml,yml,json}]
+indent_style = space
+indent_size = 2
+
+# Markdown
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = 120
+
+# Makefile — must use real tabs
+[Makefile]
+indent_style = tab

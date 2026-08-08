@@ -1,0 +1,194 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-swarmada-io-v1-robot
+  failurePolicy: Fail
+  name: mrobot.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - robots
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-firmwarerollout
+  failurePolicy: Fail
+  name: vfirmwarerollout.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - firmwarerollouts
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-fleetaction
+  failurePolicy: Fail
+  name: vfleetaction.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - fleetactions
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-fleettask
+  failurePolicy: Fail
+  name: vfleettask.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - fleettasks
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-fleetzone
+  failurePolicy: Fail
+  name: vfleetzone.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - fleetzones
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-modelrollout
+  failurePolicy: Fail
+  name: vmodelrollout.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - DELETE
+    resources:
+    - modelrollouts
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-robot
+  failurePolicy: Fail
+  name: vrobot.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - robots
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-swarmadaconfig
+  failurePolicy: Fail
+  name: vswarmadaconfig.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - swarmadaconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-zonemaintenance
+  failurePolicy: Fail
+  name: vzonemaintenance.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - zonemaintenances
+  sideEffects: None

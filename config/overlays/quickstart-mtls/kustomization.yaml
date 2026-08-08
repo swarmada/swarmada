@@ -1,0 +1,48 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# DEMO overlay for the LIVE quickstart path — a real sim_adapter.py process
+# driving a real robot over a real, mutually-authenticated ControlStream.
+# REQUIRES cert-manager; examples/warehouse-quickstart/run.sh installs it.
+#
+# Why mTLS is mandatory here rather than a nicety: the adapter's identity comes
+# only from its client certificate's SAN. internal/command/dispatcher.go refuses
+# to register an unverified stream ("nothing may be pushed to an unauthenticated
+# stream"), so over a plaintext ControlStream the manager can ingest telemetry
+# but can never push a command back. ADR-0019's validate_action probe then fails
+# unreachable for every candidate robot and NOTHING is ever assigned. The
+# plaintext sibling overlay (quickstart-dev) cannot drive an assignment for that
+# reason.
+#
+# Sibling overlays:
+#   quickstart-projected — no adapter at all; ControlStream off entirely.
+#   quickstart-dev       — plaintext + insecure-authz; telemetry only.
+
+# server-certificates.yaml and controlstream-service.yaml are local copies of the
+# equivalents under config/controlstream-tls/ and config/overlays/quickstart-dev/.
+# Kustomize refuses to load a bare file from outside the kustomization directory,
+# and referencing those directories instead would drag in their whole overlay
+# (webhook certs, the 9445 port move). Keep the copies in step if the originals
+# change.
+resources:
+  - ../../default
+  - server-certificates.yaml
+  - controlstream-service.yaml
+  - adapter-client-cert.yaml
+
+patches:
+  - path: manager-mtls-patch.yaml

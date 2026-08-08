@@ -1,0 +1,489 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: modelrollouts.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: ModelRollout
+    listKind: ModelRolloutList
+    plural: modelrollouts
+    shortNames:
+    - mr
+    singular: modelrollout
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.modelName
+      name: Model
+      type: string
+    - jsonPath: .spec.newVersion
+      name: Version
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.robotsUpdated
+      name: Updated
+      type: integer
+    - jsonPath: .status.capabilitiesSuspendedOn
+      name: Suspended
+      type: integer
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ModelRollout is the Schema for the modelrollouts API.
+
+          Key difference from FirmwareRollout: when a ModelRollout begins for a robot,
+          all capabilities listed in spec.grantsCapabilities are set to Unavailable for
+          that robot until the update completes and the model returns to Active status.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ModelRolloutSpec defines the desired state of a ModelRollout.
+
+              A capability may not be both granted and revoked by one rollout. The two lists drive
+              opposite edges of the §6.10 capability derivation, so an overlap has no coherent meaning:
+              whichever list the controller happened to apply second would decide, making the outcome an
+              artefact of iteration order rather than of the declaration. Rejecting at admission is the
+              only place the operator still has the context to say which they meant.
+            properties:
+              attestationRef:
+                description: |-
+                  AttestationRef optionally references a signed {modelDigest, metrics}
+                  attestation produced by the evaluation job. When present, the control plane
+                  verifies the signature and that the digest matches modelChecksum, binding the
+                  quality-gate metrics to the artifact being shipped (ADR-0020). Enforcement is
+                  configurable and defaults off.
+                type: string
+              grantsCapabilities:
+                description: |-
+                  GrantsCapabilities lists capabilities that become Active when this model
+                  is Active. These capabilities are set to Unavailable during the update.
+
+                  MaxItems bounds CEL cost (see Robot.spec.hardware's comment): the disjointness rule on
+                  this type cross-products the two lists, and the API server refuses to install a CRD
+                  whose estimated rule cost is unbounded. Matches RobotClass's MaxItems=32 on the same
+                  concept, and 32 capabilities granted by a single model is already far past plausible.
+                items:
+                  type: string
+                maxItems: 32
+                type: array
+              maxDownloadTimeMinutes:
+                default: 30
+                description: |-
+                  MaxDownloadTimeMinutes: if a model download exceeds this duration on a
+                  given robot, that robot's update is marked Failed.
+                  0 means no limit.
+                format: int32
+                maximum: 480
+                minimum: 0
+                type: integer
+              modelChecksum:
+                description: |-
+                  ModelChecksum is the SHA-256 digest of the model artifact, as
+                  "sha256:<64 hex>". It is carried to the adapter in the model_update Command so
+                  the robot re-verifies the downloaded bytes before install (§9.2.8), and — when
+                  signing is enforced — the detached signature is verified over this value
+                  against the SwarmadaConfig trust roots before any dispatch (parity with
+                  FirmwareRollout, ADR-0020).
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              modelName:
+                description: |-
+                  ModelName is the logical model name (not version-specific).
+                  Must match InstalledModel.name on target robots.
+                minLength: 1
+                type: string
+              modelSignatureRef:
+                description: |-
+                  ModelSignatureRef references the detached signature or sigstore bundle for the
+                  model artifact, verified against SwarmadaConfig.spec.signing.trustRoots before
+                  any dispatch. When requireSignatureVerification is true this MUST be set;
+                  omitting it fails the rollout closed (ADR-0020, §9.2.8). Supported forms: an
+                  https/oci ref, or an inline "bundle:<base64>" signature.
+                type: string
+              modelUri:
+                description: ModelURI is the OCI registry URI or HTTPS URL of the
+                  model artifact.
+                pattern: ^(oci|s3|https)://
+                type: string
+              newVersion:
+                description: NewVersion is the target model version string (semver).
+                pattern: ^\d+\.\d+\.\d+$
+                type: string
+              requiredHardware:
+                description: |-
+                  RequiredHardware lists hardware component TYPES (not names) that must be
+                  present and Healthy for a robot to receive this model.
+                  Robots in targetSelector without the required hardware are silently skipped.
+                items:
+                  description: |-
+                    HardwareComponentType classifies a physical component in a hardware inventory.
+                    Custom covers vendor-specific components without a first-class type; such
+                    entries MUST also set customType.
+                  enum:
+                  - Lidar
+                  - Camera
+                  - Gripper
+                  - LoadPlatform
+                  - Arm
+                  - Thermal
+                  - Microphone
+                  - Display
+                  - Custom
+                  type: string
+                type: array
+              revokesCapabilities:
+                description: |-
+                  RevokesCapabilities lists capabilities removed when this model replaces
+                  a previous model with a different capability profile.
+                  MaxItems bounds CEL cost (see GrantsCapabilities above).
+                items:
+                  type: string
+                maxItems: 32
+                type: array
+              rollbackPolicy:
+                default: Manual
+                description: RollbackPolicy controls what happens on failure.
+                enum:
+                - Manual
+                - Auto
+                type: string
+              safetyConstraints:
+                description: SafetyConstraints restricts when updates may be applied.
+                properties:
+                  maintenanceWindowOnly:
+                    default: false
+                    description: |-
+                      MaintenanceWindowOnly: only update robots during their configured
+                      MaintenanceWindow. Slowest but least disruptive.
+                    type: boolean
+                  minBatteryPct:
+                    default: 30
+                    description: 'MinBatteryPct: do not update robots below this battery
+                      level.'
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  requireIdleState:
+                    default: true
+                    description: 'RequireIdleState: only update robots in Idle phase.'
+                    type: boolean
+                type: object
+              strategy:
+                description: Strategy controls how the rollout progresses.
+                properties:
+                  rollingUpdate:
+                    description: |-
+                      RollingUpdate holds the RollingUpdate strategy's parameters (applies when
+                      type is RollingUpdate). When omitted, the documented defaults apply
+                      (see RollingUpdateOrDefault).
+                    properties:
+                      maxUnavailable:
+                        default: 10%
+                        description: |-
+                          MaxUnavailable is the maximum number or percentage of robots that may
+                          simultaneously be in the updating state.
+                          Examples: "10%" or "5".
+                        type: string
+                      pauseOnError:
+                        default: true
+                        description: |-
+                          PauseOnError halts the rollout if any robot fails to update.
+                          The operator must resume with swarmctl resume rollout.
+                        type: boolean
+                    type: object
+                  type:
+                    allOf:
+                    - enum:
+                      - RollingUpdate
+                    - enum:
+                      - RollingUpdate
+                    default: RollingUpdate
+                    description: Type selects the rollout strategy. Only RollingUpdate
+                      is supported at v0.1.
+                    type: string
+                type: object
+              targetSelector:
+                description: TargetSelector selects which robots receive this model
+                  update.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+            required:
+            - modelChecksum
+            - modelName
+            - modelUri
+            - newVersion
+            - targetSelector
+            type: object
+            x-kubernetes-validations:
+            - message: a capability must not appear in both grantsCapabilities and
+                revokesCapabilities
+              rule: '!has(self.grantsCapabilities) || !has(self.revokesCapabilities)
+                || !self.grantsCapabilities.exists(c, c in self.revokesCapabilities)'
+          status:
+            description: ModelRolloutStatus defines the observed state of a ModelRollout.
+            properties:
+              capabilitiesSuspendedOn:
+                format: int32
+                type: integer
+              completedAt:
+                format: date-time
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentBatch:
+                description: |-
+                  CurrentBatch is the per-robot active update batch (§6.7); each entry carries
+                  the robot's live updatePhase, sourced from adapter UpdateProgress.
+                items:
+                  description: |-
+                    RolloutBatchRobot is a per-robot entry in a rollout's active update batch. Its
+                    updatePhase reflects the robot's most recently reported intra-update progress
+                    (the adapter's advisory UpdateProgress, §9.2); when the adapter reports none it
+                    stays at the initial phase the controller set when the robot entered the batch.
+                    The phase enum differs by rollout kind (see UpdatePhase), so the field is a
+                    string validated by the control plane rather than a single CRD enum.
+                  properties:
+                    capabilitiesSuspendedAt:
+                      description: |-
+                        CapabilitiesSuspendedAt is when this robot's affected capabilities were
+                        suspended for the update (ModelRollout only), stamped per attempt at batch
+                        entry.
+                      format: date-time
+                      type: string
+                    namespace:
+                      description: Namespace is the robot's namespace.
+                      type: string
+                    previousVersion:
+                      description: PreviousVersion is the robot's firmware/model version
+                        before this update.
+                      type: string
+                    robotName:
+                      description: RobotName is the robot currently in the active
+                        update batch.
+                      type: string
+                    updatePhase:
+                      description: |-
+                        UpdatePhase is the robot's current intra-update phase. Firmware:
+                        Pulling / Installing / Verifying / Rebooting. Model:
+                        Downloading / Verifying / Installing / HealthChecking. Advisory — sourced from
+                        the adapter's UpdateProgress, else the controller's initial phase.
+                      type: string
+                    updateStartedAt:
+                      description: |-
+                        UpdateStartedAt is when the robot entered the active update batch. Preserved
+                        across reconciles for the current attempt.
+                      format: date-time
+                      type: string
+                  required:
+                  - robotName
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              failedRobots:
+                items:
+                  description: RolloutRobotResult records the failure outcome for
+                    a single robot.
+                  properties:
+                    failedAt:
+                      format: date-time
+                      type: string
+                    namespace:
+                      type: string
+                    previousVersion:
+                      type: string
+                    reason:
+                      type: string
+                    robotName:
+                      type: string
+                  required:
+                  - robotName
+                  type: object
+                type: array
+              pausedAt:
+                format: date-time
+                type: string
+              phase:
+                description: RolloutPhase is common to both FirmwareRollout and ModelRollout.
+                enum:
+                - Pending
+                - InProgress
+                - Paused
+                - Succeeded
+                - Failed
+                type: string
+              robotsFailed:
+                format: int32
+                type: integer
+              robotsIneligible:
+                description: |-
+                  RobotsIneligible counts selector-matched robots excluded from the rollout
+                  (e.g. lacking a required hardware type).
+                format: int32
+                type: integer
+              robotsPending:
+                format: int32
+                type: integer
+              robotsRolledBack:
+                description: |-
+                  RobotsRolledBack counts robots this rollout auto-reverted to their previous
+                  model version (rollbackPolicy=Auto, §6.7). A non-zero value surfaces fleet
+                  version fragmentation: these robots are back in service but NOT on newVersion.
+                format: int32
+                type: integer
+              robotsTotal:
+                format: int32
+                type: integer
+              robotsUpdated:
+                format: int32
+                type: integer
+              rollbackVersions:
+                additionalProperties:
+                  type: string
+                description: |-
+                  RollbackVersions records, per robot, the model version it was running when it
+                  entered this rollout's batch — the revert target for an Auto rollback. It is
+                  captured at batch entry (before the robot leaves that version) and carried
+                  forward across reconciles; it is the only place the previous version survives
+                  once the robot reports newVersion.
+                type: object
+              rolledBackRobots:
+                description: |-
+                  RolledBackRobots names the robots this rollout has auto-reverted. They are
+                  excluded from further update attempts by this rollout (a fixed model needs a
+                  fresh rollout), so a reverted robot is never pushed back into an update loop.
+                items:
+                  type: string
+                type: array
+              startedAt:
+                description: StartedAt/CompletedAt/PausedAt are top-level rollout
+                  timing stamps.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,60 @@
+# swarmada:admin — full access including SwarmadaConfig, robots/status, CRD
+# management, and the ONLY role granted estop-clear (RFC-0001 §9.5.3.1/.2, the
+# admin-only safety constraint). Suitable for the fleet platform team.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:admin
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Full management of every Swarmada resource.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleettasks
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # robots/status writes (admin-only among users; the adapter writes its own).
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots/status"]
+    verbs: ["update", "patch"]
+  # All custom verbs, including estop-clear — admin is the sole holder.
+  - apiGroups: ["swarmada.io"]
+    resources: ["discoveredrobots"]
+    verbs: ["admit", "reject"]
+  # policy-reset (§9.1.9.4): an operator override of an AUTOMATED decision — clearing a
+  # FailedRepeatedly suspension so a ModelPolicy resumes evaluation. Scoped like admit/reject
+  # rather than like estop-clear: it is a model-quality call, not a safety one, so it does not
+  # need to be admin-only.
+  - apiGroups: ["swarmada.io"]
+    resources: ["modelpolicies"]
+    verbs: ["policy-reset"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["cancel"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleettasks"]
+    verbs: ["append"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones", "robots"]
+    verbs: ["estop-trigger", "estop-clear"]
+  # Safety audit log: read + export + verify.
+  - apiGroups: ["swarmada.io"]
+    resources: ["safetyauditlogs"]
+    verbs: ["read", "export", "verify"]
+  # CRD management.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

@@ -1,0 +1,95 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The controller-manager Deployment. Applied via `make deploy` (kustomize
+# overlay in config/default/), which sets the real image (IMG from the
+# Makefile) and the target namespace.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: swarmada-manager
+  namespace: system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarmada-controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: swarmada-manager
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: manager
+          # Replaced by config/default's kustomization image transformer (IMG).
+          image: controller:latest
+          args:
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --leader-elect
+          env:
+            # Minikube/developer quickstart default: webhooks need serving certs
+            # this manifest does not provision (no cert-manager wiring yet — see
+            # docs/deploy-minikube.md). Disabling here keeps `make deploy` usable
+            # out of the box; a production deployment must set this to "true" (or
+            # unset) and wire real serving certs before doing so.
+            - name: ENABLE_WEBHOOKS
+              value: "false"
+          ports:
+            - containerPort: 9443
+              name: webhook-server
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      terminationGracePeriodSeconds: 10

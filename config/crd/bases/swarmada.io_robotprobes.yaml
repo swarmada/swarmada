@@ -1,0 +1,278 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: robotprobes.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: RobotProbe
+    listKind: RobotProbeList
+    plural: robotprobes
+    shortNames:
+    - rp
+    singular: robotprobe
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.probeType
+      name: Type
+      type: string
+    - jsonPath: .spec.targetComponent
+      name: Target
+      type: string
+    - jsonPath: .status.lastProbeResult
+      name: Result
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RobotProbe is the Schema for the robotprobes API.
+
+          RobotProbes add active verification on top of passive telemetry. The Zone
+          Controller calls the VerifyHardware Fleet Adapter RPC at spec.intervalSeconds
+          to confirm the targeted hardware, capability, or model is functioning within
+          spec.expectedMetrics thresholds. This is distinct from Kubernetes-style
+          liveness probing: it verifies robot subsystems via the Fleet Adapter, not an
+          HTTP endpoint.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RobotProbeSpec defines an active health check targeting a set of robots.
+              The Zone Controller calls the VerifyHardware Fleet Adapter RPC at
+              spec.intervalSeconds to actively confirm hardware, capability, or model
+              health, rather than relying on passive telemetry alone.
+            properties:
+              expectedMetrics:
+                additionalProperties:
+                  type: string
+                description: |-
+                  ExpectedMetrics are threshold key/value pairs the VerifyHardware result is
+                  checked against (e.g. {"min_frame_rate_pct": "80"}).
+                type: object
+              failureThreshold:
+                description: |-
+                  FailureThreshold is the consecutive failing cycles before the debounced
+                  status.lastProbeResult flips to Degraded/Failed. Optional: unset (nil) means
+                  fall back to SwarmadaConfig.spec.health.defaultProbeFailureThreshold, else the
+                  built-in default of 3 (ADR-0012).
+                format: int32
+                maximum: 10
+                minimum: 1
+                type: integer
+              intervalSeconds:
+                default: 60
+                description: IntervalSeconds is how often the probe runs.
+                format: int32
+                maximum: 3600
+                minimum: 10
+                type: integer
+              probeType:
+                description: ProbeType is the target class of the verification (hardware/capability/model).
+                enum:
+                - hardware
+                - capability
+                - model
+                type: string
+              recoveryThreshold:
+                description: |-
+                  RecoveryThreshold is the consecutive Healthy cycles before the debounced
+                  status.lastProbeResult returns to Healthy. Optional: unset (nil) means fall
+                  back to SwarmadaConfig.spec.health.defaultProbeRecoveryThreshold, else the
+                  built-in default of 2 (ADR-0012).
+                format: int32
+                maximum: 10
+                minimum: 1
+                type: integer
+              robotSelector:
+                description: RobotSelector selects the robots this probe verifies.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              syntheticInput:
+                description: |-
+                  SyntheticInput is an optional test input for a model probe (VerifyModel),
+                  carried to the adapter as VerifyModel.synthetic_input.
+                format: byte
+                type: string
+              targetCapability:
+                description: TargetCapability names the capability to verify when
+                  ProbeType is capability.
+                type: string
+              targetComponent:
+                description: TargetComponent names the specific component/capability/model
+                  to verify.
+                type: string
+              targetModel:
+                description: TargetModel names the model to verify when ProbeType
+                  is model.
+                type: string
+              timeoutSeconds:
+                default: 10
+                description: TimeoutSeconds is the per-probe RPC timeout.
+                format: int32
+                maximum: 60
+                minimum: 1
+                type: integer
+            required:
+            - probeType
+            - robotSelector
+            type: object
+          status:
+            description: RobotProbeStatus defines the observed state of a RobotProbe.
+            properties:
+              consecutiveFailures:
+                description: |-
+                  ConsecutiveFailures is the current consecutive failing-cycle count, clamped at
+                  the effective failureThreshold (ADR-0012) so a steady failing probe does not
+                  churn status every cycle.
+                format: int32
+                type: integer
+              consecutiveSuccesses:
+                description: |-
+                  ConsecutiveSuccesses is the current consecutive Healthy-cycle count, clamped at
+                  the effective recoveryThreshold (ADR-0012). Together with ConsecutiveFailures
+                  it debounces lastProbeResult.
+                format: int32
+                type: integer
+              lastProbeResult:
+                description: LastProbeResult is the aggregate result of the most recent
+                  cycle.
+                enum:
+                - Healthy
+                - Degraded
+                - Failed
+                - Pending
+                - Unknown
+                type: string
+              lastProbeTime:
+                description: LastProbeTime is when the probe last ran.
+                format: date-time
+                type: string
+              robotResults:
+                description: RobotResults is the per-robot outcome of the most recent
+                  cycle.
+                items:
+                  description: RobotProbeRobotResult is the per-robot outcome of a
+                    probe cycle.
+                  properties:
+                    actualMetrics:
+                      additionalProperties:
+                        type: number
+                      description: ActualMetrics are the metric values the Fleet Adapter
+                        returned on the last probe.
+                      type: object
+                    consecutiveFailures:
+                      description: |-
+                        ConsecutiveFailures is this robot's consecutive failing-cycle count, reset to
+                        0 on a Healthy cycle and clamped at the effective failureThreshold.
+                      format: int32
+                      type: integer
+                    consecutiveSuccesses:
+                      description: |-
+                        ConsecutiveSuccesses is this robot's consecutive Healthy-cycle count, reset to
+                        0 on a failing cycle and clamped at the effective recoveryThreshold.
+                      format: int32
+                      type: integer
+                    failedAt:
+                      description: FailedAt is when this robot's current failure run
+                        began (nil when not failing).
+                      format: date-time
+                      type: string
+                    lastProbeTime:
+                      description: LastProbeTime is when this robot was last probed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable summary, especially
+                        on failure.
+                      type: string
+                    namespace:
+                      description: Namespace is the Robot's namespace.
+                      type: string
+                    probeStatus:
+                      description: ProbeStatus is the last observed probe status for
+                        this robot.
+                      enum:
+                      - Healthy
+                      - Degraded
+                      - Failed
+                      - Pending
+                      - Unknown
+                      type: string
+                    robotName:
+                      description: RobotName is the Robot this result is for.
+                      type: string
+                  required:
+                  - probeStatus
+                  - robotName
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

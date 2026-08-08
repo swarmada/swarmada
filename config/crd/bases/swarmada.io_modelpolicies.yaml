@@ -1,0 +1,529 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: modelpolicies.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: ModelPolicy
+    listKind: ModelPolicyList
+    plural: modelpolicies
+    shortNames:
+    - mp
+    singular: modelpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.modelName
+      name: Model
+      type: string
+    - jsonPath: .spec.trigger.type
+      name: Trigger
+      type: string
+    - jsonPath: .spec.autoDeployOn
+      name: AutoDeploy
+      type: string
+    - jsonPath: .status.deploymentCount
+      name: Deployed
+      type: integer
+    - jsonPath: .status.rejectionCount
+      name: Rejected
+      type: integer
+    - jsonPath: .status.lastDecision
+      name: LastDecision
+      type: string
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ModelPolicy is the Schema for the modelpolicies API.
+
+          A ModelPolicy is the policy-governed bridge between an AI training pipeline
+          (Isaac Lab, custom training systems) and Swarmada's ModelRollout deployment.
+          It receives training completion events (via webhook or registry watch),
+          evaluates reported metrics against a quality gate, and automatically creates
+          a ModelRollout when the gate passes — without requiring operator intervention.
+
+          This is the robotics equivalent of a CI/CD deployment policy: the training
+          pipeline is CI (build the model), Swarmada ModelPolicy is CD (evaluate and
+          deploy it to the fleet if it meets quality standards).
+
+          The quality gate is the critical safety mechanism: a model that achieved 87%
+          pick success rate in simulation will be blocked from reaching the fleet by
+          the policy, regardless of how recently it was trained.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ModelPolicySpec defines the desired state of a ModelPolicy.
+            properties:
+              autoDeployOn:
+                default: QualityGatePass
+                description: AutoDeployOn defines when automatic deployment is triggered.
+                enum:
+                - QualityGatePass
+                - NewVersion
+                - Manual
+                type: string
+              consecutiveRejectionLimit:
+                default: 5
+                description: |-
+                  ConsecutiveRejectionLimit is the number of consecutive quality-gate
+                  rejections after which the controller sets a FailedRepeatedly condition and
+                  SUSPENDS evaluation — further triggers are silently dropped until an operator
+                  resets the policy (swarmctl reset policy). 0 disables suspension (unlimited
+                  retries). §9.1.9.4.
+                format: int32
+                minimum: 0
+                type: integer
+              maxConcurrentRollouts:
+                default: 1
+                description: |-
+                  MaxConcurrentRollouts prevents multiple auto-triggered rollouts from
+                  running simultaneously. Default 1 (queue new deployments until current
+                  completes).
+                format: int32
+                minimum: 1
+                type: integer
+              modelName:
+                description: |-
+                  ModelName is the logical model name this policy governs.
+                  Must match InstalledModel.name on target robots.
+                type: string
+              qualityGate:
+                description: |-
+                  QualityGate defines the metrics thresholds a model must satisfy.
+                  If empty, any model version triggers deployment (use with caution).
+                properties:
+                  customMetrics:
+                    description: |-
+                      CustomMetrics allows arbitrary key/value threshold rules from the
+                      webhook payload or OCI image labels.
+                    items:
+                      description: CustomMetricRule defines a custom quality gate
+                        metric threshold.
+                      properties:
+                        name:
+                          description: Name is the metric key in the webhook payload
+                            or OCI image label.
+                          type: string
+                        operator:
+                          description: Operator is the comparison operation.
+                          enum:
+                          - GreaterThan
+                          - LessThan
+                          - GreaterThanOrEqual
+                          - LessThanOrEqual
+                          - Equal
+                          - NotEqual
+                          type: string
+                        threshold:
+                          description: Threshold is the value to compare against.
+                          type: number
+                      required:
+                      - name
+                      - operator
+                      - threshold
+                      type: object
+                    type: array
+                  maxFailureRate:
+                    description: MaxFailureRate is the maximum fraction of failed
+                      operations (0.0–1.0).
+                    maximum: 1
+                    minimum: 0
+                    type: number
+                  maxSimToRealGap:
+                    description: |-
+                      MaxSimToRealGap is the maximum acceptable performance gap between
+                      simulation and real-world evaluation (0.0–1.0). It is evaluated fail-closed
+                      (ADR-0021): when set, an absent real_pick_success_rate is treated as an
+                      infinite gap and FAILS the gate — real-hardware validation is required, it is
+                      never skipped because real metrics were not reported.
+                    type: number
+                  minEvalEpisodes:
+                    description: |-
+                      MinEvalEpisodes is the minimum number of evaluation episodes reported.
+                      Guards against deploying a model that was evaluated on too few scenarios.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minPickSuccessRate:
+                    description: |-
+                      MinPickSuccessRate is the minimum fraction of successful pick operations
+                      in the evaluation run (0.0–1.0).
+                    maximum: 1
+                    minimum: 0
+                    type: number
+                  requireRealEval:
+                    description: |-
+                      RequireRealEval, when true, fails the gate closed unless the payload carries
+                      real-hardware evaluation metrics (real_pick_success_rate), independently of
+                      whether maxSimToRealGap is set. It defaults true whenever maxSimToRealGap is
+                      set (that guard already needs real metrics); a simulation or development
+                      namespace may set it false to permit simulation-only promotion — an explicit,
+                      named opt-out, never the silent default (ADR-0021).
+                    type: boolean
+                type: object
+              rolloutTemplate:
+                description: RolloutTemplate is the ModelRollout spec applied when
+                  auto-deploying.
+                properties:
+                  rollbackPolicy:
+                    default: Manual
+                    description: |-
+                      RollbackPolicy on auto-created rollouts. Defaults to Manual — silent
+                      rollbacks from auto-deployments are especially dangerous.
+                    enum:
+                    - Manual
+                    - Auto
+                    type: string
+                  safetyConstraints:
+                    description: SafetyConstraints restricts when updates may be applied.
+                    properties:
+                      maintenanceWindowOnly:
+                        default: false
+                        description: |-
+                          MaintenanceWindowOnly: only update robots during their configured
+                          MaintenanceWindow. Slowest but least disruptive.
+                        type: boolean
+                      minBatteryPct:
+                        default: 30
+                        description: 'MinBatteryPct: do not update robots below this
+                          battery level.'
+                        format: int32
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                      requireIdleState:
+                        default: true
+                        description: 'RequireIdleState: only update robots in Idle
+                          phase.'
+                        type: boolean
+                    type: object
+                  strategy:
+                    description: Strategy controls rolling update parameters.
+                    properties:
+                      rollingUpdate:
+                        description: |-
+                          RollingUpdate holds the RollingUpdate strategy's parameters (applies when
+                          type is RollingUpdate). When omitted, the documented defaults apply
+                          (see RollingUpdateOrDefault).
+                        properties:
+                          maxUnavailable:
+                            default: 10%
+                            description: |-
+                              MaxUnavailable is the maximum number or percentage of robots that may
+                              simultaneously be in the updating state.
+                              Examples: "10%" or "5".
+                            type: string
+                          pauseOnError:
+                            default: true
+                            description: |-
+                              PauseOnError halts the rollout if any robot fails to update.
+                              The operator must resume with swarmctl resume rollout.
+                            type: boolean
+                        type: object
+                      type:
+                        allOf:
+                        - enum:
+                          - RollingUpdate
+                        - enum:
+                          - RollingUpdate
+                        default: RollingUpdate
+                        description: Type selects the rollout strategy. Only RollingUpdate
+                          is supported at v0.1.
+                        type: string
+                    type: object
+                type: object
+              targetRobotSelector:
+                description: TargetRobotSelector selects which robots will receive
+                  auto-deployments.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              trigger:
+                description: Trigger configures how training completion events reach
+                  this policy.
+                properties:
+                  registryWatch:
+                    description: RegistryWatch configures OCI registry polling (only
+                      when Type=RegistryWatch).
+                    properties:
+                      metricsLabel:
+                        default: swarmada.metrics
+                        description: |-
+                          MetricsLabel is the OCI image label name containing quality metrics as JSON.
+                          Example: LABEL swarmada.metrics='{"pickSuccessRate":0.94,"failureRate":0.018}'
+                        type: string
+                      pollIntervalSeconds:
+                        default: 60
+                        description: PollIntervalSeconds controls how often the controller
+                          checks for new tags.
+                        format: int32
+                        minimum: 60
+                        type: integer
+                      registry:
+                        description: Registry is the OCI registry hostname (e.g. "localhost:5000").
+                        type: string
+                    required:
+                    - registry
+                    type: object
+                  type:
+                    default: Webhook
+                    description: Type selects the trigger mechanism.
+                    enum:
+                    - Webhook
+                    - RegistryWatch
+                    - Manual
+                    type: string
+                  webhook:
+                    description: Webhook configures the HTTP webhook endpoint (only
+                      when Type=Webhook).
+                    properties:
+                      allowUnauthenticated:
+                        default: false
+                        description: |-
+                          AllowUnauthenticated opts a policy INTO accepting unsigned webhook requests
+                          when no authSecretRef is configured. It exists only for development and
+                          simulation; it is never the default, and production policies must leave it
+                          false and set authSecretRef (ADR-0020).
+                        type: boolean
+                      authSecretRef:
+                        description: |-
+                          AuthSecretRef references a Secret containing the shared HMAC secret the
+                          training system signs its webhook body with. Authentication is REQUIRED by
+                          default (ADR-0020): if this is empty the endpoint rejects every request unless
+                          allowUnauthenticated is explicitly set.
+                        type: string
+                      enabled:
+                        default: true
+                        description: Enabled enables the webhook endpoint for this
+                          policy.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
+                required:
+                - type
+                type: object
+            required:
+            - modelName
+            - targetRobotSelector
+            type: object
+          status:
+            description: ModelPolicyStatus defines the observed state of a ModelPolicy.
+            properties:
+              activeRollout:
+                description: |-
+                  ActiveRollout is the name of the currently running auto-created ModelRollout.
+                  Empty when no rollout is in progress.
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              consecutiveRejections:
+                description: |-
+                  ConsecutiveRejections counts quality-gate rejections since the last Deploy
+                  decision (reset to 0 on any Deploy). When it reaches
+                  spec.consecutiveRejectionLimit the FailedRepeatedly condition suspends
+                  evaluation. §9.1.9.4.
+                format: int32
+                type: integer
+              deploymentCount:
+                description: DeploymentCount is the total number of successful auto-deployments.
+                format: int32
+                minimum: 0
+                type: integer
+              history:
+                description: History stores the last 20 evaluation records (oldest
+                  removed first).
+                items:
+                  description: PolicyEvaluationRecord stores the result of one quality
+                    gate evaluation.
+                  properties:
+                    createdRollout:
+                      description: CreatedRollout is the ModelRollout name created
+                        on Deploy (empty on Reject).
+                      type: string
+                    decision:
+                      description: Decision is the outcome of the quality gate.
+                      enum:
+                      - Deploy
+                      - Reject
+                      - Pending
+                      type: string
+                    evaluatedAt:
+                      description: EvaluatedAt is the time of the evaluation.
+                      format: date-time
+                      type: string
+                    failedRules:
+                      description: FailedRules lists which quality gate rules failed
+                        (empty on Deploy).
+                      items:
+                        type: string
+                      type: array
+                    modelUri:
+                      description: ModelURI is the OCI URI of the evaluated model.
+                      type: string
+                    reportedMetrics:
+                      additionalProperties:
+                        type: number
+                      description: ReportedMetrics are the raw metrics received from
+                        the training system.
+                      type: object
+                    version:
+                      description: Version is the model version that was evaluated.
+                      type: string
+                  required:
+                  - decision
+                  - evaluatedAt
+                  - modelUri
+                  - version
+                  type: object
+                type: array
+              lastDecision:
+                description: LastDecision is the most recent quality gate decision.
+                enum:
+                - Deploy
+                - Reject
+                - Pending
+                type: string
+              lastDecisionReason:
+                description: LastDecisionReason is a human-readable explanation of
+                  the decision.
+                type: string
+              lastTriggerAt:
+                description: LastTriggerAt is the time the most recent trigger event
+                  was received.
+                format: date-time
+                type: string
+              rejectionCount:
+                description: RejectionCount is the total number of models blocked
+                  by the quality gate.
+                format: int32
+                minimum: 0
+                type: integer
+              webhookEndpoint:
+                description: |-
+                  WebhookEndpoint is the auto-generated endpoint URL when Trigger.Type=Webhook.
+                  Training systems POST to this URL when training completes.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

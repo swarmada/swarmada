@@ -1,0 +1,43 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Production ControlStream mTLS overlay (RFC-0001 §9.2.7, ADR-0025). Layers on
+# config/default and adds:
+#   1. cert-manager materials (certificate.yaml): a CA Issuer + the server cert.
+#   2. A ControlStream Service (swarmada-controlstream) matching the cert SAN.
+#   3. A manager patch (manager-mtls-patch.yaml) mounting the server keypair + CA
+#      and setting --fleet-adapter-tls-cert-file/-key-file/-client-ca-file.
+# With these, the ControlStream terminates mTLS (RequireAndVerifyClientCert, TLS
+# 1.3). ASSUMES cert-manager is installed. Unlike config/overlays/quickstart-dev
+# (plaintext + --fleet-adapter-insecure-authz), this overlay is production-safe.
+
+#   4. The admission webhooks (../webhook) with a cert-manager serving cert
+#      (webhook-cert.yaml) and caBundle injection (webhook-cainjection-patch.yaml).
+#      config/default omits these because it cannot provision serving certs; this overlay
+#      already depends on cert-manager, so the control plane it deploys has real admission
+#      control and defaulting rather than none.
+
+resources:
+  - ../default
+  - ../webhook
+  - controlstream-service.yaml
+  - certificate.yaml
+  - webhook-cert.yaml
+
+patches:
+  - path: manager-mtls-patch.yaml
+  - path: webhook-cainjection-patch.yaml

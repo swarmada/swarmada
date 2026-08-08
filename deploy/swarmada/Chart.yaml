@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+apiVersion: v2
+name: swarmada
+description: |
+  Swarmada — a Kubernetes control plane for heterogeneous robot fleets (RFC-0001).
+  Installs the controller-manager, CRDs, RBAC (incl. the built-in swarmada:* roles),
+  and admission webhooks. Swarmada is a Prometheus scrape TARGET only; this chart
+  ships OPTIONAL ServiceMonitor/PrometheusRule manifests but never bundles Prometheus.
+type: application
+
+# Chart version — bump on any chart change (SemVer). Independent of appVersion.
+version: 0.2.0
+# The Swarmada control-plane version this chart deploys (the container image tag
+# default). Alpha per RFC-0001's maturity table.
+appVersion: "0.2.0"
+
+# The webhook v1 admission API + CRD structural schemas require a recent API server.
+kubeVersion: ">=1.27.0-0"
+
+home: https://github.com/swarmada/swarmada
+sources:
+  - https://github.com/swarmada/swarmada
+keywords:
+  - robotics
+  - fleet
+  - control-plane
+  - operator
+maintainers:
+  - name: The Swarmada Authors
+    url: https://github.com/swarmada/swarmada
+annotations:
+  # Swarmada exposes /metrics and OPTIONAL Prometheus-Operator manifests only; it
+  # never packages, installs, or runs a monitoring stack (neutrality: bring your own).
+  category: Robotics

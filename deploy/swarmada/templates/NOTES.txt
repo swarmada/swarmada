@@ -1,0 +1,37 @@
+Swarmada {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Controller-manager:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "swarmada.fullname" . }}-controller-manager
+
+{{- if .Values.installCRDs }}
+CRDs installed (kept on uninstall via helm.sh/resource-policy: keep):
+  kubectl get crd -l app.kubernetes.io/part-of=swarmada 2>/dev/null || kubectl get crd | grep swarmada.io
+{{- else }}
+installCRDs=false — ensure the swarmada.io CRDs are applied out of band (kubectl apply -f config/crd/bases/).
+{{- end }}
+
+{{- if .Values.controlStream.enabled }}
+
+ControlStream (Fleet Adapter gRPC) reachable in-cluster at:
+  {{ include "swarmada.fullname" . }}-controlstream.{{ .Release.Namespace }}.svc:{{ .Values.controlStream.port }}
+  (RFC-0001 §9.2 mandates mTLS in production — terminate/verify at the adapter or a gateway.)
+{{- end }}
+
+{{- if .Values.webhooks.enabled }}
+{{- if not .Values.webhooks.certManager.enabled }}
+
+WARNING: webhooks.certManager.enabled=false — you MUST provide the TLS Secret
+  "{{ include "swarmada.webhookCertSecret" . }}" and set webhooks.caBundle, or admission will fail closed.
+{{- end }}
+{{- end }}
+
+Next steps:
+  1. Create a SwarmadaConfig in your workload namespace (telemetry sink, signing, estop, taskCancellation).
+  2. Bind the built-in roles to your users, e.g.:
+       kubectl create clusterrolebinding my-ops --clusterrole=swarmada:operator --user=<you>
+{{- if .Values.metrics.service.enabled }}
+  3. Scrape metrics at :{{ .Values.metrics.service.port }}/metrics —
+{{- if .Values.metrics.serviceMonitor.enabled }} a ServiceMonitor was created for your Prometheus Operator.
+{{- else }} enable metrics.serviceMonitor.enabled=true (Prometheus Operator) or set manager.podAnnotations for a raw scrape.
+{{- end }}
+{{- end }}

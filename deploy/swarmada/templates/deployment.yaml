@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+# Controller-manager Deployment — mirrors config/manager/manager.yaml, with the
+# image and flags driven by values. The image, args, ports, probes, resources, and
+# security contexts all derive from the Dockerfile (/manager entrypoint) and the
+# cmd/manager flag set.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "swarmada.fullname" . }}-controller-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "swarmada.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "swarmada.labels" . | nindent 8 }}
+      {{- with .Values.manager.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "swarmada.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.manager.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: {{ include "swarmada.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /manager
+          args:
+            - --metrics-bind-address=:{{ .Values.manager.metricsPort }}
+            - --health-probe-bind-address=:{{ .Values.manager.healthPort }}
+            {{- if .Values.manager.leaderElect }}
+            - --leader-elect
+            - --leader-election-id={{ .Values.manager.leaderElectionID }}
+            {{- end }}
+            {{- if .Values.controlStream.enabled }}
+            - --fleet-adapter-bind-address=:{{ .Values.controlStream.port }}
+            {{- else }}
+            # Empty disables the ControlStream gRPC server (cmd/manager).
+            - --fleet-adapter-bind-address=
+            {{- end }}
+            {{- if .Values.modelWebhook.enabled }}
+            - --model-webhook-bind-address=:{{ .Values.modelWebhook.port }}
+            {{- else }}
+            - --model-webhook-bind-address=
+            {{- end }}
+            {{- with .Values.manager.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # ENABLE_WEBHOOKS=false disables the admission webhook server (cmd/manager).
+            - name: ENABLE_WEBHOOKS
+              value: {{ ternary "true" "false" .Values.webhooks.enabled | quote }}
+            {{- with .Values.manager.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.manager.healthPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.manager.metricsPort }}
+              protocol: TCP
+            {{- if .Values.webhooks.enabled }}
+            - name: webhook-server
+              containerPort: {{ .Values.webhooks.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.controlStream.enabled }}
+            - name: controlstream
+              containerPort: {{ .Values.controlStream.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.modelWebhook.enabled }}
+            - name: model-webhook
+              containerPort: {{ .Values.modelWebhook.port }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.manager.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.manager.securityContext | nindent 12 }}
+          {{- if .Values.webhooks.enabled }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          {{- end }}
+      {{- if .Values.webhooks.enabled }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "swarmada.webhookCertSecret" . }}
+            defaultMode: 420
+      {{- end }}
+      terminationGracePeriodSeconds: 10
+      {{- with .Values.manager.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.manager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.manager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

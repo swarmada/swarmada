@@ -1,0 +1,64 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Strategic-merge patch: `args` on a Container has no merge key, so this repeats
+# config/manager/manager.yaml's base three flags and appends the TLS trio.
+#
+# Unlike config/controlstream-tls's patch this keeps ENABLE_WEBHOOKS=false and
+# leaves ControlStream on 9443. That patch moves ControlStream to 9445 only
+# because it also turns the admission webhooks on, and controller-runtime's
+# webhook server hard-codes 9443. With webhooks off there is no contention, so
+# the demo keeps the documented 9443 endpoint and needs no webhook serving certs
+# — one less thing to provision on a throwaway kind cluster.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarmada-controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          args:
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --leader-elect
+            - --fleet-adapter-tls-cert-file=/etc/controlstream-tls/tls.crt
+            - --fleet-adapter-tls-key-file=/etc/controlstream-tls/tls.key
+            - --fleet-adapter-client-ca-file=/etc/controlstream-tls/ca.crt
+            # DEV/DEMO ONLY. Orthogonal to the mTLS above: the certificate still
+            # establishes WHO the adapter is (that identity is what makes the
+            # ControlStream registrable at all), this only relaxes the per-robot
+            # authorization check on top of it.
+            #
+            # Needed because the quickstart's sample Robots carry no robotClass,
+            # while the real Authorizer requires the adapter's
+            # spec.servesRobotClasses to cover the robot's class — it refuses every
+            # message with `does not serve robot class ""`. Giving the samples a
+            # class is the correct production answer; this keeps the demo to one
+            # documented dev flag instead of reshaping the sample fleet.
+            - --fleet-adapter-insecure-authz=true
+          env:
+            - name: ENABLE_WEBHOOKS
+              value: "false"
+          volumeMounts:
+            - name: controlstream-tls
+              mountPath: /etc/controlstream-tls
+              readOnly: true
+      volumes:
+        - name: controlstream-tls
+          secret:
+            secretName: controlstream-server-tls

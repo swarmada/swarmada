@@ -1,0 +1,96 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarmada"
+version = "0.2.0"
+description = "Swarmada – robot fleet orchestration (simulation, ML, tooling)"
+readme = "README.md"
+# 3.12 is the floor the dependency set actually permits: numpy requires >=3.12 and scikit-learn
+# >=3.11, so this package has not been installable on 3.10 for some time — the previous ">=3.10"
+# overstated support rather than describing it.
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "protobuf>=4.25",
+    "pydantic>=2.5",
+    "structlog>=24.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+simulation = [
+    # rclpy ships with the ROS 2 environment; install via rosdep, not pip
+    "transforms3d>=0.4",
+]
+ml = [
+    "torch>=2.2",
+    "pandas>=2.1",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "black>=24.0",
+    "ruff>=0.3",
+    "mypy>=1.9",
+]
+
+# ---------------------------------------------------------------------------
+# Tool configuration (PyCharm honours all of these)
+# ---------------------------------------------------------------------------
+
+[tool.setuptools.packages.find]
+where = ["."]
+# NOTE (fixed 2026-07-10): "adapters*" was missing here, so `pip install -e .`
+# / a wheel build silently dropped the whole adapters/ package (simulation
+# adapter, scenarios loader, conformance harness, template, example-noop).
+# This only worked in practice because `make conformance*`/`make test-py` run
+# `python -m adapters...` / pytest from the repo root, which puts the repo
+# root on sys.path regardless of what setuptools thinks is installed — a real
+# `pip install .` from outside the repo, or a built wheel, would break.
+include = ["simulation*", "scripts*", "adapters*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP"]
+
+[tool.mypy]
+# Matches requires-python above. Type-checking against a lower version would check a configuration
+# that cannot be installed (numpy requires >=3.12), and fails outright on numpy's PEP 695 stubs.
+python_version = "3.12"
+strict = true
+exclude = ["proto/"]   # generated code
+
+[[tool.mypy.overrides]]
+module = ["sklearn.*"]
+ignore_missing_imports = true

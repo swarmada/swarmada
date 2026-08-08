@@ -1,0 +1,142 @@
+# Copyright 2026 The Swarmada Authors. Apache-2.0.
+#
+# full-surface — the coverage scenario. Its ONLY goal is to touch every field the
+# control plane consumes from a Fleet Adapter at least once, in a single timed run,
+# so the integration/visual/metrics harness (make demo / make demo-test) can watch
+# a value flow through every swarmtop view and assert every §9.3.8 alert fires and
+# clears. It is NOT a "story" demo (hardware-fault/battery-edge/estop-drill each tell
+# one clean story) — it deliberately does everything, once.
+#
+# It rides the EXISTING ScenarioEngine (adapters/scenarios/loader.py) — no new engine,
+# no second mock. Every knob below is one the loader already parses and the in-tree
+# adapters/simulation/sim_adapter.py already maps onto the wire.
+#
+# ── What each beat exercises (adapter-observable surface) ──────────────────────────
+#   T+0    register + CapabilitiesSnapshot (hardware manifest + installed_models)
+#          → proto CapabilitiesSnapshot / HardwareComponent / InstalledModel
+#          → RobotPhase Discovered→Idle (control-plane derived)
+#   T+0..  battery drains on the curve below
+#          → TelemetryPayload.battery.percent (RA-1: projected, not per-tick status)
+#   T+8    camera_front DEGRADED (affects perception.camera)
+#          → HardwareStatusUpdate status=DEGRADED; capability perception.camera → Degraded
+#          → RobotPhase Error; FleetAction capability-loss reassignment (RFC-0001) → Revoking→reassign
+#   T+12   camera_front FAILED
+#          → HardwareStatusUpdate status=FAILED (the FAILED rung of the enum; explicit
+#            presence on a safety-relevant scalar, AGENTS.md invariant 3)
+#   T+16   camera_front HEALTHY
+#          → recovery: capability re-Active; RobotPhase Maintenance→Idle (recovery loop)
+#   T+22.. ControlStream drop → reconnect at T+30 (comms.drop)
+#          → stream torn down: RobotPhase Offline; telemetry withheld while down
+#          → assignment-lease expiry with no renewal → FleetAction Revoking (lease-expiry
+#            path — distinct from the capability-loss Revoking above)
+#          → on reconnect: RegisterRobot re-handshake, persisted fencing high-water (C3),
+#            lease self-stop during the outage (C4), swarmada_fleet_adapter_reconnects_total++
+#          → FleetAdapter phase Connected→Disconnected→Connected
+#   T+36   confirmed emergency stop (estop.trigger: at_seconds)
+#          → confirm_estop against simulator ground truth (never faked, C5)
+#          → AdapterSafetyMessage.estop_ack state=STOPPED
+#          → RobotEstopState Normal→Stopping→Stopped
+#
+# ── Beats this preset CANNOT reach through the sim, by design (harness/operator drives) ──
+# These are control-plane- or operator-derived transitions with no adapter-side knob;
+# make demo-test projects/asserts them the same honest way examples/warehouse-quickstart
+# projects Idle (see that script's header note). Listed here so coverage is explicit,
+# not silently missing:
+#   - RobotPhase Charging      — the KinematicSim battery curve only drains; there is no
+#                                recharge stimulus. Harness projects Charging.
+#   - RobotPhase Assigned      — transient between Idle and InProgress; scheduler-derived.
+#   - FleetAction Pending/Paused/Succeeded/Cancelled — scheduler/lifecycle-derived (the
+#                                reference sim adapter never reports task completion, so
+#                                Succeeded is projected; Paused via a pause Command).
+#   - FleetAdapter Pending/Rejected — Rejected needs a refused handshake; out of a single
+#                                healthy run's scope (a negative-path fixture, not here).
+#   - RobotEstopState Resuming→Normal (estop CLEAR) — operator action under RFC-0006
+#                                supervised estop clear; make demo-test issues the clear.
+#
+# NOTE FOR THE HARNESS (make demo / make demo-test): the multi-step fault_timeline below
+# (DEGRADED→FAILED→HEALTHY, three events) is INCOMPATIBLE with sim_adapter.py's default
+# hardware-fault CLI overrides (--fault-at/--recover-at collapse every non-HEALTHY event
+# to a single time and every HEALTHY event to another). Load this preset WITHOUT applying
+# HardwareFaultOverrides (load_scenario(name) with overrides=None), or invoke the adapter
+# so the overrides are inert. This is the one existing-file change the demo runner needs
+# (sub-task 2/3), flagged here rather than silently baked in.
+name: full-surface
+
+description: >
+  Coverage scenario: one live robot is driven through hardware degrade→fail→recover,
+  a full ControlStream drop + reconnect (lease-expiry Revoking, C3/C4), and a confirmed
+  estop, on a compact deterministic timeline — touching every consumed adapter field once
+  so the integration harness can watch and assert the whole surface.
+
+fleet:
+  size: 1                 # the one LIVE robot; the harness status-projects any spares
+  robot_id_prefix: robot-sim
+
+manifest:
+  capabilities:
+    - navigation.2d
+    - perception.camera   # the capability gated on camera_front; degrades with it
+  hardware:
+    # Physical attributes (HardwareComponent tags 6-13) are declared HERE, per component, and only
+    # where the simulated robot would actually know them. What is left out is as deliberate as what
+    # is set: an undeclared attribute is OMITTED on the wire, so this one preset exercises BOTH
+    # presence states and demo-test can prove "unknown" never arrives as 0.
+    - name: lidar_top
+      type: Lidar
+      model: sim-lidar-v1
+      rangeM: 25.0
+      horizontalFovDeg: 360
+      # resolutionMp / frameRateFps / depthCapable deliberately absent: not meaningful for a lidar.
+    - name: camera_front  # the fault target; drives perception.camera
+      type: Camera
+      model: sim-cam-v1
+      resolutionMp: 12.0
+      frameRateFps: 30
+      depthCapable: false   # a DECLARED false — data, distinct from "not reported"
+      # rangeM / payload / platform dims deliberately absent.
+  installed_models:       # populate the CapabilitiesSnapshot.installed_models field too
+    - name: nav-planner
+      version: "1.2.0"
+
+battery:
+  start_percent: 100
+  drain_per_second: 0.5   # visibly drains across the ~40s run without hitting the floor
+  floor_percent: 5
+
+position:
+  pattern: patrol         # static | line | patrol — patrol so RobotPosition.x/y move
+
+fault_timeline:
+  # DEGRADED → capability perception.camera degrades → capability-loss reassignment.
+  - component: camera_front
+    at_seconds: 8
+    status: DEGRADED
+    reason: simulated camera degradation
+    affects_capabilities: [perception.camera]
+  # FAILED → the FAILED rung of HardwareStatus (touched once here; hardware-fault only
+  # ever reaches DEGRADED).
+  - component: camera_front
+    at_seconds: 12
+    status: FAILED
+    reason: simulated camera hard failure
+    affects_capabilities: [perception.camera]
+  # HEALTHY → recovery loop; capability re-Active.
+  - component: camera_front
+    at_seconds: 16
+    status: HEALTHY
+    reason: ""
+    affects_capabilities: [perception.camera]
+
+comms:
+  gaps: []
+  # Full bidirectional ControlStream drop [22s, 30s): tears the stream down and reconnects
+  # with a fresh Hello/Register. Drives Offline, lease-expiry Revoking, C3 fencing
+  # high-water, C4 lease self-stop, and the adapter-reconnect counter. Telemetry withheld
+  # while down.
+  drop:
+    at_seconds: 22
+    reconnect_seconds: 30
+
+estop:
+  trigger: at_seconds     # none | on_command | at_seconds
+  at_seconds: 36          # after reconnect, so the estop is observed on a live stream

@@ -1,0 +1,81 @@
+# swarmada:fleet-manager — full fleet management (RFC-0001 §9.5.3.1): robots,
+# rollouts, probes, zones, maintenance, and the admit/reject/cancel/estop-trigger
+# custom verbs. Deliberately EXCLUDES estop-clear (admin-only, §9.5.3.2), robots/
+# status writes, and SwarmadaConfig writes. Suitable for fleet operations engineers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:fleet-manager
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Read-only over everything.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleettasks
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch"]
+  # Robot / class / rollout / probe / maintenance management.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - robotclasses
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["zonemaintenances"]
+    verbs: ["create", "delete"]
+  # FleetAction management incl. the cancel custom verb.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["create", "update", "patch", "delete", "cancel"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleettasks"]
+    verbs: ["create", "update", "patch", "delete", "append"]
+  # Zone management incl. the estop-trigger custom verb — but NOT estop-clear.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones"]
+    verbs: ["create", "update", "delete", "estop-trigger"]
+  # estop-trigger on individual robots (§9.6.2.3 — robot or FleetZone scope).
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots"]
+    verbs: ["estop-trigger"]
+  # DiscoveredRobot admit/reject custom verbs, plus the write they actually perform.
+  #
+  # `admit`/`reject` are SAR-gated virtual verbs: they carry the authorization decision but
+  # no API effect of their own. `reject` marks the object with swarmada.io/rejected so the
+  # manager can seal ROBOT_REJECTED (§9.6.5.1) before deleting it, and that mark is a plain
+  # patch — without this verb the SAR passes and the write is then refused.
+  #
+  # `patch`, not `delete`: the removal belongs to the control plane, which is what keeps an
+  # operator's refusal distinguishable from a TTL sweep. A fleet manager deliberately cannot
+  # delete a DiscoveredRobot outright.
+  - apiGroups: ["swarmada.io"]
+    resources: ["discoveredrobots"]
+    verbs: ["admit", "reject", "patch"]
+  # policy-reset (§9.1.9.4): an operator override of an AUTOMATED decision — clearing a
+  # FailedRepeatedly suspension so a ModelPolicy resumes evaluation. Scoped like admit/reject
+  # rather than like estop-clear: it is a model-quality call, not a safety one, so it does not
+  # need to be admin-only.
+  - apiGroups: ["swarmada.io"]
+    resources: ["modelpolicies"]
+    verbs: ["policy-reset"]
+  # Safety audit log: read + verify (NOT export — admin only, §9.5.3.2).
+  - apiGroups: ["swarmada.io"]
+    resources: ["safetyauditlogs"]
+    verbs: ["read", "verify"]

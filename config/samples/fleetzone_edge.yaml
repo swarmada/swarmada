@@ -1,0 +1,53 @@
+# A FleetZone with a Zone Controller edge node (RFC-0001 §9.2.10, §9.6.2.5).
+#
+# spec.edgeNode declares a facility-LAN edge node for this zone. The API Server
+# advertises spec.edgeNode.address in RegisterAck.edge_endpoints to every adapter
+# whose robots' zone chain includes this zone; those adapters open the EdgeStream and
+# tee position frames to it, and the edge node issues headless, confirmed-only estops
+# on a zone-boundary breach even during a control-plane partition.
+#
+# The edge node (cmd/edge) derives its guard from THIS resource:
+#   - spec.physicalBounds.{floor, polygon}  → the zone boundary it evaluates
+#   - Robot.spec.zone (below)               → which robots it guards
+# See examples/edge-node/ for a runnable, no-hardware demonstration.
+apiVersion: swarmada.io/v1
+kind: FleetZone
+metadata:
+  name: warehouse-a
+  namespace: warehouse-a
+spec:
+  displayName: "Warehouse A — edge-guarded floor"
+  physicalBounds:
+    floor: 0
+    # A 20m × 20m square (metres from the site origin). A robot reported outside
+    # this polygon on floor 0 is a confirmed boundary breach.
+    polygon:
+      # "y" is quoted here — bare y/n/yes/no/true/false are booleans under
+      # YAML 1.1 scalar resolution (the "Norway problem"), so an unquoted `y:`
+      # key gets silently coerced to the boolean key `true`, which the API
+      # server's strict decoding then rejects as an unknown field.
+      - { x: 0.0, "y": 0.0 }
+      - { x: 20.0, "y": 0.0 }
+      - { x: 20.0, "y": 20.0 }
+      - { x: 0.0, "y": 20.0 }
+  edgeNode:
+    # host:port the adapter dials on the facility LAN.
+    address: "edge-warehouse-a.svc.cluster.local:9600"
+    # Secret (namespace CA tree, §9.5.2) holding the edge node's server cert. Its
+    # tls.crt / tls.key / ca.crt are projected onto the edge host and passed to
+    # cmd/edge as --tls-cert-file / --tls-key-file / --tls-client-ca-file.
+    tlsSecretRef: "edge-warehouse-a-tls"
+---
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: amr-1
+  namespace: warehouse-a
+spec:
+  manufacturer: Simulated
+  model: SimBot-v1
+  adapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  # The leaf FleetZone this robot operates in — the edge node guards it here.
+  zone: warehouse-a

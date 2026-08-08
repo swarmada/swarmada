@@ -1,0 +1,982 @@
+/*
+Copyright 2026 The Swarmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+syntax = "proto3";
+
+package fleet_adapter.v1;
+
+option go_package = "github.com/swarmada/swarmada/proto/fleet_adapter/v1;fleetadapterv1";
+option java_package = "io.swarmada.fleet.adapter.v1";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FleetAdapterService — adapter-initiated bidirectional stream topology
+//
+// TOPOLOGY (RFC-0001 #fleet-adapter-protocol-the-controlstream-service; supersedes the Stage-2 interim direction).
+//
+// The control plane is the gRPC SERVER. Each Fleet Adapter is the CLIENT: it
+// dials the control plane and opens two long-lived bidirectional streams:
+//   ControlStream  — all operational traffic (actions, telemetry, heartbeat)
+//   SafetyStream   — emergency-stop only (RFC-0001 #fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams RA-6; see SafetyStream RPC)
+// This topology is simultaneously:
+//   * NAT/firewall friendly — robots and adapters never need a routable address
+//     or an inbound listener (a hard requirement on warehouse/hospital Wi-Fi); and
+//   * able to PUSH control-plane → adapter commands (action assignment, and above
+//     all emergency stop) to a client that dialed in.
+//
+// The earlier flat unary design (control plane as server with AssignAction/Estop
+// as ordinary RPCs) cannot do the second: a server cannot initiate a unary call
+// to a client. That inversion made every control-plane → adapter operation —
+// estop included — non-functional (architectural review R2). ControlStream
+// resolves it: commands travel DOWN the stream, results travel UP, correlated by
+// Command.command_id.
+//
+// One ControlStream multiplexes every robot an adapter manages; each message
+// carries robot_id. All connections use mTLS (RFC-0001 #security-transport-security); the adapter's client
+// certificate IS its identity, and per-robot authorization is enforced
+// server-side by checking each message's robot_id against that identity
+// (FleetAdapter.spec.servesRobotClasses + namespace) — there is no per-robot JWT.
+//
+// SAFETY HARDENING (carried over from the Stage-2 proto pass):
+//   * fencing tokens on AssignAction/CancelAction (anti double-execution, R2/RA-2);
+//   * adapter-CONFIRMED estop via EstopAck.state (never telemetry-inferred, R4);
+//   * proto3 explicit-presence (`optional`) on safety-relevant scalars (RA-3b).
+// ═══════════════════════════════════════════════════════════════════════════
+
+service FleetAdapterService {
+  // ControlStream is the primary persistent connection. The adapter opens it
+  // and sends AdapterHello first; the control plane replies with HelloAck.
+  // Thereafter both sides multiplex:
+  //   adapter → control plane : AdapterMessage  (register/discover, telemetry,
+  //                             action status, command results, heartbeat replies)
+  //   control plane → adapter : ControlPlaneMessage (acks, pushed Commands,
+  //                             heartbeat requests)
+  // NOTE: Estop/EstopAck travel on SafetyStream, NOT on ControlStream.
+  // Command.estop (field 5) and CommandResult.estop (field 6) are retained for
+  // wire-format compatibility but are DEPRECATED — see annotations below.
+  rpc ControlStream(stream AdapterMessage) returns (stream ControlPlaneMessage);
+
+  // SafetyStream is the ONLY additional RPC in this service. It exists because
+  // ControlStream multiplexes bulk telemetry, large CapabilitiesSnapshots, and
+  // frequent ActionStatusUpdates alongside Commands. Under load an Estop Command
+  // can queue behind this traffic or stall on the HTTP/2 flow-control window,
+  // violating the <500 ms estop SLA (RFC-0001 #safety-timing-requirements, RA-6).
+  //
+  // Rejected alternative — HTTP/2 stream priority (RFC 7540 §5.3) within a
+  // single ControlStream: gRPC libraries (grpc-go, grpc-java, grpc-core) do not
+  // expose per-message priority to the application layer, and a flow-control
+  // window that is full stalls ALL frames on the stream regardless of priority.
+  // Physical channel isolation via a dedicated stream is the only mechanism
+  // that guarantees estop is never queued behind bulk data.
+  //
+  // Invariants:
+  //   * Same mTLS identity and per-robot authorization as ControlStream.
+  //   * Carries ONLY Estop Commands and EstopAck results (plus optional
+  //     safety-critical PauseCapabilities / PauseResult).
+  //   * Permanently empty in steady state — no telemetry, no action commands.
+  //   * EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
+  //   * Adapter MUST open SafetyStream in the same dial step as ControlStream.
+  //     If SafetyStream cannot be established the adapter MUST NOT declare
+  //     itself healthy and MUST retry.
+  //   * Estop and EstopAck messages are REUSED — not duplicated — via the
+  //     AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
+  rpc SafetyStream(stream AdapterSafetyMessage) returns (stream ControlPlaneSafetyMessage);
+}
+
+// ── Stream envelopes ──────────────────────────────────────────────────────────
+
+// Adapter → control plane. `seq` is a per-stream monotonic counter for gap
+// detection and audit correlation; it has no protocol semantics.
+message AdapterMessage {
+  uint64 seq = 1;
+  oneof payload {
+    AdapterHello         hello          = 2;  // MUST be the first message
+    DiscoverRobot        discover       = 3;
+    RegisterRobot        register       = 4;
+    TelemetryPayload     telemetry      = 5;
+    ActionStatusUpdate     action_status    = 6;
+    CommandResult        command_result = 7;
+    HeartbeatResponse    heartbeat      = 8;
+    CapabilitiesSnapshot capabilities   = 9;
+    ResourceRequest      resource_request = 10;  // adapter-initiated reservation (RFC-0001 #tde)
+    UpdateProgress       update_progress  = 11;  // intra-update per-robot rollout progress (advisory)
+  }
+}
+
+// Control plane → adapter.
+message ControlPlaneMessage {
+  uint64 seq = 1;
+  oneof payload {
+    HelloAck         hello_ack    = 2;
+    RegisterAck      register_ack = 3;
+    DiscoverAck      discover_ack = 4;
+    Command          command      = 5;
+    HeartbeatRequest heartbeat    = 6;
+    ResourceResponse resource_response = 7;  // decision for an adapter ResourceRequest
+  }
+}
+
+// ── Handshake ─────────────────────────────────────────────────────────────────
+
+message AdapterHello {
+  string vendor           = 1;  // matches FleetAdapter.spec.vendor
+  string adapter_version  = 2;  // adapter build / semver
+  string protocol_version = 3;  // e.g. "fleet_adapter.v1"
+  string namespace        = 4;  // Swarmada namespace (also bound by mTLS)
+  // Semver of the fleet-adapter CONTRACT this adapter targets (e.g. "1.0.0") — the proto surface,
+  // the SupportedAction schema, and the conformance-suite revision, versioned together (ADR-0032).
+  //
+  // Three version fields sit side by side here and are NOT interchangeable:
+  //   adapter_version  — the adapter's own BUILD (vendor cadence; two builds may implement one
+  //                      contract, one build may span several)
+  //   protocol_version — the wire-package IDENTITY ("fleet_adapter.v1"); an identity string, not a
+  //                      semver, so it cannot express compatibility within a range
+  //   contract_version — THIS: what compatibility is judged on
+  //
+  // The control plane intersects it with the range it advertises on
+  // SwarmadaConfig.status.supportedContractRange (N and N-1 minor within the major). Out of range,
+  // absent, or unparseable is incompatible — REGISTRATION_REJECTION_VERSION_MISMATCH, fail closed;
+  // an empty value is never an implicit pass. An adapter built before this field existed therefore
+  // sends nothing and is treated as incompatible for WORK, while registration, telemetry,
+  // heartbeats and estop are unaffected.
+  string contract_version = 5;
+}
+
+message HelloAck {
+  bool   accepted                    = 1;
+  string negotiated_protocol_version = 2;
+  string message                     = 3;
+  // The contract version the control plane agreed for this connection — the value it will hold the
+  // adapter to, echoed so the adapter can confirm what was negotiated rather than assume its own
+  // request was honoured. Set only when accepted; empty on rejection (ADR-0032).
+  string negotiated_contract_version = 4;
+}
+
+// ── Robot lifecycle: Discover / Register ──────────────────────────────────────
+
+enum RegistrationRejection {
+  REGISTRATION_REJECTION_UNSPECIFIED        = 0;
+  REGISTRATION_REJECTION_NOT_ADMITTED       = 1;  // Register: no Robot CRD exists
+  REGISTRATION_REJECTION_ALREADY_EXISTS     = 2;  // Discover: Robot/DiscoveredRobot exists
+  REGISTRATION_REJECTION_VERSION_MISMATCH   = 3;  // incompatible adapter version
+  REGISTRATION_REJECTION_NAMESPACE_MISMATCH = 4;  // robot not in adapter's namespace
+  REGISTRATION_REJECTION_INVALID_ROBOT_ID   = 5;  // robot_id malformed / empty / not a valid identifier
+}
+
+// First-time connection: a robot with no Robot CRD. The control plane creates a
+// DiscoveredRobot (RFC-0001 #discoveredrobot). Rejected ALREADY_EXISTS if one already exists.
+message DiscoverRobot {
+  string   robot_id              = 1;  // globally unique (serial / MAC)
+  string   manufacturer          = 2;
+  string   model                 = 3;
+  string   firmware_version      = 4;
+  repeated HardwareComponent hardware              = 5;
+  repeated InstalledModel    installed_models      = 6;
+  repeated string            reported_capabilities = 7;
+  // Hardware MAC address, when the robot exposes one. optional for proto3 explicit
+  // presence: an absent MAC ("unset") is distinct from a reported-empty string.
+  optional string            mac                   = 8;
+}
+
+message DiscoverAck {
+  bool                  accepted              = 1;
+  string                discovered_robot_name = 2;
+  string                message               = 3;
+  RegistrationRejection rejection             = 4;  // set when accepted=false
+  // Effective DiscoveredRobot TTL for the announcing adapter's refresh cadence:
+  // the adapter sets its announce interval I = min(ttl_seconds/2, 300); 0 = TTL
+  // disabled (I defaults to 60s). Sourced from SwarmadaConfig discovery TTL.
+  int64                 ttl_seconds           = 5;
+}
+
+// Reconnect of an already-admitted robot (Robot CRD exists). Creates no
+// Kubernetes resources. Rejected NOT_ADMITTED if no Robot CRD — Discover instead.
+message RegisterRobot {
+  string   robot_id          = 1;  // must match the Robot's swarmada.io/robot-id
+  string   adapter_version   = 2;
+  string   firmware_version  = 3;
+  repeated HardwareComponent reported_hardware = 4;
+}
+
+message RegisterAck {
+  bool                  accepted  = 1;
+  RegistrationRejection rejection = 2;  // set when accepted=false
+  string                message   = 3;
+  // Authoritative action state for this robot as of this moment on the control
+  // plane. Set on every RegisterAck (first-time and reconnect); the adapter
+  // uses it on reconnect to detect divergence from local state (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation, RA-2).
+  RobotActionState authoritative_action_state = 4;
+  // Robot.spec values the adapter needs to configure itself:
+  int32    telemetry_interval_seconds = 10;
+  string   assigned_zone              = 11;
+  repeated string active_capabilities = 12;
+  // Edge nodes the adapter MUST dial for this robot's zone chain
+  // (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream). Empty when no FleetZone in the chain declares one.
+  repeated EdgeEndpoint edge_endpoints = 13;
+}
+
+message RobotActionState {
+  RobotActionPhase phase            = 1;
+  string         action_id          = 2;  // empty when phase is IDLE or UNKNOWN
+  // Current fencing token the adapter should be executing under; the adapter
+  // MUST reject any command with a lower token for this robot.
+  uint64         fencing_token    = 3;
+  // Current lease generation. 0 when phase is not IN_PROGRESS or REVOKING.
+  uint64         lease_generation = 4;
+}
+
+enum RobotActionPhase {
+  ROBOT_ACTION_PHASE_UNSPECIFIED = 0;
+  ROBOT_ACTION_PHASE_IDLE        = 1;  // no action assigned; robot should be idle
+  ROBOT_ACTION_PHASE_IN_PROGRESS = 2;  // action active under a live lease; continue
+  ROBOT_ACTION_PHASE_REVOKING    = 3;  // lease renewal stopped; self-stop on expiry
+  ROBOT_ACTION_PHASE_CANCELLED   = 4;  // cancelled during disconnect; halt immediately
+  ROBOT_ACTION_PHASE_UNKNOWN     = 5;  // no record; halt and report
+}
+
+// ── Pushed commands (control plane → adapter) ─────────────────────────────────
+
+// A command pushed down the stream. command_id is unique per stream and is
+// echoed in the matching CommandResult. robot_id selects the managed robot.
+message Command {
+  uint64 command_id = 1;
+  string robot_id   = 2;
+  oneof command {
+    AssignAction         assign_action       = 3;
+    CancelAction         cancel_action       = 4;
+    Estop              estop             = 5;  // DEPRECATED: estop travels on SafetyStream; retained for wire compatibility
+    PauseCapabilities  pause             = 6;
+    ResumeCapabilities resume            = 7;
+    ScanCapabilities   scan              = 8;
+    VerifyHardware     verify_hardware   = 9;   // optional (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist)
+    VerifyCapability   verify_capability = 10;  // optional
+    VerifyModel        verify_model      = 11;  // optional
+    PushFirmware       push_firmware     = 12;  // optional
+    ModelUpdate        model_update      = 13;  // optional
+    ReservationGranted reservation_granted = 14;  // optional; async grant of a QUEUED reservation
+    ZoneAdmission      zone_admission    = 15;  // optional; zone-capacity hold/admit (RFC-0001 #tde)
+    // renew_lease refreshes the assignment lease for action_id. The adapter MUST
+    // reset its self-stop timer when lease_generation matches its current
+    // generation. Rationale for a dedicated arm (not HeartbeatRequest): lease
+    // renewal carries explicit safety semantics — a missed renewal MUST trigger
+    // autonomous action self-stop (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee); conflating it with liveness heartbeat
+    // would obscure that invariant and make the self-stop condition ambiguous.
+    RenewActionLease     renew_lease       = 16;
+    // optional (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist); adapter
+    // confirms it can serve type+payload. Not issued by the control plane at v0.1 — the
+    // supported-action catalog is the shipped pre-dispatch gate — so an adapter that
+    // implements it will not currently be asked.
+    ValidateAction       validate_action   = 17;
+  }
+}
+
+message CommandResult {
+  uint64 command_id  = 1;  // echoes Command.command_id
+  string robot_id    = 2;
+  // unsupported=true is how an adapter declines an OPTIONAL command it does not
+  // implement (the in-band equivalent of gRPC UNIMPLEMENTED); the result oneof
+  // is then left empty.
+  bool   unsupported = 3;
+  oneof result {
+    AssignActionResult     assign_action   = 4;
+    CancelActionResult     cancel_action   = 5;
+    EstopAck             estop         = 6;  // DEPRECATED: EstopAck returned on SafetyStream; retained for wire compatibility
+    PauseResult          pause         = 7;
+    ResumeResult         resume        = 8;
+    CapabilitiesSnapshot scan          = 9;
+    VerifyResult         verify        = 10;
+    FirmwareResult       push_firmware = 11;
+    ModelUpdateResult    model_update  = 12;
+    ReservationGrantedAck reservation_granted = 13;
+    ZoneAdmissionAck     zone_admission = 14;
+    RenewActionLeaseResult renew_lease    = 15;
+    ValidateActionResult validate_action = 16;
+  }
+}
+
+// ── Action assignment (fenced) ────────────────────────────────────────────────
+//
+// A fencing token is a per-robot, strictly monotonic uint64 minted by the
+// control plane (sourced from a persisted lease generation, never in-memory
+// state, so it survives failover). It totally orders commands to a robot so the
+// adapter can reject stale ones after a connectivity gap. The adapter persists
+// the highest accepted token per robot and rejects any AssignAction/CancelAction
+// whose token is <= that — except an identical re-delivery of the current
+// assignment, which is acked idempotently. Estop is intentionally NOT
+// fenced: a safe stop is always honored.
+
+enum AssignActionRejection {
+  ASSIGN_ACTION_REJECTION_UNSPECIFIED           = 0;  // accepted
+  ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN   = 1;  // token <= highest accepted
+  ASSIGN_ACTION_REJECTION_MISSING_FENCING_TOKEN = 2;  // no token supplied
+  ASSIGN_ACTION_REJECTION_ROBOT_BUSY            = 3;  // on a different live action
+  ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE     = 4;  // faulted / estopped / offline
+  ASSIGN_ACTION_REJECTION_INVALID_ACTION          = 5;  // unparseable / unsupported
+}
+
+message AssignAction {
+  string action_id      = 1;  // FleetAction namespace/name
+  string action_type    = 2;  // matches FleetAction.spec.type
+  string destination  = 3 [deprecated = true];  // DEPRECATED: destination now travels in payload_json; control plane no longer sets this.
+  bytes  payload_json = 4;  // raw JSON from FleetAction.spec.payload
+  // fencing_token orders this assignment. `optional` so the adapter can tell
+  // "no token sent" (reject) from a value of 0. Control plane MUST send >= 1.
+  optional uint64 fencing_token = 5;
+  string assignment_id = 6;  // UUID for audit correlation
+  int32  priority      = 7;
+  optional int64 deadline_ms = 8;  // absent = no deadline
+  // lease_generation is the per-ACTION strictly-monotonic assignment generation
+  // (distinct from fencing_token, which is per-ROBOT and totally orders commands
+  // to ONE robot). lease_generation identifies this specific assignment attempt;
+  // the adapter holds a valid execution lease only while the control plane
+  // renews this generation via renew_lease Commands (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee).
+  optional uint64 lease_generation  = 9;
+  // Initial lease duration in milliseconds. The adapter resets its self-stop
+  // timer on each renew_lease renewal; if no renewal arrives before the timer
+  // fires the adapter MUST bring the current action to a safe stop.
+  uint32          lease_duration_ms = 10;
+}
+
+message AssignActionResult {
+  bool                accepted  = 1;
+  string              message   = 2;
+  AssignActionRejection rejection = 3;  // set when accepted=false
+  // accepted_fencing_token echoes the token the adapter is now fenced at, so the
+  // control plane can confirm its assignment won (or learn it was superseded).
+  optional uint64     accepted_fencing_token = 4;
+}
+
+message CancelAction {
+  string action_id = 1;
+  string reason  = 2;
+  // Must be >= the adapter's highest accepted token; a stale cancel is rejected
+  // so it cannot abort a newer assignment.
+  optional uint64 fencing_token = 3;
+}
+
+// CancelDisposition reports how the robot handled a cancel_action issued for
+// capability-loss reassignment (RFC-0001 Capability-loss reassignment), so the
+// control plane can requeue, do nothing, or apply onFailure. Additive: an adapter
+// that does not set it leaves UNSPECIFIED, which the control plane treats as
+// STOPPED_SAFELY (backward-compatible with the pre-existing "ack = stopped" cancel).
+enum CancelDisposition {
+  CANCEL_DISPOSITION_UNSPECIFIED    = 0;  // legacy / non-capability-loss cancel — treated as stopped-safely
+  CANCEL_DISPOSITION_STOPPED_SAFELY = 1;  // action halted at a safe point → control plane requeues (→ Pending)
+  CANCEL_DISPOSITION_COMPLETED      = 2;  // robot finished the action (lost cap not needed to finish) → cancel is a no-op
+  CANCEL_DISPOSITION_RECOVERED      = 3;  // could not safely finish/hand off; robot recovered (load returned / to base) → action Failed
+}
+
+message CancelActionResult {
+  bool   acknowledged = 1;
+  string message      = 2;
+  bool   stale        = 3;  // true if rejected because the token was stale
+  CancelDisposition disposition = 4;  // capability-loss disposition; UNSPECIFIED = stopped-safely
+}
+
+// ── Assignment lease renewal ──────────────────────────────────────────────────
+//
+// The control plane renews each robot's assignment lease at an interval well
+// within lease_duration_ms while the assignment stands, preventing the robot's
+// self-stop timer from firing. On a missed renewal the adapter MUST bring the
+// current action to a safe stop — the robot can no longer be the action's sole
+// valid executor (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee).
+//
+// A dedicated Command arm is used rather than piggybacking on HeartbeatRequest
+// because:
+//   1. Missed renewal MUST trigger autonomous action self-stop; merging this with
+//      liveness heartbeat conflates two orthogonal safety properties.
+//   2. RenewActionLeaseResult carries running=false, letting the adapter surface
+//      action completion to a transiently out-of-contact control plane.
+
+message RenewActionLease {
+  string action_id           = 1;  // FleetAction namespace/name; identifies the lease
+  uint64 lease_generation  = 2;  // must match the adapter's current lease_generation
+  uint32 lease_duration_ms = 3;  // new lease duration from this renewal timestamp
+}
+
+message RenewActionLeaseResult {
+  // false if lease_generation is stale (adapter has a newer or no generation);
+  // the adapter ignores the renewal and does NOT reset its self-stop timer.
+  bool   renewed            = 1;
+  // false if the robot is no longer executing action_id (completed, failed, or
+  // self-stopped). The control plane uses this to detect silent action completion
+  // during a connectivity gap.
+  bool   running            = 2;
+  // The adapter's current lease_generation (for control-plane diagnostics).
+  uint64 current_generation = 3;
+  string message            = 4;
+}
+
+// ── Emergency stop (confirmed) ────────────────────────────────────────────────
+
+// ── Emergency stop: VERSION-FROZEN (ADR-0032) ────────────────────────────────
+//
+// Estop and EstopAck are frozen across all contract versions within a major line. No field of
+// either message may acquire a dependency on contract_version, and estop MUST be honoured against
+// any connected adapter irrespective of its negotiation, compatibility, or conformance state —
+// including an adapter whose contract_version was rejected as out of range.
+//
+// The reason is that stopping is not work. Every other gate in this contract exists to withhold
+// WORK from an adapter that cannot be trusted to execute it correctly; withholding a STOP from that
+// same adapter would invert the safety property. An adapter that cannot be given a task can still
+// always be told to halt.
+//
+// This records as a contract guarantee what the SafetyStream split and CONFORMANCE.md C5 already
+// provide: estop travels on its own stream, is never fenced, and STOPPED is only ever
+// adapter-confirmed (never inferred from absent motion or a timeout).
+message Estop {
+  string estop_id     = 1;  // UUID for idempotency and audit
+  string reason       = 2;
+  string issued_by    = 3;  // authenticated identity, for attribution only
+  int64  issued_at_ms = 4;
+}
+
+enum EstopState {
+  ESTOP_STATE_UNSPECIFIED = 0;
+  ESTOP_STATE_STOPPING    = 1;  // command received; robot is decelerating
+  ESTOP_STATE_STOPPED     = 2;  // CONFIRMED halted in a safe state
+  ESTOP_STATE_FAILED      = 3;  // could not confirm a stop — escalate immediately
+}
+
+// The control plane MUST treat a robot as STOPPED only on EstopAck.state =
+// ESTOP_STATE_STOPPED — never by inferring it from absent motion or a timeout.
+message EstopAck {
+  string     estop_id        = 1;  // echoes the request
+  EstopState state           = 2;  // confirmed by the adapter, not inferred
+  string     message         = 3;
+  int64      confirmed_at_ms = 4;
+  // Epoch-ms at which the adapter issued the hardware stop command (RFC-0001 #safety-timing-requirements, the
+  // <1s ACK→hardware boundary). optional for explicit presence: unset ("not
+  // reported") is distinct from epoch 0.
+  optional int64 stop_initiated_at = 5;
+}
+
+// ── SafetyStream envelopes (RFC-0001 #fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams, RA-6) ────────────────────────────────────
+//
+// These two messages are the ONLY types carried on SafetyStream. They reuse the
+// existing Estop and EstopAck message definitions above — no duplication.
+// PauseCapabilities / PauseResult are optional arms for safety-critical
+// capability pauses; an adapter that does not implement safety-critical pause on
+// SafetyStream returns PauseResult{paused: false, message: "unsupported"}.
+
+// Adapter → control plane on SafetyStream.
+message AdapterSafetyMessage {
+  uint64 seq      = 1;  // per-stream monotonic counter; audit/gap-detection only
+  string robot_id = 2;  // managed robot; same per-robot authz as ControlStream
+  oneof payload {
+    EstopAck          estop_ack    = 3;  // RFC-0001 #safety-timing-requirements SLA measured on receipt of this
+    PauseResult       pause_result = 4;  // optional: safety-critical pause confirmation
+  }
+}
+
+// Control plane → adapter on SafetyStream.
+message ControlPlaneSafetyMessage {
+  uint64 seq      = 1;
+  string robot_id = 2;
+  oneof payload {
+    Estop             estop = 3;  // reuses Estop (estop_id, reason, issued_by, issued_at_ms)
+    PauseCapabilities pause = 4;  // optional: safety-critical capability pause
+  }
+}
+
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+
+message TelemetryPayload {
+  string        robot_id     = 1;
+  int64         timestamp_ms = 2;  // Unix ms; always present
+  RobotPosition position     = 3;
+  BatteryStatus battery      = 4;
+  RobotPhase    phase        = 5;
+  // Delta-compressed: only components whose status changed since the last
+  // payload; ALL components on the first payload after (re)connect.
+  repeated HardwareStatusUpdate hardware = 6;
+  string        current_action = 7;  // empty if idle
+}
+
+// Scalars below use proto3 explicit presence because 0 / 0.0 / false are valid,
+// safety-relevant readings; without presence a dropped field deserializes to
+// zero and is indistinguishable from a real reading — a phantom origin (0,0) or
+// a false 0% battery (review RA-3b).
+message RobotPosition {
+  optional double x     = 1;  // metres, zone frame; 0.0 is a valid coordinate
+  optional double y     = 2;
+  optional double yaw   = 3;  // radians; 0.0 is a valid heading
+  optional int32  floor = 4;  // 0 = ground is a valid floor; absent != ground
+  optional double altitude = 5;  // metres (geodetic/aerial); AGL/MSL per SwarmadaConfig; frame-exclusive with floor
+}
+
+message BatteryStatus {
+  optional int32  percent  = 1;  // 0–100; 0 is a valid (critical) reading
+  optional bool   charging = 2;  // absent = unknown, NOT "false"
+  optional double voltage  = 3;  // volts; 0.0 is meaningful
+  optional int32  estimated_minutes_remaining = 4;  // 0 = critical; absent = unknown
+}
+
+// ── Action status ─────────────────────────────────────────────────────────────
+
+enum ActionState {
+  ACTION_STATE_UNSPECIFIED = 0;
+  ACTION_STATE_RUNNING     = 1;
+  ACTION_STATE_SUCCEEDED   = 2;
+  ACTION_STATE_FAILED      = 3;
+  ACTION_STATE_PAUSED      = 4;
+  ACTION_STATE_CANCELLED   = 5;
+  ACTION_STATE_STOPPED     = 6;  // clean commanded stop (reconnect IDLE/REVOKING-expired, edge estop); NOT a failure
+  ACTION_STATE_UNKNOWN     = 7;  // no control-plane record (reconnect UNKNOWN phase); robot halts and reports
+}
+
+message ActionStatusUpdate {
+  string    action_id = 1;
+  ActionState state   = 2;
+  string    message = 3;
+  // fencing_token the robot is currently executing under, echoed so the control
+  // plane can detect a robot still acting on a superseded assignment.
+  optional uint64 fencing_token = 4;
+  int32     progress_pct = 5;  // 0–100; 0 if unknown
+}
+
+// ── Heartbeat ─────────────────────────────────────────────────────────────────
+// Works as a normal request/response now that it travels over the stream: the
+// control plane pushes HeartbeatRequest, the adapter replies HeartbeatResponse.
+
+message HeartbeatRequest {
+  string robot_id   = 1;
+  int64  sent_at_ms = 2;
+}
+
+message HeartbeatResponse {
+  string        robot_id      = 1;
+  RobotPhase    phase         = 2;
+  BatteryStatus battery       = 3;
+  int64         received_at_ms = 4;
+}
+
+// ── Capabilities: scan / pause / resume ───────────────────────────────────────
+
+message ScanCapabilities {}  // request a full (non-delta) snapshot
+
+message CapabilitiesSnapshot {
+  string   robot_id         = 1;
+  repeated HardwareComponent hardware         = 2;  // ALL components
+  repeated InstalledModel    installed_models = 3;  // ALL models
+  int64    snapshot_ms      = 4;
+   repeated SupportedAction   supported_actions = 5;  // the action catalog this adapter can serve (discovery)
+  // Firmware install state as the robot reports it (ADR-0033). Optional: an adapter
+  // that does not implement push_firmware leaves it unset, and the control plane
+  // keeps its own firmwareVersion record untouched.
+  FirmwareState              firmware          = 6;
+}
+
+message PauseCapabilities {
+  string   reason                  = 1;
+  repeated string capability_names = 2;  // only pauseable:true capabilities
+  bool     require_stop_before_ack = 3;  // adapter MUST reach physical stop first
+}
+
+message PauseResult {
+  bool   paused  = 1;
+  string message = 2;
+}
+
+message ResumeCapabilities {
+  string   reason                  = 1;
+  repeated string capability_names = 2;
+}
+
+message ResumeResult {
+  bool   resumed = 1;
+  string message = 2;
+}
+
+// ── Resource reservation & zone capacity ────────────────────────────────────
+//
+// Reservations are ADAPTER-initiated (unlike Command): the adapter requests a
+// SharedResource (RFC-0001 #tde) on a robot's behalf before it enters a capacity-limited
+// space. ResourceRequest travels UP; ResourceResponse travels DOWN, correlated by
+// request_id. A QUEUED reservation is later granted asynchronously by a
+// reservation_granted Command (control plane → adapter). Zone-capacity holds
+// (RFC-0001 #tde) are control-plane-initiated and ride the zone_admission Command.
+
+message ResourceRequest {
+  uint64 request_id = 1;   // unique per stream; echoed in ResourceResponse
+  string robot_id   = 2;
+  oneof request {
+    ReserveResource reserve = 3;
+    ReleaseResource release = 4;
+  }
+}
+
+message ResourceResponse {
+  uint64 request_id = 1;   // echoes ResourceRequest.request_id
+  string robot_id   = 2;
+  oneof response {
+    ReserveResult reserve = 3;
+    ReleaseResult release = 4;
+  }
+}
+
+message ReserveResource {
+  string resource_name = 1;   // SharedResource name; resolved up the zone tree
+}
+
+enum ReservationState {
+  RESERVATION_STATE_UNSPECIFIED = 0;
+  RESERVATION_STATE_GRANTED     = 1;  // robot may proceed now
+  RESERVATION_STATE_QUEUED      = 2;  // hold at boundary; await reservation_granted
+  RESERVATION_STATE_DENIED      = 3;  // resource unknown / unreachable from the zone
+}
+
+message ReserveResult {
+  ReservationState state          = 1;
+  int32            queue_position = 2;  // 0 when GRANTED
+  string           message        = 3;
+}
+
+message ReleaseResource {
+  string resource_name = 1;
+}
+
+message ReleaseResult {
+  bool   released = 1;
+  string message  = 2;
+}
+
+// Async grant of a previously QUEUED reservation (control plane → adapter),
+// carried as a Command so it is acknowledged like any other pushed command.
+message ReservationGranted { string resource_name = 1; }
+message ReservationGrantedAck { bool acknowledged = 1; }
+
+// Zone-capacity hold/admit (control plane → adapter). admit=false holds the robot
+// at the leaf-zone boundary when the zone is at maxConcurrentRobots; admit=true
+// releases it when a slot frees.
+message ZoneAdmission { string zone_name = 1; bool admit = 2; string message = 3; }
+message ZoneAdmissionAck { bool acknowledged = 1; }
+
+// ── Optional operations: probes / firmware / model (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist) ───────────────────
+
+enum ProbeStatus {
+  PROBE_STATUS_UNSPECIFIED = 0;
+  PROBE_STATUS_HEALTHY     = 1;
+  PROBE_STATUS_DEGRADED    = 2;
+  PROBE_STATUS_FAILED      = 3;
+}
+
+message VerifyHardware {
+  string component_name = 1;
+  map<string, double> expected_metrics = 2;
+}
+
+message VerifyCapability {
+  string capability_name = 1;
+  map<string, double> expected_metrics = 2;
+}
+
+message VerifyModel {
+  string model_name      = 1;
+  bytes  synthetic_input = 2;
+  map<string, double> expected_metrics = 3;
+}
+
+message VerifyResult {
+  ProbeStatus status = 1;
+  map<string, double> actual_metrics = 2;
+  string message = 3;
+}
+
+message PushFirmware {
+  string target_version       = 1;
+  string firmware_uri         = 2;
+  string firmware_checksum    = 3;  // sha256:<hex>; integrity check
+  // Signature URI or sigstore bundle for the firmware artifact (publisher-trust
+  // check, DD-S1). The adapter MUST verify it against
+  // SwarmadaConfig.spec.signing.trustRoots before install and fail closed on
+  // failure. Required when SwarmadaConfig.spec.signing.requireSignatureVerification.
+  string firmware_signature_ref = 4;
+}
+
+message FirmwareResult {
+  bool   accepted        = 1;  // download begun
+  string message         = 2;
+  // DN or fingerprint of the trust-root key that verified the signature;
+  // populated when accepted=true. Recorded in the FIRMWARE_SIGNATURE_VERIFIED
+  // audit event (DD-S1).
+  string verified_signer = 3;
+}
+
+message ModelUpdate {
+  string model_name        = 1;
+  string old_version       = 2;
+  string new_version       = 3;
+  string model_uri         = 4;
+  string model_checksum    = 5;  // sha256:<hex>
+  // Signature URI or sigstore bundle for the model artifact (publisher-trust
+  // check, DD-S1). The adapter MUST verify it against
+  // SwarmadaConfig.spec.signing.trustRoots before install and fail closed on
+  // failure. Required when SwarmadaConfig.spec.signing.requireSignatureVerification.
+  string model_signature_ref = 6;
+  // When true, this is an Auto rollback (RFC-0001 #design-details-why-is-modelrollout-rollback-manual-by-default): the adapter MUST reactivate the
+  // robot-retained new_version (the version the robot was on before the failed
+  // update) WITHOUT downloading — model_uri is empty and no signature/checksum is
+  // sent, because the artifact is already present and was verified on first install.
+  bool rollback = 7;
+}
+
+message ModelUpdateResult {
+  bool   acknowledged    = 1;
+  string message         = 2;
+  // DN or fingerprint of the trust-root key that verified the signature;
+  // populated when acknowledged=true. Recorded in the MODEL_SIGNATURE_VERIFIED
+  // audit event (DD-S1).
+  string verified_signer = 3;
+}
+
+// UpdateProgress reports intra-update per-robot progress during a firmware or model
+// rollout, so the control plane can surface it as
+// FirmwareRollout/ModelRollout.status.currentBatch[].updatePhase. It is ADVISORY
+// telemetry and MUST NOT be treated as a terminal outcome. Emitting it is OPTIONAL
+// for an adapter — a silent adapter simply leaves the phase at the control plane's
+// initial value.
+//
+// What IS authoritative differs by kind, and the difference is load-bearing:
+//   - model:    the robot reports per-model state on its own status
+//               (installedModels[].status / failureReason), so an install FAILURE is
+//               observable and is sealed as MODEL_UPDATE_FAILED
+//               (RFC-0001 #safety-required-events).
+//   - firmware: FirmwareResult.accepted means "download begun" — an ACCEPTANCE ack,
+//               not a completion signal. No message in this contract reports a
+//               firmware install failure, which is why FIRMWARE_INSTALL_FAILED is
+//               marked deferred rather than pending: closing it requires a contract
+//               change here, not controller work.
+message UpdateProgress {
+  string     robot_id = 1;
+  UpdateKind kind     = 2;  // which rollout this progress belongs to
+  // Phase string; MUST match the CRD updatePhase enum for the kind
+  // (firmware: Pulling / Installing / Verifying / Rebooting;
+  //  model:    Downloading / Verifying / Installing / HealthChecking).
+  string     phase    = 3;
+  int32      percent  = 4;  // 0-100 completion, optional (0 if unknown)
+
+  // ── Terminal outcome (ADR-0033) ────────────────────────────────────────────
+  // Set on the LAST message of an install, and only then. While outcome is
+  // INSTALL_OUTCOME_UNSPECIFIED this message is advisory progress exactly as
+  // before, so an adapter that never reports an outcome is wire-compatible.
+  //
+  // An adapter that implements push_firmware or model_update MUST report a
+  // terminal outcome for every install it accepts. Declining the optional
+  // command remains free; accepting one and going silent wedges the rollout,
+  // because a control plane cannot distinguish that from a slow install.
+  InstallOutcome outcome        = 5;
+  // Why the install failed. Set only with outcome = FAILED; it is the operator's
+  // only account of the failure and is recorded verbatim in the audit entry.
+  string         failure_reason = 6;
+  // The version the robot is ACTUALLY running now that the install is over. On
+  // SUCCEEDED it is the target; on FAILED it is what the robot fell back to, which
+  // is the fact an operator needs and cannot infer — a failed install may leave the
+  // robot on the old version, on a recovery image, or somewhere else entirely.
+  string         resulting_version = 7;
+}
+
+// InstallOutcome is the terminal result of a firmware or model install.
+//
+// An enum rather than a bool: a defaulted false would be indistinguishable from
+// "failed", and this value gates a safety-relevant audit entry. UNSPECIFIED means
+// the install has not finished — never "assume success" and never "assume failure".
+enum InstallOutcome {
+  INSTALL_OUTCOME_UNSPECIFIED = 0;  // not terminal; still in progress
+  INSTALL_OUTCOME_SUCCEEDED   = 1;
+  INSTALL_OUTCOME_FAILED      = 2;
+}
+
+// UpdateKind disambiguates which rollout an UpdateProgress belongs to.
+enum UpdateKind {
+  UPDATE_KIND_UNSPECIFIED = 0;
+  UPDATE_KIND_FIRMWARE    = 1;
+  UPDATE_KIND_MODEL       = 2;
+}
+
+// ── Common component / model types ────────────────────────────────────────────
+
+enum HardwareStatus {
+  HARDWARE_STATUS_UNSPECIFIED = 0;
+  HARDWARE_STATUS_HEALTHY     = 1;
+  HARDWARE_STATUS_DEGRADED    = 2;
+  HARDWARE_STATUS_FAILED      = 3;
+  // Intentionally not in service — an operator/edge toggle turned the component
+  // off. Distinct from FAILED (fault): benign, reversible, and NOT critical.
+  HARDWARE_STATUS_DISABLED    = 4;
+}
+
+enum ModelStatus {
+  MODEL_STATUS_UNSPECIFIED = 0;
+  MODEL_STATUS_ACTIVE      = 1;
+  MODEL_STATUS_UPDATING    = 2;
+  MODEL_STATUS_FAILED      = 3;
+  MODEL_STATUS_INACTIVE    = 4;
+}
+
+enum RobotPhase {
+  ROBOT_PHASE_UNSPECIFIED = 0;
+  ROBOT_PHASE_IDLE        = 1;
+  ROBOT_PHASE_ASSIGNED    = 2;
+  ROBOT_PHASE_IN_PROGRESS = 3;
+  ROBOT_PHASE_CHARGING    = 4;
+  ROBOT_PHASE_ERROR       = 5;
+  ROBOT_PHASE_OFFLINE     = 6;
+  ROBOT_PHASE_MAINTENANCE = 7;
+  ROBOT_PHASE_DISCOVERED  = 8;
+}
+
+message HardwareComponent {
+  string         name              = 1;  // unique within the robot
+  string         type              = 2;  // Lidar | Camera | Gripper | ...
+  string         model             = 3;  // manufacturer model; informational
+  HardwareStatus status            = 4;
+  string         degradation_reason = 5;
+
+  // Numeric/boolean attributes of the component, feeding
+  // DiscoveredRobot.status.reportedHardware[] (RFC-0001 #discoveredrobot) and, after the admission merge, the
+  // Robot's hardware inventory.
+  //
+  // Every one is `optional` for proto3 explicit presence: absent means the adapter does not
+  // report that attribute, which is NOT the same as reporting 0 or false. This is AGENTS.md
+  // invariant 3 ("explicit presence on safety-relevant scalars") applied to capability data —
+  // a defaulted 0 would read as a real 0 kg payload ceiling or 0 m sensor range, and a
+  // defaulted false as "not depth-capable", either of which a scheduler would act on.
+  //
+  // Types follow DiscoveredRobot.status.reportedHardware[]
+  // (api/v1/discoveredrobot_types.go), the direct consumer of these values.
+  optional double max_payload_kg     = 6;   // kg; lift/tow ceiling
+  optional double resolution_mp      = 7;   // megapixels
+  optional double range_m            = 8;   // metres; sensor max range
+  optional double horizontal_fov_deg = 9;   // degrees; 360 for a spinning lidar
+  optional bool   depth_capable      = 10;  // absent = unknown, NOT "not depth-capable"
+  optional double frame_rate_fps     = 11;  // frames per second
+  optional double platform_length_mm = 12;  // millimetres; chassis footprint
+  optional double platform_width_mm  = 13;
+}
+
+message InstalledModel {
+  string      name            = 1;
+  string      version         = 2;
+  ModelStatus status          = 3;
+  string      running_version = 4;  // may lag version during a ModelRollout
+  // Why this model is in MODEL_STATUS_FAILED; empty for any other status.
+  // Without it, status = FAILED says a model is unusable but not why, and the
+  // reason is gone by the time an operator looks (ADR-0033).
+  string      failure_reason  = 5;
+}
+
+// FirmwareState is the robot's firmware install state, as the ROBOT reports it.
+//
+// The contract had no way to describe this at all before ADR-0033: FirmwareResult
+// acknowledges that a download began, and UpdateProgress streams phases that vanish
+// with the stream. Carrying it in the snapshot is what lets a control plane that
+// restarted mid-rollout recover the outcome it missed, instead of leaving the
+// rollout wedged waiting for a message that already came and went.
+message FirmwareState {
+  // The version the robot is running right now. This is the robot's own report,
+  // distinct from FirmwareRollout's record of what it pushed.
+  string                running_version   = 1;
+  FirmwareInstallStatus status            = 2;
+  // The version a FAILED or in-flight install was trying to reach. Paired with
+  // running_version it answers the question a failed rollout actually raises:
+  // what was attempted, and what is the robot left on.
+  string                attempted_version = 3;
+  // Why the last install failed; set only with status = FAILED.
+  string                failure_reason    = 4;
+}
+
+enum FirmwareInstallStatus {
+  FIRMWARE_INSTALL_STATUS_UNSPECIFIED = 0;  // not reported by this adapter
+  FIRMWARE_INSTALL_STATUS_RUNNING     = 1;  // no install in flight
+  FIRMWARE_INSTALL_STATUS_UPDATING    = 2;
+  // The last install did not complete. The robot is running running_version, which
+  // is NOT attempted_version — a robot is never left in an unknown firmware state.
+  FIRMWARE_INSTALL_STATUS_FAILED      = 3;
+}
+
+message HardwareStatusUpdate {
+  string         component_name     = 1;
+  HardwareStatus status             = 2;
+  string         degradation_reason = 3;
+}
+
+// ---------------------------------------------------------------------------
+// EdgeService — served by the Zone Controller EDGE NODE on the facility LAN,
+// not by the control plane (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
+// every endpoint listed in RegisterAck.edge_endpoints and holds one EdgeStream
+// per edge node, with the same dial-out, mTLS, and reconnect-backoff
+// discipline as the ControlStream. The stream survives control-plane
+// partitions: it is the data source for headless boundary-breach detection
+// and the delivery path for headless estop.
+service EdgeService {
+  rpc EdgeStream(stream AdapterEdgeMessage) returns (stream EdgeControlMessage);
+}
+
+message AdapterEdgeMessage {
+  oneof msg {
+    PositionFrame position  = 1;  // fire-and-forget pose tee, per telemetry tick
+    EstopAck      estop_ack = 2;  // confirmed ack for an edge-issued estop
+  }
+}
+
+message EdgeControlMessage {
+  oneof msg {
+    Estop estop = 1;  // headless zone-scoped estop (RFC-0001 #safety-edge-headless-emergency-stop)
+  }
+}
+
+// One frame per managed robot per telemetry tick, teed to every connected
+// edge node. No ack, no buffering, no retransmission: a missed frame is
+// superseded by the next. Absence of frames MUST NOT be interpreted as a
+// breach or trigger an estop (RFC-0001 #safety-edge-headless-emergency-stop).
+message PositionFrame {
+  string        robot_id = 1;
+  RobotPosition position = 2;
+  int64         ts_ms    = 3;  // adapter clock, epoch milliseconds
+}
+
+message EdgeEndpoint {
+  string zone    = 1;  // FleetZone declaring the edge node
+  string address = 2;  // host:port on the facility LAN
+}
+
+// ValidateAction asks the adapter whether it can serve an action's type+payload
+// from the Robot-OS command set it advertises. Pure inspection: reserves nothing,
+// moves no robot. Issued at FleetAction/FleetTask acceptance and re-checked at
+// assignment for the chosen robot; unsupported=true means unconfirmed (not servable).
+message ValidateAction       { string action_type = 1; bytes payload_json = 2; }
+message ValidateActionResult { bool servable = 1; string message = 2; }
+
+// SupportedAction is one entry in an adapter's discoverable action catalog
+// (carried in CapabilitiesSnapshot). It declares an action `type` the adapter
+// can serve, the capabilities a robot needs to be eligible, and a coarse
+// parameter descriptor. Discovery (this catalog, pulled via Command.scan) is the
+// cheap pre-filter; ValidateAction is the authoritative per-instance check.
+message SupportedAction {
+  string          action_type           = 1;  // matches FleetAction.spec.type
+  repeated string required_capabilities = 2;  // robot must have these Active
+  repeated ActionParam params           = 3;  // coarse payload parameter descriptors
+  string          description           = 4;
+}
+message ActionParam {
+  string          name     = 1;
+  string          unit     = 2;  // e.g. "kg", "m", "s"; empty if none
+  string          kind     = 3;  // "number" | "string" | "bool" | "enum"
+  double          min      = 4;  // for number; unset => 0
+  double          max      = 5;  // for number; unset => 0
+  repeated string allowed  = 6;  // permitted values for kind=enum
+  bool            required = 7;
+}

@@ -1,0 +1,49 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Strategic merge patch: the `args` field on a corev1.Container has no merge
+# key, so a patch that sets `args` replaces the whole list — this repeats
+# config/manager/manager.yaml's base three flags and appends the fourth. If the
+# base args ever change, update this list to match.
+#
+# --fleet-adapter-bind-address="" disables the ControlStream server. cmd/manager
+# guards every ControlStream-backed consumer on that address being non-empty
+# (main.go: `if fleetAdapterAddr != ""`), so with it empty the FleetAction
+# reconciler's Validator stays nil and actionServableBy takes its documented
+# "catalog gate only — the v0.2 behaviour" branch.
+#
+# That is exactly what the status-projected quickstart path needs. It runs NO
+# adapter process: robot state is projected by writing status directly, and the
+# FleetAdapter object is fabricated as Connected/conformance-Passed purely to
+# satisfy the ADR-0032 dispatch gate. Leave ControlStream enabled and ADR-0019's
+# validate_action probe then asks that fabricated adapter whether it can serve
+# the action, finds no stream behind it, and — by design, to avoid phantom
+# assignments — drops every candidate robot. The result is a permanent
+# "no eligible robot available" and no FleetAction is ever assigned.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swarmada-controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          args:
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --leader-elect
+            - --fleet-adapter-bind-address=

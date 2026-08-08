@@ -1,0 +1,21 @@
+# swarmada:robot — the Fleet Adapter's service-account role (RFC-0001 §9.5.3.1).
+# Bind via a namespace-scoped RoleBinding. It may read robots and write robot
+# status, and read the tasks/zones it serves. It CANNOT create resources, cannot
+# act cross-namespace, and holds NO custom verbs (no admit/reject/cancel/estop-*).
+# WHICH robots it may act on is enforced server-side per message (the robot_id
+# check, §9.5.1.2) — not by this role, since RBAC cannot select objects by label.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:robot
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots", "fleetactions", "fleetzones"]
+    verbs: ["get", "list", "watch"]
+  # Write robot status (telemetry projection); scoped to owned robots server-side.
+  - apiGroups: ["swarmada.io"]
+    resources: ["robots/status"]
+    verbs: ["update", "patch"]

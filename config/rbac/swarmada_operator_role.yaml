@@ -1,0 +1,35 @@
+# swarmada:operator — can create and manage FleetActions; read everything else
+# (RFC-0001 §9.5.3.1). Cannot modify robots, zones, or configuration; cannot
+# trigger or clear estops. Suitable for WMS integrations and shift supervisors.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:operator
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Read-only over all Swarmada resources.
+  - apiGroups: ["swarmada.io"]
+    resources:
+      - robots
+      - discoveredrobots
+      - robotclasses
+      - fleetactions
+      - fleettasks
+      - fleetzones
+      - zonemaintenances
+      - robotprobes
+      - firmwarerollouts
+      - modelrollouts
+      - modelpolicies
+      - swarmadaconfigs
+      - fleetadapters
+    verbs: ["get", "list", "watch"]
+  # Full FleetAction management, including the `cancel` custom verb (§9.5.3.2).
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["create", "update", "patch", "delete", "cancel"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleettasks"]
+    verbs: ["create", "update", "patch", "delete", "append"]

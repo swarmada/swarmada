@@ -1,0 +1,16 @@
+{
+  "adapter_name": "Acme Fleet Adapter",
+  "adapter_slug": "fleet-adapter-acme",
+  "python_package": "fleet_adapter_acme",
+  "vendor": "acme",
+  "robot_class": "acme-amr",
+  "author": "Your Name <you@example.com>",
+  "year": "2026",
+  "__prompts__": {
+    "adapter_name": "Human-readable adapter name",
+    "adapter_slug": "Repository/directory name (kebab-case)",
+    "python_package": "Python package name (snake_case)",
+    "vendor": "Vendor identifier reported in AdapterHello.vendor",
+    "robot_class": "RobotClass this adapter drives"
+  }
+}

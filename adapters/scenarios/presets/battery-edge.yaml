@@ -1,0 +1,47 @@
+# Copyright 2026 The Swarmada Authors. Apache-2.0.
+#
+# battery-edge — one robot starts low and drains fast to 0. Shows the
+# scheduler's existing highest-battery-wins tie-break (DefaultScheduler.
+# SelectRobot, internal/scheduler/scheduler.go): among Idle, capability-
+# matching candidates it sorts by battery descending and picks the
+# healthiest, so this robot loses every NEW-task selection to any healthy
+# Idle robot. Drives TelemetryPayload.battery.
+#
+# NOTE: FleetAction has no minBatteryPct field and there is no logic anywhere
+# that pulls an ALREADY-assigned task off a robot because its battery drops
+# mid-task — this scenario demonstrates the low-battery robot never getting
+# picked in the first place, not a live hand-off of in-progress work.
+name: battery-edge
+description: >
+  One robot starts at low battery and drains fast to 0; the scheduler's
+  highest-battery-wins tie-break means it is never selected for a new task
+  while a healthier Idle robot is available.
+
+fleet:
+  size: 1
+  robot_id_prefix: robot-sim
+
+manifest:
+  capabilities:
+    - navigation.2d
+  hardware:
+    - name: lidar_top
+      type: Lidar
+      model: sim-lidar-v1
+  installed_models: []
+
+battery:
+  start_percent: 22      # already near the edge
+  drain_per_second: 1.0  # fast: past a 20% minBatteryPct within a couple of seconds
+  floor_percent: 0
+
+position:
+  pattern: static
+
+fault_timeline: []
+
+comms:
+  gaps: []
+
+estop:
+  trigger: none

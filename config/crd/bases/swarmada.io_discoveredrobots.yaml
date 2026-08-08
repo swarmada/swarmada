@@ -1,0 +1,263 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: discoveredrobots.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: DiscoveredRobot
+    listKind: DiscoveredRobotList
+    plural: discoveredrobots
+    shortNames:
+    - dr
+    singular: discoveredrobot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.manufacturer
+      name: Manufacturer
+      type: string
+    - jsonPath: .status.model
+      name: Model
+      type: string
+    - jsonPath: .status.firmwareVersion
+      name: Firmware
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.connectedAt
+      name: Connected
+      type: date
+    - jsonPath: .status.ttlExpiresAt
+      name: TTL
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: "DiscoveredRobot is the Schema for the discoveredrobots API.\n\nA
+          DiscoveredRobot is created automatically when a Fleet Adapter calls the\nDiscover
+          RPC for a robot with no existing Robot CRD in the namespace.\nOperators
+          review DiscoveredRobots and admit them with:\n\n\tswarmctl admit robot <name>
+          --zone <leaf-zone>\n\nDiscoveredRobot.spec is always empty — this is a read-only
+          resource.\nOperators CANNOT edit it; admission is exclusively via swarmctl
+          admit."
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              DiscoveredRobotSpec is intentionally empty. DiscoveredRobot is a read-only,
+              status-only resource: the control plane creates it on Discover, and operators
+              admit it via `swarmctl admit`, never by editing spec.
+            type: object
+          status:
+            description: |-
+              DiscoveredRobotStatus defines the observed state of a DiscoveredRobot.
+              DiscoveredRobot.spec is always empty — this resource is fully read-only.
+            properties:
+              adapterAddress:
+                description: AdapterAddress is the gRPC address of the Fleet Adapter.
+                type: string
+              adapterVersion:
+                description: AdapterVersion is the Fleet Adapter version string.
+                type: string
+              connectedAt:
+                description: ConnectedAt is the time the Fleet Adapter called Discover.
+                format: date-time
+                type: string
+              firmwareVersion:
+                description: FirmwareVersion as reported by the Fleet Adapter.
+                type: string
+              lastAnnouncedAt:
+                description: |-
+                  LastAnnouncedAt is the most recent time the Fleet Adapter re-announced this
+                  robot (the discovery-TTL liveness refresh); TTLExpiresAt is derived from it.
+                format: date-time
+                type: string
+              macAddress:
+                description: |-
+                  MacAddress is the robot's hardware MAC address, when reported at discovery
+                  (the projection of DiscoverRobot.mac). Empty when the robot exposes none.
+                type: string
+              manufacturer:
+                description: Manufacturer as reported by the Fleet Adapter.
+                type: string
+              model:
+                description: Model as reported by the Fleet Adapter.
+                type: string
+              phase:
+                description: Phase is the current phase of the discovered robot.
+                enum:
+                - Discovered
+                - Stale
+                type: string
+              reportedCapabilities:
+                description: ReportedCapabilities is the initial capability set reported
+                  at discovery.
+                items:
+                  type: string
+                type: array
+              reportedHardware:
+                description: ReportedHardware is the hardware inventory reported at
+                  discovery time.
+                items:
+                  description: |-
+                    DiscoveredHardwareComponent is a hardware component reported at discovery time.
+
+                    The attribute set mirrors Robot.spec.hardware[] so a DiscoveredRobot can round-trip
+                    its reported inventory into a Robot at admission without loss. NOTE (ADR-0022): the
+                    Discover handler populates the identity/health fields — Name, Type, Status, Model, and
+                    CustomType (the preserved subtype of an unrecognised Type) — and the physical-measurement
+                    attributes below, which the fleet_adapter.v1 HardwareComponent carries at tags 6-13.
+
+                    Each measurement is a POINTER because the wire field is proto3 `optional`: an attribute the
+                    adapter does not report stays nil, and nil is not 0. A defaulted 0 would read as a measured
+                    0 kg payload ceiling or 0 m sensing range, and a defaulted false as "not depth-capable" —
+                    values a scheduler would act on.
+                  properties:
+                    customType:
+                      description: CustomType is the operator-defined subtype when
+                        Type is Custom.
+                      type: string
+                    depthCapable:
+                      description: DepthCapable indicates a depth-capable camera.
+                      type: boolean
+                    frameRateFps:
+                      description: FrameRateFps is the sensor/camera frame rate in
+                        frames per second.
+                      type: number
+                    horizontalFovDeg:
+                      description: HorizontalFovDeg is the horizontal field of view
+                        in degrees.
+                      type: number
+                    maxPayloadKg:
+                      type: number
+                    model:
+                      description: Model is the manufacturer model string (informational).
+                      type: string
+                    name:
+                      type: string
+                    platformLengthMm:
+                      description: PlatformLengthMm is the load-platform length in
+                        millimetres.
+                      type: number
+                    platformWidthMm:
+                      description: PlatformWidthMm is the load-platform width in millimetres.
+                      type: number
+                    rangeM:
+                      description: RangeM is the sensing range in metres (lidar/range
+                        sensors).
+                      type: number
+                    resolutionMp:
+                      type: number
+                    status:
+                      description: |-
+                        HardwareStatus describes the health of a single hardware component. Mirrors the
+                        fleet_adapter.v1 HardwareStatus wire enum (HEALTHY;DEGRADED;FAILED;DISABLED).
+                      enum:
+                      - Healthy
+                      - Degraded
+                      - Failed
+                      - Disabled
+                      type: string
+                    type:
+                      description: |-
+                        HardwareComponentType classifies a physical component in a hardware inventory.
+                        Custom covers vendor-specific components without a first-class type; such
+                        entries MUST also set customType.
+                      enum:
+                      - Lidar
+                      - Camera
+                      - Gripper
+                      - LoadPlatform
+                      - Arm
+                      - Thermal
+                      - Microphone
+                      - Display
+                      - Custom
+                      type: string
+                  required:
+                  - name
+                  - status
+                  - type
+                  type: object
+                type: array
+              reportedModels:
+                description: ReportedModels is the installed model list reported at
+                  discovery time.
+                items:
+                  description: DiscoveredModel is an AI model reported at discovery
+                    time.
+                  properties:
+                    grantsCapabilities:
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      type: string
+                    status:
+                      description: |-
+                        ModelStatus describes the health of an installed AI model at discovery time.
+                        Mirrors the fleet_adapter.v1 ModelStatus enum.
+                      enum:
+                      - Active
+                      - Updating
+                      - Failed
+                      - Inactive
+                      type: string
+                    version:
+                      type: string
+                  required:
+                  - name
+                  - status
+                  - version
+                  type: object
+                type: array
+              robotId:
+                description: |-
+                  RobotID is the stable robot identifier the Fleet Adapter announced
+                  (DiscoverRobot.robot_id); the identity key for admission, never empty.
+                minLength: 1
+                type: string
+              suggestedRobotClass:
+                description: RobotClass suggested by the Fleet Adapter (may be empty).
+                type: string
+              ttlExpiresAt:
+                description: |-
+                  TTLExpiresAt is the time at which this resource will be auto-deleted
+                  if the robot has not been admitted or rejected.
+                format: date-time
+                type: string
+            required:
+            - adapterAddress
+            - adapterVersion
+            - connectedAt
+            - manufacturer
+            - model
+            - phase
+            - robotId
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

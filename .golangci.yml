@@ -1,0 +1,140 @@
+# golangci-lint v2 configuration
+version: "2"
+
+run:
+  timeout: 5m
+
+# ── Linters ────────────────────────────────────────────────────────────────────
+linters:
+  # v2 spells this `default: none`; the v1 `disable-all: true` is REJECTED by the v2 schema,
+  # which silently left the default linter set enabled on top of the list below.
+  default: none
+  enable:
+    # Correctness
+    - errcheck        # unhandled errors
+    - govet           # go vet (shadow, composites, …)
+    - staticcheck     # SA/ST/S/U rules — absorbs gosimple + unused in v2
+    - ineffassign     # assignments whose result is never read
+    - bodyclose       # http response body not closed
+    - noctx           # http.NewRequest without context
+    - rowserrcheck    # sql.Rows.Err() not checked
+    - sqlclosecheck   # sql.Rows/Stmt not closed
+    # Style
+    - misspell        # common English misspellings
+    - revive          # drop-in replacement for golint
+    - whitespace      # unnecessary blank lines
+    # Security
+    - gosec           # common security issues (G rules)
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+            - sayRepetitiveInsteadOfStutters
+
+    gosec:
+      excludes:
+        - G114   # use of net/http serve without timeout (false positive in main)
+        # G101 flags `const registryCredentialsSecret = "swarmada-registry-credentials"` — the NAME
+        # of the Secret the fetcher reads credentials from, not a credential. There is no secret
+        # material anywhere in the repository; the identifier merely contains "credentials".
+        - G101
+
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000"  # package comment — not required for internal packages
+        - "-ST1003"  # naming — kubebuilder generates non-conforming names
+        # QF1002/QF1003 push `switch { case cond: ... }` toward a tagged switch. This codebase uses
+        # the condition form deliberately as a readable if/else chain, and the suggested rewrites
+        # read WORSE at the call sites involved (`switch p { case nil: ... }` hides that it is a nil
+        # check). These are quickfix STYLE suggestions, not correctness findings — declined, like
+        # the ST rules above, rather than churned through working code.
+        - "-QF1002"
+        - "-QF1003"
+
+  # v2 moved exclusions from `issues:` to `linters:`. Under `issues:` they were schema-invalid and
+  # therefore IGNORED — generated stubs and test files were being linted as first-class source.
+  exclusions:
+    paths:
+      - vendor
+      - proto   # generated gRPC stubs
+      - pkg     # module cache (present if GOPATH was ever set to the project root)
+
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+
+      # SA5011 in tests: the idiom is `x := helper(t); if x == nil { t.Fatal(...) }; x.Field`.
+      # staticcheck does not prove t.Fatal terminates, so it reports a nil dereference that cannot
+      # happen. Scoped to tests and to that one check — SA5011 in non-test code stays enabled,
+      # because there the same warning would be a real defect.
+      - path: "_test\\.go"
+        text: "SA5011"
+        linters:
+          - staticcheck
+
+      # command.CommandSender is a type ALIAS to controlstream.CommandSender. revive sees the
+      # package-qualified stutter, but the name deliberately mirrors the aliased type so the two
+      # grep as one symbol; renaming would leave `command.Sender = controlstream.CommandSender`,
+      # an asymmetry worse than the repetition. Declined, not suppressed wholesale — the exported
+      # rule stays on everywhere else.
+      - path: "internal/command/dispatcher\\.go"
+        text: "will be used as command.CommandSender"
+        linters:
+          - revive
+
+      # G115 int -> int32 on len()/counts. Every remaining site converts a slice length or a
+      # tallied count (`int32(len(q.CurrentHolders))`, `int32(len(pending.Items))`) for comparison
+      # against an int32 CRD field. Overflow needs >2^31 objects in one Kubernetes list. Scoped to
+      # this ONE conversion shape by text — the int64->uint64 fencing-token conversions that
+      # motivated internal/command/fencing.go stay flagged.
+      - text: "G115: integer overflow conversion int -> int32"
+        linters:
+          - gosec
+
+      # G304 on operator-supplied paths: a --config-file, a TLS cert/key path, an audit log path.
+      # The variable IS the operator's choice — the process reads what its own flags name. Scoped to
+      # the entry points and the audit sink; G304 elsewhere (a path built from untrusted input)
+      # stays flagged.
+      - path: "(cmd/edge|cmd/manager|cmd/swarmctl|internal/audit)/"
+        text: "G304"
+        linters:
+          - gosec
+
+      # G118 in the dispatcher: both goroutines take `_ context.Context` DELIBERATELY and say so in
+      # their doc comments. Binding them to the caller's context would let one robot's closing
+      # stream cancel a best-effort push to a DIFFERENT robot's adapter — the bug the detachment
+      # exists to prevent. Scoped to that file.
+      - path: "internal/command/dispatcher\\.go"
+        text: "G118"
+        linters:
+          - gosec
+
+      - path: "zz_generated\\.deepcopy\\.go"
+        linters:
+          - govet
+          - staticcheck
+          - revive
+          - errcheck
+
+# ── Formatters ────────────────────────────────────────────────────────────────
+# In v2, gofmt/goimports moved from linters to their own top-level section.
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/swarmada/swarmada
+
+# ── Issues ────────────────────────────────────────────────────────────────────
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0

@@ -1,0 +1,326 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: fleetadapters.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: FleetAdapter
+    listKind: FleetAdapterList
+    plural: fleetadapters
+    shortNames:
+    - fa
+    singular: fleetadapter
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.vendor
+      name: Vendor
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.conformance
+      name: Conformance
+      type: string
+    - jsonPath: .status.connectedRobots
+      name: Robots
+      type: integer
+    - jsonPath: .spec.endpoint
+      name: Endpoint
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: FleetAdapter is the Schema for the fleetadapters API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FleetAdapterSpec defines the desired adapter connection.
+            properties:
+              conformanceReport:
+                description: |-
+                  ConformanceReport references the signed result proving this adapter passes
+                  the §5.3.7 conformance suite. The control plane will not move the adapter to
+                  Connected without a verified, passing report.
+                properties:
+                  configMapRef:
+                    description: ConfigMapRef names a ConfigMap in this namespace
+                      holding the signed report.
+                    type: string
+                  digest:
+                    description: Digest is the sha256 digest of the signed report,
+                      for integrity checking.
+                    type: string
+                  suiteVersion:
+                    description: SuiteVersion is the version of the conformance suite
+                      that was run.
+                    type: string
+                required:
+                - suiteVersion
+                type: object
+              endpoint:
+                description: |-
+                  Endpoint is the gRPC address (host:port) the control plane dials to reach
+                  this adapter. The adapter implements fleet_adapter.v1.FleetAdapterService.
+                type: string
+              heartbeatIntervalSeconds:
+                default: 10
+                description: |-
+                  HeartbeatIntervalSeconds is how often the control plane probes adapter
+                  liveness. Missing this many consecutive probes moves the adapter to
+                  Disconnected.
+                format: int32
+                minimum: 1
+                type: integer
+              protocolVersion:
+                default: fleet_adapter.v1
+                description: |-
+                  ProtocolVersion is the Fleet Adapter protocol version this adapter
+                  implements. The control plane refuses to drive robots through an adapter
+                  whose version it does not support.
+                type: string
+              servesRobotClasses:
+                description: |-
+                  ServesRobotClasses lists the RobotClass names this adapter can drive. A
+                  Robot referencing one of these classes is admitted only if this adapter is
+                  Connected and conformant. Empty means the adapter serves any class —
+                  discouraged outside development.
+                items:
+                  type: string
+                type: array
+              tlsSecretRef:
+                description: |-
+                  TLSSecretRef names a Secret in this namespace holding the mTLS client
+                  material the control plane uses to authenticate to the adapter (§5.5.2).
+                type: string
+              vendor:
+                description: Vendor is the robot manufacturer or adapter provider
+                  (e.g. "acme-robotics").
+                type: string
+            required:
+            - endpoint
+            - vendor
+            type: object
+          status:
+            description: |-
+              FleetAdapterStatus describes the observed state of a FleetAdapter: its live connectivity and
+              health phase, the versions negotiated at the handshake, the conformance result the control plane
+              gates dispatch on, and the robots it currently drives. Control-plane-owned — an adapter never
+              writes it.
+            properties:
+              conditions:
+                description: Conditions is the standard conditions list.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              conformance:
+                description: |-
+                  Conformance is the result of the last conformance verification. Robots are
+                  only admitted against an adapter whose Conformance is Passed.
+                enum:
+                - Unknown
+                - Passed
+                - Failed
+                type: string
+              conformanceContractVersion:
+                description: |-
+                  ConformanceContractVersion is the fleet-adapter CONTRACT version (semver, e.g. "1.0.0") that
+                  the verified conformance report was earned against — the `contract_version` the harness
+                  stamped into the report whose digest this controller checked (ADR-0032, "Version-bound
+                  conformance"). It binds the result to a version instead of treating a Passed earned against
+                  one revision of the contract as valid against any.
+
+                  It is only set from a report whose digest verified: an unverifiable report clears it, so a
+                  stale version never sits beside a Failed result. Empty means the attestation carries no
+                  contract version (a report from a pre-versioning harness) — recorded as unknown, never
+                  inferred, and never treated as an implicit pass.
+
+                  Conformance remains SELF-CERTIFIED (ADR-0007): the harness produces this value, the registry
+                  pull request attests it, and the control plane only consumes it. Nothing here issues a result.
+                type: string
+              connectedRobots:
+                description: ConnectedRobots is the number of Robots currently driven
+                  through this adapter.
+                format: int32
+                type: integer
+              lastHeartbeat:
+                description: LastHeartbeat is when the control plane last confirmed
+                  adapter liveness.
+                format: date-time
+                type: string
+              message:
+                description: Message is a human-readable summary, especially on Degraded
+                  or Rejected.
+                type: string
+              negotiatedContractVersion:
+                description: |-
+                  NegotiatedContractVersion is the fleet-adapter CONTRACT version agreed at the last handshake
+                  (ADR-0032) — the semver over the proto surface, the SupportedAction schema and the conformance
+                  suite. Distinct from NegotiatedProtocolVersion, which is a package identity ("fleet_adapter.v1")
+                  and so cannot express compatibility.
+
+                  Set only when the reported version is inside the range this control plane supports; an adapter
+                  that reports an out-of-range, unparseable, or absent version leaves this EMPTY and lands in
+                  phase Rejected, which bars its robots from admission. Empty therefore means "no compatible
+                  contract was agreed", never "compatible but unrecorded".
+                type: string
+              negotiatedProtocolVersion:
+                description: |-
+                  NegotiatedProtocolVersion is the protocol version actually agreed with the
+                  adapter at connect time; it may differ from spec.protocolVersion if the
+                  adapter reports an older version.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is the current connection/health state.
+                enum:
+                - Pending
+                - Connected
+                - Degraded
+                - Disconnected
+                - Rejected
+                type: string
+              supportedActions:
+                description: |-
+                  SupportedActions is the adapter's advertised action catalog, projected from
+                  the CapabilitiesSnapshot supported_actions (RFC-0001 §9.2). Read-only; written
+                  on change (RA-1). Admission uses it to pre-filter unserviceable FleetAction
+                  types before scheduling.
+                items:
+                  description: |-
+                    SupportedAction is one entry in an adapter's discoverable action catalog
+                    (RFC-0001 §9.2): an action type the adapter can serve, the capabilities a robot
+                    needs, and coarse parameter descriptors. Numeric min/max travel on the wire but
+                    are not projected to status in v0.1 (the projection is deliberately coarse).
+                  properties:
+                    actionType:
+                      description: ActionType matches FleetAction.spec.type.
+                      type: string
+                    description:
+                      type: string
+                    params:
+                      description: Params are coarse payload parameter descriptors.
+                      items:
+                        description: ActionParam is a coarse parameter descriptor
+                          for a SupportedAction.
+                        properties:
+                          allowed:
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          kind:
+                            description: Kind is one of number|string|bool|enum.
+                            type: string
+                          name:
+                            type: string
+                          required:
+                            type: boolean
+                          unit:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    requiredCapabilities:
+                      description: RequiredCapabilities a robot must have Active to
+                        be eligible.
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  required:
+                  - actionType
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

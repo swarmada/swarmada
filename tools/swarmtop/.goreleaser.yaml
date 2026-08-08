@@ -1,0 +1,62 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Cross-platform release builds for swarmtop. Runs via `goreleaser release
+# --clean` on a v* tag push (see .github/workflows/release.yml). Publishes to
+# a Homebrew tap and a Scoop bucket so most users never need Go installed.
+
+version: 2
+
+builds:
+  - id: swarmtop
+    main: ./cmd/swarmtop
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64 # revisit once Windows/ARM demand exists; not a priority
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - repository:
+      owner: swarmada
+      name: homebrew-tap
+    homepage: "https://swarmada.io"
+    description: "A read-only terminal fleet inspector for Swarmada."
+    license: "Apache-2.0"
+
+scoops:
+  - repository:
+      owner: swarmada
+      name: scoop-bucket
+    homepage: "https://swarmada.io"
+    description: "A read-only terminal fleet inspector for Swarmada."
+    license: "Apache-2.0"
+
+release:
+  github:
+    owner: swarmada
+    name: swarmtop

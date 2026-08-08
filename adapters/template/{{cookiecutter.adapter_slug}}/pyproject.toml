@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{{cookiecutter.adapter_slug}}"
+version = "0.1.0"
+description = "{{cookiecutter.adapter_name}} — a Swarmada Fleet Adapter for {{cookiecutter.robot_class}}"
+authors = [{ name = "{{cookiecutter.author}}" }]
+license = { text = "Apache-2.0" }
+# Matches the SDK and control plane (one floor across the repository). A scaffolded adapter's own
+# dependencies would run on 3.10; this is consistency, not a technical requirement.
+requires-python = ">=3.12"
+dependencies = [
+  # The audited safety primitives (C3/C4/C5) — never re-implement them.
+  "swarmada-sdk",
+  "grpcio>=1.60",
+  "protobuf>=4.25",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.1"]
+
+[project.scripts]
+{{cookiecutter.adapter_slug}} = "{{cookiecutter.python_package}}.adapter:main"
+
+[tool.setuptools.packages.find]
+include = ["{{cookiecutter.python_package}}*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

@@ -1,0 +1,731 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: fleettasks.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: FleetTask
+    listKind: FleetTaskList
+    plural: fleettasks
+    shortNames:
+    - ft
+    singular: fleettask
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.actionSummary
+      name: Actions
+      type: string
+    - jsonPath: .spec.desiredState
+      name: Desired
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: FleetTask is the Schema for the fleettasks API — the composite
+          objective composing FleetActions.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FleetTaskSpec defines the desired composite objective.
+            properties:
+              actions:
+                description: |-
+                  Actions is the member set. APPEND-ONLY after creation: existing entries (spec and recorded
+                  status) are immutable; new entries may be appended before the task is terminal via the
+                  scoped `append` RBAC verb (enforced by the validating webhook). Keyed by name.
+                items:
+                  description: FleetTaskAction is one member action of a composite
+                    FleetTask.
+                  properties:
+                    action:
+                      description: |-
+                        Action is a full FleetActionSpec, embedded verbatim and copied unchanged onto the child
+                        FleetAction the controller generates for this member.
+                      properties:
+                        acceptDegradedCapabilities:
+                          description: |-
+                            AcceptDegradedCapabilities, when true, lets the Scheduler satisfy this action's
+                            requiredCapabilities with entries in Degraded status, not only Active. When
+                            nil (unset), the namespace default
+                            SwarmadaConfig.spec.scheduling.defaultAcceptDegradedCapabilities applies, and
+                            a per-action value overrides that default — so this is a pointer with no static
+                            CRD default (a plain defaulted bool could not distinguish unset from false).
+                            This relaxes only the capability-status requirement; degraded parametric
+                            constraints additionally require a capability-level degradedPolicy.
+                          type: boolean
+                        constraints:
+                          additionalProperties:
+                            type: number
+                          description: |-
+                            Constraints are parametric filter predicates (§6.10.3): each entry maps a
+                            capability parameter name to the MINIMUM value a candidate robot must resolve.
+                            A robot matches only if it has an Active capability whose
+                            status.capabilities[].resolvedParameters[<name>] is >= the constraint (e.g.
+                            constraints.maxPayloadKg: 30 requires an Active transport.payload resolving
+                            maxPayloadKg >= 30). A parameter no Active capability resolves is treated as
+                            unsatisfied (fail-closed), so the robot is excluded.
+                          type: object
+                        deadline:
+                          description: |-
+                            Deadline is the latest time by which this action must start.
+                            Actions that cannot start before their deadline are moved to Failed.
+                          format: date-time
+                          type: string
+                        desiredState:
+                          allOf:
+                          - enum:
+                            - Running
+                            - Paused
+                            - Returning
+                            - Cancelled
+                          - enum:
+                            - Running
+                            - Paused
+                            - Returning
+                            - Cancelled
+                          default: Running
+                          description: |-
+                            DesiredState is the declarative control intent (Running/Paused/Returning/Cancelled),
+                            reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
+                            standalone action; for an action owned by a FleetTask the composite is authoritative and
+                            reconciles it to the action's desiredState.
+                          type: string
+                        estimatedDurationSeconds:
+                          description: |-
+                            EstimatedDurationSeconds is an optional hint used by the Traffic Deconfliction
+                            Engine's PriorityWithDuration policy (shortest-job-first within a band, §5.5.5).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        minBatteryPct:
+                          description: |-
+                            MinBatteryPct requires a candidate robot's status.batteryPercent to be at or
+                            above this value (scheduler hard filter). Unset imposes no battery floor.
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        onFailure:
+                          allOf:
+                          - enum:
+                            - Requeue
+                            - Alert
+                            - Abandon
+                          - enum:
+                            - Requeue
+                            - Alert
+                            - Abandon
+                          default: Requeue
+                          description: |-
+                            OnFailure selects what happens when the action reaches the Failed phase.
+                            Requeue resets the action to Pending and applies RetryPolicy; Alert leaves it
+                            Failed and emits a FleetActionFailed event for operator review; Abandon leaves
+                            it Failed silently. An exhausted Requeue falls through to Alert behaviour.
+                          type: string
+                        payload:
+                          description: Payload carries action-type-specific parameters
+                            as free-form JSON.
+                          properties:
+                            raw:
+                              description: Raw is the raw JSON bytes of the payload.
+                              format: byte
+                              type: string
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        preferredManufacturer:
+                          description: |-
+                            PreferredManufacturer is a soft scheduling preference: among otherwise-eligible
+                            robots, those whose manufacturer matches are ranked first. Not a hard filter.
+                          type: string
+                        preferredRobot:
+                          description: |-
+                            PreferredRobot is a soft scheduling preference naming ONE robot: among
+                            otherwise-eligible robots, that robot is ranked first. Not a hard filter, and
+                            deliberately not RobotSelector.
+
+                            The distinction is the whole point. RobotSelector PINS: the named robot or
+                            nothing. PreferredRobot expresses "this one if it can, otherwise whoever can" —
+                            which is what a person means when they start a task on their own device. Because
+                            it ranks rather than filters, every eligibility filter still applies to the
+                            preferred robot: it wins only if it is genuinely able to do the work, and the
+                            fleet silently takes over when it is busy, out of zone, or lacks the capability.
+
+                            Honoured only when the namespace sets
+                            SwarmadaConfig.spec.scheduling.honorPreferredRobot (default true). Naming a robot
+                            that does not exist, or one that is not eligible, is not an error — the hint
+                            simply has no effect.
+                          type: string
+                        priority:
+                          default: Normal
+                          description: |-
+                            Priority is the named scheduling band for this action (Critical/High/Normal/Low).
+                            The scheduler and Traffic Deconfliction Engine compare bands by rank; Critical
+                            may preempt a lower band at a zone or shared resource (§5.5.6).
+                          enum:
+                          - Critical
+                          - High
+                          - Normal
+                          - Low
+                          type: string
+                        requiredCapabilities:
+                          description: |-
+                            RequiredCapabilities is the list of capabilities a robot must have
+                            for this action to be assigned to it (e.g. ["navigation", "arm"]).
+                          items:
+                            type: string
+                          type: array
+                        retryPolicy:
+                          description: |-
+                            RetryPolicy governs requeue-on-failure and is only consulted when OnFailure
+                            is Requeue. When omitted, the controller applies the field defaults
+                            (maxRetries=3, backoffSeconds=30).
+                          properties:
+                            backoffSeconds:
+                              default: 30
+                              description: |-
+                                BackoffSeconds is how long to wait after a failure before requeueing, giving
+                                the robot time to recover or another robot time to become available.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxRetries:
+                              default: 3
+                              description: |-
+                                MaxRetries is the maximum number of times the action may be requeued after a
+                                failure. When status.retryCount reaches it, the action remains Failed and
+                                Alert behaviour is applied.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                          type: object
+                        robotSelector:
+                          description: |-
+                            RobotSelector pins the action to a specific robot by name.
+                            When set, the scheduler skips capability/zone matching.
+                          type: string
+                        timeoutSeconds:
+                          description: |-
+                            TimeoutSeconds is the maximum duration, measured from status.StartTime, in
+                            which this action must complete. It is consulted by
+                            SwarmadaConfig.actionCancellation.onDisconnect=WhenActionExpired (§9.1.11.9): a
+                            Revoking (disconnected) action whose completion window has passed is
+                            auto-cancelled rather than reassigned, since expiry renders completion moot.
+                            A action with no TimeoutSeconds, or one that never started, cannot expire.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        type:
+                          description: Type classifies the action.
+                          enum:
+                          - Navigate
+                          - PickUp
+                          - DropOff
+                          - Patrol
+                          - Charge
+                          - Custom
+                          type: string
+                        zone:
+                          description: |-
+                            Zone constrains which zone the action must be executed in.
+                            If empty, the scheduler may assign any robot regardless of zone.
+                          type: string
+                      required:
+                      - type
+                      type: object
+                    compensation:
+                      description: |-
+                        Compensation is an OPTIONAL FleetActionSpec run to undo this action's effect if it reached
+                        Succeeded but the task later fails under failurePolicy: Compensate.
+                      properties:
+                        acceptDegradedCapabilities:
+                          description: |-
+                            AcceptDegradedCapabilities, when true, lets the Scheduler satisfy this action's
+                            requiredCapabilities with entries in Degraded status, not only Active. When
+                            nil (unset), the namespace default
+                            SwarmadaConfig.spec.scheduling.defaultAcceptDegradedCapabilities applies, and
+                            a per-action value overrides that default — so this is a pointer with no static
+                            CRD default (a plain defaulted bool could not distinguish unset from false).
+                            This relaxes only the capability-status requirement; degraded parametric
+                            constraints additionally require a capability-level degradedPolicy.
+                          type: boolean
+                        constraints:
+                          additionalProperties:
+                            type: number
+                          description: |-
+                            Constraints are parametric filter predicates (§6.10.3): each entry maps a
+                            capability parameter name to the MINIMUM value a candidate robot must resolve.
+                            A robot matches only if it has an Active capability whose
+                            status.capabilities[].resolvedParameters[<name>] is >= the constraint (e.g.
+                            constraints.maxPayloadKg: 30 requires an Active transport.payload resolving
+                            maxPayloadKg >= 30). A parameter no Active capability resolves is treated as
+                            unsatisfied (fail-closed), so the robot is excluded.
+                          type: object
+                        deadline:
+                          description: |-
+                            Deadline is the latest time by which this action must start.
+                            Actions that cannot start before their deadline are moved to Failed.
+                          format: date-time
+                          type: string
+                        desiredState:
+                          allOf:
+                          - enum:
+                            - Running
+                            - Paused
+                            - Returning
+                            - Cancelled
+                          - enum:
+                            - Running
+                            - Paused
+                            - Returning
+                            - Cancelled
+                          default: Running
+                          description: |-
+                            DesiredState is the declarative control intent (Running/Paused/Returning/Cancelled),
+                            reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
+                            standalone action; for an action owned by a FleetTask the composite is authoritative and
+                            reconciles it to the action's desiredState.
+                          type: string
+                        estimatedDurationSeconds:
+                          description: |-
+                            EstimatedDurationSeconds is an optional hint used by the Traffic Deconfliction
+                            Engine's PriorityWithDuration policy (shortest-job-first within a band, §5.5.5).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        minBatteryPct:
+                          description: |-
+                            MinBatteryPct requires a candidate robot's status.batteryPercent to be at or
+                            above this value (scheduler hard filter). Unset imposes no battery floor.
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        onFailure:
+                          allOf:
+                          - enum:
+                            - Requeue
+                            - Alert
+                            - Abandon
+                          - enum:
+                            - Requeue
+                            - Alert
+                            - Abandon
+                          default: Requeue
+                          description: |-
+                            OnFailure selects what happens when the action reaches the Failed phase.
+                            Requeue resets the action to Pending and applies RetryPolicy; Alert leaves it
+                            Failed and emits a FleetActionFailed event for operator review; Abandon leaves
+                            it Failed silently. An exhausted Requeue falls through to Alert behaviour.
+                          type: string
+                        payload:
+                          description: Payload carries action-type-specific parameters
+                            as free-form JSON.
+                          properties:
+                            raw:
+                              description: Raw is the raw JSON bytes of the payload.
+                              format: byte
+                              type: string
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        preferredManufacturer:
+                          description: |-
+                            PreferredManufacturer is a soft scheduling preference: among otherwise-eligible
+                            robots, those whose manufacturer matches are ranked first. Not a hard filter.
+                          type: string
+                        preferredRobot:
+                          description: |-
+                            PreferredRobot is a soft scheduling preference naming ONE robot: among
+                            otherwise-eligible robots, that robot is ranked first. Not a hard filter, and
+                            deliberately not RobotSelector.
+
+                            The distinction is the whole point. RobotSelector PINS: the named robot or
+                            nothing. PreferredRobot expresses "this one if it can, otherwise whoever can" —
+                            which is what a person means when they start a task on their own device. Because
+                            it ranks rather than filters, every eligibility filter still applies to the
+                            preferred robot: it wins only if it is genuinely able to do the work, and the
+                            fleet silently takes over when it is busy, out of zone, or lacks the capability.
+
+                            Honoured only when the namespace sets
+                            SwarmadaConfig.spec.scheduling.honorPreferredRobot (default true). Naming a robot
+                            that does not exist, or one that is not eligible, is not an error — the hint
+                            simply has no effect.
+                          type: string
+                        priority:
+                          default: Normal
+                          description: |-
+                            Priority is the named scheduling band for this action (Critical/High/Normal/Low).
+                            The scheduler and Traffic Deconfliction Engine compare bands by rank; Critical
+                            may preempt a lower band at a zone or shared resource (§5.5.6).
+                          enum:
+                          - Critical
+                          - High
+                          - Normal
+                          - Low
+                          type: string
+                        requiredCapabilities:
+                          description: |-
+                            RequiredCapabilities is the list of capabilities a robot must have
+                            for this action to be assigned to it (e.g. ["navigation", "arm"]).
+                          items:
+                            type: string
+                          type: array
+                        retryPolicy:
+                          description: |-
+                            RetryPolicy governs requeue-on-failure and is only consulted when OnFailure
+                            is Requeue. When omitted, the controller applies the field defaults
+                            (maxRetries=3, backoffSeconds=30).
+                          properties:
+                            backoffSeconds:
+                              default: 30
+                              description: |-
+                                BackoffSeconds is how long to wait after a failure before requeueing, giving
+                                the robot time to recover or another robot time to become available.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxRetries:
+                              default: 3
+                              description: |-
+                                MaxRetries is the maximum number of times the action may be requeued after a
+                                failure. When status.retryCount reaches it, the action remains Failed and
+                                Alert behaviour is applied.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                          type: object
+                        robotSelector:
+                          description: |-
+                            RobotSelector pins the action to a specific robot by name.
+                            When set, the scheduler skips capability/zone matching.
+                          type: string
+                        timeoutSeconds:
+                          description: |-
+                            TimeoutSeconds is the maximum duration, measured from status.StartTime, in
+                            which this action must complete. It is consulted by
+                            SwarmadaConfig.actionCancellation.onDisconnect=WhenActionExpired (§9.1.11.9): a
+                            Revoking (disconnected) action whose completion window has passed is
+                            auto-cancelled rather than reassigned, since expiry renders completion moot.
+                            A action with no TimeoutSeconds, or one that never started, cannot expire.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        type:
+                          description: Type classifies the action.
+                          enum:
+                          - Navigate
+                          - PickUp
+                          - DropOff
+                          - Patrol
+                          - Charge
+                          - Custom
+                          type: string
+                        zone:
+                          description: |-
+                            Zone constrains which zone the action must be executed in.
+                            If empty, the scheduler may assign any robot regardless of zone.
+                          type: string
+                      required:
+                      - type
+                      type: object
+                    dependsOn:
+                      description: |-
+                        DependsOn lists member names that gate this action's start. Empty = a root action, eligible
+                        immediately (subject to the start barrier). Multiple entries are an AND-join: eligible only
+                        when EVERY predecessor has reached this action's StartCondition. Must be acyclic and name
+                        existing members (enforced at admission).
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    name:
+                      description: Name is unique within the task and stable for the
+                        life of the task.
+                      type: string
+                    startCondition:
+                      allOf:
+                      - enum:
+                        - Pending
+                        - Assigned
+                        - InProgress
+                        - Succeeded
+                        - Failed
+                        - Cancelled
+                        - Paused
+                        - Revoking
+                        - Preempted
+                      - enum:
+                        - Assigned
+                        - InProgress
+                        - Succeeded
+                      default: Succeeded
+                      description: |-
+                        StartCondition is the predecessor phase that satisfies each dependency, in the FleetAction
+                        phase vocabulary. Succeeded (default) is a strict pipeline; InProgress is a relay; Assigned
+                        is "as soon as a robot commits."
+                      type: string
+                    trigger:
+                      allOf:
+                      - enum:
+                        - Auto
+                        - OnEvent
+                      - enum:
+                        - Auto
+                        - OnEvent
+                      default: Auto
+                      description: |-
+                        Trigger controls eligibility. Auto (default): eligible when DependsOn is satisfied. OnEvent:
+                        dormant until an authorized append/patch activates it.
+                      type: string
+                  required:
+                  - action
+                  - name
+                  type: object
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              completionPolicy:
+                allOf:
+                - enum:
+                  - All
+                  - Any
+                  - Quorum
+                - enum:
+                  - All
+                  - Any
+                  - Quorum
+                default: All
+                description: CompletionPolicy decides when the task is Succeeded given
+                  member outcomes.
+                type: string
+              desiredState:
+                allOf:
+                - enum:
+                  - Running
+                  - Paused
+                  - Returning
+                  - Cancelled
+                - enum:
+                  - Running
+                  - Paused
+                  - Returning
+                  - Cancelled
+                default: Running
+                description: |-
+                  DesiredState is the declarative, level-triggered intent for the whole task, reconciled onto
+                  its non-terminal child actions. A write persists and re-converges after a disconnect;
+                  re-writing the same value is idempotent (RFC-0001 §9.1.5, ADR-0007).
+                type: string
+              failurePolicy:
+                allOf:
+                - enum:
+                  - FailFast
+                  - ContinueOthers
+                  - Compensate
+                - enum:
+                  - FailFast
+                  - ContinueOthers
+                  - Compensate
+                default: FailFast
+                description: |-
+                  FailurePolicy decides the response to a terminally-failed action completionPolicy cannot
+                  absorb. Immutable after creation (a graph's failure semantics must not shift mid-run).
+                type: string
+              quorum:
+                description: Quorum is REQUIRED when CompletionPolicy is Quorum, ignored
+                  otherwise (CEL-enforced).
+                format: int32
+                minimum: 1
+                type: integer
+            required:
+            - actions
+            type: object
+            x-kubernetes-validations:
+            - message: quorum is required when completionPolicy is Quorum
+              rule: self.completionPolicy != 'Quorum' || has(self.quorum)
+          status:
+            description: FleetTaskStatus describes the observed state of a FleetTask.
+            properties:
+              actionSummary:
+                description: ActionSummary is a short "N/M Succeeded" projection for
+                  print columns and tooling.
+                type: string
+              actions:
+                description: Actions projects each member's current state.
+                items:
+                  description: |-
+                    FleetTaskActionStatus projects one member's current state. The composite controller reads child
+                    FleetAction status and never writes it (RA-1 + the RFC-0001 ownership discipline).
+                  properties:
+                    actionRef:
+                      description: ActionRef is the owned child FleetAction's name;
+                        empty until the action is generated.
+                      type: string
+                    assignedRobot:
+                      description: AssignedRobot is the robot the child FleetAction
+                        is scheduled to, if any.
+                      type: string
+                    attempt:
+                      description: Attempt is incremented each time this member is
+                        (re)generated as a new child FleetAction.
+                      format: int32
+                      type: integer
+                    compensationPhase:
+                      description: 'CompensationPhase tracks a compensation run under
+                        failurePolicy: Compensate.'
+                      enum:
+                      - None
+                      - Pending
+                      - InProgress
+                      - Succeeded
+                      - Failed
+                      type: string
+                    dependenciesMet:
+                      description: DependenciesMet reports whether every DependsOn
+                        predecessor has reached StartCondition.
+                      type: boolean
+                    name:
+                      description: Name matches the spec.actions[].name.
+                      type: string
+                    phase:
+                      description: Phase is the child FleetAction's current phase
+                        (its own lifecycle).
+                      enum:
+                      - Pending
+                      - Assigned
+                      - InProgress
+                      - Succeeded
+                      - Failed
+                      - Cancelled
+                      - Paused
+                      - Revoking
+                      - Preempted
+                      type: string
+                  required:
+                  - dependenciesMet
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              completionTime:
+                description: CompletionTime is when the task reached a terminal phase.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions is the standard conditions list (e.g. Ready,
+                  DependencyGraphValid, BarrierSatisfied).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
+              phase:
+                description: 'Phase is the aggregate lifecycle state (RA-1: transition-driven,
+                  never per telemetry tick).'
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Compensating
+                - Compensated
+                - Cancelled
+                type: string
+              startedAt:
+                description: StartedAt is when the first member entered execution.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

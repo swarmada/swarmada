@@ -1,0 +1,70 @@
+# ── Go ────────────────────────────────────────────────────────────────────────
+bin/
+vendor/
+*.test
+*.out
+coverage.txt
+
+# Module cache — present if GOPATH was ever mistakenly set to the project root.
+# Safe to delete: go mod tidy re-downloads to the real GOPATH (~/.go/pkg/mod).
+pkg/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── JetBrains IDEs (GoLand + PyCharm) ────────────────────────────────────────
+# Exclude local, machine-specific files.
+*.iml
+
+# ── Generated / build artefacts ───────────────────────────────────────────────
+# api/v1/zz_generated.deepcopy.go  ← commit this until controller-gen is installed
+#   then uncomment and run: make generate
+# Generated code IS committed (AGENTS.md: commit regenerated stubs/manifests) so a
+# fresh clone and CI build without a codegen toolchain. Regenerate with
+# `make proto` / `make manifests` and commit the result.
+# config/crd/bases/*.yaml     # (was ignored) — now committed
+# proto/**/*_pb2*.py          # (was ignored) — now committed
+# proto/**/*.pb.go            # (was ignored) — now committed
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
+kubeconfig
+*.kubeconfig
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Reference adapters (own repos per ADR-0005; local dev only) ───────────────
+# Cloned/updated via `make fetch-adapters` (scripts/fetch-reference-adapters.sh).
+# These are independent git repos (ROS 2 / VDA5050 / MAVLink adapters, or a
+# vendor's own adapter checkout) — never a submodule, never committed here.
+adapters/external/
+
+# JetBrains IDE — entire folder, never published
+.idea/
+
+# Untested WIP — not published until tested
+ml/
+
+# Untested WIP tests — not published until tested
+tests/python/test_scenarios.py
+tests/python/test_sim_adapter.py
+tests/python/test_sim_adapter_commands.py
+tests/python/test_sim_adapter_scenario.py
+tests/python/test_sim_adapter_zone_admission.py
+tests/python/test_smoke.py

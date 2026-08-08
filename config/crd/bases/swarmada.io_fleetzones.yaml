@@ -1,0 +1,552 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: fleetzones.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: FleetZone
+    listKind: FleetZoneList
+    plural: fleetzones
+    shortNames:
+    - fz
+    singular: fleetzone
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.robotCount
+      name: Robots
+      type: integer
+    - jsonPath: .spec.maxConcurrentRobots
+      name: Max
+      type: integer
+    - jsonPath: .status.activeActions
+      name: ActiveActions
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: FleetZone is the Schema for the fleetzones API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: FleetZoneSpec defines the layout and properties of a zone.
+            properties:
+              displayName:
+                description: DisplayName is a human-readable label for this zone (e.g.
+                  "Receiving Dock A").
+                type: string
+              edgeNode:
+                description: |-
+                  EdgeNode, when set, declares a Zone Controller edge node for this zone
+                  (§9.2.10, §9.6.2.5). The API Server advertises its address in
+                  RegisterAck.edge_endpoints to every adapter whose robots' zone chain
+                  includes this zone; those adapters MUST open the EdgeStream.
+                properties:
+                  address:
+                    description: Address is the host:port the adapter dials on the
+                      facility LAN.
+                    minLength: 1
+                    type: string
+                  tlsSecretRef:
+                    description: |-
+                      TLSSecretRef names the Secret holding the edge node's server-certificate
+                      material, issued from the namespace CA tree (§9.5.2).
+                    type: string
+                required:
+                - address
+                type: object
+              estopPolicy:
+                description: |-
+                  EstopPolicy controls how an emergency stop on this zone propagates through
+                  the zone tree (§9.6.2.5). Absent = defaults (propagate to children, not to
+                  parent).
+                properties:
+                  propagateToChildren:
+                    default: true
+                    description: |-
+                      PropagateToChildren: an estop on this zone also triggers estop on all
+                      descendant zones. Recommended true.
+                    type: boolean
+                  propagateToParent:
+                    default: false
+                    description: |-
+                      PropagateToParent: an estop on this zone notifies the parent (which does NOT
+                      auto-trigger its own estop — it receives a ChildEstopTriggered event).
+                    type: boolean
+                type: object
+              maxConcurrentRobots:
+                default: 0
+                description: |-
+                  MaxConcurrentRobots caps how many robots may occupy this zone at once. The
+                  TDE enforces it; a robot attempting to enter a full zone is held at the
+                  boundary (§9.4). 0 = no limit (default; typical for root zones that
+                  aggregate children).
+                format: int32
+                minimum: 0
+                type: integer
+              parentZone:
+                description: |-
+                  ParentZone references a parent FleetZone for hierarchical zones.
+                  Leave empty for top-level zones. Admission (a FleetZone webhook, not yet
+                  built) rejects a non-existent parent and any cycle A→B→A (§9.3.1).
+                type: string
+              physicalBounds:
+                description: |-
+                  PhysicalBounds is the spatial extent of this zone. The Zone Controller uses
+                  the polygon for point-in-polygon containment when deriving a robot's current
+                  zone from position telemetry (§9.3.4).
+                properties:
+                  floor:
+                    description: |-
+                      Floor is the integer floor number (0 = ground), interpreted relative to
+                      SwarmadaConfig.spec.coordinateSystem.groundFloor.
+                    format: int32
+                    maximum: 200
+                    minimum: -10
+                    type: integer
+                  maxAltitude:
+                    type: number
+                  minAltitude:
+                    description: |-
+                      MinAltitude and MaxAltitude bound the zone's vertical extent in metres for
+                      geodetic (aerial) namespaces only — the drone altitude floor/ceiling.
+                      Unset for ground (Local) zones.
+                    type: number
+                  polygon:
+                    description: |-
+                      Polygon is the closed zone boundary (the last vertex connects back to the
+                      first). At least 3 vertices are required; a self-intersecting polygon is
+                      rejected by the FleetZone admission webhook (not yet built, §9.3.1).
+                    items:
+                      description: |-
+                        Point is a 2-D coordinate in the site coordinate frame (metres from the site
+                        origin, per SwarmadaConfig.spec.coordinateSystem). 0.0 is a valid coordinate.
+                      properties:
+                        x:
+                          type: number
+                        "y":
+                          type: number
+                      required:
+                      - x
+                      - "y"
+                      type: object
+                    minItems: 3
+                    type: array
+                required:
+                - floor
+                - polygon
+                type: object
+              provisioningPolicy:
+                description: |-
+                  ProvisioningPolicy overrides SwarmadaConfig.spec.provisioning for robots in
+                  this zone. Absent = inherit the namespace default (§9.1.5.1).
+                properties:
+                  autoAdmitRobotClass:
+                    description: AutoAdmitRobotClass overrides the namespace auto-admit
+                      class for this zone.
+                    type: string
+                  autoAdmitZone:
+                    description: AutoAdmitZone overrides the auto-admit target zone.
+                    type: string
+                  mode:
+                    description: Mode overrides the namespace provisioning mode for
+                      this zone.
+                    enum:
+                    - TwoPhase
+                    - DirectRegister
+                    type: string
+                type: object
+              sharedResources:
+                description: |-
+                  SharedResources are physical resources (lifts, corridors, docks) that robots
+                  in this zone AND all descendant zones may reserve before use (§9.4).
+                  Resources declared on a parent are visible to all child zones.
+                items:
+                  description: SharedResource declares a reservable physical resource
+                    (§9.1.5.1).
+                  properties:
+                    capacity:
+                      default: 1
+                      description: |-
+                        Capacity is the maximum number of simultaneous reservation holders (usually
+                        1 for a physical resource).
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    displayName:
+                      description: DisplayName is a human-readable label.
+                      type: string
+                    durationFallback:
+                      default: FIFO
+                      description: DurationFallback applies only under PriorityWithDuration.
+                      enum:
+                      - FIFO
+                      - Deprioritize
+                      type: string
+                    name:
+                      description: Name is unique within the zone tree; robots reserve
+                        by this name.
+                      minLength: 1
+                      type: string
+                    reservationPolicy:
+                      description: ReservationPolicy orders grants for this resource.
+                      enum:
+                      - FIFO
+                      - Priority
+                      - PriorityWithDuration
+                      - Manual
+                      type: string
+                    type:
+                      description: Type classifies the resource.
+                      enum:
+                      - ChargingDock
+                      - Corridor
+                      - Elevator
+                      - Entrance
+                      - Custom
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+              waypoints:
+                description: |-
+                  Waypoints is the list of named locations robots can navigate to within
+                  this zone.  Each waypoint name must be unique within the zone.
+                items:
+                  description: Waypoint is a named pose within a FleetZone.
+                  properties:
+                    altitude:
+                      description: |-
+                        Altitude is the waypoint's vertical position in metres (geodetic/aerial
+                        namespaces only); frame-exclusive with the zone Floor. Unset for Local.
+                      type: number
+                    name:
+                      description: Name is the logical name used in FleetAction destinations.
+                      minLength: 1
+                      type: string
+                    x:
+                      type: number
+                    "y":
+                      type: number
+                    yaw:
+                      description: Yaw is the preferred heading in radians (0 = east,
+                        π/2 = north).
+                      type: number
+                  required:
+                  - name
+                  - x
+                  - "y"
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+            type: object
+          status:
+            description: FleetZoneStatus describes the observed state of a FleetZone.
+            properties:
+              activeActions:
+                description: ActiveActions is the number of FleetActions currently
+                  running in this zone.
+                format: int32
+                type: integer
+              childZones:
+                description: |-
+                  ChildZones is the list of direct child zone names, written by the Zone
+                  Controller (§9.3.4).
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              conditions:
+                description: |-
+                  Conditions is the standard conditions list, written by the Zone Controller:
+                  ZoneReady (serviceability) and CapacityAvailable (room for another robot).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentConcurrentRobots:
+                description: |-
+                  CurrentConcurrentRobots is the number of Occupied reservations (robots
+                  physically confirmed in this zone). Written by the TDE (§9.4). MAY briefly
+                  exceed spec.maxConcurrentRobots by 1 during Critical preemption (TDE-3).
+                format: int32
+                type: integer
+              edgeFeedUnavailable:
+                description: |-
+                  EdgeFeedUnavailable lists robots assigned to this edge-node zone from which
+                  the edge node has received no EdgeStream PositionFrame within its grace
+                  window — i.e. an adapter serving them never established its EdgeStream, so the
+                  zone-boundary-breach trigger is degraded for those robots. Written by the edge
+                  node; the Zone Controller emits an EdgeFeedUnavailable Warning event while this
+                  is non-empty. Empty when every expected feed is live (§9.2.10).
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              estopStatus:
+                description: |-
+                  EstopStatus is the zone's aggregate emergency-stop status, written by the
+                  zone-estop controller (§9.6.2.5). Empty is treated as Clear.
+                enum:
+                - Clear
+                - Triggered
+                - ChildTriggered
+                type: string
+              isLeaf:
+                description: |-
+                  IsLeaf is true when this zone has no child zones. Computed by the Zone
+                  Controller and recomputed whenever a child FleetZone is created or deleted
+                  (§9.3.4). A zone not yet reconciled reports false (safe default: not treated
+                  as a leaf until confirmed — the Robot admission gate requires a leaf zone).
+                type: boolean
+              lastEstopAt:
+                description: |-
+                  LastEstopAt is the time of the most recent estop trigger in this zone tree.
+                  Empty when EstopStatus is Clear.
+                format: date-time
+                type: string
+              reservations:
+                description: |-
+                  Reservations is the per-action zone-capacity reservation state, written
+                  exclusively by the Traffic Deconfliction Engine (§9.4). Operator edits are
+                  rejected by the FleetZone admission webhook (TDE-4).
+                items:
+                  description: ZoneReservation is one action's zone-capacity reservation
+                    (§9.4.2). TDE-owned.
+                  properties:
+                    actionID:
+                      description: ActionID is the FleetAction owning this reservation.
+                      type: string
+                    enteredAt:
+                      description: EnteredAt is when the robot entered the zone (Reserved→Occupied).
+                      format: date-time
+                      type: string
+                    expiresAt:
+                      description: ExpiresAt is when a Reserved slot expires; null
+                        while Occupied.
+                      format: date-time
+                      type: string
+                    grantedAt:
+                      description: GrantedAt is when the reservation was granted.
+                      format: date-time
+                      type: string
+                    priority:
+                      description: Priority is the owning action's band.
+                      enum:
+                      - Critical
+                      - High
+                      - Normal
+                      - Low
+                      type: string
+                    robotID:
+                      description: RobotID holds or awaits this slot.
+                      type: string
+                    state:
+                      description: State is Reserved or Occupied.
+                      enum:
+                      - Reserved
+                      - Occupied
+                      type: string
+                  required:
+                  - actionID
+                  - grantedAt
+                  - priority
+                  - robotID
+                  - state
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              robotCount:
+                description: |-
+                  RobotCount is the number of robots whose currentZone is this zone or any
+                  descendant zone. Written by the Zone Controller (§9.3.4).
+                format: int32
+                minimum: 0
+                type: integer
+              sharedResourceQueues:
+                description: |-
+                  SharedResourceQueues is the per-resource reservation/queue state, one entry
+                  per spec.sharedResources[]. Written exclusively by the TDE (§9.4).
+                items:
+                  description: |-
+                    SharedResourceQueue is one shared resource's hold/queue state (§9.4.5). One
+                    entry per spec.sharedResources[]. TDE-owned.
+                  properties:
+                    currentHolders:
+                      description: |-
+                        CurrentHolders are the robots currently holding the resource, up to the
+                        resource's capacity (TDE-5). A capacity-1 resource degenerates to one holder.
+                      items:
+                        description: ResourceHolder is the current holder of a shared
+                          resource (§9.4.5).
+                        properties:
+                          actionID:
+                            type: string
+                          estimatedReleaseAt:
+                            description: EstimatedReleaseAt is set when an estimated
+                              duration was provided.
+                            format: date-time
+                            type: string
+                          heldSince:
+                            description: HeldSince is when the hold was granted.
+                            format: date-time
+                            type: string
+                          priority:
+                            description: |-
+                              ActionPriority is the named scheduling band for a FleetAction. Bands are compared
+                              by rank (Critical > High > Normal > Low) by the scheduler and the Traffic
+                              Deconfliction Engine (RFC-0001 §5.5.6); the preemptor bands (Critical and High,
+                              see CanPreempt) may displace a lower Normal/Low band.
+                            enum:
+                            - Critical
+                            - High
+                            - Normal
+                            - Low
+                            type: string
+                          robotID:
+                            type: string
+                        required:
+                        - actionID
+                        - heldSince
+                        - priority
+                        - robotID
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    resourceName:
+                      description: ResourceName matches a spec.sharedResources[].name.
+                      type: string
+                    waitQueue:
+                      description: WaitQueue is the ordered list of pending requests.
+                      items:
+                        description: |-
+                          WaitQueueEntry is a pending shared-resource request, ordered by the resource's
+                          reservationPolicy (§9.4.5).
+                        properties:
+                          actionID:
+                            type: string
+                          estimatedDurationSeconds:
+                            description: EstimatedDurationSeconds drives PriorityWithDuration
+                              (SJF); nil → fallback.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          priority:
+                            description: |-
+                              ActionPriority is the named scheduling band for a FleetAction. Bands are compared
+                              by rank (Critical > High > Normal > Low) by the scheduler and the Traffic
+                              Deconfliction Engine (RFC-0001 §5.5.6); the preemptor bands (Critical and High,
+                              see CanPreempt) may displace a lower Normal/Low band.
+                            enum:
+                            - Critical
+                            - High
+                            - Normal
+                            - Low
+                            type: string
+                          requestedAt:
+                            description: RequestedAt is the arrival time (FIFO tiebreak
+                              within band).
+                            format: date-time
+                            type: string
+                          robotID:
+                            type: string
+                        required:
+                        - actionID
+                        - priority
+                        - requestedAt
+                        - robotID
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  required:
+                  - resourceName
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

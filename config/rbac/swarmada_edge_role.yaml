@@ -1,0 +1,25 @@
+# swarmada:edge — the Zone Controller edge node's service-account role (RFC-0001
+# §9.2.10, §9.6.2.5). Bind via a namespace-scoped RoleBinding to the edge node's
+# ServiceAccount. The edge node runs on facility-LAN hardware, so its cluster
+# access is deliberately minimal: it READS the FleetZones and Robots it guards to
+# keep its cached zone polygons / robot→zone map current (config sync), and WRITES
+# only fleetzones/status.edgeFeedUnavailable to report robots whose adapter never
+# established its EdgeStream. It CANNOT create or delete resources, cannot write
+# any spec, and holds no custom verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:edge
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Config sync: read the zones the node guards and their robot→zone assignments.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones", "robots"]
+    verbs: ["get", "list", "watch"]
+  # Feed reporting: raise/clear status.edgeFeedUnavailable on an edge-node zone so
+  # the Zone Controller can emit the EdgeFeedUnavailable Warning (§9.2.10).
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones/status"]
+    verbs: ["get", "update", "patch"]

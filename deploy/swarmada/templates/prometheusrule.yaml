@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if .Values.metrics.prometheusRule.enabled -}}
+# OPTIONAL — renders ONLY when metrics.prometheusRule.enabled=true, so
+# `helm template`/`helm install` stay clean on clusters WITHOUT the Prometheus
+# Operator CRDs. This ships alert RULES for an EXISTING Prometheus to evaluate; it
+# neither installs Prometheus nor Alertmanager. Ensure your Prometheus's
+# ruleSelector matches metrics.prometheusRule.labels.
+#
+# The `expr` of every rule is the RFC-0001 §9.3.8 "Suggested minimum alert
+# expressions" block, VERBATIM. §9.3.8 defines SEVEN expressions (the two
+# telemetry rules — dropped_frames and tsdb_write_errors — are distinct); all
+# seven are shipped. `for`/`severity` are chart-added, derived from each metric's
+# §9.3.8 alerting guidance.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "swarmada.fullname" . }}-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: swarmada.control-plane
+      rules:
+        # Estop latency SLO breach — safety timing requirements (§9.3.8).
+        - alert: SwarmadaEstopLatencySLOBreach
+          expr: increase(swarmada_estop_latency_violations_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Estop ACK latency exceeded the 500ms SLA (namespace {{`{{ $labels.namespace }}`}})"
+            description: "swarmada_estop_latency_violations_total increased in the last 5m on adapter {{`{{ $labels.adapter }}`}}, robot {{`{{ $labels.robot_name }}`}}. Any non-zero rate is an SLO breach (RFC-0001 §9.3.8 / safety timing requirements)."
+
+        # Silent telemetry drop with sink not explicitly Drop — telemetry pipeline Invariant 1 (§9.3.8).
+        - alert: SwarmadaTelemetryDroppedFrames
+          expr: increase(swarmada_telemetry_dropped_frames_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Telemetry frames dropped (namespace {{`{{ $labels.namespace }}`}})"
+            description: "swarmada_telemetry_dropped_frames_total is increasing with sink.type not set to Drop — indicates TSDB sink failure/misconfiguration (RFC-0001 §9.3.8, telemetry pipeline Invariant 1)."
+
+        # TSDB write errors (underlying cause of drops) — telemetry pipeline (§9.3.8).
+        - alert: SwarmadaTelemetryTSDBWriteErrors
+          expr: increase(swarmada_telemetry_tsdb_write_errors_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TSDB write errors (namespace {{`{{ $labels.namespace }}`}})"
+            description: "swarmada_telemetry_tsdb_write_errors_total is increasing — the configured time-series sink is rejecting writes (RFC-0001 §9.3.8)."
+
+        # Scheduler P99 assignment latency > 60s for Normal-priority tasks — scheduler (§9.3.8).
+        - alert: SwarmadaSchedulerAssignmentLatencyHigh
+          expr: |-
+            histogram_quantile(0.99,
+              rate(swarmada_scheduler_assignment_latency_seconds_bucket{priority="Normal"}[10m])
+            ) > 60
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Scheduler P99 assignment latency > 60s for Normal-priority tasks"
+            description: "P99 of swarmada_scheduler_assignment_latency_seconds for priority=Normal has exceeded 60s over 10m (RFC-0001 §9.3.8, scheduler)."
+
+        # Stuck Revoking task — double-execution risk, assignment lease (§9.3.8).
+        - alert: SwarmadaFleetActionStuckRevoking
+          expr: swarmada_fleetactions_by_phase{phase="Revoking"} > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "FleetAction stuck in Revoking (namespace {{`{{ $labels.namespace }}`}})"
+            description: "A FleetAction has been Revoking longer than the lease horizon (leaseDurationMs + clockSkewMarginMs) — a single-executor / double-execution risk (RFC-0001 §9.3.8, assignment lease)."
+
+        # Estop-path outage: adapter disconnected — emergency stop protocol (§9.3.8).
+        - alert: SwarmadaFleetAdapterDisconnected
+          expr: swarmada_fleet_adapter_connected == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "FleetAdapter disconnected — estop path down (adapter {{`{{ $labels.adapter }}`}})"
+            description: "swarmada_fleet_adapter_connected == 0: no Command — including estop — can reach this adapter's robots (RFC-0001 §9.3.8, emergency stop protocol)."
+
+        # Uncleared estop awaiting explicit operator action — estop state machine (§9.3.8).
+        - alert: SwarmadaRobotEstopUncleared
+          expr: swarmada_robots_in_estop{estop_state="Stopped"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Robot estop uncleared (namespace {{`{{ $labels.namespace }}`}})"
+            description: "A robot has been in estop_state=Stopped beyond the alert window — an uncleared estop requires explicit operator action (RFC-0001 §9.3.8, estop state machine)."
+{{- end }}

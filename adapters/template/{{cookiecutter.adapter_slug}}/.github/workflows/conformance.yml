@@ -1,0 +1,16 @@
+name: conformance
+on: [push, pull_request]
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e '.[dev]' swarmada-sdk grpcio-tools
+      - name: Safety-wiring tests
+        run: pytest tests/ -v
+      # TODO(vendor): fetch the published Swarmada conformance harness and run it
+      # against this adapter (C0-C16). See adapters/conformance/README.md upstream.

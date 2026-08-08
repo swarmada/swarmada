@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if .Values.webhooks.enabled -}}
+{{- $svc := printf "%s-webhook-service" (include "swarmada.fullname" .) -}}
+{{- $certName := printf "%s-serving-cert" (include "swarmada.fullname" .) -}}
+# ─────────────────────────────────────────────────────────────────────────────
+# Admission webhook Service + configurations.
+# Mirrors config/webhook/manifests.yaml (paths, rules, failurePolicy, sideEffects).
+# The webhook server binds :{{ .Values.webhooks.port }} inside the pod; this
+# Service maps 443 → that port.
+#
+# CA bundle:
+#   - cert-manager enabled  → the ca-injector fills clientConfig.caBundle via the
+#     cert-manager.io/inject-ca-from annotation (see templates/certificate.yaml).
+#   - cert-manager disabled → webhooks.caBundle is written into each clientConfig,
+#     and you must create the Secret {{ include "swarmada.webhookCertSecret" . }}.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "swarmada.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook-server
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "swarmada.fullname" . }}-mutating-webhook-configuration
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+  {{- if .Values.webhooks.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ $certName }}
+  {{- end }}
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-swarmada-io-v1-robot
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: {{ .Values.webhooks.failurePolicy }}
+    name: mrobot.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["robots"]
+    sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "swarmada.fullname" . }}-validating-webhook-configuration
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+  {{- if .Values.webhooks.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ $certName }}
+  {{- end }}
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-fleetzone
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: {{ .Values.webhooks.failurePolicy }}
+    name: vfleetzone.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["fleetzones"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-robot
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: {{ .Values.webhooks.failurePolicy }}
+    name: vrobot.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["robots"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-swarmadaconfig
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: {{ .Values.webhooks.failurePolicy }}
+    name: vswarmadaconfig.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["swarmadaconfigs"]
+    sideEffects: None
+{{- end }}

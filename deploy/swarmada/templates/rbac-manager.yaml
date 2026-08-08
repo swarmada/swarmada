@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if .Values.rbac.create -}}
+# ─────────────────────────────────────────────────────────────────────────────
+# Controller-manager ClusterRole + binding.
+#
+# DERIVED FROM config/rbac/role.yaml (controller-gen output) AND
+# config/rbac/fleetaction_supplemental_role.yaml. The two are folded into ONE
+# ClusterRole here: the supplement exists in config/ only because controller-gen
+# silently drops the fleetactions/{,status,finalizers} + robots/finalizers markers
+# on regeneration (see that file's header); a hand-templated chart role has no
+# such quirk, so those rules are simply included directly.
+#
+# Keep in sync with config/rbac — if role.yaml changes, update this block
+# (step 5 adds `make helm-sync` to regenerate it from config/, so drift is not
+# silent).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "swarmada.fullname" . }}-manager-role
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+rules:
+# ── config/rbac/role.yaml ──
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - discoveredrobots
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - discoveredrobots/status
+  - firmwarerollouts/status
+  - fleetadapters/status
+  - fleetzones/status
+  - modelpolicies/status
+  - modelrollouts/status
+  - robotclasses/status
+  - robotprobes/status
+  - robots/status
+  - swarmadaconfigs/status
+  - zonemaintenances/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - swarmada.io
+  resources:
+  - firmwarerollouts
+  - fleetadapters
+  - robotclasses
+  - robotprobes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions
+  - fleetzones
+  - modelpolicies
+  - robots
+  - zonemaintenances
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - modelrollouts
+  - swarmadaconfigs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - zonemaintenances/finalizers
+  verbs:
+  - update
+# ── config/rbac/fleetaction_supplemental_role.yaml (markers controller-gen drops) ──
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions/finalizers
+  - robots/finalizers
+  verbs:
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "swarmada.fullname" . }}-manager-rolebinding
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "swarmada.fullname" . }}-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "swarmada.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

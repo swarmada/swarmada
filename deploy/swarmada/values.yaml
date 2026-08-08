@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+# Default values for the Swarmada control-plane chart.
+# Every value is derived from the existing config/ kustomize and the cmd/manager
+# flags — the chart is a faithful, single-source packaging of that install, not a
+# second divergent copy. If config/ changes, regenerate/adjust here.
+
+# ── Naming ────────────────────────────────────────────────────────────────────
+# Override the generated resource names. By default names derive from the release
+# name and the chart name (see templates/_helpers.tpl).
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Controller-manager image ──────────────────────────────────────────────────
+# Matches the Dockerfile / Makefile IMG (ghcr.io/swarmada/swarmada). tag defaults
+# to .Chart.AppVersion when left empty.
+image:
+  repository: ghcr.io/swarmada/swarmada
+  tag: ""
+  pullPolicy: IfNotPresent
+# Names of imagePullSecrets in the release namespace for a private registry.
+imagePullSecrets: []
+
+# ── Controller-manager Deployment ─────────────────────────────────────────────
+replicaCount: 1
+
+manager:
+  # Leader election lets you run replicaCount > 1 with a single active reconciler.
+  # (--leader-elect / --leader-election-id, cmd/manager).
+  leaderElect: true
+  leaderElectionID: swarmada-leader
+
+  # The manager serves /metrics here (--metrics-bind-address) and health probes
+  # here (--health-probe-bind-address). Ports are referenced by the metrics
+  # Service and the probes below; keep the host empty to bind all interfaces.
+  # 9090 is the normative /metrics port from RFC-0001 §9.3.8 (config/manager's
+  # :8080 is a dev-quickstart artifact; the chart drives the flag explicitly).
+  metricsPort: 9090
+  healthPort: 8081
+
+  # Extra pod annotations. Set these for the RAW prometheus.io/* scrape fallback on
+  # clusters WITHOUT the Prometheus Operator (no ServiceMonitor). Example:
+  #   podAnnotations:
+  #     prometheus.io/scrape: "true"
+  #     prometheus.io/port: "9090"
+  #     prometheus.io/path: "/metrics"
+  podAnnotations: {}
+
+  # Mirrors config/manager/manager.yaml requests/limits.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Pod- and container-level hardening (mirrors config/manager/manager.yaml:
+  # runAsNonRoot, drop ALL caps, no privilege escalation). The distroless image
+  # already runs as nonroot.
+  podSecurityContext:
+    runAsNonRoot: true
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  # Scheduling knobs (empty by default).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Extra args/env appended verbatim to the manager container (escape hatch).
+  extraArgs: []
+  extraEnv: []
+
+serviceAccount:
+  # Create the manager ServiceAccount (swarmada-manager equivalent). Set false to
+  # bind an externally-managed SA via serviceAccount.name.
+  create: true
+  name: ""
+  annotations: {}
+
+# ── ControlStream gRPC server (Fleet Adapter connections) ─────────────────────
+# --fleet-adapter-bind-address; empty disables it. NOTE: the controller-runtime
+# admission webhook server binds 9443 (its fixed default, not flag-configurable),
+# so ControlStream is placed on a DISTINCT port here to avoid a listener collision
+# when webhooks and ControlStream are both enabled. Adapters connect to this
+# Service (RFC-0001 §9.2 mandates mTLS in production — see docs).
+controlStream:
+  enabled: true
+  port: 9440
+  service:
+    type: ClusterIP
+    annotations: {}
+
+# ── ModelPolicy training-completion HMAC webhook ──────────────────────────────
+# --model-webhook-bind-address (§9.1.9.3); empty disables it. Plain HTTP endpoint
+# that verifies the HMAC signature; served on every replica.
+modelWebhook:
+  enabled: true
+  port: 9444
+
+# ── Admission webhooks (mutating + validating) ────────────────────────────────
+# Governs ENABLE_WEBHOOKS and the MutatingWebhookConfiguration/
+# ValidatingWebhookConfiguration. The webhook server binds 9443 (fixed).
+webhooks:
+  enabled: true
+  port: 9443
+  # cert-manager provisions the serving cert + injects the CA bundle. When false,
+  # you MUST supply a TLS Secret named "<fullname>-webhook-server-cert" yourself and
+  # set the caBundle out of band (documented in step 2 / the chart README).
+  certManager:
+    enabled: true
+    # Duration/renewal for the issued Certificate (cert-manager defaults if empty).
+    duration: ""
+    renewBefore: ""
+  # When certManager.enabled=false, supply the CA bundle (base64 PEM) that signed
+  # your webhook serving cert here; it is written into every webhook clientConfig.
+  # You must ALSO create the TLS Secret "<fullname>-webhook-server-cert"
+  # (tls.crt/tls.key) yourself. Ignored when cert-manager is enabled (its
+  # ca-injector fills caBundle via the inject-ca-from annotation).
+  caBundle: ""
+  # failurePolicy for the webhook configurations (Fail = fail-closed admission).
+  failurePolicy: Fail
+
+# ── CRDs ──────────────────────────────────────────────────────────────────────
+# Install the api/v1 CustomResourceDefinitions with the chart. See step 3 for the
+# crds/ vs templates/ decision and the upgrade caveat.
+installCRDs: true
+
+# ── RBAC ──────────────────────────────────────────────────────────────────────
+rbac:
+  # The manager ClusterRole + binding (mirrors config/rbac/role.yaml and the
+  # fleetaction supplemental role).
+  create: true
+  # The five built-in operator/automation ClusterRoles from RFC-0001 §9.5.3
+  # (swarmada:admin / :operator / :fleet-manager / :viewer / :robot). These are
+  # cluster-scoped grants for humans/automation; bind them yourself to subjects.
+  clusterRoles: true
+
+# ── Metrics exposure (scrape TARGET only — never bundles Prometheus) ───────────
+metrics:
+  service:
+    enabled: true
+    # Service port; targets the manager's metricsPort (/metrics), §9.3.8 default 9090.
+    port: 9090
+    annotations: {}
+  # OPTIONAL Prometheus-Operator ServiceMonitor pointing an EXISTING Prometheus at
+  # us. Renders ONLY when enabled (guarded so `helm template` is clean on clusters
+  # without the monitoring.coreos.com CRDs). Default OFF.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    path: /metrics
+    # Extra labels so a Prometheus selector (spec.serviceMonitorSelector) matches.
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
+  # OPTIONAL Prometheus-Operator PrometheusRule carrying the §9.3.8 alert rules.
+  # Renders ONLY when enabled. Default OFF.
+  prometheusRule:
+    enabled: false
+    labels: {}

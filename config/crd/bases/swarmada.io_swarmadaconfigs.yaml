@@ -1,0 +1,686 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: swarmadaconfigs.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: SwarmadaConfig
+    listKind: SwarmadaConfigList
+    plural: swarmadaconfigs
+    shortNames:
+    - sc
+    singular: swarmadaconfig
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SwarmadaConfig is the Schema for the swarmadaconfigs API.
+
+          Exactly one SwarmadaConfig per namespace, with the fixed name "swarmada-config".
+          Auto-created with defaults when a namespace is initialized (first FleetZone created).
+          Provides namespace-level tunables for health tracking, re-scanning,
+          provisioning, scheduling, and maintenance behaviour.
+
+          The name MUST be "swarmada-config" (§9.3.1). Cross-field rules from §9.1.11
+          (AfterTimeout ⇒ disconnectTimeoutSeconds; disconnectedReservationTTLSeconds >
+          disconnectTimeoutSeconds; sink.endpoint required for a real store;
+          requireSignatureVerification ⇒ non-empty trustRoots) are enforced by a
+          SwarmadaConfig admission webhook — deferred, not yet built (§F). The empty
+          default sink.type is deliberately NOT rejected here: auto-creation (§9.1.11.3)
+          produces a defaulted config the operator then completes.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SwarmadaConfigSpec defines the desired state of SwarmadaConfig.
+            properties:
+              actionCancellation:
+                description: ActionCancellation configures disconnect handling (§9.1.11.9).
+                properties:
+                  disconnectTimeoutSeconds:
+                    description: |-
+                      DisconnectTimeoutSeconds is the wall-clock ceiling before a Revoking action is
+                      auto-cancelled. Required when OnDisconnect is AfterTimeout.
+                    format: int32
+                    minimum: 30
+                    type: integer
+                  onDisconnect:
+                    default: Never
+                    description: |-
+                      OnDisconnect selects the policy. Never (default) is safest for
+                      non-idempotent actions.
+                    enum:
+                    - Never
+                    - AfterTimeout
+                    - WhenActionExpired
+                    type: string
+                type: object
+              coordinateSystem:
+                description: CoordinateSystem declares facility-wide spatial conventions
+                  (§9.1.11.11).
+                properties:
+                  angleUnit:
+                    default: Radians
+                    description: AngleUnit is the unit for all yaw values.
+                    enum:
+                    - Radians
+                    - Degrees
+                    type: string
+                  geodetic:
+                    description: |-
+                      Geodetic holds the datum and altitude reference. Required when
+                      referenceFrame is Geodetic; MUST be unset when referenceFrame is Local.
+                    properties:
+                      altitudeReference:
+                        default: AGL
+                        description: AltitudeReference is the vertical reference (AGL
+                          or MSL).
+                        enum:
+                        - AGL
+                        - MSL
+                        type: string
+                      datum:
+                        default: WGS84
+                        description: Datum is the horizontal datum. WGS84 only at
+                          v0.1.
+                        enum:
+                        - WGS84
+                        type: string
+                    type: object
+                  groundFloor:
+                    default: 0
+                    description: |-
+                      GroundFloor is the integer floor value that denotes ground level;
+                      Robot.status.position.floor and FleetZone.spec.floor are interpreted
+                      relative to it. 0 = ground.
+                    format: int32
+                    type: integer
+                  lengthUnit:
+                    default: Meters
+                    description: LengthUnit is the distance unit for all x/y values
+                      (Local frame).
+                    enum:
+                    - Meters
+                    - Millimeters
+                    type: string
+                  origin:
+                    description: Origin describes the physical (0,0) point (Local
+                      frame).
+                    properties:
+                      description:
+                        description: |-
+                          Description is a human-readable description of the site origin.
+                          Informational; aligns operators and tooling.
+                        maxLength: 256
+                        type: string
+                    type: object
+                  referenceFrame:
+                    default: Local
+                    description: |-
+                      ReferenceFrame selects Local (default) or Geodetic conventions for the
+                      namespace. Local uses the lengthUnit/angleUnit/groundFloor/origin fields;
+                      Geodetic uses the geodetic block.
+                    enum:
+                    - Local
+                    - Geodetic
+                    type: string
+                type: object
+              estop:
+                description: Estop configures emergency-stop delivery (§9.1.11.8).
+                properties:
+                  delivery:
+                    description: Delivery governs SafetyStream estop delivery and
+                      retry.
+                    properties:
+                      partialDeliveryBehavior:
+                        default: BlockNewActions
+                        description: PartialDeliveryBehavior selects the response
+                          when delivery is partial.
+                        enum:
+                        - BlockNewActions
+                        - Alert
+                        type: string
+                      perAdapterTimeoutMs:
+                        default: 500
+                        description: |-
+                          PerAdapterTimeoutMs is the max wait for one adapter to ACK before retrying.
+                          ACK means stop INITIATED, not complete.
+                        format: int32
+                        minimum: 100
+                        type: integer
+                      retryPolicy:
+                        description: RetryPolicy bounds redelivery.
+                        properties:
+                          maxAttempts:
+                            default: 0
+                            description: MaxAttempts is the retry ceiling; 0 = retry
+                              indefinitely until ACK or clear.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          retryIntervalMs:
+                            default: 250
+                            description: RetryIntervalMs is the delay between attempts.
+                            format: int32
+                            minimum: 50
+                            type: integer
+                        type: object
+                    type: object
+                  requireExplicitClearAfterEstop:
+                    default: true
+                    description: |-
+                      RequireExplicitClearAfterEstop is documented for traceability (always true):
+                      robots that ACKd an estop MUST NOT resume until an operator explicitly clears
+                      it.
+                    type: boolean
+                type: object
+              health:
+                description: SwarmadaHealthConfig holds health-tracking tunables for
+                  the namespace.
+                properties:
+                  capabilityRescanIntervalSeconds:
+                    default: 300
+                    description: |-
+                      CapabilityRescanIntervalSeconds: full capability snapshot via
+                      ScanCapabilities RPC. 0 disables periodic rescanning.
+                    format: int32
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                  connectivityCriticalThresholdSeconds:
+                    default: 120
+                    description: 'ConnectivityCriticalThresholdSeconds: seconds Offline
+                      before Critical.'
+                    format: int32
+                    maximum: 86400
+                    minimum: 30
+                    type: integer
+                  connectivityOfflineThresholdSeconds:
+                    default: 30
+                    description: 'ConnectivityOfflineThresholdSeconds: seconds without
+                      telemetry before Offline.'
+                    format: int32
+                    maximum: 3600
+                    minimum: 5
+                    type: integer
+                  defaultHardwareProbeIntervalSeconds:
+                    default: 30
+                    description: 'DefaultHardwareProbeIntervalSeconds: default for
+                      RobotProbe resources.'
+                    format: int32
+                    maximum: 3600
+                    minimum: 10
+                    type: integer
+                  defaultProbeFailureThreshold:
+                    default: 3
+                    description: 'DefaultProbeFailureThreshold: consecutive failures
+                      before Degraded.'
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  defaultProbeRecoveryThreshold:
+                    default: 2
+                    description: 'DefaultProbeRecoveryThreshold: consecutive successes
+                      before Healthy.'
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  defaultProbeTimeoutSeconds:
+                    default: 5
+                    description: DefaultProbeTimeoutSeconds is the default probe timeout.
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
+                  disableAllProbes:
+                    default: false
+                    description: |-
+                      DisableAllProbes, when true, suspends all RobotProbe verification in the
+                      namespace: the probe loop issues no Verify RPCs and reports probes as
+                      Unknown/paused. Passive telemetry is unaffected.
+                    type: boolean
+                  telemetryIntervalSeconds:
+                    default: 10
+                    description: 'TelemetryIntervalSeconds: default passive telemetry
+                      rate for robots.'
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
+                type: object
+              maintenance:
+                description: SwarmadaMaintenanceConfig holds zone maintenance defaults.
+                properties:
+                  defaultAutoResumeMinutes:
+                    default: 0
+                    description: 'DefaultAutoResumeMinutes: 0 means no auto-resume
+                      (operator must resume).'
+                    format: int32
+                    maximum: 480
+                    minimum: 0
+                    type: integer
+                  defaultGracefulDrainTimeoutSeconds:
+                    default: 300
+                    description: |-
+                      DefaultGracefulDrainTimeoutSeconds: after this duration in Graceful mode,
+                      robots are force-paused even if actions are not yet complete.
+                    format: int32
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                  requireEstopClearBeforeResume:
+                    default: true
+                    description: |-
+                      RequireEstopClearBeforeResume is the namespace default for the ZoneMaintenance
+                      field of the same name: block resume of a paused robot until any active estop
+                      on it is cleared.
+                      Specified, controller pending: the resume-gate is not yet enforced.
+                    type: boolean
+                type: object
+              provisioning:
+                description: SwarmadaProvisioningConfig holds robot provisioning settings.
+                properties:
+                  autoAdmitRobotClass:
+                    description: |-
+                      AutoAdmitRobotClass: if set, robots whose adapter-suggested RobotClass equals
+                      this value are admitted automatically without operator review. Auto-admit is
+                      enabled only when AutoAdmitZone is also set (ADR-0014).
+                    type: string
+                  autoAdmitZone:
+                    description: |-
+                      AutoAdmitZone is the leaf FleetZone auto-admitted robots are placed in. Auto-
+                      admit requires both this and AutoAdmitRobotClass; a class without a zone is
+                      inert, since a schedulable Robot requires a zone (ADR-0014).
+                    type: string
+                  autoRemoveOfflineGraceSeconds:
+                    default: 300
+                    description: |-
+                      AutoRemoveOfflineGraceSeconds is the dwell after a robot enters Offline before it is
+                      removed, so a brief adapter blip does not evict a robot that reconnects. Applies only
+                      when AutoRemoveOfflineRobots is true (ADR-0030).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  autoRemoveOfflineRobots:
+                    description: |-
+                      AutoRemoveOfflineRobots opts an auto-admitted Robot into automatic removal once its
+                      adapter presence is gone (phase Offline) and any assigned action's lease is provably
+                      dead (§9.6.3.5). Off by default. Only Robots that were auto-admitted (ADR-0014) are
+                      eligible — operator-created robots are never removed, regardless of this setting.
+                      This reclaims ephemeral robots (e.g. a robot) killed without a clean disconnect (ADR-0030).
+                    type: boolean
+                  discoveredRobotTTLMinutes:
+                    default: 60
+                    description: 'DiscoveredRobotTTLMinutes: auto-delete un-admitted
+                      DiscoveredRobots after this time.'
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  mode:
+                    default: TwoPhase
+                    description: Mode controls the discovery-to-admission flow.
+                    enum:
+                    - TwoPhase
+                    - DirectRegister
+                    type: string
+                type: object
+              scheduling:
+                description: SwarmadaSchedulingConfig holds scheduler tunables.
+                properties:
+                  actionRequeueBackoffSeconds:
+                    default: 30
+                    description: 'ActionRequeueBackoffSeconds: wait time between action
+                      requeue attempts.'
+                    format: int32
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                  defaultAcceptDegradedCapabilities:
+                    default: false
+                    description: 'DefaultAcceptDegradedCapabilities: namespace-level
+                      default.'
+                    type: boolean
+                  honorPreferredRobot:
+                    default: true
+                    description: |-
+                      HonorPreferredRobot, when true, ranks an action's spec.preferredRobot first among
+                      otherwise-eligible robots (soft preference). Defaults to true: the hint is opt-in
+                      per action, so a namespace that never sets preferredRobot is unaffected either way,
+                      and a client that does set it means it.
+
+                      Turning this OFF does not make a preferred robot ineligible — it makes the hint
+                      inert, and ranking falls back to manufacturer then battery. Use it to centrally
+                      disable client-expressed robot affinity without editing the actions themselves.
+                    type: boolean
+                  maxPendingActionsPerZone:
+                    description: |-
+                      MaxPendingActionsPerZone caps the number of Pending FleetActions the scheduler
+                      admits per zone before applying backpressure. 0 means unbounded.
+                      Specified, controller pending: not yet enforced by the scheduler.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  preferSameManufacturer:
+                    default: true
+                    description: |-
+                      PreferSameManufacturer, when true, ranks robots whose manufacturer matches an
+                      action's PreferredManufacturer first (soft preference).
+                      Specified, controller pending: not yet applied by the scheduler ranker.
+                    type: boolean
+                type: object
+              signing:
+                description: Signing configures artifact signature trust roots (§9.1.11.1).
+                properties:
+                  rekorPublicKey:
+                    description: |-
+                      RekorPublicKey pins the transparency log's own public key (PEM in a Secret).
+
+                      It is what makes the log check MEAN anything. Without a pinned key the control plane can only
+                      ask the log whether it indexes a hash, and a hostile or impersonated endpoint answers yes to
+                      everything; fetching the key from the same endpoint being verified is circular, so the key
+                      MUST come from the operator. With it pinned, the entry's inclusion proof and
+                      signed-entry-timestamp are verified cryptographically and a forged response fails closed.
+
+                      Optional for compatibility: when unset the check degrades to index presence only, and the
+                      controller reports that it did so rather than implying a verified entry.
+                    properties:
+                      key:
+                        description: Key is the data key holding the PEM material.
+                        type: string
+                      name:
+                        description: Name is the Secret name in the same namespace.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  rekorUrl:
+                    description: |-
+                      RekorURL, when set, requires the artifact's signature entry to appear in the
+                      named transparency log before acceptance.
+                    type: string
+                  requireSignatureVerification:
+                    default: true
+                    description: |-
+                      RequireSignatureVerification, when true (default), forces adapters to verify
+                      every firmware/model artifact against a trust root before install.
+                    type: boolean
+                  trustRoots:
+                    description: |-
+                      TrustRoots are the public-key anchors. At least one is required when
+                      RequireSignatureVerification is true (enforced by the SwarmadaConfig
+                      admission webhook — see the note on SwarmadaConfig).
+                    items:
+                      description: |-
+                        SigningTrustRoot is a public-key anchor against which artifact signatures are
+                        verified (§9.1.11.1).
+                      properties:
+                        name:
+                          description: Name is a logical identifier, written to the
+                            audit-log detail.
+                          type: string
+                        secretRef:
+                          description: SecretRef references the Secret and key holding
+                            the trust anchor.
+                          properties:
+                            key:
+                              description: Key is the data key holding the PEM material.
+                              type: string
+                            name:
+                              description: Name is the Secret name in the same namespace.
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - secretRef
+                      type: object
+                    type: array
+                type: object
+              telemetry:
+                description: Telemetry configures the two-data-plane split (§9.1.11.7,
+                  §9.3.7).
+                properties:
+                  materialBatteryThresholds:
+                    default:
+                    - 15
+                    - 30
+                    description: |-
+                      MaterialBatteryThresholds are ascending battery percentages that count as
+                      material; a status write occurs only when a reading crosses one. Entering
+                      the lowest bucket is safety-critical and bypasses the rate cap.
+                    items:
+                      format: int32
+                      type: integer
+                    type: array
+                  maxStatusWritesPerMinutePerRobot:
+                    default: 0
+                    description: |-
+                      MaxStatusWritesPerMinutePerRobot is a hard ceiling on non-critical status
+                      writes per robot per minute; the more restrictive of this and
+                      StatusWriteMinIntervalSeconds applies. 0 = no ceiling.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  sink:
+                    description: Sink is the high-cadence TSDB target.
+                    properties:
+                      endpoint:
+                        description: |-
+                          Endpoint is the remote-write / ingest endpoint. Required when Type is a real
+                          store; ignored when Type is Drop or empty.
+                        type: string
+                      type:
+                        default: ""
+                        description: |-
+                          Type selects the sink. MUST be set explicitly by the operator; the empty
+                          default raises TelemetrySinkUnconfigured rather than silently dropping.
+                        enum:
+                        - ""
+                        - Drop
+                        - PrometheusRemoteWrite
+                        - VictoriaMetrics
+                        - Mimir
+                        type: string
+                    type: object
+                  statusWriteMinIntervalSeconds:
+                    default: 0
+                    description: |-
+                      StatusWriteMinIntervalSeconds caps how often one robot's status may be
+                      written; a non-critical material change arriving sooner is coalesced.
+                      Safety-critical transitions bypass the cap. 0 disables it.
+                    format: int32
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                type: object
+              trafficDeconfliction:
+                description: TrafficDeconfliction exposes the TDE tunables (§9.1.11.10).
+                properties:
+                  disconnectedReservationTTLSeconds:
+                    default: 360
+                    description: |-
+                      DisconnectedReservationTTLSeconds is the extended TTL applied when the action
+                      transitions to Revoking. MUST exceed ActionCancellation.DisconnectTimeoutSeconds
+                      when AfterTimeout is used (enforced by the SwarmadaConfig admission webhook).
+                    format: int32
+                    minimum: 60
+                    type: integer
+                  maxRetryAfterSeconds:
+                    default: 120
+                    description: MaxRetryAfterSeconds bounds the FleetAction reconciler
+                      backoff ceiling on Denied.
+                    format: int32
+                    minimum: 10
+                    type: integer
+                  minRetryAfterSeconds:
+                    default: 10
+                    description: MinRetryAfterSeconds bounds the FleetAction reconciler
+                      backoff floor on Denied.
+                    format: int32
+                    minimum: 5
+                    type: integer
+                  onReservationExpiry:
+                    default: ReleaseAndRequeue
+                    description: OnReservationExpiry selects the action when a Reserved
+                      slot expires.
+                    enum:
+                    - ReleaseAndRequeue
+                    - ReleaseOnly
+                    type: string
+                  recovery:
+                    description: Recovery tunes TDE startup recovery.
+                    properties:
+                      conservativeRecoveryFallback:
+                        default: ReleaseAll
+                        description: |-
+                          ConservativeRecoveryFallback is the action if the Zone Controller is not
+                          Ready within the timeout.
+                        enum:
+                        - ReleaseAll
+                        - ReleaseReservedOnly
+                        type: string
+                      zoneControllerWaitTimeoutSeconds:
+                        default: 30
+                        description: |-
+                          ZoneControllerWaitTimeoutSeconds is how long the TDE waits for the Zone
+                          Controller to report Ready before applying ConservativeRecoveryFallback.
+                        format: int32
+                        minimum: 5
+                        type: integer
+                    type: object
+                  reservationTTLSeconds:
+                    default: 120
+                    description: |-
+                      ReservationTTLSeconds is how long a Reserved slot is held before expiry if
+                      the robot does not enter the zone.
+                    format: int32
+                    minimum: 10
+                    type: integer
+                  tdeCallTimeoutMs:
+                    default: 200
+                    description: |-
+                      TDECallTimeoutMs bounds a RequestReservation call; exceeding it denies the
+                      reservation and returns the action to Pending.
+                    format: int32
+                    minimum: 50
+                    type: integer
+                type: object
+            type: object
+          status:
+            description: SwarmadaConfigStatus is the observed state of a SwarmadaConfig.
+            properties:
+              conditions:
+                description: Conditions surface pipeline health, notably TelemetrySinkUnconfigured.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
+              supportedContractRange:
+                description: |-
+                  SupportedContractRange is the fleet-adapter contract-version range this control plane
+                  accepts (a semver range, e.g. ">=1.0.0 <1.1.0"): the implemented minor and its predecessor
+                  within the current major (ADR-0032). An adapter reporting a version outside it is rejected
+                  at the handshake with REGISTRATION_REJECTION_VERSION_MISMATCH.
+
+                  It is ADVERTISED, not configured: the controller populates it from the compiled-in contract
+                  version (internal/contract.Version), so an operator can answer "which adapters can this
+                  control plane drive?" without reading code, and a vendor can key its qualification on a
+                  value the cluster states. Editing it has no effect — the controller restores it.
+
+                  Written transition-only (RA-1): only when the computed range differs from what is stored,
+                  and never on a telemetry tick.
+                type: string
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: SwarmadaConfig must be named 'swarmada-config'
+          rule: self.metadata.name == 'swarmada-config'
+    served: true
+    storage: true
+    subresources:
+      status: {}

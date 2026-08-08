@@ -1,0 +1,551 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: robotclasses.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: RobotClass
+    listKind: RobotClassList
+    plural: robotclasses
+    shortNames:
+    - rc
+    singular: robotclass
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.manufacturer
+      name: Manufacturer
+      type: string
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .spec.baseAdapter.name
+      name: Adapter
+      type: string
+    - jsonPath: .status.referencingRobots
+      name: Robots
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: RobotClass is the Schema for the robotclasses API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RobotClassSpec is the shared template merged into a Robot's spec at admission
+              (§5.2.1.2). Scalar fields: the Robot value wins if present, else the class
+              value. List fields (hardware, defaultModels, baseCapabilities) merge
+              union-by-name — a Robot entry with the same name fully replaces the class
+              entry; there is no partial per-field merge within a list element.
+            properties:
+              baseAdapter:
+                description: |-
+                  BaseAdapter is the Fleet Adapter configuration inherited by every robot of
+                  this class. A Robot may override adapter.version (e.g. during a staged
+                  adapter rollout) but inherits the adapter name.
+                properties:
+                  name:
+                    description: Name is the FleetAdapter resource name that manages
+                      this class by default.
+                    minLength: 1
+                    type: string
+                  version:
+                    description: Version is the default adapter version applied to
+                      newly admitted robots.
+                    pattern: ^\d+\.\d+\.\d+$
+                    type: string
+                required:
+                - name
+                - version
+                type: object
+              baseCapabilities:
+                description: |-
+                  BaseCapabilities are the capabilities every robot of this class advertises,
+                  merged (union by name) into the admitted Robot's capability set.
+                items:
+                  description: ClassCapability is a capability advertised by every
+                    robot of a class.
+                  properties:
+                    degradedPolicy:
+                      description: |-
+                        DegradedPolicy governs whether this capability may still be scheduled while
+                        in Degraded status. When absent (or Schedulable=false) a Degraded instance is
+                        treated as Inactive for scheduling. When Schedulable=true, the Scheduler may
+                        satisfy a action's parametric constraints using the capability's currently
+                        resolved (reduced) parameters — so a degraded capability serves lower-
+                        constraint actions but is excluded from those it can no longer meet.
+                      properties:
+                        schedulable:
+                          default: false
+                          description: |-
+                            Schedulable allows the Scheduler to satisfy parametric constraints with this
+                            capability while it is Degraded, using its current (reduced) resolved
+                            parameters. Default false: a Degraded capability is not schedulable.
+                          type: boolean
+                      required:
+                      - schedulable
+                      type: object
+                    name:
+                      description: Name is the capability identifier (e.g. "navigation.2d",
+                        "estop.receive").
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    parameters:
+                      additionalProperties:
+                        description: |-
+                          CapabilityParameter is one parameter of a capability. Set exactly one of
+                          SourceField (dynamic) or Value (static literal).
+                        properties:
+                          sourceField:
+                            description: |-
+                              SourceField is a dotted path into the resolved spec, e.g.
+                              "hardware[load-platform].spec.maxPayloadKg".
+                            type: string
+                          value:
+                            description: Value is a static literal value for the parameter.
+                            type: string
+                        type: object
+                      description: |-
+                        Parameters carries capability-specific parameters. A parameter is resolved
+                        either dynamically from a hardware field (sourceField) — so a per-robot
+                        hardware override is reflected automatically — or as a static literal.
+                      type: object
+                    pauseable:
+                      default: true
+                      description: |-
+                        Pauseable reports whether the scheduler may suspend this capability. Safety
+                        and monitoring capabilities (e.g. estop.receive, health.heartbeat) MUST be
+                        false and are never paused.
+                      type: boolean
+                    providingModel:
+                      description: ProvidingModel names the ClassModel backing a model-driven
+                        capability.
+                      maxLength: 128
+                      type: string
+                    requiredHardware:
+                      description: |-
+                        RequiredHardware lists component names that must be Healthy for this
+                        capability to be Active. An empty list means no hardware dependency.
+                        MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+                      items:
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: set
+                    type:
+                      description: Type is how the capability is provided.
+                      enum:
+                      - hardware-native
+                      - model-driven
+                      - manual
+                      type: string
+                  required:
+                  - name
+                  - pauseable
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              defaultChargingConfig:
+                description: |-
+                  DefaultChargingConfig is the charging policy inherited by all robots of this
+                  class. dockName is intentionally NOT a class field — docks are per-unit and
+                  assigned at admission.
+                properties:
+                  minBatteryPctToCharge:
+                    description: |-
+                      MinBatteryPctToCharge is the battery level below which the robot initiates
+                      autonomous docking.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  targetBatteryPct:
+                    description: |-
+                      TargetBatteryPct is the level at which the robot leaves the dock; it MUST be
+                      greater than MinBatteryPctToCharge.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: targetBatteryPct must be greater than minBatteryPctToCharge
+                  rule: '!has(self.minBatteryPctToCharge) || !has(self.targetBatteryPct)
+                    || self.targetBatteryPct > self.minBatteryPctToCharge'
+              defaultConstraints:
+                description: |-
+                  DefaultConstraints are operational limits inherited by all robots of this
+                  class; any field may be overridden per-robot.
+                properties:
+                  maxPayloadKg:
+                    description: MaxPayloadKg caps the load the robot will accept,
+                      in kilograms.
+                    minimum: 0
+                    type: number
+                  maxSpeedMs:
+                    description: |-
+                      MaxSpeedMs is the maximum commanded speed in metres per second; the Fleet
+                      Adapter enforces this limit.
+                    minimum: 0
+                    type: number
+                  minBatteryPctForAction:
+                    description: |-
+                      MinBatteryPctForAction is the battery floor below which the robot refuses new
+                      action assignments.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
+              defaultModels:
+                description: |-
+                  DefaultModels are the inference models installed on robots of this class at
+                  admission unless the operator's admit command overrides them.
+                items:
+                  description: ClassModel is a default inference model installed on
+                    robots of a class.
+                  properties:
+                    grantsCapabilities:
+                      description: |-
+                        GrantsCapabilities lists capabilities unlocked when the model is Active.
+                        MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+                      items:
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: set
+                    modelUri:
+                      description: |-
+                        ModelURI is where the Robot Agent fetches the model artifact
+                        (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
+                      minLength: 1
+                      type: string
+                    name:
+                      description: |-
+                        Name is the logical model name; it must match
+                        Robot.spec.installedModels[*].name after a ModelRollout completes.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    requiredHardware:
+                      description: |-
+                        RequiredHardware lists component names that must be Healthy for the model to
+                        run; a degraded dependency moves the model — and the capabilities it grants
+                        — Inactive. MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+                      items:
+                        type: string
+                      maxItems: 32
+                      type: array
+                      x-kubernetes-list-type: set
+                    version:
+                      description: Version is the model version (semver).
+                      pattern: ^\d+\.\d+\.\d+$
+                      type: string
+                  required:
+                  - modelUri
+                  - name
+                  - version
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              defaultTelemetry:
+                description: |-
+                  DefaultTelemetry are the telemetry-cadence defaults inherited by all robots of
+                  this class; any field may be overridden per-robot. Fields a robot leaves unset
+                  are filled from here by the RobotDefaulter merge (§9.1.11).
+                properties:
+                  maxIdleIntervalSeconds:
+                    description: |-
+                      MaxIdleIntervalSeconds is the default ceiling on how long a stationary robot may
+                      go without sending a position frame.
+                    format: int32
+                    maximum: 300
+                    minimum: 1
+                    type: integer
+                  motionThresholdMeters:
+                    description: |-
+                      MotionThresholdMeters is the default minimum position change before a new
+                      position frame is sent.
+                    minimum: 0
+                    type: number
+                  telemetryIntervalSeconds:
+                    description: |-
+                      TelemetryIntervalSeconds is the default telemetry reporting interval (the
+                      ceiling between frames; basis for Offline detection).
+                    format: int32
+                    maximum: 30
+                    minimum: 1
+                    type: integer
+                type: object
+              hardware:
+                description: |-
+                  Hardware is the physical component inventory present on every robot of this
+                  class. Keyed by name; a Robot overrides one entry by declaring a hardware
+                  item with the same name. A Robot cannot remove a class entry — omission
+                  means inheritance. See §5.2.3 for the authoritative per-type field list.
+                items:
+                  description: |-
+                    HardwareComponent declares one physical component. Type-specific attributes are
+                    optional and interpreted according to Type. They are pointers so that "unset"
+                    is distinguishable from a real zero (a LoadPlatform with maxPayloadKg unset is
+                    "unknown", not "0 kg") — the same explicit-presence discipline applied to the
+                    Fleet Adapter telemetry proto.
+                  properties:
+                    channels:
+                      description: Channels is the number of audio input channels
+                        (Microphone).
+                      format: int32
+                      type: integer
+                    customType:
+                      description: CustomType names the component kind when Type is
+                        Custom (e.g. "SafetyBus").
+                      type: string
+                    degreesOfFreedom:
+                      description: DegreesOfFreedom is the number of articulated joints
+                        (Arm).
+                      format: int32
+                      type: integer
+                    depthCapable:
+                      description: DepthCapable reports whether a Camera provides
+                        a depth channel.
+                      type: boolean
+                    frameRateFps:
+                      description: FrameRateFps is the sensor frame rate (Camera).
+                      format: int32
+                      type: integer
+                    horizontalFovDeg:
+                      description: HorizontalFovDeg is the horizontal field of view
+                        in degrees.
+                      type: number
+                    maxGripForceN:
+                      description: MaxGripForceN is the maximum grip force in newtons
+                        (Gripper).
+                      type: number
+                    maxPayloadKg:
+                      description: MaxPayloadKg is the rated payload for a LoadPlatform
+                        / Arm in kilograms.
+                      type: number
+                    model:
+                      description: Model is the component's manufacturer/model string
+                        (e.g. "SICK TIM551").
+                      type: string
+                    name:
+                      description: Name uniquely identifies this component within
+                        the inventory (merge key).
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    platformLengthMm:
+                      description: PlatformLengthMm is the load platform length in
+                        millimetres.
+                      format: int32
+                      type: integer
+                    platformWidthMm:
+                      description: PlatformWidthMm is the load platform width in millimetres.
+                      format: int32
+                      type: integer
+                    rangeM:
+                      description: RangeM is the sensing range in metres (Lidar /
+                        depth Camera).
+                      type: number
+                    reachMm:
+                      description: ReachMm is the maximum reach from base in millimetres
+                        (Arm).
+                      format: int32
+                      type: integer
+                    resolutionH:
+                      description: ResolutionH is the horizontal resolution in pixels
+                        (Thermal / Display).
+                      format: int32
+                      type: integer
+                    resolutionMp:
+                      description: ResolutionMp is the sensor resolution in megapixels
+                        (Camera).
+                      type: number
+                    resolutionV:
+                      description: ResolutionV is the vertical resolution in pixels
+                        (Thermal / Display).
+                      format: int32
+                      type: integer
+                    sampleRateHz:
+                      description: SampleRateHz is the audio sample rate in Hz (Microphone).
+                      format: int32
+                      type: integer
+                    strokeMm:
+                      description: StrokeMm is the maximum jaw opening in millimetres
+                        (Gripper).
+                      format: int32
+                      type: integer
+                    tempRangeMaxC:
+                      description: TempRangeMaxC is the maximum sensing temperature
+                        in Celsius (Thermal).
+                      format: int32
+                      type: integer
+                    tempRangeMinC:
+                      description: TempRangeMinC is the minimum sensing temperature
+                        in Celsius (Thermal).
+                      format: int32
+                      type: integer
+                    touchCapable:
+                      description: TouchCapable reports whether a Display accepts
+                        touch input.
+                      type: boolean
+                    type:
+                      description: Type classifies the component.
+                      enum:
+                      - Lidar
+                      - Camera
+                      - Gripper
+                      - LoadPlatform
+                      - Arm
+                      - Thermal
+                      - Microphone
+                      - Display
+                      - Custom
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                  x-kubernetes-validations:
+                  - message: customType is required when type is Custom
+                    rule: self.type != 'Custom' || (has(self.customType) && size(self.customType)
+                      > 0)
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              manufacturer:
+                description: Manufacturer is the canonical manufacturer identifier
+                  (lowercase, no spaces).
+                minLength: 1
+                type: string
+              model:
+                description: |-
+                  Model is the manufacturer's model name; informational but indexed for
+                  filtering (e.g. `swarmctl get robot --model acme-picker`).
+                minLength: 1
+                type: string
+            required:
+            - baseAdapter
+            - hardware
+            - manufacturer
+            - model
+            type: object
+          status:
+            description: |-
+              RobotClassStatus is the observed state of a RobotClass. A RobotClass is a
+              template and carries little runtime state; status is used to surface
+              validation problems (e.g. an unreachable model URI), an observed generation,
+              and how many Robots currently inherit from this class.
+            properties:
+              conditions:
+                description: Conditions is the standard conditions list.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation this status was computed from.
+                  It is the RobotClass generation the admission-time merge (§5.2.1.2) draws from —
+                  the "last merge generation" a newly-admitted Robot of this class inherits.
+                format: int64
+                type: integer
+              referencingRobots:
+                description: |-
+                  ReferencingRobots is the number of Robots in this class's namespace whose
+                  spec.robotClass names it. Read/aggregate only — it drives no behavior.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

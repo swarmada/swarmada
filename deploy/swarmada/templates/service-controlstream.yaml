@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if .Values.controlStream.enabled -}}
+# ControlStream gRPC Service — Fleet Adapters connect here (--fleet-adapter-bind-
+# address). RFC-0001 §9.2 mandates mTLS in production; terminate/verify certs at
+# the adapter/gateway per docs. Exposed as ClusterIP by default; set
+# controlStream.service.type=LoadBalancer to reach adapters outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "swarmada.fullname" . }}-controlstream
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+  {{- with .Values.controlStream.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.controlStream.service.type }}
+  selector:
+    {{- include "swarmada.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: controlstream
+      port: {{ .Values.controlStream.port }}
+      targetPort: controlstream
+      protocol: TCP
+{{- end }}

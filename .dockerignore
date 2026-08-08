@@ -1,0 +1,38 @@
+# Keep the Docker build context minimal. The Dockerfile copies only go.mod/go.sum
+# and the cmd/, api/, internal/ trees; everything else is noise that would only
+# slow context upload and bust layer caches.
+
+.git
+.github
+.idea
+bin/
+vendor/
+coverage.txt
+*.test
+*.out
+
+# Python / docs / specs — not used by the controller-manager image.
+# NOTE: proto/ is intentionally NOT excluded here — internal/controlstream
+# imports the generated proto/fleet_adapter/v1 stubs, so the Dockerfile's
+# `COPY proto/ proto/` needs it in the build context. `make docker-build`
+# regenerates those stubs (via the `proto` target) before the image build;
+# a bare `docker build` needs `make proto` run manually first.
+ml/
+simulation/
+scripts/
+tests/
+fleet-adapter/
+rfcs/
+config/
+hack/
+*.md
+
+# Caches and OS cruft.
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+.DS_Store
+Thumbs.db
