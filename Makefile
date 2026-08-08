@@ -605,3 +605,16 @@ clean-all: clean  ##! clean + Go build/test caches, the quickstart kind cluster,
 	@command -v docker >/dev/null 2>&1 && docker image rm $(IMG) >/dev/null 2>&1 \
 	  && echo "  removed image $(IMG)" || true
 	@echo "clean-all: build/test caches cleared. The shared Go module cache was left intact."
+
+.PHONY: adapters
+ADAPTER_ORG ?= https://github.com/swarmada
+ADAPTERS    ?= fleet-adapter-ros2 fleet-adapter-vda5050 fleet-adapter-mavlink
+adapters: ## Fetch/update the reference Fleet Adapters into adapters/external/
+	@mkdir -p adapters/external
+	@for a in $(ADAPTERS); do \
+	  if [ -d adapters/external/$$a/.git ]; then \
+	    echo "updating $$a"; git -C adapters/external/$$a pull --ff-only; \
+	  else \
+	    echo "cloning  $$a"; git clone $(ADAPTER_ORG)/$$a.git adapters/external/$$a; \
+	  fi; \
+	done

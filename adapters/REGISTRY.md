@@ -56,6 +56,9 @@ minor/patch bumps do not.
 | :------ | :---------------- | :--------- | :------------ | :------- | :---------- |
 | `example-noop` | — (reference skeleton) | in-tree `adapters/example-noop/` | Core project | `1.0.0` (`fleet_adapter.v1`) | `template` (skeleton/example; registers no robot) |
 | `simulation` | Simulator (test infrastructure) | in-tree `adapters/simulation/` | Core project | `1.0.0` (`fleet_adapter.v1`) | `partial` (safety-complete C3/C4/C5; CONFORMANT vs the current C0–C16 harness via `make conformance-sim`; optional commands declined) |
+| `fleet-adapter-ros2` | ROS 2 / Nav2 | [`swarmada/fleet-adapter-ros2`](https://github.com/swarmada/fleet-adapter-ros2) | [@AlexBahel](https://github.com/AlexBahel) | `1.0.0` (`fleet_adapter.v1`) | `partial` (safety-complete; CONFORMANT vs the C0–C16 harness against a simulated binding, optional commands declined; C13.2 defence-in-depth absent — non-blocking; no live ROS 2/Nav2 runtime yet) |
+| `fleet-adapter-vda5050` | VDA5050 (MQTT) | [`swarmada/fleet-adapter-vda5050`](https://github.com/swarmada/fleet-adapter-vda5050) | [@AlexBahel](https://github.com/AlexBahel) | `1.0.0` (`fleet_adapter.v1`) | `partial` (safety-complete; CONFORMANT vs the C0–C16 harness against a simulated binding, optional commands declined; C13.2 defence-in-depth absent — non-blocking; no live MQTT/VDA5050 runtime yet) |
+| `fleet-adapter-mavlink` | MAVLink / PX4 | [`swarmada/fleet-adapter-mavlink`](https://github.com/swarmada/fleet-adapter-mavlink) | [@AlexBahel](https://github.com/AlexBahel) | `1.0.0` (`fleet_adapter.v1`) | `partial` (safety-complete; CONFORMANT vs the C0–C16 harness against a simulated binding, optional commands declined; C13.2 defence-in-depth absent — non-blocking; no live MAVLink/PX4 runtime yet) |
 
 New reference or vendor adapters are welcome — open a pull request adding a Registry
 row once the adapter passes the [conformance suite](CONFORMANCE.md).
