@@ -28,7 +28,7 @@ community-maintainable act rather than a change to the core.
 | Kubernetes | Swarmada |
 | :--- | :--- |
 | Node | `Robot` / `RobotClass` |
-| Pod / Deployment | `FleetTask` |
+| Pod / Deployment | `FleetAction` / `FleetTask` |
 | Namespace | `FleetZone` |
 | Rolling update | `FirmwareRollout` / `ModelRollout` |
 | `kubectl` | `swarmctl` |

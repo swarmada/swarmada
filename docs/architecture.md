@@ -54,7 +54,7 @@ familiar with Kubernetes can reason about a fleet with the same mental model.
 | Kubernetes | Swarmada | Meaning |
 | :--- | :--- | :--- |
 | Node | `Robot` / `RobotClass` | A physical robot; a template for a robot type |
-| Pod / Deployment | `FleetTask` | A unit of work to be assigned and executed |
+| Pod / Deployment | `FleetAction` / `FleetTask` | The atomic unit of dispatch; the composite objective that composes them |
 | Namespace | `FleetZone` | A physical or administrative area of the facility |
 | Health probe | `RobotProbe` | Active verification of a robot subsystem |
 | Rolling update | `FirmwareRollout` / `ModelRollout` | Fleet-wide firmware or model rollout |
