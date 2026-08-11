@@ -57,6 +57,22 @@ were **added** or **amended**; the version increment follows
   they own — deleting children alone is a no-op, because the controller
   regenerates them deterministically — and fails the run rather than proceeding
   against state a previous run left behind.
+- **`FleetTask` sample manifest, and a guard that keeps every sample decodable.**
+  `config/samples/fleettask_sample.yaml` ships a three-member `receiving-round`
+  chain — `approach-dock` → `inspect-dock` → `return-to-bay`, each gated on the
+  previous by `dependsOn` — so `kubectl apply -f config/samples/` now creates a
+  composite. A single-member task would never exercise `dependsOn`,
+  `startCondition`, or a partial `actionSummary`, which are the behaviours that
+  distinguish a composite from a standalone action. `docs/operations.md` gains a
+  pointer to it, resolving a `<fleettask.yaml>` placeholder that named no file in
+  the repository. `test/samples` decodes every document under `config/samples/`
+  against the `api/v1` types with unknown fields rejected, and asserts the
+  required fields a Go zero value would hide, so a manifest naming a field the
+  API no longer has fails in CI rather than on a reader's cluster — the failure
+  mode the `FleetTask`/`FleetAction` rename left undetected in other manifest
+  sets. The warehouse quickstart keeps its own inline single-member composite:
+  the three-member sample needs three free robots and would leave that scenario
+  no idle spare.
 - **warehouse-quickstart scenarios.** The quickstart (`make quickstart`) fronts a
   scenario picker — `healthy-fleet`, `battery-edge`, `battery-handoff`,
   `hardware-fault`, `comms-flaky`, `estop-drill` — plus an advanced

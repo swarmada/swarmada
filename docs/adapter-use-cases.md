@@ -76,9 +76,11 @@ python3 adapters/simulation/sim_adapter.py --endpoint localhost:9443
 ```
 
 You should see the sample `Robot` (`sim-robot-001`, `config/samples/robot_sample.yaml`)
-move from `Discovered` to registered, and the sample `FleetTask` get assigned to
-it once telemetry confirms it meets the task's declared capability and battery
-requirements.
+move from `Discovered` to registered, and the sample `FleetAction`s get assigned to
+it once telemetry confirms it meets each action's declared zone and capability
+requirements. The sample `FleetTask` (`receiving-round`) is never assigned to a
+robot itself: the control plane generates one `FleetAction` per member and
+schedules those, releasing each member as its `dependsOn` predecessors succeed.
 
 ## 3. Fault-injection / recovery demo (the Demo B story)
 
