@@ -22,49 +22,17 @@ import (
 	"github.com/swarmada/swarmtop/internal/k8sclient"
 )
 
-// viewActions renders the FleetAction table with a selectable cursor. Read-only:
-// the action lifecycle is the control plane's, swarmtop just watches it — but a row
-// can be opened into a live detail view ([enter]) or split pane ([s]), the same
-// as the robot list.
-func (m Model) viewActions() string {
-	var b strings.Builder
-	left := m.styles.header.Render("swarmtop · actions")
-	right := m.styles.muted.Render(fmt.Sprintf("%d actions  live ●", len(m.fleet.Actions)))
-	b.WriteString(left + "   " + right)
-	b.WriteByte('\n')
-
-	if len(m.fleet.Actions) == 0 {
-		b.WriteString(m.styles.muted.Render("  no actions"))
-		b.WriteByte('\n')
-		b.WriteString(m.styles.help.Render("[esc] robots  [a] adapters  [q] quit"))
-		return b.String()
-	}
-
-	b.WriteString(m.styles.colHeader.Render(
-		pad("NAME", 16) + pad("PHASE", 12) + pad("ROBOT", 12) +
-			pad("PRIO", 9) + pad("DEADLINE", 10) + pad("PROG", 6) + "RETRY"))
-	b.WriteByte('\n')
-
-	for i, t := range m.fleet.Actions {
-		row := m.actionRow(t)
-		if i == m.actionCursor {
-			row = m.styles.selected.Render(stripANSI(row))
-		}
-		b.WriteString(row)
-		if i < len(m.fleet.Actions)-1 {
-			b.WriteByte('\n')
-		}
-	}
-	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [r] robots  [a] adapters  [/] filter  [?] keys"))
-	return b.String()
-}
+// The full-width action table lives in tasks.go now: spec §3 rule 7 folds
+// "swarmtop · actions" into the combined composite screen, and §3b requires a
+// single row builder for member and standalone rows alike. What remains here is
+// the split pane, the detail pane, and the narrow list — none of which duplicate
+// a row renderer.
 
 // viewActionSplit renders the narrowed action list beside a live detail pane for the
 // action under the cursor — the FleetAction analogue of the robot split view.
 func (m Model) viewActionSplit() string {
-	return m.splitScreen("actions · split", m.narrowActionList(),
-		m.actionDetailLines(m.selectedAction()),
+	return m.splitScreen("tasks · split", m.narrowActionList(),
+		m.compositeDetailLines(),
 		"[↑↓] move  [PgUp/PgDn] scroll detail  [s] unsplit  [enter] full  [r] robots  [a] adapters  [esc] back  [q] quit")
 }
 
@@ -75,28 +43,31 @@ func (m Model) viewActionDetail() string {
 	if t != nil {
 		name = t.Name
 	}
-	return m.scrollScreen("actions › "+name, m.actionDetailLines(t),
+	return m.scrollScreen("tasks › "+name, m.actionDetailLines(t),
 		"[↑↓/PgUp/PgDn/g/G] scroll  [esc] back  [q] quit")
 }
 
-// narrowActionList is the compact left pane for the action split view: name, phase,
-// and assigned robot, with the cursor row highlighted.
+// narrowActionList is the compact left pane for the split view: name, phase, and
+// assigned robot. It renders the SAME flattened rows as the full screen, tasks
+// included, because both are driven by taskCursor. Members indent under their
+// task; the narrow pane has no room for a TASK column, so the indent is the
+// hierarchy cue and the detail pane is the authoritative answer (spec §3a).
 func (m Model) narrowActionList() string {
-	if len(m.fleet.Actions) == 0 {
-		return m.styles.muted.Render("  no actions")
+	rows := m.taskRows()
+	if len(rows) == 0 {
+		return m.styles.muted.Render("  no tasks or actions")
 	}
 	var b strings.Builder
 	b.WriteString(m.styles.colHeader.Render(pad("NAME", 16) + pad("PHASE", 12) + "ROBOT"))
 	b.WriteByte('\n')
-	for i, t := range m.fleet.Actions {
-		row := pad(t.Name, 16) +
-			m.styles.level(pad(format.Dash(t.Phase), 12), format.ActionPhase(t.Phase)) +
-			format.Dash(t.AssignedRobot)
-		if i == m.actionCursor {
+	for i, r := range rows {
+		name, phase, robot, lvl := m.narrowCells(r)
+		row := pad(name, 16) + m.styles.level(pad(phase, 12), lvl) + robot
+		if i == m.taskCursor {
 			row = m.styles.selected.Render(stripANSI(row))
 		}
 		b.WriteString(row)
-		if i < len(m.fleet.Actions)-1 {
+		if i < len(rows)-1 {
 			b.WriteByte('\n')
 		}
 	}
@@ -119,6 +90,16 @@ func (m Model) actionDetailLines(t *k8sclient.FleetActionView) []string {
 		format.Dash(t.Priority)))
 	add(fmt.Sprintf("Progress  %d%%", t.ProgressPct))
 
+	// The width-independent answer to "which task does this belong to", present on
+	// EVERY action — member or standalone. This is why the narrow list can drop
+	// the TASK column without losing the information (spec §3a).
+	if t.OwnerTask != "" {
+		add(fmt.Sprintf("Task      %s   (member: %s)", t.OwnerTask,
+			strings.TrimPrefix(t.Name, t.OwnerTask+"-")))
+	} else {
+		add("Task      " + m.styles.muted.Render("—   (standalone)"))
+	}
+
 	retry := fmt.Sprintf("%d", t.RetryCount)
 	if t.RetryCount > 0 {
 		retry = m.styles.warn.Render(retry)
@@ -140,19 +121,4 @@ func (m Model) actionDetailLines(t *k8sclient.FleetActionView) []string {
 		add("  " + m.styles.muted.Render(t.Message))
 	}
 	return lines
-}
-
-func (m Model) actionRow(t k8sclient.FleetActionView) string {
-	name := pad(t.Name, 16)
-	phase := m.styles.level(pad(format.Dash(t.Phase), 12), format.ActionPhase(t.Phase))
-	robot := pad(format.Dash(t.AssignedRobot), 12)
-	prio := pad(format.Dash(t.Priority), 9)
-	dlText, dlLvl := format.Deadline(t.Deadline, m.ageRef())
-	deadline := m.styles.level(pad(dlText, 10), dlLvl)
-	prog := pad(fmt.Sprintf("%d%%", t.ProgressPct), 6)
-	retry := fmt.Sprintf("%d", t.RetryCount)
-	if t.RetryCount > 0 {
-		retry = m.styles.warn.Render(retry)
-	}
-	return name + phase + robot + prio + deadline + prog + retry
 }

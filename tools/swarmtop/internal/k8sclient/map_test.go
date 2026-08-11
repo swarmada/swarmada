@@ -39,7 +39,7 @@ func TestMapRobot_CoreFields(t *testing.T) {
 			BatteryPercent:         i32(23),
 			CurrentZone:            "B",
 			SpecZoneMatchesCurrent: &no,
-			AssignedAction:           "haul-8846",
+			AssignedAction:         "haul-8846",
 			Position:               &swarmadav1.RobotPosition{X: 14.2, Y: 8.7, Floor: i32(2)},
 			Connectivity:           &swarmadav1.ConnectivityStatus{LastSeenAt: &seen},
 		},

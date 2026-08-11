@@ -32,13 +32,13 @@ import (
 // mapRobot projects a Robot into its display view.
 func mapRobot(r *swarmadav1.Robot) RobotView {
 	v := RobotView{
-		Name:         r.Name,
-		Phase:        string(r.Status.Phase),
-		Estop:        estopOrNormal(r.Status.EstopState),
-		SpecZone:     r.Spec.Zone,
-		CurrentZone:  r.Status.CurrentZone,
+		Name:           r.Name,
+		Phase:          string(r.Status.Phase),
+		Estop:          estopOrNormal(r.Status.EstopState),
+		SpecZone:       r.Spec.Zone,
+		CurrentZone:    r.Status.CurrentZone,
 		AssignedAction: r.Status.AssignedAction,
-		AdapterName:  r.Spec.Adapter.Name,
+		AdapterName:    r.Spec.Adapter.Name,
 	}
 
 	if r.Status.BatteryPercent != nil {
@@ -200,6 +200,14 @@ func mapHardware(entries []swarmadav1.HardwareComponentStatus) []HardwareView {
 	return views
 }
 
+// ownedByLabel is the label the FleetTask controller stamps on every child it
+// generates (internal/controller/fleettask_controller.go:70). swarmtop groups by
+// it rather than by walking ownerReferences: it is already on the object the
+// informer delivers, so grouping costs no second lookup, and it is the same key
+// `kubectl get fleetactions -l` selects on. The literal is duplicated because
+// the controller's copy is unexported and in another module.
+const ownedByLabel = "swarmada.io/fleettask"
+
 // mapFleetAction projects a FleetAction into its view.
 func mapFleetAction(t *swarmadav1.FleetAction) FleetActionView {
 	v := FleetActionView{
@@ -210,12 +218,102 @@ func mapFleetAction(t *swarmadav1.FleetAction) FleetActionView {
 		ProgressPct:   t.Status.ProgressPct,
 		RetryCount:    t.Status.RetryCount,
 		Message:       t.Status.Message,
+		OwnerTask:     t.Labels[ownedByLabel],
 	}
 	if d := t.Spec.Deadline; d != nil {
 		dl := d.Time
 		v.Deadline = &dl
 	}
 	return v
+}
+
+// mapFleetTask projects a FleetTask into its view: the member list off
+// status.actions[], and the headline current member.
+func mapFleetTask(t *swarmadav1.FleetTask) FleetTaskView {
+	v := FleetTaskView{
+		Name:             t.Name,
+		Phase:            string(t.Status.Phase),
+		ActionSummary:    t.Status.ActionSummary,
+		DesiredState:     string(t.Spec.DesiredState),
+		CompletionPolicy: string(t.Spec.CompletionPolicy),
+		FailurePolicy:    string(t.Spec.FailurePolicy),
+		CreatedAt:        t.CreationTimestamp.Time,
+		Conditions:       mapConditions(t.Status.Conditions),
+		Members:          make([]FleetTaskMemberView, 0, len(t.Status.Actions)),
+	}
+	for i := range t.Status.Actions {
+		m := t.Status.Actions[i]
+		v.Members = append(v.Members, FleetTaskMemberView{
+			Name:              m.Name,
+			ActionRef:         m.ActionRef,
+			Phase:             string(m.Phase),
+			AssignedRobot:     m.AssignedRobot,
+			DependenciesMet:   m.DependenciesMet,
+			Attempt:           m.Attempt,
+			CompensationPhase: m.CompensationPhase,
+		})
+	}
+
+	v.StartedAtUnknown = t.Status.StartedAt == nil
+	if t.Status.StartedAt != nil {
+		v.StartedAt = t.Status.StartedAt.Time
+	}
+	v.CompletionTimeUnknown = t.Status.CompletionTime == nil
+	if t.Status.CompletionTime != nil {
+		v.CompletionTime = t.Status.CompletionTime.Time
+	}
+
+	v.CurrentMember = currentMember(t.Status.Phase, v.Members)
+	return v
+}
+
+// currentMember picks the member the task row headlines: the most advanced
+// non-terminal one, InProgress before Assigned before Pending. A terminal task
+// has none. Ties resolve to the earliest status.actions[] entry, an order the
+// controller keeps stable (listMapKey=name), so the headline does not flicker
+// between reconciles.
+func currentMember(phase swarmadav1.FleetTaskPhase, members []FleetTaskMemberView) string {
+	if taskIsTerminal(phase) {
+		return ""
+	}
+	best, bestRank := "", 0
+	for _, m := range members {
+		if r := memberRank(m.Phase); r > bestRank {
+			best, bestRank = m.Name, r
+		}
+	}
+	return best
+}
+
+// memberRank ranks the three phases the task row headlines by how far along they
+// are. 0 means "not a candidate": a terminal member, or any phase outside those
+// three (Paused, Revoking, Preempted) — the spec ranks only these, so nothing
+// else is promoted to the headline.
+func memberRank(phase string) int {
+	switch swarmadav1.ActionPhase(phase) {
+	case swarmadav1.ActionPhaseInProgress:
+		return 3
+	case swarmadav1.ActionPhaseAssigned:
+		return 2
+	case swarmadav1.ActionPhasePending:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// taskIsTerminal reports whether the task has settled; no member is "current"
+// once it has.
+func taskIsTerminal(phase swarmadav1.FleetTaskPhase) bool {
+	switch phase {
+	case swarmadav1.FleetTaskPhaseSucceeded,
+		swarmadav1.FleetTaskPhaseFailed,
+		swarmadav1.FleetTaskPhaseCompensated,
+		swarmadav1.FleetTaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // mapRobotProbe projects a RobotProbe into its view, summarizing the last

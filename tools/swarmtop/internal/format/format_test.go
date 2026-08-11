@@ -97,6 +97,12 @@ func TestAge(t *testing.T) {
 	if got := Age(time.Time{}, ref, true); got != "—" {
 		t.Fatalf("unknown age should be dash, got %q", got)
 	}
+	// A zero timestamp dashes even when the caller does not flag it unknown. This
+	// is what lets a view carry a bare time.Time with no companion Unknown flag —
+	// FleetTaskView.CreatedAt relies on it.
+	if got := Age(time.Time{}, ref, false); got != "—" {
+		t.Fatalf("zero age should be dash without an unknown flag, got %q", got)
+	}
 }
 
 func TestTelemetryAge_Staleness(t *testing.T) {

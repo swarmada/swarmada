@@ -51,7 +51,7 @@ func (m Model) viewList() string {
 		b.WriteString(m.renderRobotTable())
 	}
 	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [t] actions  [a] adapters  [z] zones  [/] filter  [?] keys"))
+	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [t] tasks  [a] adapters  [z] zones  [/] filter  [?] keys"))
 	return b.String()
 }
 
@@ -61,7 +61,7 @@ func (m Model) renderRobotTable() string {
 	titles, _ := components.RobotColumnLayout()
 	rows := components.RobotRows(m.fleet, m.ageRef())
 	// Size columns to their content and the terminal width: tight columns for
-	// CAPS/ADAPTER/EVT/etc., leftover width to TASK, and graceful shrink when narrow.
+	// CAPS/ADAPTER/EVT/etc., leftover width to ACTION, and graceful shrink when narrow.
 	widths := m.robotColWidths(titles, rows)
 	sel := m.tbl.Cursor()
 
@@ -84,16 +84,21 @@ func (m Model) renderRobotTable() string {
 
 // robotColWidths sizes the robot-list columns to their content and the available
 // terminal width. Each column starts at the width of its widest cell (header
-// included), bounded by a per-column cap. Any leftover width is handed to the TASK
+// included), bounded by a per-column cap. Any leftover width is handed to the ACTION
 // column (rightmost, the most useful free-text field) so the table fills the screen;
 // when the terminal is too narrow for the natural layout, the low-signal columns
-// (CAPS, ADAPTER, NAME, ZONE) shrink toward their minimums first, so TASK stays
+// (CAPS, ADAPTER, NAME, ZONE) shrink toward their minimums first, so ACTION stays
 // readable instead of being cut off the right edge. Order matches RobotColumns.
 func (m Model) robotColWidths(titles []string, rows []table.Row) []int {
-	// caps/mins are indexed by column (NAME, PHASE, BATT, ZONE, CAPS, ADAPTER, EVT,
-	// TASK). If the schema ever changes shape, fall back to the fixed layout.
-	caps := []int{20, 11, 6, 10, 22, 20, 9, 48}
-	mins := []int{9, 6, 4, 3, 8, 6, 6, 10}
+	// caps/mins are indexed by column and MUST stay the same length as
+	// RobotColumns — NAME, PHASE, ESTOP, BATT, ZONE, CAPS, ADAPTER, EVT, ACTION.
+	// The guard below falls back to the fixed layout if they ever disagree, which
+	// is not a harmless no-op: it silently disables responsive sizing for the whole
+	// list. That is exactly what happened when ESTOP was added to the schema
+	// without an entry here — every width was pinned, and the ACTION column stayed
+	// at 16 on a 200-column terminal.
+	caps := []int{20, 11, 10, 6, 10, 22, 20, 9, 48}
+	mins := []int{9, 6, 6, 4, 3, 8, 6, 6, 10}
 	if len(titles) != len(caps) {
 		_, base := components.RobotColumnLayout()
 		return base
@@ -130,10 +135,10 @@ func (m Model) robotColWidths(titles []string, rows []table.Row) []int {
 	}
 	switch {
 	case total < avail:
-		// Surplus → TASK (last column) absorbs it, filling the row to the edge.
+		// Surplus → ACTION (last column) absorbs it, filling the row to the edge.
 		w[components.ColAction] += avail - total
 	case total > avail:
-		// Deficit → shrink the low-signal columns toward their mins before TASK.
+		// Deficit → shrink the low-signal columns toward their mins before ACTION.
 		need := total - avail
 		for _, idx := range []int{components.ColCaps, components.ColAdapter, components.ColName, components.ColZone} {
 			give := w[idx] - mins[idx]
@@ -242,7 +247,7 @@ func (m Model) titleBar(section string) string {
 // to grow a hint for every key: the footer carries the common ones, this carries all of them.
 func (m Model) helpOverlay() string {
 	rows := [][2]string{
-		{"r / t / a / z", "robots · actions · adapters · zones — from any screen, detail included"},
+		{"r / t / a / z", "robots · tasks+actions · adapters · zones — from any screen, detail included"},
 		{"s", "split: show the detail pane. An app-wide preference, kept across screens"},
 		{"enter", "full-screen detail for the selected row"},
 		{"esc", "back to the previous screen"},

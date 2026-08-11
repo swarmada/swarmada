@@ -92,5 +92,10 @@ func (f *FakeWatcher) EmitAdapter(kind EventKind, v AdapterView) {
 	f.changes <- FleetEvent{Kind: kind, Adapter: &v}
 }
 
+// EmitTask pushes a FleetTask add/update/delete event.
+func (f *FakeWatcher) EmitTask(kind EventKind, v FleetTaskView) {
+	f.changes <- FleetEvent{Kind: kind, Task: &v}
+}
+
 // Close ends the Changes() stream.
 func (f *FakeWatcher) Close() { close(f.changes) }

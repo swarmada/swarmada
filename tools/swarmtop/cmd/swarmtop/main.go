@@ -14,10 +14,11 @@
 
 // Command swarmtop is a read-only, live-updating terminal fleet inspector for
 // Swarmada — a Swarmada-native alternative to generic Kubernetes UIs, purpose
-// built for Robot/FleetAction/RobotProbe/FleetAdapter state.
+// built for Robot/FleetAction/FleetTask/FleetZone/RobotProbe/FleetAdapter state.
 //
-// A snapshot-backed Store watches Robots/FleetActions/FleetAdapters through a
-// controller-runtime cache, and a Bubble Tea UI renders each as a list with the
+// A snapshot-backed Store watches Robots/FleetActions/FleetTasks/FleetZones/
+// FleetAdapters/RobotProbes through a controller-runtime cache, and a Bubble Tea
+// UI renders each as a list with the
 // same selectable master-detail experience: a split pane (`s`) and a full-screen
 // detail view (`enter`). Robot detail shows capabilities/hardware/events; action
 // and adapter detail show the lifecycle/health fields plus the live phase and

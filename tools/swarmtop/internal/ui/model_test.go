@@ -61,7 +61,7 @@ func sampleFleet() k8sclient.Fleet {
 				Caps: k8sclient.CapSummary{Active: 3, Total: 3}},
 			{Name: "robot-3", Phase: "InProgress", Estop: "Normal", BatteryPercent: b32(23), CurrentZone: "B",
 				AssignedAction: "haul-8846",
-				Caps:         k8sclient.CapSummary{Active: 2, Total: 3, FirstProblem: "cam_front", FirstProblemState: "Degraded"},
+				Caps:           k8sclient.CapSummary{Active: 2, Total: 3, FirstProblem: "cam_front", FirstProblemState: "Degraded"},
 				Capabilities: []k8sclient.CapabilityView{
 					{Name: "lift", Status: "Active"},
 					{Name: "cam_front", Status: "Degraded", Reason: "hardware fault"},

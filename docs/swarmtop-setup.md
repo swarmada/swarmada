@@ -1,7 +1,7 @@
 # swarmtop — demo setup
 
 `swarmtop` is a read-only terminal inspector for a running Swarmada control
-plane — a live view of `Robot`, `FleetTask`, `FleetAdapter`, and `RobotProbe`
+plane — a live view of `Robot`, `FleetAction`, `FleetTask`, `FleetZone`, `FleetAdapter`, and `RobotProbe`
 state. **For now it exists only to make the demos legible.** It is staged
 in-tree at `tools/swarmtop/` and built with a single `make` target; there is no
 Helm chart, no Homebrew/Scoop/krew package, and no separate repo yet — those are

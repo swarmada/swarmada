@@ -98,6 +98,12 @@ func (w *cacheWatcher) Start(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if err := w.addWorkloadHandler(ctx, &swarmadav1.FleetTask{}, func(o client.Object, k EventKind) FleetEvent {
+		v := mapFleetTask(o.(*swarmadav1.FleetTask))
+		return FleetEvent{Kind: k, Task: &v}
+	}); err != nil {
+		return err
+	}
 	if err := w.addWorkloadHandler(ctx, &swarmadav1.RobotProbe{}, func(o client.Object, k EventKind) FleetEvent {
 		v := mapRobotProbe(o.(*swarmadav1.RobotProbe))
 		return FleetEvent{Kind: k, Probe: &v}

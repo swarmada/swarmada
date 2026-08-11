@@ -43,10 +43,10 @@ func sampleFleet(now time.Time) k8sclient.Fleet {
 			},
 			{
 				Name: "robot-3", Phase: "InProgress", BatteryPercent: i32(23), CurrentZone: "B",
-				ZoneDrift:    true,
+				ZoneDrift:      true,
 				AssignedAction: "haul-8846",
-				Caps:         k8sclient.CapSummary{Active: 2, Total: 3, FirstProblem: "camera_front", FirstProblemState: "Degraded"},
-				AdapterName:  "sim-fleet-adapter",
+				Caps:           k8sclient.CapSummary{Active: 2, Total: 3, FirstProblem: "camera_front", FirstProblemState: "Degraded"},
+				AdapterName:    "sim-fleet-adapter",
 			},
 		},
 		EventsByRobot: map[string][]k8sclient.EventView{
@@ -57,7 +57,7 @@ func sampleFleet(now time.Time) k8sclient.Fleet {
 
 func TestRobotColumns(t *testing.T) {
 	cols := RobotColumns()
-	want := []string{"NAME", "PHASE", "ESTOP", "BATT", "ZONE", "CAPABILITIES", "ADAPTER", "EVENTS", "TASK"}
+	want := []string{"NAME", "PHASE", "ESTOP", "BATT", "ZONE", "CAPABILITIES", "ADAPTER", "EVENTS", "ACTION"}
 	if len(cols) != len(want) {
 		t.Fatalf("got %d columns, want %d", len(cols), len(want))
 	}

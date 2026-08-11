@@ -33,10 +33,11 @@ type reducerStore struct {
 
 	mu       sync.RWMutex
 	robots   map[string]RobotView
-	actions    map[string]FleetActionView
+	actions  map[string]FleetActionView
 	probes   map[string]RobotProbeView
 	adapters map[string]AdapterView
 	zones    map[string]ZoneView
+	tasks    map[string]FleetTaskView
 
 	changed chan struct{}
 }
@@ -57,10 +58,11 @@ func NewStoreFromWatcher(w FleetWatcher) Store {
 	return &reducerStore{
 		watcher:  w,
 		robots:   map[string]RobotView{},
-		actions:    map[string]FleetActionView{},
+		actions:  map[string]FleetActionView{},
 		probes:   map[string]RobotProbeView{},
 		adapters: map[string]AdapterView{},
 		zones:    map[string]ZoneView{},
+		tasks:    map[string]FleetTaskView{},
 		changed:  make(chan struct{}, 1),
 	}
 }
@@ -99,6 +101,8 @@ func (s *reducerStore) apply(ev FleetEvent) {
 		applyOne(s.zones, ev.Kind, ev.Zone.Name, *ev.Zone)
 	case ev.Adapter != nil:
 		applyOne(s.adapters, ev.Kind, ev.Adapter.Name, *ev.Adapter)
+	case ev.Task != nil:
+		applyOne(s.tasks, ev.Kind, ev.Task.Name, *ev.Task)
 	}
 }
 
@@ -128,10 +132,11 @@ func (s *reducerStore) Snapshot() Fleet {
 	f := Fleet{
 		SnapshotAt: time.Now(),
 		Robots:     make([]RobotView, 0, len(s.robots)),
-		Actions:      make([]FleetActionView, 0, len(s.actions)),
+		Actions:    make([]FleetActionView, 0, len(s.actions)),
 		Probes:     make([]RobotProbeView, 0, len(s.probes)),
 		Adapters:   make([]AdapterView, 0, len(s.adapters)),
 		Zones:      make([]ZoneView, 0, len(s.zones)),
+		Tasks:      make([]FleetTaskView, 0, len(s.tasks)),
 	}
 	for _, v := range s.robots {
 		f.Robots = append(f.Robots, v)
@@ -148,6 +153,9 @@ func (s *reducerStore) Snapshot() Fleet {
 	for _, v := range s.zones {
 		f.Zones = append(f.Zones, v)
 	}
+	for _, v := range s.tasks {
+		f.Tasks = append(f.Tasks, v)
+	}
 	s.mu.RUnlock()
 
 	sort.Slice(f.Robots, func(a, b int) bool { return f.Robots[a].Name < f.Robots[b].Name })
@@ -155,6 +163,7 @@ func (s *reducerStore) Snapshot() Fleet {
 	sort.Slice(f.Probes, func(a, b int) bool { return f.Probes[a].Name < f.Probes[b].Name })
 	sort.Slice(f.Adapters, func(a, b int) bool { return f.Adapters[a].Name < f.Adapters[b].Name })
 	sort.Slice(f.Zones, func(a, b int) bool { return f.Zones[a].Name < f.Zones[b].Name })
+	sort.Slice(f.Tasks, func(a, b int) bool { return f.Tasks[a].Name < f.Tasks[b].Name })
 
 	f.EventsByRobot = s.watcher.RobotEvents()
 	return f

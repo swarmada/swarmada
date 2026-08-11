@@ -21,10 +21,30 @@ package format
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/swarmada/swarmtop/internal/k8sclient"
 )
+
+// MemberName strips the "<task>-" prefix the FleetTask controller stamps on the
+// children it generates, leaving the member name as declared in the task's spec.
+// Returns actionName unchanged when ownerTask is empty (a standalone action) or
+// when the name does not carry the prefix (a hand-made or adopted child), so no
+// caller has to special-case either.
+//
+// It lives here rather than in internal/ui because internal/ui/components needs
+// it too, and components cannot import ui — ui imports components.
+func MemberName(actionName, ownerTask string) string {
+	if ownerTask == "" {
+		return actionName
+	}
+	trimmed := strings.TrimPrefix(actionName, ownerTask+"-")
+	if trimmed == "" {
+		return actionName
+	}
+	return trimmed
+}
 
 // Level is a semantic severity the UI maps to a color. It intentionally mirrors
 // the swarmctl CLI convention so swarmtop and swarmctl read consistently.
@@ -114,6 +134,25 @@ func ActionPhase(phase string) Level {
 	case "Pending", "Assigned", "InProgress":
 		return LevelMuted
 	case "Revoking":
+		return LevelWarn
+	case "Failed":
+		return LevelBad
+	default:
+		return LevelMuted
+	}
+}
+
+// TaskPhase maps a composite FleetTask phase to a severity for the task view.
+// Compensating/Compensated are the saga rollback path: the task did not succeed,
+// but it is unwinding deliberately, so they read as a warning. Cancelled is an
+// operator's decision, not a fault — only Failed is bad.
+func TaskPhase(phase string) Level {
+	switch phase {
+	case "Succeeded":
+		return LevelGood
+	case "Pending", "Running":
+		return LevelMuted
+	case "Compensating", "Compensated", "Cancelled":
 		return LevelWarn
 	case "Failed":
 		return LevelBad

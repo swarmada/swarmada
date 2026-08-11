@@ -63,7 +63,7 @@ func (m Model) viewSplit() string {
 	if len(rightLines) > h {
 		scrollHint = m.styles.muted.Render(fmt.Sprintf("  detail %d-%d/%d", start+1, end, len(rightLines)))
 	}
-	b.WriteString(m.styles.help.Render("[↑↓] move  [PgUp/PgDn] scroll detail / page list  [s] unsplit  [enter] full  [t] actions  [a] adapters  [q] quit") + scrollHint)
+	b.WriteString(m.styles.help.Render("[↑↓] move  [PgUp/PgDn] scroll detail / page list  [s] unsplit  [enter] full  [t] tasks  [a] adapters  [q] quit") + scrollHint)
 	return b.String()
 }
 
@@ -387,8 +387,14 @@ func (m Model) positionDetail(r *k8sclient.RobotView) string {
 func (m Model) actionDetail(name string) string {
 	for _, t := range m.raw.Actions { // resolve against the whole fleet — see robotSummary
 		if t.Name == name {
-			return fmt.Sprintf("%s  %s  %d%%  prio=%s",
+			line := fmt.Sprintf("%s  %s  %d%%  prio=%s",
 				t.Name, format.Dash(t.Phase), t.ProgressPct, format.Dash(t.Priority))
+			// The owning task lives here, not in the narrow list — the detail pane
+			// is the width-independent answer to "which task is this part of".
+			if t.OwnerTask != "" {
+				line += m.styles.muted.Render("  task=" + t.OwnerTask)
+			}
+			return line
 		}
 	}
 	return name + m.styles.muted.Render("  (action not in snapshot)")
