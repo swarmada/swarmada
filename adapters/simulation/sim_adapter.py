@@ -351,18 +351,34 @@ class SimAdapter:
         elif which == "renew_lease":
             self._on_renew(command.renew_lease, result)
         elif which == "cancel_action":
+            # Captured before the clear below: the marker and the status emit both
+            # name the action being cancelled, and self._current_action is "" by then.
+            cancelled_action = self._current_action
             with self._sim_lock:
                 self._sim.command_stop(self._robot)
             self._lease.release(self._robot)
-            self._emit_action_status(self._current_action, "CANCELLED", "cancel_action honoured")
+            self._emit_action_status(cancelled_action, "CANCELLED", "cancel_action honoured")
             self._current_action = ""
             # The simulated robot carries no physical load, so a cancel always
             # reaches a safe stop — STOPPED_SAFELY (capability-loss reassignment
             # then requeues the task to a capable robot). A real adapter reports
             # COMPLETED or RECOVERED instead when the robot is mid-commitment.
+            disposition = pb.CANCEL_DISPOSITION_STOPPED_SAFELY
             result.cancel_action.CopyFrom(pb.CancelActionResult(
                 acknowledged=True,
-                disposition=pb.CANCEL_DISPOSITION_STOPPED_SAFELY))
+                disposition=disposition))
+            # Stable marker, emitted only after the stop, the lease release and the
+            # status emit have all succeeded — so the line means "cancel honoured",
+            # not "cancel received". A mishandled cancel surfaces three components
+            # away, as the control plane simply not reassigning, which is equally
+            # consistent with a scheduler, lease or capability fault. The disposition
+            # is read back from the value that goes on the wire rather than written
+            # a second time, so the log cannot disagree with the message.
+            disposition_name = pb.CancelDisposition.Name(disposition).removeprefix(
+                "CANCEL_DISPOSITION_")
+            print(f"CANCEL_HONOURED robot={self._robot} action={cancelled_action} "
+                  f"command_id={command.command_id} disposition={disposition_name}",
+                  file=sys.stderr, flush=True)
         elif which in ("verify_hardware", "verify_capability", "verify_model"):
             self._on_verify(getattr(command, which), result)
         elif which == "push_firmware":
