@@ -2,7 +2,7 @@
 
 Where Swarmada's container images are published, and the naming scheme across
 every image-producing component (`cmd/manager`, `cmd/edge`, the reference Fleet
-Adapters, the in-tree simulation adapter). Research current as of July 2026.
+Adapters, the in-tree simulation adapter).
 
 ## Recommendation: GHCR as primary, Docker Hub as a mirror
 
@@ -16,17 +16,17 @@ every other image. Reasons to keep it as the primary:
   quickstart, CI, and conformance harness all pull images repeatedly.
 - **Zero-config auth in GitHub Actions** — the built-in `GITHUB_TOKEN` pushes
   to GHCR with no separate credential to manage or leak, which matters for a
-  project that's about to open its Actions workflows to public contributors.
+  workflow open to outside contributors.
 - **Lives next to the code and the org** (`github.com/swarmada`) — one fewer
-  external account/dependency for a CNCF Sandbox application to explain.
+  external account and dependency to operate and document.
 
 **Secondary: Docker Hub (`docker.io/swarmada/...`), mirrored on release.**
 Docker Hub is still the first registry most people reach for
 (`docker pull swarmada/swarmada` reads more naturally to a newcomer than the
 GHCR path), so mirroring tagged releases there costs little and buys
 discoverability — accept its rate limits for that audience, don't depend on
-it for CI. **Action item:** confirm the `swarmada` namespace is available on
-Docker Hub before committing to this name in public docs (not yet checked).
+it for CI. The `swarmada` namespace on Docker Hub is unconfirmed; no mirror is
+published until it is.
 
 **Worth naming, not adopting yet: Quay.io.** Red Hat-operated, unlimited public
 repos, built-in Clair vulnerability scanning, and native `cosign` signing
@@ -34,17 +34,14 @@ support. That last point is the interesting one: `FirmwareRollout` already
 verifies OCI image signatures via Rekor
 (`internal/controller/firmwarerollout_rekor_test.go`), so publishing Swarmada's
 own images signed with `cosign` and logged to Rekor's transparency log would
-be dogfooding the exact supply-chain-security story the project already tells
-about *robot* firmware. Not urgent for the initial launch, but a natural
-Stage-3/4 (neutrality proof / CNCF application) talking point — "we sign our
-own control-plane images the same way FirmwareRollout expects a fleet's
-firmware to be signed."
+apply one supply-chain model to both the control plane and the *robot* firmware
+it already verifies. Not required for the current release.
 
 **Not recommended now: Harbor (self-hosted).** Harbor is itself a CNCF
 Graduated project and the natural end-state for a security-mature org
-(RBAC, replication, audit log, Trivy scanning), but it means operating
-infrastructure — wrong tradeoff at the current $0-budget, pre-Sandbox stage.
-Revisit if/when there's a design partner or funding covering the hosting cost.
+(RBAC, replication, audit log, Trivy scanning), but it requires operating
+infrastructure, which this project does not do today. Revisit if a deployment
+arises that justifies the hosting cost.
 
 ## Image naming scheme
 
