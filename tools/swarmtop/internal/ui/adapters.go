@@ -35,7 +35,7 @@ func (m Model) viewAdapters() string {
 	if len(m.fleet.Adapters) == 0 {
 		b.WriteString(m.styles.muted.Render("  no adapters"))
 		b.WriteByte('\n')
-		b.WriteString(m.styles.help.Render("[esc] robots  [t] actions  [q] quit"))
+		b.WriteString(m.styles.help.Render("[esc] robots  [t] tasks  [q] quit"))
 		return b.String()
 	}
 
@@ -55,7 +55,7 @@ func (m Model) viewAdapters() string {
 		}
 	}
 	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [r] robots  [t] actions  [/] filter  [?] keys"))
+	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [r] robots  [t] tasks  [/] filter  [?] keys"))
 	return b.String()
 }
 
@@ -64,7 +64,7 @@ func (m Model) viewAdapters() string {
 func (m Model) viewAdapterSplit() string {
 	return m.splitScreen("adapters · split", m.narrowAdapterList(),
 		m.adapterDetailLines(m.selectedAdapter()),
-		"[↑↓] move  [PgUp/PgDn] scroll detail  [s] unsplit  [enter] full  [r] robots  [t] actions  [esc] back  [q] quit")
+		"[↑↓] move  [PgUp/PgDn] scroll detail  [s] unsplit  [enter] full  [r] robots  [t] tasks  [esc] back  [q] quit")
 }
 
 // viewAdapterDetail renders the full-screen detail for the selected adapter.

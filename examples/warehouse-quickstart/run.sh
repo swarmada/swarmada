@@ -682,6 +682,31 @@ install_control_plane() {
 reset_namespace_state() {
   step "4.5/7 — Reset namespace $NS to a clean slate"
   if kubectl get namespace "$NS" >/dev/null 2>&1; then
+    # FleetTasks FIRST, and only after cancelling them: the validating webhook
+    # refuses to delete a LIVE composite (it owns its child FleetActions and their
+    # assignment leases), so an uncancelled task survives this reset and the
+    # controller re-creates its children into the next run's assertion — exactly
+    # the stale-state leak this function exists to prevent. Deleting the task also
+    # GCs its children via ownerReferences, which is why it runs before the
+    # fleetactions delete below.
+    if [[ -n "$(kubectl get fleettasks -n "$NS" -o name 2>/dev/null || true)" ]]; then
+      info "cancelling and deleting leftover FleetTasks from a previous run"
+      for ft in $(kubectl get fleettasks -n "$NS" -o name 2>/dev/null || true); do
+        kubectl patch "$ft" -n "$NS" --type=merge \
+          -p '{"spec":{"desiredState":"Cancelled"}}' >/dev/null 2>&1 || true
+      done
+      # The controller needs a beat to drive them terminal before delete is admitted.
+      for _ in $(seq 1 20); do
+        kubectl delete fleettasks -n "$NS" --all --ignore-not-found --wait=true \
+          >/dev/null 2>&1 && break
+        sleep 1
+      done
+      if [[ -n "$(kubectl get fleettasks -n "$NS" -o name 2>/dev/null || true)" ]]; then
+        # Hard failure, not a warning: continuing would assert against state left
+        # by a previous run, which is the failure mode this reset exists to stop.
+        fail "leftover FleetTasks could not be cancelled and deleted within 20s — refusing to run against stale state"
+      fi
+    fi
     info "deleting any leftover Robots/FleetActions from a previous run"
     kubectl delete robots,fleetactions -n "$NS" --all --ignore-not-found --wait=true >/dev/null 2>&1 || true
   else
@@ -764,6 +789,33 @@ apply_fleet() {
       ]}]'
     info "applied 1 FleetZone, ${#ROBOTS[@]} Robots (002/003 nav-only; $LIVE_ROBOT camera gated on hardware), and 1 of 2 FleetActions"
     info "(deliver-pallet-001 held back; camera restored to sim-robot-002 mid-scenario — see Step 6.5)"
+  elif [[ "$SCENARIO" == "healthy-fleet" ]]; then
+    kubectl apply -f "$SAMPLE"
+    # ITEM-0015: the composite view needs a composite to show. One FleetTask with
+    # a single member, alongside the sample's two standalone FleetActions, so
+    # swarmtop's `t` screen renders BOTH shapes at once — a task with its member
+    # nested beneath it, and actions that no task owns. Kept here rather than in
+    # config/samples so every other scenario stays composite-free (and so the
+    # zero-composite path keeps being exercised somewhere).
+    kubectl apply -n "$NS" -f - <<'YAML'
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: receiving-round-001
+spec:
+  completionPolicy: All
+  failurePolicy: FailFast
+  desiredState: Running
+  actions:
+    - name: inspect-dock
+      action:
+        type: Navigate
+        zone: warehouse-a
+        priority: Normal
+        requiredCapabilities:
+          - navigation
+YAML
+    info "applied 1 FleetZone, ${#ROBOTS[@]} Robots, 2 standalone FleetActions, and 1 FleetTask (1 member)"
   else
     kubectl apply -f "$SAMPLE"
     info "applied 1 FleetZone, ${#ROBOTS[@]} Robots, and the sample FleetActions"
@@ -1424,6 +1476,13 @@ assert_end_state() {
   echo
   kubectl get fleetactions -n "$NS"
   echo
+  # Composites are printed separately: a child FleetAction appears above under its
+  # generated "<task>-<action>" name, which on its own gives no sign a parent
+  # exists. Without this the end state would show the work but not the shape of it.
+  if [[ -n "$(kubectl get fleettasks -n "$NS" -o name 2>/dev/null || true)" ]]; then
+    kubectl get fleettasks -n "$NS"
+    echo
+  fi
   if [[ "$SCENARIO" == "estop-drill" && "$LIVE" == 1 ]]; then
     echo "✅ Quickstart end state reached: $LIVE_ROBOT was emergency-stopped while holding"
     echo "   work, CONFIRMED the stop from simulator ground truth, and its action was"

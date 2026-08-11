@@ -37,7 +37,7 @@ func (m Model) viewZones() string {
 	if len(m.fleet.Zones) == 0 {
 		b.WriteString(m.styles.muted.Render("  no zones"))
 		b.WriteByte('\n')
-		b.WriteString(m.styles.help.Render("[r] robots  [t] actions  [a] adapters  [?] keys  [q] quit"))
+		b.WriteString(m.styles.help.Render("[r] robots  [t] tasks  [a] adapters  [?] keys  [q] quit"))
 		return b.String()
 	}
 
@@ -57,7 +57,7 @@ func (m Model) viewZones() string {
 		}
 	}
 	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [r] robots  [t] actions  [a] adapters  [/] filter  [?] keys"))
+	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [r] robots  [t] tasks  [a] adapters  [/] filter  [?] keys"))
 	return b.String()
 }
 

@@ -27,7 +27,8 @@ a terminal viewer, not a web UI.
 ## What it does
 
 A read-only, live-updating terminal fleet inspector over the Swarmada CRDs
-(`Robot`, `FleetTask`, `FleetAdapter`) plus the `Event`s they emit — the
+(`Robot`, `FleetAction`, `FleetTask`, `FleetZone`, `FleetAdapter`, `RobotProbe`)
+plus the `Event`s they emit — the
 fleet-specific answer to "I want something friendlier than `kubectl get` or a
 generic K8s UI to watch battery, capability health, and adapter connectivity."
 It does not `apply`/`admit`/`delete` anything — that stays `swarmctl`'s job. It
@@ -36,18 +37,20 @@ adapter connectivity, a warning-event badge) that generic `k9s` has no concept
 of.
 
 Live updates are driven by controller-runtime informers (push, not poll):
-`swarmtop` watches `Robot`, `FleetTask`, `FleetAdapter`, and `Event`, keeps an
-in-memory snapshot, and re-renders on every change.
+`swarmtop` watches `Robot`, `FleetAction`, `FleetTask`, `FleetZone`, `FleetAdapter`, and `RobotProbe`, plus the
+`Event`s they emit; it keeps an in-memory snapshot and re-renders on every change.
 
 ### Views and keys
 
 | View | How to reach it | Shows |
 | :--- | :--- | :--- |
-| Robot list | default | name, phase, battery, zone (`*` = drift), capability summary, adapter telemetry age, `!N` warning-event badge, task |
+| Robot list | default | name, phase, estop, battery, zone (`*` = drift), capability summary, serving adapter, event badge (`1W 1N` = warnings/normals), current action — the member name alone when it belongs to a task |
 | Split | `s` | the robot list beside a live detail pane for the highlighted robot |
-| Robot detail | `enter` | full capabilities, hardware, position (coarse; RA-1), current task, health & connectivity, firmware & models, conditions, and recent events |
-| FleetTask list | `t` | phase, assigned robot, priority, progress, retries |
-| Task split / detail | `s` / `enter` (in the task list) | the task list beside — or full-screen — a live detail pane: phase, priority, progress, retries, deadline countdown, and the assigned robot's live phase + battery |
+| Robot detail | `enter` | full capabilities, hardware, position (coarse; RA-1), current action, health & connectivity, firmware & models, conditions, and recent events |
+| Tasks and actions | `t` | one screen for both shapes. Each row states its `KIND` (`task` or `action`) and, for an action, the `TASK` that owns it or `—`. Composites list first with their members nested beneath; actions no task owns follow. Columns: phase, robot, owning task, priority, progress, retries. A task row also names the member currently executing |
+| Task detail | `enter` on a task | completion and failure policy, desired state, action summary, start and completion times, every member from `status.actions[]` with the current one marked, and conditions |
+| Member detail | `enter` on a member with no action yet | states that no `FleetAction` has been generated, its dependency status, and why — the control plane creates a member's action only once its dependencies are met |
+| Action split / detail | `s` / `enter` on an action | the list beside — or full-screen — a live detail pane: phase, priority, progress, retries, deadline countdown, the owning task (or `—` when standalone), and the assigned robot's live phase + battery |
 | Adapter health | `a` | phase, conformance, negotiated protocol, connected robots, last heartbeat |
 | Adapter split / detail | `s` / `enter` (in the adapter list) | the adapter list beside — or full-screen — a live detail pane: phase, conformance, protocol, handshake freshness, and every served robot's live phase + battery |
 

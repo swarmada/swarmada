@@ -48,6 +48,10 @@ const (
 	modeActionSplit
 	// modeActionDetail is the full-screen detail for the selected action.
 	modeActionDetail
+	// modeTaskDetail is the full-screen detail for a composite row that is NOT an
+	// action — a FleetTask, or a member with no child action yet. Action rows keep
+	// going to modeActionDetail, unchanged, per spec §3 rule 6.
+	modeTaskDetail
 	// modeAdapters is the Fleet Adapter health table.
 	modeAdapters
 	// modeAdapterSplit is the narrowed adapter table + detail pane for the cursor adapter.
@@ -63,7 +67,8 @@ const (
 // inActions / inAdapters report whether the current mode belongs to that section's
 // list/split/detail family — used to toggle [t]/[a] back to the robot list.
 func (m Model) inActions() bool {
-	return m.mode == modeActions || m.mode == modeActionSplit || m.mode == modeActionDetail
+	return m.mode == modeActions || m.mode == modeActionSplit ||
+		m.mode == modeActionDetail || m.mode == modeTaskDetail
 }
 
 func (m Model) inAdapters() bool {
@@ -163,10 +168,14 @@ type Model struct {
 	// read tbl.Cursor()).
 	tbl table.Model
 
-	// actionCursor / adapterCursor are the selected-row indices for the FleetAction
-	// and Fleet Adapter tables (index-aligned with fleet.Actions / fleet.Adapters,
-	// both sorted by name), mirroring what tbl.Cursor() is for robots.
-	actionCursor    int
+	// taskCursor is the selected row on the composite screen. It indexes the
+	// FLATTENED row list (each task, its members, then standalone actions) — NOT
+	// fleet.Actions, which deliberately has no cursor of its own: the full list
+	// and the split pane must agree on what row N is, or [s] would move the
+	// selection without the operator touching it.
+	taskCursor int
+	// adapterCursor / zoneCursor are index-aligned with fleet.Adapters /
+	// fleet.Zones (both name-sorted), as tbl.Cursor() is for robots.
 	adapterCursor int
 	zoneCursor    int
 
@@ -340,7 +349,7 @@ func (m *Model) applyFilter() {
 	// Cursors index the VISIBLE slices. Narrowing the list can strand a cursor past the
 	// end, and the detail pane would then render whatever is at an out-of-range index —
 	// or panic. Clamp on every recompute rather than at each use site.
-	m.actionCursor = clampIndex(m.actionCursor, len(m.fleet.Actions))
+	m.taskCursor = clampIndex(m.taskCursor, len(m.taskRows()))
 	m.adapterCursor = clampIndex(m.adapterCursor, len(m.fleet.Adapters))
 	m.zoneCursor = clampIndex(m.zoneCursor, len(m.fleet.Zones))
 	m.refreshRows()
@@ -380,6 +389,38 @@ func filterFleet(f k8sclient.Fleet, q string) k8sclient.Fleet {
 			out.Actions = append(out.Actions, a)
 		}
 	}
+	// Tasks filter AFTER actions, because a task's survival depends on which of its
+	// actions survived. Members are filtered too, so narrowing behaves uniformly:
+	// a member is kept when its own name matches OR when its generated child
+	// survived the action filter. Matching on the member name is what makes a
+	// member with no child yet findable at all — it has no FleetAction to match,
+	// so an actions-only test would hide exactly the rows a search is for.
+	out.Tasks = nil
+	for _, t := range f.Tasks {
+		if strings.Contains(strings.ToLower(t.Name), q) {
+			// The task itself matched: keep it whole. Its generated children match by
+			// substring anyway ("<task>-<member>"), so filtering members here would
+			// drop the pending ones while the generated ones stayed.
+			out.Tasks = append(out.Tasks, t)
+			continue
+		}
+		survivingChild := make(map[string]bool)
+		for _, a := range out.Actions {
+			if a.OwnerTask == t.Name {
+				survivingChild[a.Name] = true
+			}
+		}
+		kept := t
+		kept.Members = nil
+		for _, mem := range t.Members {
+			if strings.Contains(strings.ToLower(mem.Name), q) || survivingChild[mem.ActionRef] {
+				kept.Members = append(kept.Members, mem)
+			}
+		}
+		if len(kept.Members) > 0 || len(survivingChild) > 0 {
+			out.Tasks = append(out.Tasks, kept)
+		}
+	}
 	out.Adapters = nil
 	for _, a := range f.Adapters {
 		if strings.Contains(strings.ToLower(a.Name), q) {
@@ -404,7 +445,7 @@ func (m *Model) refreshRows() {
 			m.tbl.SetCursor(n - 1)
 		}
 	}
-	m.actionCursor = clampCursor(m.actionCursor, len(m.fleet.Actions))
+	m.taskCursor = clampCursor(m.taskCursor, len(m.taskRows()))
 	m.adapterCursor = clampCursor(m.adapterCursor, len(m.fleet.Adapters))
 	m.applyFocus()
 }
@@ -495,6 +536,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDetailKey(msg, m.robotDetailLines(m.selectedRobot(), m.width), modeFor(screenRobots, m.split))
 	case modeActionDetail:
 		return m.handleDetailKey(msg, m.actionDetailLines(m.selectedAction()), modeFor(screenActions, m.split))
+	case modeTaskDetail:
+		return m.handleDetailKey(msg, m.compositeDetailLines(), modeFor(screenActions, m.split))
 	case modeAdapterDetail:
 		return m.handleDetailKey(msg, m.adapterDetailLines(m.selectedAdapter()), modeFor(screenAdapters, m.split))
 	case modeZoneDetail:
@@ -533,8 +576,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.mode, m.detailScroll = modeDetail, 0
 			}
 		case modeActions, modeActionSplit:
-			if len(m.fleet.Actions) > 0 {
+			if m.selectedAction() != nil {
 				m.mode, m.detailScroll = modeActionDetail, 0
+			} else if r, ok := m.selectedTaskRow(); ok && (r.task != nil || r.pending != nil) {
+				m.mode, m.detailScroll = modeTaskDetail, 0
 			}
 		case modeAdapters, modeAdapterSplit:
 			if len(m.fleet.Adapters) > 0 {
@@ -593,12 +638,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modeActions:
-		m.actionCursor = moveCursor(m.actionCursor, len(m.fleet.Actions), msg)
+		m.taskCursor = moveCursor(m.taskCursor, len(m.taskRows()), msg)
 		return m, nil
 
 	case modeActionSplit:
-		m.actionCursor, m.splitScroll = m.splitNav(msg, m.actionCursor, len(m.fleet.Actions),
-			m.actionDetailLines(m.selectedAction()))
+		m.taskCursor, m.splitScroll = m.splitNav(msg, m.taskCursor, len(m.taskRows()),
+			m.compositeDetailLines())
 		return m, nil
 
 	case modeZones:
@@ -779,11 +824,14 @@ func (m Model) selectedRobot() *k8sclient.RobotView {
 // selectedAction / selectedAdapter return the row under the respective cursor, or
 // nil when that list is empty.
 func (m Model) selectedAction() *k8sclient.FleetActionView {
-	i := m.actionCursor
-	if i < 0 || i >= len(m.fleet.Actions) {
+	// Resolved through the composite row list so the cursor means the same thing
+	// on the full screen and in the split pane. Nil on a task row, and on a member
+	// whose child action does not exist yet — neither has an action to show.
+	r, ok := m.selectedTaskRow()
+	if !ok {
 		return nil
 	}
-	return &m.fleet.Actions[i]
+	return r.action
 }
 
 func (m Model) selectedZone() *k8sclient.ZoneView {
@@ -825,11 +873,13 @@ func (m Model) View() string {
 	case modeSplit:
 		return m.viewSplit()
 	case modeActions:
-		return m.viewActions()
+		return m.viewTasks()
 	case modeActionSplit:
 		return m.viewActionSplit()
 	case modeActionDetail:
 		return m.viewActionDetail()
+	case modeTaskDetail:
+		return m.viewTaskDetail()
 	case modeAdapters:
 		return m.viewAdapters()
 	case modeZones:

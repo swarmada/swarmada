@@ -17,8 +17,9 @@ package k8sclient
 import "context"
 
 // FleetWatcher is the low-level informer seam: a stream of typed add/update/
-// delete events for the four Swarmada workload CRDs (Robot, FleetAction,
-// RobotProbe, FleetAdapter), plus the Kubernetes Events those robots emit. It
+// delete events for the Swarmada workload CRDs (Robot, FleetAction, FleetTask,
+// RobotProbe, FleetZone, FleetAdapter), plus the Kubernetes Events those robots
+// emit. It
 // exists so nothing above it — the snapshot Store, and therefore internal/ui —
 // imports client-go or controller-runtime: they speak only view types and this
 // interface, which is what makes the UI testable against an in-memory fake with
@@ -68,10 +69,11 @@ type FleetEvent struct {
 	Kind EventKind
 
 	Robot   *RobotView
-	Action    *FleetActionView
+	Action  *FleetActionView
 	Probe   *RobotProbeView
 	Adapter *AdapterView
 	Zone    *ZoneView
+	Task    *FleetTaskView
 
 	// EventsChanged is a content-free poke: a core/v1 Event involving a Robot
 	// was added/updated/deleted. Kind is not meaningful when this is set.

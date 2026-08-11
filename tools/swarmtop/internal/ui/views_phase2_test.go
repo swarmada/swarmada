@@ -47,7 +47,7 @@ func TestActionsView(t *testing.T) {
 		t.Fatalf("t should switch to actions view, got %v", m.mode)
 	}
 	out := plain(m.View())
-	for _, want := range []string{"swarmtop · actions", "DEADLINE", "haul-8846", "InProgress", "robot-3", "High", "62%"} {
+	for _, want := range []string{"swarmtop · tasks", "KIND", "TASK", "haul-8846", "InProgress", "robot-3", "High", "62%"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("actions view missing %q in:\n%s", want, out)
 		}
@@ -110,7 +110,7 @@ func TestActionDetailDrillIn(t *testing.T) {
 		t.Fatalf("enter from actions should open action detail, got %v", m.mode)
 	}
 	out := plain(m.View())
-	for _, want := range []string{"actions › ", "Phase", "Assigned robot"} {
+	for _, want := range []string{"tasks › ", "Phase", "Assigned robot"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("action detail missing %q in:\n%s", want, out)
 		}

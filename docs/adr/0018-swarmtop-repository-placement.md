@@ -8,7 +8,8 @@
 ## Context
 
 `swarmtop` is a read-only, live-updating terminal inspector for Swarmada fleet
-state (`Robot`, `FleetTask`, `FleetAdapter`, `RobotProbe`). It is a **client** of
+state (`Robot`, `FleetAction`, `FleetTask`, `FleetZone`, `FleetAdapter`,
+`RobotProbe`). It is a **client** of
 the control plane, not part of the normative standard: per ADR-0006 the north
 side is the Kubernetes API, so `swarmtop` reads the same CRDs any client would.
 
