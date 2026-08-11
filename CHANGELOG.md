@@ -73,6 +73,21 @@ were **added** or **amended**; the version increment follows
   sets. The warehouse quickstart keeps its own inline single-member composite:
   the three-member sample needs three free robots and would leave that scenario
   no idle spare.
+- **Simulation adapter: reports the disposition when it honours a cancel.** Handling
+  `cancel_action` now emits one stderr line —
+  `CANCEL_HONOURED robot=<id> action=<name> command_id=<n> disposition=STOPPED_SAFELY`
+  — after the stop, the lease release and the `CANCELLED` status emit have all
+  succeeded, so the line records that the cancel was honoured rather than that one
+  arrived. The disposition is read back from the value put on the wire, so the log
+  cannot disagree with the `CancelActionResult` the control plane receives.
+  `CancelDisposition` is the adapter's own determination that the robot reached a
+  safe stop — the control plane cannot derive it, and a mishandled cancel was
+  observable only as the control plane not reassigning, which is equally consistent
+  with a scheduler, lease or capability fault. Nothing on the wire changed: the same
+  message carries the same field, and conformance case C3.6 is unaffected. Tooling
+  that parses the adapter's stderr strictly will see one additional line per cancel;
+  `EDGE_ESTOP_CONFIRMED` is byte-identical and is now pinned by a test rather than by
+  convention.
 - **warehouse-quickstart scenarios.** The quickstart (`make quickstart`) fronts a
   scenario picker — `healthy-fleet`, `battery-edge`, `battery-handoff`,
   `hardware-fault`, `comms-flaky`, `estop-drill` — plus an advanced
