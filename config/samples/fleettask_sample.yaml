@@ -1,0 +1,44 @@
+# A composite FleetTask (RFC-0001 §9.1.5): one objective the control plane
+# accomplishes by generating and scheduling FleetActions, one per member. The
+# task itself never crosses the fleet-adapter boundary — its children do.
+#
+# Three members rather than one, so the behaviours that distinguish a composite
+# from a standalone action are visible: dependsOn gates each step, and
+# status.actionSummary walks 0/3 → 1/3 → 2/3 → 3/3 as they settle.
+#
+# Uses only capabilities the sample robots declare (navigation, camera_front —
+# see demo_a.yaml) and the warehouse-a namespace those samples live in.
+#
+#   kubectl apply -f config/samples/fleettask_sample.yaml -n warehouse-a
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: receiving-round
+  namespace: warehouse-a
+spec:
+  completionPolicy: All
+  failurePolicy: FailFast
+  desiredState: Running
+  actions:
+    - name: approach-dock
+      action:
+        type: Navigate
+        zone: warehouse-a
+        priority: High
+        requiredCapabilities: [navigation]
+    - name: inspect-dock
+      dependsOn: [approach-dock]
+      # Succeeded is the default; stated here to make the gate explicit.
+      startCondition: Succeeded
+      action:
+        type: Navigate
+        zone: warehouse-a
+        priority: Normal
+        requiredCapabilities: [navigation, camera_front]
+    - name: return-to-bay
+      dependsOn: [inspect-dock]
+      action:
+        type: Navigate
+        zone: warehouse-a
+        priority: Low
+        requiredCapabilities: [navigation]

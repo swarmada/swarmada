@@ -797,6 +797,9 @@ apply_fleet() {
     # nested beneath it, and actions that no task owns. Kept here rather than in
     # config/samples so every other scenario stays composite-free (and so the
     # zero-composite path keeps being exercised somewhere).
+    # Deliberately duplicated rather than applying config/samples/fleettask_sample.yaml:
+    # that sample is a three-member chain needing three free robots, which would
+    # saturate this scenario's fleet and leave no idle spare.
     kubectl apply -n "$NS" -f - <<'YAML'
 apiVersion: swarmada.io/v1
 kind: FleetTask

@@ -174,6 +174,13 @@ swarmctl resume task <name> [-n <namespace>]         # resume a task the SYSTEM 
 swarmctl cancel task <name> [-n <namespace>]         # terminal: confirmed stop → Cancelled (NOT resumable)
 swarmctl delete task <name> [-n <namespace>]         # remove a settled record — Pending or terminal (Succeeded/Failed/Cancelled) only
 ```
+A ready-to-apply example ships at `config/samples/fleettask_sample.yaml` — a
+three-member `receiving-round` chain whose members gate on `dependsOn`:
+
+```
+kubectl apply -f config/samples/fleettask_sample.yaml -n warehouse-a
+```
+
 There is **no operator `pause task`** — a task reaches `Paused` only via estop,
 `ZoneMaintenance`, or preemption (§9.6.2.4). `resume` un-pauses; `cancel` ends it. (An
 operator-initiated pause is a possible backlog capability, not a current command.)
