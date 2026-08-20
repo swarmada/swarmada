@@ -19,16 +19,21 @@ physical robot fleets.
 ## The gap it fills
 
 The robotics software stack has neutral, open reference points at most layers:
-physics simulation (Newton, donated to the Linux Foundation), perception and
-navigation (ROS 2), application programming (Intrinsic Flowstate), hardware and
-model runtimes (NVIDIA Isaac / GR00T). The **fleet orchestration** layer — the tier
-that assigns and sequences work across a mixed-vendor fleet — has no vendor-neutral,
-cloud-native open standard. Swarmada occupies that layer.
+physics simulation (Newton, contributed to the Linux Foundation), perception and
+navigation (ROS 2, under the Open Source Robotics Foundation), and the
+robot-to-fleet-manager link (VDA 5050, published by the VDA and VDMA). The
+**fleet orchestration** layer — the tier that assigns and sequences work across a
+mixed-vendor fleet — has open, foundation-hosted software in it: Open-RMF, hosted
+by the Open Source Robotics Foundation and managed by the Open Source Robotics
+Alliance since 2024. What the layer does not have is a declarative,
+Kubernetes-native specification, or a versioned adapter contract with a published
+conformance catalog against which an implementation can be measured. Those two
+absences are what this RFC addresses.
 
 A facility running automation today typically operates robots from three to five
 manufacturers at once, each with its own dashboard, fleet API, and update toolchain,
 and no single source of truth for fleet state. Below a certain fleet size that is
-merely inconvenient; above it, it is operationally unsustainable.
+only inconvenient; above it, it is operationally unsustainable.
 
 ## Why now
 
@@ -43,46 +48,56 @@ urgent:
    recurring per-robot line item, so a neutral orchestration layer at a small
    fraction of that spend is arithmetically justifiable against an existing budget
    line.
-3. **The neutral layer is unoccupied.** There is no CNCF-hosted, declarative,
-   cloud-native fleet orchestration standard. If a vendor-neutral project does not
-   occupy this space, a proprietary standard will.
+3. **The cloud-native layer is unoccupied, and no test oracle exists anywhere in
+   it.** There is no CNCF-hosted, declarative, cloud-native fleet orchestration
+   standard. Separately, no interoperability standard in this field operates a
+   conformance scheme: VDA 5050 and the MassRobotics AMR Interoperability Standard
+   publish schemas but no test suite and no certification body, ISO 21423 is not
+   yet published, and Open-RMF is a reference implementation rather than a
+   standard. A specification that publishes both a contract and the catalog that
+   measures conformance to it is what would occupy this layer as an open standard
+   rather than a proprietary one.
 
 ## Why a new project — and not Open RMF
 
 This is the question a CNCF reviewer will ask first, and it deserves a complete,
 honest answer.
 
-Open RMF is the closest existing project and a technically capable one, with real
-deployments in logistics and healthcare. It is **not a neutral standard.** The
-codebase originated in the entity (OSRC-SG) that Intrinsic — an Alphabet subsidiary
-— acquired in December 2022, and Intrinsic moved fully under Google in
-February 2026. The Open Source Robotics Alliance has provided genuine community governance
-since 2024, but the codebase remains associated with a single large technology
-vendor, which is the concern operators and manufacturers raise when evaluating
-long-term neutrality.
+Open-RMF is the closest existing project and a technically capable one, with real
+deployments in logistics and healthcare. It is open source under Apache-2.0, its
+intellectual property is held by the Open Source Robotics Foundation — an
+independent non-profit — and since 2024 it has been managed by the Open Source
+Robotics Alliance under a published project charter. Any argument that it is not
+foundation-hosted, or that contributions to it accrue to a commercial vendor, is
+incorrect and this RFC does not make one.
 
-Two distinctions matter:
+Two distinctions remain, and neither is about ownership:
 
-- **Governance.** CNCF neutrality requires that no single vendor control a project's
-  direction. A contribution to Open RMF becomes an asset under Google's stewardship
-  regardless of the quality or volume of the contribution — governance structure is
-  not something third-party contributors can change. Enterprise operators,
-  particularly those on Azure or AWS, have raised explicit concerns about adopting a
-  robot-fleet standard controlled by a competing cloud provider; an AWS-originated
-  standard would face the same skepticism from the other direction. Neutrality is
-  the property that makes a standard adoptable across the industry.
-- **Architecture.** Open RMF predates cloud-native Kubernetes patterns and is
+- **Architecture.** Open-RMF predates cloud-native Kubernetes patterns and is
   primarily event-driven; it does not use CRDs, the operator pattern, Helm, or
-  Prometheus natively. Swarmada is built on the reconciliation model — the reason it
-  recovers from connectivity loss, mid-task robot failure, and maintenance windows
-  without operator intervention. Grafting reconciliation onto an event-driven core
-  would be a rewrite, not an additive contribution.
+  Prometheus natively. This specification is built on the reconciliation model —
+  the reason the control plane recovers from connectivity loss, mid-task robot
+  failure, and maintenance windows without operator intervention. Grafting
+  reconciliation onto an event-driven core would be a rewrite rather than an
+  additive contribution. Open-RMF's own successor roadmap (2026-04-06)
+  proposes a modular re-architecture whose module interfaces are, in its words,
+  still to be defined; this RFC takes no position on that work.
+- **Contract and conformance.** Open-RMF specifies a fleet adapter as a software
+  interface within a reference implementation. It does not version that interface
+  as a standalone contract, publish an enumerated conformance catalog, or operate a
+  conformance program — and neither does any interoperability standard in this
+  layer. This specification defines `fleet_adapter.v1` as a versioned contract with
+  an RFC 2119 normative check catalog, and requires that every published result
+  carry the class of evidence that produced it.
 
-**Coexistence, not displacement.** A robot running Open RMF-based navigation can be
-managed by Swarmada through a ROS 2 Fleet Adapter. The two projects address the same
-layer under different governance models; operators can choose based on their
-neutrality requirements, cloud preferences, and existing stack. Swarmada's goal is
-to provide the neutral alternative that Open RMF structurally cannot be.
+A third property — whether a project's maintainer base is drawn from more than one
+employer — is treated in {{ref:alternatives}} §A.1, together with this project's own
+position on it.
+
+**Coexistence, not displacement.** A robot running Open-RMF-based navigation can be
+managed through a ROS 2 Fleet Adapter. The two projects address the same layer on
+different substrates and with different conformance disciplines; operators can
+choose on architecture, cloud infrastructure, and existing stack.
 
 ## The architecture in one picture
 
