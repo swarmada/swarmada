@@ -190,6 +190,10 @@ func TestRobotAdmission_RobotIDDoesNotCollideWithItself(t *testing.T) {
 	// An update re-sends the same object. Comparing on the annotation alone — without
 	// excluding the object's own name — would make every Robot un-updatable the moment it
 	// carried a robot-id, which is to say: always.
+	//
+	// This exercises the rule for real only since the uniqueness check moved out of the
+	// update short-circuit: the update below changes neither class nor adapter, so the
+	// gate previously returned before the robot-id loop ever ran.
 	ctx := context.Background()
 	existing := xoRobot("amr-1", "aisle-b3", "rid-1")
 	g := &RobotAdmissionGate{Client: xoClient(t, xoAdapter(), xoZone("aisle-b3", ""), existing)}
@@ -199,6 +203,23 @@ func TestRobotAdmission_RobotIDDoesNotCollideWithItself(t *testing.T) {
 	if _, err := g.ValidateUpdate(ctx, existing, updated); err != nil {
 		t.Fatalf("a Robot must not collide with its own robot-id on update: %v", err)
 	}
+}
+
+func TestRobotAdmission_RobotIDCollisionIntroducedByUpdateIsRejected(t *testing.T) {
+	// THE CASE THE UPDATE SHORT-CIRCUIT USED TO MISS. Uniqueness was asserted at create
+	// only, so `kubectl annotate robot amr-2 swarmada.io/robot-id=rid-1 --overwrite` handed
+	// a second Robot the identity the Scheduler dispatches by (§9.1.2.6) — two tasks, one
+	// physical robot, which is exactly what the rule exists to prevent. The update below
+	// changes neither spec.robotClass nor spec.adapter.name, so it is the shape of write
+	// the old gate waved through.
+	ctx := context.Background()
+	existing := xoRobot("amr-1", "aisle-b3", "rid-1")
+	current := xoRobot("amr-2", "aisle-b3", "rid-2")
+	g := &RobotAdmissionGate{Client: xoClient(t, xoAdapter(), xoZone("aisle-b3", ""), existing, current)}
+
+	stolen := xoRobot("amr-2", "aisle-b3", "rid-1")
+	_, err := g.ValidateUpdate(ctx, current, stolen)
+	mustRejectWith(t, err, `robot-id "rid-1" is already bound to Robot "amr-1"`)
 }
 
 func TestRobotAdmission_RobotIDListErrorFailsClosed(t *testing.T) {

@@ -108,10 +108,21 @@ type dispatchExclusion struct {
 	Reason string
 }
 
-// filterDispatchEligible returns the subset of robots whose bound FleetAdapter is fit to receive
-// work, plus the exclusions and their reasons. Adapter reads are memoized per call, so N robots
-// sharing one adapter cost one Get.
+// filterDispatchEligible returns the subset of robots fit to receive work, plus the exclusions
+// and their reasons. It enforces two of the RFC-0001 candidate filters
+// ({{ref:control-plane-scheduler}}), in the order that fails cheapest first:
 //
+//	filter 10 — the robot MUST NOT be under an active estop
+//	filter  9 — the robot's bound FleetAdapter MUST be fit for dispatch (ADR-0032)
+//
+// Filter 10 is enforced here rather than in the scheduler package because this is the single
+// choke point the caller uses for BOTH the normal selection and the preemption search
+// (fleetaction_controller.go), and because it is the only place that produces an operator-facing
+// exclusion reason. It needs no FleetZone read: a zone- or namespace-scope estop fans out to a
+// per-robot TriggerEstop (zoneestop_controller.go) which writes Robot.status.estopState, so the
+// robot's own state already carries all three scopes.
+//
+// Adapter reads are memoized per call, so N robots sharing one adapter cost one Get.
 // The returned slice preserves input order, so scheduler ranking is unaffected.
 func (r *FleetActionReconciler) filterDispatchEligible(ctx context.Context, robots []fleetv1.Robot) ([]fleetv1.Robot, []dispatchExclusion) {
 	if len(robots) == 0 {
@@ -125,6 +136,16 @@ func (r *FleetActionReconciler) filterDispatchEligible(ctx context.Context, robo
 
 	for i := range robots {
 		robot := robots[i]
+
+		// Filter 10 — an estopped robot is not a candidate. Dispatching to one produces an
+		// immediate Paused transition and no useful work, and the robot may not be at rest.
+		// Checked before the adapter read because it is free and it is the safety-relevant one.
+		if robotUnderEstop(&robot) {
+			excluded = append(excluded, dispatchExclusion{robot.Name,
+				fmt.Sprintf("robot is under an active emergency stop (estopState %s)", robot.Status.EstopState)})
+			continue
+		}
+
 		name := robot.Spec.Adapter.Name
 		if name == "" {
 			// Admission requires a named adapter (spec.adapter is a required field); a robot that
@@ -167,7 +188,7 @@ func logDispatchExclusions(ctx context.Context, action *fleetv1.FleetAction, exc
 	}
 	l := log.FromContext(ctx)
 	for _, e := range excluded {
-		l.V(1).Info("robot withheld from dispatch: adapter not fit for work (ADR-0032 assignment gate)",
+		l.V(1).Info("robot withheld from dispatch",
 			"action", action.Name, "robot", e.Robot, "reason", e.Reason)
 	}
 }

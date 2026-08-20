@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -68,6 +69,15 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// buildVersion is stamped onto every audit entry as swarmada_version (§9.6.5.2).
+//
+// Set at link time: -ldflags "-X main.buildVersion=v0.3.1". The default is deliberately
+// "dev" rather than a plausible release number: an auditor reading swarmada_version
+// needs to know WHICH build sealed an entry, and a hardcoded version that never tracks
+// the binary is worse than an obviously-unset one — it reads as provenance while
+// carrying none. This field was pinned to "v0.1.0" through every release up to v0.3.
+var buildVersion = "dev"
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -172,7 +182,7 @@ func main() {
 
 	// Register the RFC-0001 §9.3.8 metrics into the controller-runtime registry so
 	// the manager's existing /metrics endpoint (--metrics-bind-address, §9.3.8
-	// default :9090) serves them. Additive instrumentation only — no behaviour
+	// default :8080) serves them. Additive instrumentation only — no behaviour
 	// change, RA-1 untouched.
 	metrics.Register(crmetrics.Registry)
 
@@ -197,8 +207,30 @@ func main() {
 			os.Exit(1)
 		}
 		auditSink = fs
+	} else {
+		// Said out loud, every start. The in-memory sink loses the entire safety audit
+		// trail when the process exits, which is indistinguishable at runtime from a
+		// working one — an operator who never set --audit-log-file has no signal that
+		// §9.6.5 evidence is not being kept until they go looking for it after an
+		// incident. Not fatal: `make run` and the envtest suite rely on this default.
+		setupLog.Info("WARNING: no --audit-log-file configured; the safety audit log is IN MEMORY " +
+			"and is lost on restart. Do not run a production fleet in this mode (RFC-0001 §9.6.5.4).")
 	}
-	auditRecorder := audit.New(auditSink, "v0.1.0")
+	auditRecorder := audit.New(auditSink, buildVersion)
+
+	// Continue each namespace's hash chain where the sink left off. Without this the
+	// chain is tamper-evident only within one process lifetime: every restart reopens
+	// each namespace at sequence 1 chained to genesis, which an auditor cannot tell
+	// apart from a truncate-and-reseal attack (§9.6.5.2).
+	if rerr := auditRecorder.Resume(); rerr != nil {
+		if errors.Is(rerr, audit.ErrSinkNotResumable) {
+			setupLog.Info("audit chain starts at genesis: the configured sink cannot be read back, " +
+				"so per-namespace sequence numbers restart on every process restart")
+		} else {
+			setupLog.Error(rerr, "unable to resume the audit chain; refusing to start", "path", auditLogFile)
+			os.Exit(1)
+		}
+	}
 
 	// Command-push dispatcher (RFC-0001 §9.2, §E-2): pushes verify_*/model_update/
 	// assign_action/renew_lease Commands to a robot's adapter over ControlStream and
@@ -604,6 +636,27 @@ func main() {
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Robot defaulter")
 			os.Exit(1)
+		}
+
+		// Estop / rollout-resume actor stamping (ADR-0046). Four mutators that carry the
+		// authenticated operator from the admission request onto the object, so the
+		// controllers can attribute ESTOP_TRIGGERED / ESTOP_CLEARED / ROLLOUT_RESUMED to a
+		// person instead of a synthetic scope name. Robot's stamp rides RobotDefaulter
+		// above (one mutating webhook per resource).
+		//
+		// All four are failurePolicy=Ignore: attribution is best-effort and must never
+		// block a safe stop. Authorization is unaffected — the validating webhooks on the
+		// same resources keep failing closed on the estop-trigger/estop-clear SAR.
+		for name, setup := range map[string]func(ctrl.Manager) error{
+			"FleetZone estop actor":        (&swarmadawebhook.FleetZoneEstopActorDefaulter{}).SetupWebhookWithManager,
+			"SwarmadaConfig estop actor":   (&swarmadawebhook.SwarmadaConfigEstopActorDefaulter{}).SetupWebhookWithManager,
+			"FirmwareRollout resume actor": (&swarmadawebhook.FirmwareRolloutResumeActorDefaulter{}).SetupWebhookWithManager,
+			"ModelRollout resume actor":    (&swarmadawebhook.ModelRolloutResumeActorDefaulter{}).SetupWebhookWithManager,
+		} {
+			if err = setup(mgr); err != nil {
+				setupLog.Error(err, "unable to create webhook", "webhook", name)
+				os.Exit(1)
+			}
 		}
 
 		if err = (&swarmadawebhook.RobotAdmissionGate{

@@ -105,11 +105,29 @@ func (g *RobotAdmissionGate) ValidateCreate(ctx context.Context, obj runtime.Obj
 	return g.validate(ctx, robot)
 }
 
-// ValidateUpdate re-runs the gate only when the Robot's class assignment or
-// adapter binding changes. Status, label, and annotation updates must not be
-// blocked by a transiently unavailable adapter — otherwise a controller could
-// be unable to record status (e.g. mark a robot Offline) during the very
-// adapter outage that caused it.
+// ValidateUpdate splits the gate in two, because its two halves have different
+// reasons to run.
+//
+// The INVARIANTS (rules 1-3 in validateInvariants) are properties of the Robot
+// itself resolved against other objects' specs: a dangling RobotClass or zone, a
+// non-leaf zone, an unreachable charging dock, a duplicated swarmada.io/robot-id.
+// Nothing about them is transient, so they are re-checked on every update. The
+// robot-id rule in particular is the guard that stops the Scheduler dispatching
+// two tasks to one physical robot (§9.1.2.6) — skipping it on update left
+// `kubectl annotate robot B swarmada.io/robot-id=X --overwrite` free to clone an
+// identity that create-time admission had already refused.
+//
+// The ADAPTER BINDING gate (rule 4 in validateAdapterBinding) is different: it
+// reads the LIVE status of a FleetAdapter, so re-running it on every write would
+// make a transient adapter outage block label and annotation writes on every
+// Robot in the namespace — including the annotations an operator reaches for
+// during that very outage. It is therefore re-run only when the binding it
+// authorizes actually changes (§9.5 "Revoking an adapter's authority").
+//
+// Status writes are not a consideration here either way: the webhook is
+// registered for resources=robots, not robots/status, and every controller
+// writes robot status through Status().Patch on the subresource, which does not
+// route to this hook.
 func (g *RobotAdmissionGate) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	newRobot, ok := newObj.(*fleetv1.Robot)
 	if !ok {
@@ -130,13 +148,18 @@ func (g *RobotAdmissionGate) ValidateUpdate(ctx context.Context, oldObj, newObj 
 		}
 	}
 
-	// Re-run the adapter-binding gate only when the class or adapter changed;
-	// annotation/status/label updates must not be blocked by a transient adapter.
+	// Invariants hold on every write, whatever changed.
+	if warns, err := g.validateInvariants(ctx, newRobot); err != nil {
+		return warns, err
+	}
+
+	// Re-run only the liveness-dependent adapter gate when the class or adapter
+	// changed; annotation and label updates must not be blocked by a transient adapter.
 	if oldRobot.Spec.RobotClass == newRobot.Spec.RobotClass &&
 		oldRobot.Spec.Adapter.Name == newRobot.Spec.Adapter.Name {
 		return nil, nil
 	}
-	return g.validate(ctx, newRobot)
+	return g.validateAdapterBinding(ctx, newRobot)
 }
 
 // ValidateDelete is a no-op; deletions are always permitted.
@@ -144,14 +167,29 @@ func (g *RobotAdmissionGate) ValidateDelete(_ context.Context, _ runtime.Object)
 	return nil, nil
 }
 
+// validate runs every rule. It is the create path; update splits the two halves
+// apart (see ValidateUpdate).
 func (g *RobotAdmissionGate) validate(ctx context.Context, robot *fleetv1.Robot) (admission.Warnings, error) {
-	log := logf.FromContext(ctx).WithValues(
-		"robot", client.ObjectKeyFromObject(robot),
-		"robotClass", robot.Spec.RobotClass,
-		"adapter", robot.Spec.Adapter.Name,
-	)
+	if warns, err := g.validateInvariants(ctx, robot); err != nil {
+		return warns, err
+	}
+	return g.validateAdapterBinding(ctx, robot)
+}
+
+// validateInvariants enforces the rules that are true of a Robot at rest: its
+// RobotClass and zone resolve, the zone is a leaf, its charging dock is reachable
+// from that zone, and its robot-id is unique in the namespace. None of them depend
+// on another object's live status, so all of them run on every create and update.
+func (g *RobotAdmissionGate) validateInvariants(ctx context.Context, robot *fleetv1.Robot) (admission.Warnings, error) {
+	// A gate with no client cannot assert any of these. Deny rather than fall
+	// through: a Robot whose fields are all empty would otherwise be admitted
+	// without a single lookup having been attempted.
+	if g.Client == nil {
+		return nil, fmt.Errorf("robot admission gate has no client; refusing to admit %s/%s unvalidated",
+			robot.Namespace, robot.Name)
+	}
+
 	classPath := field.NewPath("spec").Child("robotClass")
-	adapterPath := field.NewPath("spec").Child("adapter").Child("name")
 
 	// 1. If a RobotClass is named, it must exist in the Robot's namespace — the
 	//    admission-time merge (§5.2.1.2) cannot resolve a dangling reference.
@@ -259,6 +297,26 @@ func (g *RobotAdmissionGate) validate(ctx context.Context, robot *fleetv1.Robot)
 			}
 		}
 	}
+
+	return nil, nil
+}
+
+// validateAdapterBinding enforces the FleetAdapter admission keystone (§5.2.12,
+// §9.5) and the ADR-0032 contract-version condition. Unlike the invariants above
+// this reads the LIVE status of another object, so update re-runs it only when
+// spec.robotClass or spec.adapter.name changes — see ValidateUpdate.
+func (g *RobotAdmissionGate) validateAdapterBinding(ctx context.Context, robot *fleetv1.Robot) (admission.Warnings, error) {
+	if g.Client == nil {
+		return nil, fmt.Errorf("robot admission gate has no client; refusing to admit %s/%s unvalidated",
+			robot.Namespace, robot.Name)
+	}
+
+	log := logf.FromContext(ctx).WithValues(
+		"robot", client.ObjectKeyFromObject(robot),
+		"robotClass", robot.Spec.RobotClass,
+		"adapter", robot.Spec.Adapter.Name,
+	)
+	adapterPath := field.NewPath("spec").Child("adapter").Child("name")
 
 	// 4. The Robot's own adapter binding (spec.adapter.name) must resolve to a
 	//    real, class-serving, Connected, conformance-passed FleetAdapter. The

@@ -128,9 +128,12 @@ func (s *MetricsSweeper) sweep(ctx context.Context) {
 				}
 				phaseByNS[ns][phase]++
 			}
-			// Only the active estop states are counted (Normal is excluded, §9.3.8).
+			// Only the active estop states are counted (Normal and Resuming are
+			// excluded, §9.3.8). The set MUST match RFC-0001 filter 10 and
+			// robotUnderEstop: a robot withheld from dispatch for an estop that
+			// this gauge does not count is invisible to the operator debugging it.
 			switch robots.Items[i].Status.EstopState {
-			case fleetv1.RobotEstopStopping, fleetv1.RobotEstopStopped:
+			case fleetv1.RobotEstopStopping, fleetv1.RobotEstopStopped, fleetv1.RobotEstopFailed:
 				if estopByNS[ns] == nil {
 					estopByNS[ns] = map[string]int{}
 				}

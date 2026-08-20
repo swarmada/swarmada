@@ -81,13 +81,13 @@ type SwarmadaSchedulingConfig struct {
 	ActionRequeueBackoffSeconds int32 `json:"actionRequeueBackoffSeconds,omitempty"`
 	// MaxPendingActionsPerZone caps the number of Pending FleetActions the scheduler
 	// admits per zone before applying backpressure. 0 means unbounded.
-	// Specified, controller pending: not yet enforced by the scheduler.
+	// Enforced by the FleetAction admission webhook (pendingCap).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxPendingActionsPerZone int32 `json:"maxPendingActionsPerZone,omitempty"`
 	// PreferSameManufacturer, when true, ranks robots whose manufacturer matches an
 	// action's PreferredManufacturer first (soft preference).
-	// Specified, controller pending: not yet applied by the scheduler ranker.
+	// Applied by the FleetAction controller's scheduler tiebreak (preferSameManufacturer).
 	// +optional
 	// +kubebuilder:default=true
 	PreferSameManufacturer *bool `json:"preferSameManufacturer,omitempty"`
@@ -103,6 +103,36 @@ type SwarmadaSchedulingConfig struct {
 	// +optional
 	// +kubebuilder:default=true
 	HonorPreferredRobot *bool `json:"honorPreferredRobot,omitempty"`
+
+	// LeaseDurationSeconds is the task-lease horizon (§9.6.3.5): how long a robot may
+	// execute an assigned action without a renewal before it MUST self-stop.
+	//
+	// This is a SAFETY bound, not a tuning knob. The resolved value is both written to
+	// FleetAction.status.leaseExpiresAt and sent to the robot as Command.lease_duration_ms,
+	// which arms the adapter's self-stop timer (§9.2.8 "Task-lease self-stop", §9.6.3.3
+	// item 1). Raising it directly extends how long a robot that has lost its link keeps
+	// moving before halting itself — hence the 300s ceiling. The 10s floor keeps the
+	// horizon above the derived renewal interval by a workable margin.
+	//
+	// The renewal interval is always leaseDurationSeconds/3 (§9.3.2) and is NOT separately
+	// configurable: deriving it makes it impossible to widen the horizon without also
+	// renewing proportionally sooner (ADR-0044).
+	// +kubebuilder:default=30
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=300
+	LeaseDurationSeconds int32 `json:"leaseDurationSeconds,omitempty"`
+
+	// ClockSkewMarginSeconds is the margin added before a lease is treated as provably
+	// expired (§9.6.3.5 condition 3: now ≥ leaseExpiresAt + skew). It absorbs clock
+	// disagreement between the control plane and the robot.
+	//
+	// Also a safety bound: too small and the control plane may reassign an action while
+	// the robot still believes its lease is live — a double-execution window; too large
+	// and recovery after a disconnect is needlessly delayed. Bounded to 1..60s (ADR-0044).
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=60
+	ClockSkewMarginSeconds int32 `json:"clockSkewMarginSeconds,omitempty"`
 }
 
 // ProvisioningMode controls how new robots are onboarded.
@@ -167,7 +197,8 @@ type SwarmadaMaintenanceConfig struct {
 	// RequireEstopClearBeforeResume is the namespace default for the ZoneMaintenance
 	// field of the same name: block resume of a paused robot until any active estop
 	// on it is cleared.
-	// Specified, controller pending: the resume-gate is not yet enforced.
+	// Enforced by the ZoneMaintenance controller as the namespace-level fallback
+	// when ZoneMaintenance.spec.requireEstopClearBeforeResume is unset.
 	// +optional
 	// +kubebuilder:default=true
 	RequireEstopClearBeforeResume *bool `json:"requireEstopClearBeforeResume,omitempty"`

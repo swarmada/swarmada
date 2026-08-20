@@ -42,7 +42,7 @@ limitations under the License.
 //
 // Liveness is kept off the write path too: LastHeartbeat is tracked in the
 // pipeline, and only the LOSS of liveness (Phase -> Offline) yields a status
-// write. The Health Monitor reads from the pipeline, not from etcd timestamps.
+// write. Connectivity is read from the pipeline, not from etcd timestamps.
 //
 // # Integration seam (TelemetryPayload -> Frame)
 //

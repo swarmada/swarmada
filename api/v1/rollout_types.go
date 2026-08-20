@@ -75,8 +75,16 @@ type RollingUpdateStrategy struct {
 	// +kubebuilder:default="10%"
 	MaxUnavailable string `json:"maxUnavailable,omitempty"`
 
-	// PauseOnError halts the rollout if any robot fails to update.
-	// The operator must resume with swarmctl resume rollout.
+	// PauseOnError halts the rollout if any robot fails to update: no further robot
+	// enters the batch while a failure stands, though in-flight updaters continue.
+	//
+	// The operator resumes with `swarmctl rollout resume`, which is gated on the
+	// rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+	// annotation the controller consumes. Resume EXCLUDES the robots that failed from
+	// further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+	// artifact needs a fresh rollout. Excluded robots are named in
+	// status.excludedRobots and count as settled, so the rollout can reach a terminal
+	// phase and its record becomes deletable.
 	// +kubebuilder:default=true
 	PauseOnError bool `json:"pauseOnError,omitempty"`
 }
@@ -176,20 +184,21 @@ type FirmwareRolloutSpec struct {
 	// +kubebuilder:validation:Required
 	TargetSelector metav1.LabelSelector `json:"targetSelector"`
 
-	// NewVersion is the target firmware version string (semver).
+	// NewVersion is the target firmware version string.
 	//
-	// The pattern matches ModelRollout.spec.newVersion: both are compared for ordering at
-	// rollout start, and an unparseable version cannot be ordered. MinLength=1 alone admitted
-	// values like "latest" or "v2.1" that read as versions and sort as nothing, so the failure
-	// arrived at batch selection — after the rollout was created and an operator believed it
-	// scheduled — rather than at admission.
+	// Swarmada treats it as OPAQUE: it is never parsed, ordered or compared. Batch
+	// classification is by EQUALITY only — a robot is "done" when
+	// Status.FirmwareVersion == NewVersion and "updating" when its pending-firmware
+	// annotation == NewVersion; the eligible set is sorted by NAME, not by version.
+	// Vendor firmware strings are frequently not semver ("2.5.0-rc1", "v2.5.0",
+	// "2026.06"), so constraining the form here would reject valid targets while
+	// protecting nothing.
 	//
-	// Deliberately bare `major.minor.patch`: prerelease and build metadata are excluded here
-	// for the same reason the contract-version parser excludes them (RFC-0001 §9.2.2) —
-	// admitting them would require this API to define their precedence, and it does not.
+	// ModelRollout.NewVersion IS pattern-constrained to bare major.minor.patch,
+	// because that controller refuses downgrades via versionIsNewer and therefore
+	// needs a parseable order. The asymmetry is deliberate (RFC-0001 D2).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern=`^\d+\.\d+\.\d+$`
 	NewVersion string `json:"newVersion"`
 
 	// FirmwareURI is the download URL for the firmware artifact.
@@ -253,6 +262,15 @@ type FirmwareRolloutStatus struct {
 	// +listType=atomic
 	CurrentBatch []RolloutBatchRobot  `json:"currentBatch,omitempty"`
 	FailedRobots []RolloutRobotResult `json:"failedRobots,omitempty"`
+
+	// ExcludedRobots names the robots an operator resume removed from this rollout
+	// (ADR-0041). They failed, the operator resumed past them, and this rollout will
+	// not attempt them again — retrying a failed artifact is what a FRESH rollout is
+	// for. They are excluded from every progress bucket, so they neither re-pause the
+	// rollout nor hold it short of a terminal phase; a non-empty list surfaces that the
+	// fleet did not fully converge on this version.
+	// +optional
+	ExcludedRobots []string `json:"excludedRobots,omitempty"`
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -373,7 +391,9 @@ type ModelRolloutSpec struct {
 	GrantsCapabilities []string `json:"grantsCapabilities,omitempty"`
 
 	// RevokesCapabilities lists capabilities removed when this model replaces
-	// a previous model with a different capability profile.
+	// a previous model with a different capability set. ("Capability set" is the
+	// northbound seam of ADR-0037; the southbound axis is a "protocol profile".
+	// This comment said "capability profile", which is neither.)
 	// MaxItems bounds CEL cost (see GrantsCapabilities above).
 	// +optional
 	// +kubebuilder:validation:MaxItems=32
@@ -387,9 +407,10 @@ type ModelRolloutSpec struct {
 	// +optional
 	SafetyConstraints RolloutSafetyConstraints `json:"safetyConstraints,omitempty"`
 
-	// MaxDownloadTimeMinutes: if a model download exceeds this duration on a
-	// given robot, that robot's update is marked Failed.
-	// 0 means no limit.
+	// MaxDownloadTimeMinutes: specified so that if a model download exceeds this
+	// duration on a given robot, that robot's update is marked Failed.
+	// 0 means no limit. Specified, not implemented at v0.3: no controller reads
+	// this field or times a download against it.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=480
 	// +kubebuilder:default=30
@@ -437,6 +458,15 @@ type ModelRolloutStatus struct {
 	// fresh rollout), so a reverted robot is never pushed back into an update loop.
 	// +optional
 	RolledBackRobots []string `json:"rolledBackRobots,omitempty"`
+
+	// ExcludedRobots names the robots an operator resume removed from this rollout
+	// (ADR-0041). They failed, the operator resumed past them, and this rollout will
+	// not attempt them again — retrying a failed artifact is what a FRESH rollout is
+	// for. They are excluded from every progress bucket, so they neither re-pause the
+	// rollout nor hold it short of a terminal phase; a non-empty list surfaces that the
+	// fleet did not fully converge on this version.
+	// +optional
+	ExcludedRobots []string `json:"excludedRobots,omitempty"`
 
 	// RollbackVersions records, per robot, the model version it was running when it
 	// entered this rollout's batch — the revert target for an Auto rollback. It is

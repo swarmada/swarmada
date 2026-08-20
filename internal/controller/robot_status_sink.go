@@ -46,9 +46,9 @@ const RobotIDAnnotation = fleetv1.RobotIDAnnotation
 // does NOT write Phase or AssignedAction: those are owned by the scheduler and the
 // robot lifecycle controllers and are single-executor-critical (§9.6.3.5).
 // Racing them from the telemetry plane would be unsafe. Telemetry-driven phase
-// and connectivity transitions are the Health Monitor's responsibility (§9.3.3),
-// and robot-reported action state is reconciled by the reconnect protocol (§9.2.6);
-// both are separate from this projection.
+// and connectivity transitions belong to the Robot reconciler and the FleetAdapter
+// controller (§9.3.3); robot-reported action state is reconciled by the reconnect
+// protocol (§9.2.6). All are separate from this projection.
 type RobotStatusSink struct {
 	client.Client
 }

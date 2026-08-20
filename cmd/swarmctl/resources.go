@@ -145,6 +145,7 @@ func init() {
 	registerModelPolicy()
 	registerSwarmadaConfig()
 	registerZoneMaintenance()
+	registerFleetTask()
 }
 
 func registerRobot() {
@@ -180,7 +181,10 @@ func registerRobot() {
 
 func registerFleetAction() {
 	registerResource(&resourceDef{
-		singular: "fleetaction", plural: "fleetactions", kind: "FleetAction", aliases: []string{"ft"},
+		// `fact` is FleetAction's own declared shortName
+		// (api/v1/fleetaction_types.go: +kubebuilder:resource:shortName=fact). `ft`
+		// was bound here in error and belongs to FleetTask.
+		singular: "fleetaction", plural: "fleetactions", kind: "FleetAction", aliases: []string{"fact"},
 		gvk:       gvkOf("FleetAction"),
 		newList:   func() client.ObjectList { return &fleetv1.FleetActionList{} },
 		newObject: func() client.Object { return &fleetv1.FleetAction{} },
@@ -527,5 +531,59 @@ func registerZoneMaintenance() {
 			}
 		},
 		conditions: func(o client.Object) []metav1.Condition { return o.(*fleetv1.ZoneMaintenance).Status.Conditions },
+	})
+}
+
+func registerFleetTask() {
+	registerResource(&resourceDef{
+		// `ft` is FleetTask's own declared shortName
+		// (api/v1/fleettask_types.go: +kubebuilder:resource:shortName=ft), so
+		// `kubectl get ft` and `swarmctl get ft` resolve to the same kind.
+		singular: "fleettask", plural: "fleettasks", kind: "FleetTask", aliases: []string{"ft"},
+		gvk:       gvkOf("FleetTask"),
+		newList:   func() client.ObjectList { return &fleetv1.FleetTaskList{} },
+		newObject: func() client.Object { return &fleetv1.FleetTask{} },
+		items: func(l client.ObjectList) []client.Object {
+			tl := l.(*fleetv1.FleetTaskList)
+			out := make([]client.Object, len(tl.Items))
+			for i := range tl.Items {
+				out[i] = &tl.Items[i]
+			}
+			return out
+		},
+		// Mirrors the type's own printcolumn markers, in declared order.
+		columns: []column{
+			{header: "PHASE", cell: func(o client.Object) cli.Cell { return text(string(o.(*fleetv1.FleetTask).Status.Phase)) }},
+			{header: "ACTIONS", cell: func(o client.Object) cli.Cell { return text(o.(*fleetv1.FleetTask).Status.ActionSummary) }},
+			{header: "DESIRED", cell: func(o client.Object) cli.Cell { return text(string(o.(*fleetv1.FleetTask).Spec.DesiredState)) }},
+			{header: "AGE", cell: func(o client.Object) cli.Cell {
+				return cli.TextCell(cli.Age(o.(*fleetv1.FleetTask).CreationTimestamp))
+			}},
+		},
+		details: func(o client.Object) []cli.KV {
+			t := o.(*fleetv1.FleetTask)
+			kv := []cli.KV{
+				{Label: "Completion Policy", Value: orNone(string(t.Spec.CompletionPolicy))},
+			}
+			// Quorum is meaningful only under completionPolicy: Quorum, and a nil
+			// quorum there is itself a defect worth surfacing rather than hiding
+			// behind a default (ITEM-0050).
+			if t.Spec.CompletionPolicy == fleetv1.CompletionPolicyQuorum {
+				if t.Spec.Quorum == nil {
+					kv = append(kv, cli.KV{Label: "Quorum", Value: "<unset>"})
+				} else {
+					kv = append(kv, cli.KV{Label: "Quorum", Value: fmt.Sprintf("%d", *t.Spec.Quorum)})
+				}
+			}
+			return append(kv,
+				cli.KV{Label: "Failure Policy", Value: orNone(string(t.Spec.FailurePolicy))},
+				cli.KV{Label: "Desired State", Value: orNone(string(t.Spec.DesiredState))},
+				cli.KV{Label: "Phase", Value: orNone(string(t.Status.Phase))},
+				cli.KV{Label: "Actions", Value: fmt.Sprintf("%d declared, %s", len(t.Spec.Actions), orNone(t.Status.ActionSummary))},
+				cli.KV{Label: "Started", Value: cli.AgePtr(t.Status.StartedAt)},
+				cli.KV{Label: "Completed", Value: cli.AgePtr(t.Status.CompletionTime)},
+			)
+		},
+		conditions: func(o client.Object) []metav1.Condition { return o.(*fleetv1.FleetTask).Status.Conditions },
 	})
 }

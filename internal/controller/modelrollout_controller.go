@@ -119,13 +119,35 @@ func (r *ModelRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		rolledBackSet[n] = true
 	}
 
-	var done, updating, failed, eligible, rolledBack, newer []*fleetv1.Robot
+	// An operator resume converts the robots that are currently failed into this
+	// rollout's excluded set (ADR-0041), so the pause cannot re-latch off the same
+	// robots on the very next reconcile. Applied BEFORE classification so this pass
+	// already sees them excluded.
+	if done, err := r.applyResume(ctx, rollout); err != nil {
+		return ctrl.Result{}, err
+	} else if done {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	excludedSet := make(map[string]bool, len(rollout.Status.ExcludedRobots))
+	for _, n := range rollout.Status.ExcludedRobots {
+		excludedSet[n] = true
+	}
+
+	var done, updating, failed, eligible, rolledBack, newer, excluded []*fleetv1.Robot
 	for i := range robots.Items {
 		rob := &robots.Items[i]
 		if rolledBackSet[rob.Name] {
 			// Already auto-reverted by this rollout — excluded from every bucket so it
 			// is neither re-updated nor counted as pending/failed.
 			rolledBack = append(rolledBack, rob)
+			continue
+		}
+		if excludedSet[rob.Name] {
+			// An operator resumed past this robot. Same treatment as a rolled-back one:
+			// out of every bucket, so it neither re-pauses the rollout (it is no longer
+			// in `failed`) nor is re-dispatched to (it is no longer in `eligible`) nor
+			// holds the rollout short of terminal (it counts as settled below).
+			excluded = append(excluded, rob)
 			continue
 		}
 		switch classifyModel(rob, rollout.Spec.ModelName, rollout.Spec.NewVersion) {
@@ -238,7 +260,7 @@ func (r *ModelRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// ── Rollout status ─────────────────────────────────────────────────────────
 	newStatus := computeRolloutStatus(rollout.Spec.ModelName, total,
-		done, updating, failed, rolledBack, newer, paused, rollbackVersions, rollout.Status.CurrentBatch)
+		done, updating, failed, rolledBack, newer, excluded, paused, rollbackVersions, rollout.Status.CurrentBatch)
 
 	// Announce the refusal once per reconcile rather than per robot: on a large fleet a
 	// per-robot event would bury the signal it exists to give. A silent skip is what makes
@@ -253,6 +275,18 @@ func (r *ModelRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"%d robot(s) already run a newer %s than %s and were not updated: %s",
 			len(newer), rollout.Spec.ModelName, rollout.Spec.NewVersion, strings.Join(names, ", ")))
 	}
+	// PausedAt anchors the halt for an operator and for the audit entry. Stamped on the
+	// EDGE into Paused so it records when the rollout stopped, not when it was last
+	// reconciled while stopped — and so it rides the material-change patch below.
+	if newStatus.Phase == fleetv1.RolloutPhasePaused {
+		if rollout.Status.PausedAt != nil {
+			newStatus.PausedAt = rollout.Status.PausedAt
+		} else {
+			pausedAt := metav1.Now()
+			newStatus.PausedAt = &pausedAt
+		}
+	}
+	pauseEdge := newStatus.Phase == fleetv1.RolloutPhasePaused && rollout.Status.Phase != fleetv1.RolloutPhasePaused
 	if !equality.Semantic.DeepEqual(rollout.Status, newStatus) {
 		orig := rollout.DeepCopy()
 		rollout.Status = newStatus
@@ -261,6 +295,19 @@ func (r *ModelRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		logger.V(1).Info("model rollout progress", "phase", newStatus.Phase,
 			"updated", newStatus.RobotsUpdated, "total", newStatus.RobotsTotal)
+		// §9.5.4 requires MODEL_ROLLOUT_PAUSED. Sealed on the edge, so a rollout that sits
+		// Paused across many reconciles seals one entry rather than one per pass.
+		if pauseEdge {
+			failedNames := make([]string, 0, len(newStatus.FailedRobots))
+			for _, f := range newStatus.FailedRobots {
+				failedNames = append(failedNames, f.RobotName)
+			}
+			r.sealModelEvent(ctx, rollout, "", audit.EventModelRolloutPaused, "pause", audit.OutcomeError,
+				map[string]string{
+					"model_name":    rollout.Spec.ModelName,
+					"failed_robots": strings.Join(failedNames, ","),
+				})
+		}
 	}
 
 	// While updaters are outstanding, requeue to pick up the adapter-reported
@@ -472,19 +519,82 @@ func classifyModel(rob *fleetv1.Robot, modelName, newVersion string) modelState 
 // sealModelEvent appends one §9.6.5.1 entry about a model rollout. Best-effort and
 // nil-safe: the push, the mark and the classification have all already happened, and an
 // audit sink must never be able to hold up a model update or a rollback.
+// applyResume consumes a pending swarmada.io/rollout-resume annotation (ADR-0041).
+//
+// It moves the robots this rollout currently records as failed into status.excludedRobots and
+// clears status.pausedAt. Those robots are then out of every progress bucket, so `paused` —
+// which is derived per reconcile from len(failed), not latched — cannot immediately re-latch
+// off the same robots, and the rollout can reach a terminal phase and become deletable.
+//
+// Returns done=true when it wrote status; the caller ends the reconcile and the write requeues.
+// Idempotent: a request already applied writes nothing (RA-1). A rollout that is NOT paused
+// still records the request as processed, so a stale annotation cannot silently resume a
+// FUTURE pause.
+func (r *ModelRolloutReconciler) applyResume(ctx context.Context, rollout *fleetv1.ModelRollout) (bool, error) {
+	req, pending := pendingResume(rollout.Annotations)
+	if !pending {
+		return false, nil
+	}
+
+	resumed := false
+	if rollout.Status.Phase == fleetv1.RolloutPhasePaused {
+		newlyExcluded := make([]string, 0, len(rollout.Status.FailedRobots))
+		for _, f := range rollout.Status.FailedRobots {
+			newlyExcluded = append(newlyExcluded, f.RobotName)
+		}
+
+		base := rollout.DeepCopy()
+		rollout.Status.ExcludedRobots = mergeExcluded(rollout.Status.ExcludedRobots, newlyExcluded)
+		// The failure list is what re-derives `paused`; leaving it would re-pause on the very
+		// next reconcile and make the resume look like it did nothing — the same trap
+		// policy-reset avoids by zeroing ConsecutiveRejections.
+		rollout.Status.FailedRobots = nil
+		rollout.Status.PausedAt = nil
+		if err := r.Status().Patch(ctx, rollout, client.MergeFrom(base)); err != nil {
+			return false, fmt.Errorf("resuming model rollout: %w", err)
+		}
+		r.sealModelEventAs(ctx, rollout,
+			estopActor(rollout.Annotations, "modelrollout-controller"),
+			"", audit.EventRolloutResumed, "resume", audit.OutcomeAllowed,
+			map[string]string{
+				"reason":          req,
+				"excluded_robots": strings.Join(newlyExcluded, ","),
+			})
+		resumed = true
+	}
+
+	if err := markResumeProcessed(ctx, r.Client, rollout, req); err != nil {
+		return false, err
+	}
+	return resumed, nil
+}
+
 func (r *ModelRolloutReconciler) sealModelEvent(ctx context.Context, rollout *fleetv1.ModelRollout,
 	robotName, eventType, action string, outcome audit.Outcome, detail map[string]string) {
+	r.sealModelEventAs(ctx, rollout,
+		audit.Actor{Type: audit.ActorServiceAccount, Identity: "modelrollout-controller"},
+		robotName, eventType, action, outcome, detail)
+}
+
+// sealModelEventAs is sealModelEvent with an explicit actor — see the FirmwareRollout twin
+// for why only ROLLOUT_RESUMED uses it (ADR-0046).
+func (r *ModelRolloutReconciler) sealModelEventAs(ctx context.Context, rollout *fleetv1.ModelRollout,
+	actor audit.Actor, robotName, eventType, action string, outcome audit.Outcome, detail map[string]string) {
 	if r.Audit == nil {
 		return
 	}
 	if detail == nil {
 		detail = map[string]string{}
 	}
-	detail["robot"] = robotName
+	// Rollout-scope events (pause, resume) concern the whole rollout, not one robot;
+	// an empty "robot" key would claim a subject that does not exist.
+	if robotName != "" {
+		detail["robot"] = robotName
+	}
 	if _, err := r.Audit.Record(audit.Entry{
 		EventType: eventType,
 		Namespace: rollout.Namespace,
-		Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: "modelrollout-controller"},
+		Actor:     actor,
 		Resource:  audit.Resource{Kind: "ModelRollout", Namespace: rollout.Namespace, Name: rollout.Name},
 		Action:    action,
 		Outcome:   outcome,
@@ -699,7 +809,7 @@ func maxUnavailable(spec string, total int) int {
 	return n
 }
 
-func computeRolloutStatus(modelName string, total int, done, updating, failed, rolledBack, newer []*fleetv1.Robot, paused bool, rollbackVersions map[string]string, prior []fleetv1.RolloutBatchRobot) fleetv1.ModelRolloutStatus {
+func computeRolloutStatus(modelName string, total int, done, updating, failed, rolledBack, newer, excluded []*fleetv1.Robot, paused bool, rollbackVersions map[string]string, prior []fleetv1.RolloutBatchRobot) fleetv1.ModelRolloutStatus {
 	batch := buildRolloutBatch(updating, prior, modelInitialPhase, func(*fleetv1.Robot) string { return "" }, true)
 
 	failedResults := make([]fleetv1.RolloutRobotResult, 0, len(failed))
@@ -766,10 +876,21 @@ func computeRolloutStatus(modelName string, total int, done, updating, failed, r
 	if len(rolledBackNames) > 0 {
 		st.RolledBackRobots = rolledBackNames
 	}
+	if len(excluded) > 0 {
+		excludedNames := make([]string, 0, len(excluded))
+		for _, r := range excluded {
+			excludedNames = append(excludedNames, r.Name)
+		}
+		sort.Strings(excludedNames)
+		st.ExcludedRobots = excludedNames
+	}
 	switch {
-	case len(done)+len(rolledBack)+len(newer) == total && total > 0:
-		// Every robot is either on newVersion or was reverted. Succeeded, but a
-		// non-zero RobotsRolledBack surfaces the version fragmentation (§6.7).
+	case len(done)+len(rolledBack)+len(newer)+len(excluded) == total && total > 0:
+		// Every robot is on newVersion, was reverted, or was excluded by an operator
+		// resume. Succeeded, but a non-zero RobotsRolledBack / ExcludedRobots surfaces the
+		// version fragmentation (§6.7, ADR-0041). Counting excluded robots as settled is
+		// what lets a resumed rollout reach a terminal phase at all — without it the
+		// record could never be deleted, which is the other half of the wedge resume fixes.
 		st.Phase = fleetv1.RolloutPhaseSucceeded
 	case paused:
 		st.Phase = fleetv1.RolloutPhasePaused

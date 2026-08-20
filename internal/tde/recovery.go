@@ -80,6 +80,26 @@ func (e *Engine) recoverZone(ctx context.Context, c client.Client, z *fleetv1.Fl
 		zs.resources = map[string]*fleetv1.SharedResourceQueue{}
 	} else {
 		zs.resources = queuesFromStatus(z.Status.SharedResourceQueues)
+
+		// Releasing a reservation has to release the holds that went with it. Validate
+		// and ReleaseReservedOnly rebuilt the queues verbatim from status while dropping
+		// reservations, so an action recovery had just released stayed the recorded
+		// holder of a corridor or lift with nothing left to release it -- a shared
+		// resource leaked permanently across a restart, and its waiters never promoted
+		// (D-TDE-7). ReleaseAll needs no equivalent: it discards the queues outright.
+		keptIDs := make(map[string]bool, len(kept))
+		for i := range kept {
+			keptIDs[kept[i].ActionID] = true
+		}
+		for _, q := range zs.resources {
+			for _, id := range queueActionIDs(q) {
+				if keptIDs[id] {
+					continue
+				}
+				capacity := e.resourceCapacity(ctx, z.Namespace, z.Name, q.ResourceName)
+				releaseHolder(q, id, e.now(), capacity)
+			}
+		}
 	}
 
 	// Mirror the recovered set back to status via the supplied client.

@@ -90,7 +90,7 @@ spec:
                   rejections after which the controller sets a FailedRepeatedly condition and
                   SUSPENDS evaluation — further triggers are silently dropped until an operator
                   resets the policy (swarmctl reset policy). 0 disables suspension (unlimited
-                  retries). §9.1.9.4.
+                  retries). §9.1.10.4.
                 format: int32
                 minimum: 0
                 type: integer
@@ -107,6 +107,7 @@ spec:
                 description: |-
                   ModelName is the logical model name this policy governs.
                   Must match InstalledModel.name on target robots.
+                minLength: 1
                 type: string
               qualityGate:
                 description: |-
@@ -157,6 +158,8 @@ spec:
                       (ADR-0021): when set, an absent real_pick_success_rate is treated as an
                       infinite gap and FAILS the gate — real-hardware validation is required, it is
                       never skipped because real metrics were not reported.
+                    maximum: 1
+                    minimum: 0
                     type: number
                   minEvalEpisodes:
                     description: |-
@@ -237,8 +240,16 @@ spec:
                           pauseOnError:
                             default: true
                             description: |-
-                              PauseOnError halts the rollout if any robot fails to update.
-                              The operator must resume with swarmctl resume rollout.
+                              PauseOnError halts the rollout if any robot fails to update: no further robot
+                              enters the batch while a failure stands, though in-flight updaters continue.
+
+                              The operator resumes with `swarmctl rollout resume`, which is gated on the
+                              rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                              annotation the controller consumes. Resume EXCLUDES the robots that failed from
+                              further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+                              artifact needs a fresh rollout. Excluded robots are named in
+                              status.excludedRobots and count as settled, so the rollout can reach a terminal
+                              phase and its record becomes deletable.
                             type: boolean
                         type: object
                       type:
@@ -439,7 +450,7 @@ spec:
                   ConsecutiveRejections counts quality-gate rejections since the last Deploy
                   decision (reset to 0 on any Deploy). When it reaches
                   spec.consecutiveRejectionLimit the FailedRepeatedly condition suspends
-                  evaluation. §9.1.9.4.
+                  evaluation. §9.1.10.4.
                 format: int32
                 type: integer
               deploymentCount:

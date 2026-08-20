@@ -52,6 +52,60 @@ webhooks:
       service:
         name: {{ $svc }}
         namespace: {{ .Release.Namespace }}
+        path: /mutate-swarmada-io-v1-firmwarerollout
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: mfirmwarerollout.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["firmwarerollouts"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-swarmada-io-v1-fleetzone
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: mfleetzone.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["fleetzones"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-swarmada-io-v1-modelrollout
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: mmodelrollout.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["modelrollouts"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
         path: /mutate-swarmada-io-v1-robot
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
@@ -63,6 +117,24 @@ webhooks:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["robots"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-swarmada-io-v1-swarmadaconfig
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: mswarmadaconfig.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["swarmadaconfigs"]
     sideEffects: None
 ---
 apiVersion: admissionregistration.k8s.io/v1

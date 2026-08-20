@@ -57,15 +57,37 @@ var (
 	modelRolloutGR    = schema.GroupResource{Group: fleetv1.GroupVersion.Group, Resource: "modelrollouts"}
 )
 
-// rolloutDeleteForbidden builds the shared Forbidden response. It names only mechanisms that exist:
-// a rollout is paused/allowed to settle, never "abandoned" (there is no abandon verb today).
+// rolloutDeleteForbidden builds the shared Forbidden response. It names only mechanisms that
+// exist: there is no abandon verb and no `pause rollout` command, so it points at the one path
+// that actually moves a stuck rollout to a terminal phase.
+//
+// A Paused rollout gets a different instruction from a live one, because it is the case an
+// operator is most likely to hit and the one where "let it reach a terminal phase" is useless
+// advice: a rollout paused by pauseOnError makes no further progress on its own. `swarmctl
+// rollout resume` excludes the robots that failed (ADR-0041), which lets it settle and become
+// deletable.
 func rolloutDeleteForbidden(gr schema.GroupResource, kind, ns, name string, phase fleetv1.RolloutPhase) error {
+	remedy := fmt.Sprintf("let it reach a terminal phase, then delete the record (namespace %s)", ns)
+	if phase == fleetv1.RolloutPhasePaused {
+		remedy = fmt.Sprintf(
+			"it is halted by pauseOnError and will not progress on its own: resume it with "+
+				"`swarmctl rollout resume %s --kind %s -n %s`, which excludes the robots that failed "+
+				"so the rollout can settle, then delete the record",
+			name, rolloutKindFlag(kind), ns)
+	}
 	return apierrors.NewForbidden(gr, name, fmt.Errorf(
 		"%s is %s: only a terminal record (Succeeded/Failed) may be deleted, because a rollout that is "+
 			"still live owns in-flight per-robot update state (a ModelRollout suspends model-granted "+
-			"capabilities while Updating). Let it reach a terminal phase — pause it if you need it to "+
-			"stop progressing (swarmctl pause rollout %s -n %s) — then delete the record",
-		kind, phaseOrUnsetRollout(phase), name, ns))
+			"capabilities while Updating). %s",
+		kind, phaseOrUnsetRollout(phase), remedy))
+}
+
+// rolloutKindFlag maps a Kind to the --kind value `swarmctl rollout resume` expects.
+func rolloutKindFlag(kind string) string {
+	if kind == "ModelRollout" {
+		return "model"
+	}
+	return "firmware"
 }
 
 // phaseOrUnsetRollout renders an empty phase readably in an admission message.

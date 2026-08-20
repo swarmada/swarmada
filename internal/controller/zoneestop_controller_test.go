@@ -20,6 +20,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,8 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/safety"
+
+	"github.com/swarmada/swarmada/internal/metrics"
 )
 
 const zeNS = "warehouse-a"
@@ -39,14 +42,26 @@ const zeNS = "warehouse-a"
 // fakeEstopper records which robots were estopped/cleared and returns a scripted
 // state.
 type fakeEstopper struct {
+	// mu guards the recorders. Zone and namespace estop fan out in PARALLEL (§9.6.2.1),
+	// so TriggerEstop is called concurrently — the double has to be as safe as the thing
+	// it stands in for, or `go test -race` fails on the test's own bookkeeping.
+	mu       sync.Mutex
 	estopped []string
 	cleared  []string
 	state    fleetv1.RobotEstopState
+	// scopes records the §9.3.8 scope label each call carried. Every emit site used to
+	// hard-code "robot", so a zone or namespace estop was indistinguishable from a
+	// single-robot one in the metrics; recording it here is what lets a test say otherwise.
+	scopes []metrics.EstopScope
 }
 
-func (f *fakeEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string) (safety.Result, error) {
+func (f *fakeEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
+	scope metrics.EstopScope) (safety.Result, error) {
+	f.mu.Lock()
+	f.scopes = append(f.scopes, scope)
 	f.estopped = append(f.estopped, robotID)
 	st := f.state
+	f.mu.Unlock()
 	if st == "" {
 		st = fleetv1.RobotEstopStopped
 	}
@@ -54,12 +69,23 @@ func (f *fakeEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string) 
 }
 
 func (f *fakeEstopper) ClearEstop(_ context.Context, _, robotID, _ string) (fleetv1.RobotEstopState, error) {
+	f.mu.Lock()
 	f.cleared = append(f.cleared, robotID)
+	f.mu.Unlock()
 	return fleetv1.RobotEstopNormal, nil
 }
 
-func (f *fakeEstopper) names() []string        { sort.Strings(f.estopped); return f.estopped }
-func (f *fakeEstopper) clearedNames() []string { sort.Strings(f.cleared); return f.cleared }
+// names/clearedNames return SORTED COPIES. Under a parallel fan-out the arrival order
+// carries no information — asserting on it would be asserting on goroutine scheduling — so
+// the doubles normalise it rather than letting every caller remember to.
+func (f *fakeEstopper) names() []string        { return sortedCopy(f.estopped) }
+func (f *fakeEstopper) clearedNames() []string { return sortedCopy(f.cleared) }
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
 
 func zeZone(name, parent string, policy *fleetv1.ZoneEstopPolicy, trigger string) *fleetv1.FleetZone {
 	z := &fleetv1.FleetZone{

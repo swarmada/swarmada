@@ -17,6 +17,7 @@ limitations under the License.
 package audit
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,9 +36,12 @@ import (
 // not counted, leaving no sequence gap and letting a safety-relevant producer
 // escalate).
 type FileSink struct {
-	mu  sync.Mutex
-	f   *os.File
-	enc *json.Encoder
+	mu sync.Mutex
+	// path is retained so the chain tail can be read back at startup (Tail). The write
+	// handle is append-only and write-only by design, so it cannot serve that read.
+	path string
+	f    *os.File
+	enc  *json.Encoder
 }
 
 // NewFileSink opens (creating if absent) the audit log at path for append. The
@@ -47,7 +51,50 @@ func NewFileSink(path string) (*FileSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening audit log %q: %w", path, err)
 	}
-	return &FileSink{f: f, enc: json.NewEncoder(f)}, nil
+	return &FileSink{path: path, f: f, enc: json.NewEncoder(f)}, nil
+}
+
+// Tail reports the highest-sequence entry per namespace, satisfying [ResumableSink].
+//
+// It re-reads the file rather than tracking the tail in memory, because the case it
+// exists for is exactly the one where this process has no memory: a restart. A line
+// that does not parse is skipped rather than fatal — a torn final line is the expected
+// shape of a crash during append, and refusing to start over it would turn a recoverable
+// crash into an outage. Every intact line still chains, so Verify remains the authority
+// on whether the log is sound.
+func (s *FileSink) Tail() (map[string]Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := os.Open(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]Entry{}, nil // nothing sealed yet; genesis is correct
+		}
+		return nil, fmt.Errorf("reading audit log %q: %w", s.path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	out := map[string]Entry{}
+	sc := bufio.NewScanner(f)
+	// An entry carries a free-form detail map, so a line can exceed the 64 KiB default.
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e Entry
+		if err := json.Unmarshal(line, &e); err != nil {
+			continue // torn or foreign line; Verify reports it, Tail does not block on it
+		}
+		if cur, seen := out[e.Namespace]; !seen || e.SequenceNumber > cur.SequenceNumber {
+			out[e.Namespace] = e
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scanning audit log %q: %w", s.path, err)
+	}
+	return out, nil
 }
 
 // Append writes e as one NDJSON line and fsyncs it. Safe for concurrent use.

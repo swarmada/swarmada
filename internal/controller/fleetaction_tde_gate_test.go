@@ -172,7 +172,7 @@ func TestTDELifecycle_ReleasesOnTerminal(t *testing.T) {
 
 // Entering Revoking extends the reservation TTL through the disconnect window.
 func TestTDELifecycle_ExtendsTTLOnRevoking(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	action := assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 3, lease)
 	action.Spec.Zone = "z"
 	r, _ := newActionReconciler(t, action, robotInPhase("r1", fleetv1.RobotPhaseOffline, "t1"))
@@ -190,7 +190,7 @@ func TestTDELifecycle_ExtendsTTLOnRevoking(t *testing.T) {
 // victim on r1, and the robot r1 (InProgress in zone z, eligible).
 func preemptScenario(t *testing.T, tdeResult tde.ReservationResult) (*FleetActionReconciler, client.Client) {
 	t.Helper()
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	crit := criticalPending("crit")
 	crit.Spec.Zone = "z"
 	victim := bandAction("norm", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityNormal, 2, lease)

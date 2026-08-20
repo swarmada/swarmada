@@ -29,6 +29,7 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
+	"github.com/swarmada/swarmada/internal/metrics"
 )
 
 // NamespaceEstopReconciler drives NAMESPACE-scope emergency stops (RFC-0001 §9.6.2
@@ -78,7 +79,8 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if reason == "" || reason == "true" {
 		reason = "namespace emergency stop"
 	}
-	issuedBy := "namespace-estop:" + req.Namespace
+	actor := estopActor(cfg.Annotations, "namespace-estop:"+req.Namespace)
+	issuedBy := actor.Identity
 
 	var robots fleetv1.RobotList
 	if err := r.List(ctx, &robots, client.InNamespace(req.Namespace)); err != nil {
@@ -90,22 +92,26 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// ack_received_at live on the robot-scope entries.
 	inScope := make([]string, 0, len(robots.Items))
 	var worstLatency time.Duration
-	for i := range robots.Items {
-		inScope = append(inScope, robots.Items[i].Name)
-		res, terr := r.Estopper.TriggerEstop(ctx, req.Namespace, robots.Items[i].Name, reason, issuedBy)
-		if res.Delivered && res.Latency > worstLatency {
-			worstLatency = res.Latency
+	// Issued in PARALLEL (§9.6.2.1); see estopFanout. A namespace estop is the widest
+	// fan-out there is, so it is where sequential dispatch cost the most.
+	outcomes, fanout := estopFanout(ctx, r.Estopper, req.Namespace, robots.Items, reason, issuedBy,
+		metrics.ScopeNamespace)
+	for _, o := range outcomes {
+		inScope = append(inScope, o.robot)
+		if o.result.Delivered && o.result.Latency > worstLatency {
+			worstLatency = o.result.Latency
 		}
-		if terr != nil || res.State != fleetv1.RobotEstopStopped {
+		if o.err != nil || o.result.State != fleetv1.RobotEstopStopped {
 			failed++
-			logger.Info("namespace estop not confirmed for robot (escalate)", "robot", robots.Items[i].Name,
-				"state", res.State, "err", errString(terr))
+			logger.Info("namespace estop not confirmed for robot (escalate)", "robot", o.robot,
+				"state", o.result.State, "err", errString(o.err))
 			continue
 		}
 		stopped++
 	}
+	metrics.ObserveEstopFanout(req.Namespace, metrics.ScopeNamespace, fanout)
 	logger.Info("namespace estop fanned out", "namespace", req.Namespace, "reason", reason,
-		"robots", len(robots.Items), "stopped", stopped, "unconfirmed", failed)
+		"robots", len(robots.Items), "stopped", stopped, "unconfirmed", failed, "fanout", fanout)
 
 	if r.Audit != nil {
 		outcome := audit.OutcomeAllowed
@@ -117,7 +123,7 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			EventType: audit.EventEstopTriggered,
 			Action:    "estop-trigger",
 			Outcome:   outcome,
-			Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: issuedBy},
+			Actor:     actor,
 			Resource:  audit.Resource{Kind: "SwarmadaConfig", Namespace: req.Namespace, Name: cfg.Name},
 			Detail: map[string]string{
 				"reason":             reason,
@@ -148,7 +154,8 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // is a no-op; a action Paused by the estop stays operator-gated (§9.6.2.4).
 func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, namespace string, cfg *fleetv1.SwarmadaConfig) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	clearedBy := "namespace-estop:" + namespace
+	actor := estopActor(cfg.Annotations, "namespace-estop:"+namespace)
+	clearedBy := actor.Identity
 
 	var robots fleetv1.RobotList
 	if err := r.List(ctx, &robots, client.InNamespace(namespace)); err != nil {
@@ -170,7 +177,7 @@ func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, name
 			EventType: audit.EventEstopCleared,
 			Action:    "estop-clear",
 			Outcome:   audit.OutcomeAllowed,
-			Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: clearedBy},
+			Actor:     actor,
 			Resource:  audit.Resource{Kind: "SwarmadaConfig", Namespace: namespace, Name: cfg.Name},
 			Detail:    map[string]string{"robots": itoa(len(robots.Items)), "cleared": itoa(cleared)},
 		}); aerr != nil {

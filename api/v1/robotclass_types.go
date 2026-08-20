@@ -280,7 +280,10 @@ type ClassModel struct {
 
 	// ModelURI is where the Robot Agent fetches the model artifact
 	// (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
+	// Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
+	// validated identically wherever it is declared (RFC-0001 D3).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^(oci|s3|https)://`
 	ModelURI string `json:"modelUri"`
 
 	// RequiredHardware lists component names that must be Healthy for the model to

@@ -357,19 +357,20 @@ spec:
                 type: string
               newVersion:
                 description: |-
-                  NewVersion is the target firmware version string (semver).
+                  NewVersion is the target firmware version string.
 
-                  The pattern matches ModelRollout.spec.newVersion: both are compared for ordering at
-                  rollout start, and an unparseable version cannot be ordered. MinLength=1 alone admitted
-                  values like "latest" or "v2.1" that read as versions and sort as nothing, so the failure
-                  arrived at batch selection — after the rollout was created and an operator believed it
-                  scheduled — rather than at admission.
+                  Swarmada treats it as OPAQUE: it is never parsed, ordered or compared. Batch
+                  classification is by EQUALITY only — a robot is "done" when
+                  Status.FirmwareVersion == NewVersion and "updating" when its pending-firmware
+                  annotation == NewVersion; the eligible set is sorted by NAME, not by version.
+                  Vendor firmware strings are frequently not semver ("2.5.0-rc1", "v2.5.0",
+                  "2026.06"), so constraining the form here would reject valid targets while
+                  protecting nothing.
 
-                  Deliberately bare `major.minor.patch`: prerelease and build metadata are excluded here
-                  for the same reason the contract-version parser excludes them (RFC-0001 §9.2.2) —
-                  admitting them would require this API to define their precedence, and it does not.
+                  ModelRollout.NewVersion IS pattern-constrained to bare major.minor.patch,
+                  because that controller refuses downgrades via versionIsNewer and therefore
+                  needs a parseable order. The asymmetry is deliberate (RFC-0001 D2).
                 minLength: 1
-                pattern: ^\d+\.\d+\.\d+$
                 type: string
               rollbackPolicy:
                 default: Manual
@@ -421,8 +422,16 @@ spec:
                       pauseOnError:
                         default: true
                         description: |-
-                          PauseOnError halts the rollout if any robot fails to update.
-                          The operator must resume with swarmctl resume rollout.
+                          PauseOnError halts the rollout if any robot fails to update: no further robot
+                          enters the batch while a failure stands, though in-flight updaters continue.
+
+                          The operator resumes with `swarmctl rollout resume`, which is gated on the
+                          rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                          annotation the controller consumes. Resume EXCLUDES the robots that failed from
+                          further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+                          artifact needs a fresh rollout. Excluded robots are named in
+                          status.excludedRobots and count as settled, so the rollout can reach a terminal
+                          phase and its record becomes deletable.
                         type: boolean
                     type: object
                   type:
@@ -601,6 +610,17 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              excludedRobots:
+                description: |-
+                  ExcludedRobots names the robots an operator resume removed from this rollout
+                  (ADR-0041). They failed, the operator resumed past them, and this rollout will
+                  not attempt them again — retrying a failed artifact is what a FRESH rollout is
+                  for. They are excluded from every progress bucket, so they neither re-pause the
+                  rollout nor hold it short of a terminal phase; a non-empty list surfaces that the
+                  fleet did not fully converge on this version.
+                items:
+                  type: string
+                type: array
               failedRobots:
                 items:
                   description: RolloutRobotResult records the failure outcome for
@@ -772,6 +792,15 @@ spec:
                   reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
                   standalone action; for an action owned by a FleetTask the composite is authoritative and
                   reconciles it to the action's desiredState.
+
+                  LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                  Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                  action stays Paused until an operator resumes, requeues, or cancels it through the
+                  verb-gated intake, because Paused has a single resume rule whatever produced it —
+                  an estop or this field — and an operator reading phase: Paused must never have to
+                  ask which path produced it before deciding whether it will move on its own.
+                  Cancelled is the one value that is level-triggered in both directions, because
+                  cancellation is terminal and there is nothing to lift.
                 type: string
               estimatedDurationSeconds:
                 description: |-
@@ -1186,8 +1215,10 @@ spec:
                 type: object
               endpoint:
                 description: |-
-                  Endpoint is the gRPC address (host:port) the control plane dials to reach
-                  this adapter. The adapter implements fleet_adapter.v1.FleetAdapterService.
+                  Endpoint is the gRPC address (host:port) the adapter is expected to be
+                  reachable at, for operator reference. Informational only: the control plane
+                  never dials it — the ControlStream is adapter-initiated (RFC-0001 §9.2), so
+                  nothing in the reconciler reads this field.
                 type: string
               heartbeatIntervalSeconds:
                 default: 10
@@ -1224,7 +1255,6 @@ spec:
                   (e.g. "acme-robotics").
                 type: string
             required:
-            - endpoint
             - vendor
             type: object
           status:
@@ -1545,6 +1575,15 @@ spec:
                             reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
                             standalone action; for an action owned by a FleetTask the composite is authoritative and
                             reconciles it to the action's desiredState.
+
+                            LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                            Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                            action stays Paused until an operator resumes, requeues, or cancels it through the
+                            verb-gated intake, because Paused has a single resume rule whatever produced it —
+                            an estop or this field — and an operator reading phase: Paused must never have to
+                            ask which path produced it before deciding whether it will move on its own.
+                            Cancelled is the one value that is level-triggered in both directions, because
+                            cancellation is terminal and there is nothing to lift.
                           type: string
                         estimatedDurationSeconds:
                           description: |-
@@ -1740,6 +1779,15 @@ spec:
                             reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
                             standalone action; for an action owned by a FleetTask the composite is authoritative and
                             reconciles it to the action's desiredState.
+
+                            LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                            Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                            action stays Paused until an operator resumes, requeues, or cancels it through the
+                            verb-gated intake, because Paused has a single resume rule whatever produced it —
+                            an estop or this field — and an operator reading phase: Paused must never have to
+                            ask which path produced it before deciding whether it will move on its own.
+                            Cancelled is the one value that is level-triggered in both directions, because
+                            cancellation is terminal and there is nothing to lift.
                           type: string
                         estimatedDurationSeconds:
                           description: |-
@@ -1888,7 +1936,10 @@ spec:
                         DependsOn lists member names that gate this action's start. Empty = a root action, eligible
                         immediately (subject to the start barrier). Multiple entries are an AND-join: eligible only
                         when EVERY predecessor has reached this action's StartCondition. Must be acyclic and name
-                        existing members (enforced at admission).
+                        existing members. Specified to be enforced at admission; at v0.3 this is validated by
+                        validateGraph on every non-terminal reconcile instead, not by the admission webhook — a
+                        cyclic or dangling entry is currently admitted and fails on the next reconcile. See
+                        crds/fleettask.md.
                       items:
                         type: string
                       type: array
@@ -1930,7 +1981,11 @@ spec:
                       default: Auto
                       description: |-
                         Trigger controls eligibility. Auto (default): eligible when DependsOn is satisfied. OnEvent:
-                        dormant until an authorized append/patch activates it.
+                        dormant until an authorized append/patch activates it. Specified to allow an existing entry's
+                        Trigger to be flipped OnEvent -> Auto post-creation as the sole exception to Actions being
+                        otherwise immutable once created; at v0.3 this is not implemented — ValidateUpdate's
+                        append-only check rejects any change to an existing action, including a Trigger-only flip.
+                        See crds/fleettask.md.
                       type: string
                   required:
                   - action
@@ -2271,8 +2326,8 @@ spec:
               parentZone:
                 description: |-
                   ParentZone references a parent FleetZone for hierarchical zones.
-                  Leave empty for top-level zones. Admission (a FleetZone webhook, not yet
-                  built) rejects a non-existent parent and any cycle A→B→A (§9.3.1).
+                  Leave empty for top-level zones. The FleetZone admission webhook rejects a
+                  non-existent parent and any cycle A→B→A (§9.3.1).
                 type: string
               physicalBounds:
                 description: |-
@@ -2300,7 +2355,7 @@ spec:
                     description: |-
                       Polygon is the closed zone boundary (the last vertex connects back to the
                       first). At least 3 vertices are required; a self-intersecting polygon is
-                      rejected by the FleetZone admission webhook (not yet built, §9.3.1).
+                      rejected by the FleetZone admission webhook (§9.3.1).
                     items:
                       description: |-
                         Point is a 2-D coordinate in the site coordinate frame (metres from the site
@@ -2804,7 +2859,7 @@ spec:
                   rejections after which the controller sets a FailedRepeatedly condition and
                   SUSPENDS evaluation — further triggers are silently dropped until an operator
                   resets the policy (swarmctl reset policy). 0 disables suspension (unlimited
-                  retries). §9.1.9.4.
+                  retries). §9.1.10.4.
                 format: int32
                 minimum: 0
                 type: integer
@@ -2821,6 +2876,7 @@ spec:
                 description: |-
                   ModelName is the logical model name this policy governs.
                   Must match InstalledModel.name on target robots.
+                minLength: 1
                 type: string
               qualityGate:
                 description: |-
@@ -2871,6 +2927,8 @@ spec:
                       (ADR-0021): when set, an absent real_pick_success_rate is treated as an
                       infinite gap and FAILS the gate — real-hardware validation is required, it is
                       never skipped because real metrics were not reported.
+                    maximum: 1
+                    minimum: 0
                     type: number
                   minEvalEpisodes:
                     description: |-
@@ -2951,8 +3009,16 @@ spec:
                           pauseOnError:
                             default: true
                             description: |-
-                              PauseOnError halts the rollout if any robot fails to update.
-                              The operator must resume with swarmctl resume rollout.
+                              PauseOnError halts the rollout if any robot fails to update: no further robot
+                              enters the batch while a failure stands, though in-flight updaters continue.
+
+                              The operator resumes with `swarmctl rollout resume`, which is gated on the
+                              rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                              annotation the controller consumes. Resume EXCLUDES the robots that failed from
+                              further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+                              artifact needs a fresh rollout. Excluded robots are named in
+                              status.excludedRobots and count as settled, so the rollout can reach a terminal
+                              phase and its record becomes deletable.
                             type: boolean
                         type: object
                       type:
@@ -3153,7 +3219,7 @@ spec:
                   ConsecutiveRejections counts quality-gate rejections since the last Deploy
                   decision (reset to 0 on any Deploy). When it reaches
                   spec.consecutiveRejectionLimit the FailedRepeatedly condition suspends
-                  evaluation. §9.1.9.4.
+                  evaluation. §9.1.10.4.
                 format: int32
                 type: integer
               deploymentCount:
@@ -3337,9 +3403,10 @@ spec:
               maxDownloadTimeMinutes:
                 default: 30
                 description: |-
-                  MaxDownloadTimeMinutes: if a model download exceeds this duration on a
-                  given robot, that robot's update is marked Failed.
-                  0 means no limit.
+                  MaxDownloadTimeMinutes: specified so that if a model download exceeds this
+                  duration on a given robot, that robot's update is marked Failed.
+                  0 means no limit. Specified, not implemented at v0.3: no controller reads
+                  this field or times a download against it.
                 format: int32
                 maximum: 480
                 minimum: 0
@@ -3402,7 +3469,9 @@ spec:
               revokesCapabilities:
                 description: |-
                   RevokesCapabilities lists capabilities removed when this model replaces
-                  a previous model with a different capability profile.
+                  a previous model with a different capability set. ("Capability set" is the
+                  northbound seam of ADR-0037; the southbound axis is a "protocol profile".
+                  This comment said "capability profile", which is neither.)
                   MaxItems bounds CEL cost (see GrantsCapabilities above).
                 items:
                   type: string
@@ -3456,8 +3525,16 @@ spec:
                       pauseOnError:
                         default: true
                         description: |-
-                          PauseOnError halts the rollout if any robot fails to update.
-                          The operator must resume with swarmctl resume rollout.
+                          PauseOnError halts the rollout if any robot fails to update: no further robot
+                          enters the batch while a failure stands, though in-flight updaters continue.
+
+                          The operator resumes with `swarmctl rollout resume`, which is gated on the
+                          rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                          annotation the controller consumes. Resume EXCLUDES the robots that failed from
+                          further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+                          artifact needs a fresh rollout. Excluded robots are named in
+                          status.excludedRobots and count as settled, so the rollout can reach a terminal
+                          phase and its record becomes deletable.
                         type: boolean
                     type: object
                   type:
@@ -3645,6 +3722,17 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              excludedRobots:
+                description: |-
+                  ExcludedRobots names the robots an operator resume removed from this rollout
+                  (ADR-0041). They failed, the operator resumed past them, and this rollout will
+                  not attempt them again — retrying a failed artifact is what a FRESH rollout is
+                  for. They are excluded from every progress bucket, so they neither re-pause the
+                  rollout nor hold it short of a terminal phase; a non-empty list surfaces that the
+                  fleet did not fully converge on this version.
+                items:
+                  type: string
+                type: array
               failedRobots:
                 items:
                   description: RolloutRobotResult records the failure outcome for
@@ -3980,7 +4068,10 @@ spec:
                       description: |-
                         ModelURI is where the Robot Agent fetches the model artifact
                         (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
+                        Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
+                        validated identically wherever it is declared (RFC-0001 D3).
                       minLength: 1
+                      pattern: ^(oci|s3|https)://
                       type: string
                     name:
                       description: |-
@@ -4976,7 +5067,10 @@ spec:
                       description: |-
                         ModelURI is where the Robot Agent fetches the model artifact
                         (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
+                        Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
+                        validated identically wherever it is declared (RFC-0001 D3).
                       minLength: 1
+                      pattern: ^(oci|s3|https)://
                       type: string
                     name:
                       description: |-
@@ -5137,6 +5231,8 @@ spec:
                   bucket boundary — never on every telemetry tick (RA-1). For continuous
                   battery history, query the telemetry TSDB, not this field.
                 format: int32
+                maximum: 100
+                minimum: 0
                 type: integer
               capabilities:
                 description: |-
@@ -5859,7 +5955,8 @@ spec:
                       RequireEstopClearBeforeResume is the namespace default for the ZoneMaintenance
                       field of the same name: block resume of a paused robot until any active estop
                       on it is cleared.
-                      Specified, controller pending: the resume-gate is not yet enforced.
+                      Enforced by the ZoneMaintenance controller as the namespace-level fallback
+                      when ZoneMaintenance.spec.requireEstopClearBeforeResume is unset.
                     type: boolean
                 type: object
               provisioning:
@@ -5920,6 +6017,20 @@ spec:
                     maximum: 3600
                     minimum: 0
                     type: integer
+                  clockSkewMarginSeconds:
+                    default: 5
+                    description: |-
+                      ClockSkewMarginSeconds is the margin added before a lease is treated as provably
+                      expired (§9.6.3.5 condition 3: now ≥ leaseExpiresAt + skew). It absorbs clock
+                      disagreement between the control plane and the robot.
+
+                      Also a safety bound: too small and the control plane may reassign an action while
+                      the robot still believes its lease is live — a double-execution window; too large
+                      and recovery after a disconnect is needlessly delayed. Bounded to 1..60s (ADR-0044).
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
                   defaultAcceptDegradedCapabilities:
                     default: false
                     description: 'DefaultAcceptDegradedCapabilities: namespace-level
@@ -5937,11 +6048,31 @@ spec:
                       inert, and ranking falls back to manufacturer then battery. Use it to centrally
                       disable client-expressed robot affinity without editing the actions themselves.
                     type: boolean
+                  leaseDurationSeconds:
+                    default: 30
+                    description: |-
+                      LeaseDurationSeconds is the task-lease horizon (§9.6.3.5): how long a robot may
+                      execute an assigned action without a renewal before it MUST self-stop.
+
+                      This is a SAFETY bound, not a tuning knob. The resolved value is both written to
+                      FleetAction.status.leaseExpiresAt and sent to the robot as Command.lease_duration_ms,
+                      which arms the adapter's self-stop timer (§9.2.8 "Task-lease self-stop", §9.6.3.3
+                      item 1). Raising it directly extends how long a robot that has lost its link keeps
+                      moving before halting itself — hence the 300s ceiling. The 10s floor keeps the
+                      horizon above the derived renewal interval by a workable margin.
+
+                      The renewal interval is always leaseDurationSeconds/3 (§9.3.2) and is NOT separately
+                      configurable: deriving it makes it impossible to widen the horizon without also
+                      renewing proportionally sooner (ADR-0044).
+                    format: int32
+                    maximum: 300
+                    minimum: 10
+                    type: integer
                   maxPendingActionsPerZone:
                     description: |-
                       MaxPendingActionsPerZone caps the number of Pending FleetActions the scheduler
                       admits per zone before applying backpressure. 0 means unbounded.
-                      Specified, controller pending: not yet enforced by the scheduler.
+                      Enforced by the FleetAction admission webhook (pendingCap).
                     format: int32
                     minimum: 0
                     type: integer
@@ -5950,7 +6081,7 @@ spec:
                     description: |-
                       PreferSameManufacturer, when true, ranks robots whose manufacturer matches an
                       action's PreferredManufacturer first (soft preference).
-                      Specified, controller pending: not yet applied by the scheduler ranker.
+                      Applied by the FleetAction controller's scheduler tiebreak (preferSameManufacturer).
                     type: boolean
                 type: object
               signing:
@@ -6318,8 +6449,11 @@ spec:
                 default: 0
                 description: |-
                   AutoResumeAfterMinutes: if non-zero, the maintenance automatically
-                  deactivates this many minutes after activation (ZoneMaintenance deleted).
-                  0 means the operator must manually resume.
+                  deactivates this many minutes after activation: status.phase transitions
+                  to Completed and all paused/wound-down robots are resumed. The object
+                  itself is NOT deleted — it is terminal (the controller no longer acts on
+                  it) but remains until the operator deletes it; there is no automatic
+                  garbage collection. 0 means the operator must manually resume.
                 format: int32
                 maximum: 1440
                 minimum: 0

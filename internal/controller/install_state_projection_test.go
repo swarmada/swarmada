@@ -303,3 +303,150 @@ func TestProject_SameRobotIDInTwoNamespacesResolvesIndependently(t *testing.T) {
 		t.Error("a report in one namespace must not write another namespace's robot")
 	}
 }
+
+// ── Firmware-version promotion (Round-4 D1) ──────────────────────────────────
+//
+// The FirmwareRollout controller classifies a robot as updated by comparing
+// Robot.status.firmwareVersion against spec.newVersion, and install_state_projection.go is
+// the ONLY producer of that field in the tree. Before D1 nothing wrote it, so a successful
+// install left the robot classified as updating forever. These tests pin the gate (Running
+// only) and the RA-1 property on the newly-writable field.
+
+func TestProject_SuccessfulFirmwareInstallPromotesRunningVersion(t *testing.T) {
+	rob := ipRobot("amr-1")
+	rob.Status.FirmwareVersion = "2.1.0"
+	c := ipClient(t, rob)
+
+	u := ipProgress(fav1.UpdateKind_UPDATE_KIND_FIRMWARE,
+		fav1.InstallOutcome_INSTALL_OUTCOME_SUCCEEDED, "2.2.0", "")
+	if err := ipIngestor(c).IngestUpdateProgress(context.Background(), ipNS, u); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	got := ipGet(t, c, "amr-1")
+	if got.Status.FirmwareVersion != "2.2.0" {
+		t.Errorf("firmwareVersion = %q, want the reported running version 2.2.0 — "+
+			"without this the rollout never classifies the robot as updated", got.Status.FirmwareVersion)
+	}
+	// Captured on the transition only, so it names what a Manual revert targets.
+	if got.Status.PreviousFirmwareVersion != "2.1.0" {
+		t.Errorf("previousFirmwareVersion = %q, want 2.1.0", got.Status.PreviousFirmwareVersion)
+	}
+}
+
+func TestProject_FirmwarePromotionIsSuppressedWhenNothingChanged(t *testing.T) {
+	// RA-1 on the promotion path specifically. The pre-existing write-once test uses a
+	// FAILED outcome, which never reaches the promotion branch — so it could not have
+	// caught a promotion that rewrote firmwareVersion on every redundant report. Both
+	// carriers report the same install, so a repeat is the common case.
+	rob := ipRobot("amr-1")
+	rob.Status.FirmwareVersion = "2.1.0"
+	c := ipClient(t, rob)
+	u := ipProgress(fav1.UpdateKind_UPDATE_KIND_FIRMWARE,
+		fav1.InstallOutcome_INSTALL_OUTCOME_SUCCEEDED, "2.2.0", "")
+	ing := ipIngestor(c)
+
+	if err := ing.IngestUpdateProgress(context.Background(), ipNS, u); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	rv := ipGet(t, c, "amr-1").ResourceVersion
+
+	for i := 0; i < 3; i++ {
+		if err := ing.IngestUpdateProgress(context.Background(), ipNS, u); err != nil {
+			t.Fatalf("re-ingest: %v", err)
+		}
+	}
+	got := ipGet(t, c, "amr-1")
+	if got.ResourceVersion != rv {
+		t.Errorf("a repeated identical success caused a status write: resourceVersion %s -> %s",
+			rv, got.ResourceVersion)
+	}
+	// A re-promotion would also clobber the revert target with the new version.
+	if got.Status.PreviousFirmwareVersion != "2.1.0" {
+		t.Errorf("previousFirmwareVersion = %q after repeats, want 2.1.0 — "+
+			"a repeat must not overwrite the revert target", got.Status.PreviousFirmwareVersion)
+	}
+}
+
+func TestProject_OnlyRunningPromotesTheVersion(t *testing.T) {
+	// Updating still reports the OLD version; Failed may report the old version, a recovery
+	// image, or anything else. Promoting either asserts a fact the robot never reported.
+	for _, tc := range []struct {
+		name    string
+		outcome fav1.InstallOutcome
+		version string
+	}{
+		{"failed install must not promote", fav1.InstallOutcome_INSTALL_OUTCOME_FAILED, "9.9.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rob := ipRobot("amr-1")
+			rob.Status.FirmwareVersion = "2.1.0"
+			c := ipClient(t, rob)
+			u := ipProgress(fav1.UpdateKind_UPDATE_KIND_FIRMWARE, tc.outcome, tc.version, "boom")
+
+			if err := ipIngestor(c).IngestUpdateProgress(context.Background(), ipNS, u); err != nil {
+				t.Fatalf("ingest: %v", err)
+			}
+			got := ipGet(t, c, "amr-1")
+			if got.Status.FirmwareVersion != "2.1.0" {
+				t.Errorf("firmwareVersion = %q, want it left at 2.1.0", got.Status.FirmwareVersion)
+			}
+			if got.Status.PreviousFirmwareVersion != "" {
+				t.Errorf("previousFirmwareVersion = %q, want unset", got.Status.PreviousFirmwareVersion)
+			}
+		})
+	}
+
+	// The Updating arm goes through projectFirmwareState directly: the UpdateProgress
+	// carrier only ever maps a terminal report to Running or Failed, so Updating can only
+	// arrive on the snapshot carrier.
+	t.Run("updating must not promote", func(t *testing.T) {
+		rob := ipRobot("amr-1")
+		rob.Status.FirmwareVersion = "2.1.0"
+		c := ipClient(t, rob)
+		key := client.ObjectKeyFromObject(rob)
+		st := &fleetv1.FirmwareInstallState{
+			Status: fleetv1.FirmwareInstallUpdating, RunningVersion: "2.1.0",
+			AttemptedVersion: "2.2.0", ReportedAt: &metav1.Time{Time: ipBase},
+		}
+		if err := projectFirmwareState(context.Background(), c, key, st); err != nil {
+			t.Fatalf("project: %v", err)
+		}
+		if got := ipGet(t, c, "amr-1"); got.Status.FirmwareVersion != "2.1.0" {
+			t.Errorf("firmwareVersion = %q, want it left at 2.1.0 while Updating", got.Status.FirmwareVersion)
+		}
+	})
+}
+
+func TestProject_VersionOnlyChangeStillWrites(t *testing.T) {
+	// The one case where mutate() returns true through the promotion branch ALONE: the
+	// install state is already recorded verbatim, but firmwareVersion is stale — exactly
+	// what a robot upgraded before this projection existed looks like. If applyInstallState's
+	// no-op guard compared only firmwareInstall, this write would be suppressed and the
+	// rollout would never terminate.
+	rob := ipRobot("amr-1")
+	rob.Status.FirmwareVersion = "2.1.0"
+	rob.Status.FirmwareInstall = &fleetv1.FirmwareInstallState{
+		Status: fleetv1.FirmwareInstallRunning, RunningVersion: "2.2.0",
+		ReportedAt: &metav1.Time{Time: ipBase},
+	}
+	c := ipClient(t, rob)
+	key := client.ObjectKeyFromObject(rob)
+
+	// Same substance as what is already stored — only firmwareVersion is out of date.
+	st := &fleetv1.FirmwareInstallState{
+		Status: fleetv1.FirmwareInstallRunning, RunningVersion: "2.2.0",
+		ReportedAt: &metav1.Time{Time: ipBase.Add(time.Minute)},
+	}
+	if err := projectFirmwareState(context.Background(), c, key, st); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	got := ipGet(t, c, "amr-1")
+	if got.Status.FirmwareVersion != "2.2.0" {
+		t.Errorf("firmwareVersion = %q, want 2.2.0 — a version-only change must still write",
+			got.Status.FirmwareVersion)
+	}
+	if got.Status.PreviousFirmwareVersion != "2.1.0" {
+		t.Errorf("previousFirmwareVersion = %q, want 2.1.0", got.Status.PreviousFirmwareVersion)
+	}
+}

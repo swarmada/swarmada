@@ -42,18 +42,24 @@ import (
 )
 
 const (
-	// leaseDuration is how long a robot may execute an assigned action without a
-	// renewal before it MUST self-stop (RFC-0001 §9.6.3.5). The control plane
-	// renews within this window while the assignment stands. TODO: source from
-	// SwarmadaConfig.spec.scheduling once that surface consumes it (as
-	// robot_controller.go now sources its offline threshold from spec.health).
-	leaseDuration = 30 * time.Second
-	// leaseRenewInterval is how often the control plane refreshes the lease while
-	// the robot is reachable — well below leaseDuration (default duration/3, §9.3.2).
-	leaseRenewInterval = leaseDuration / 3
-	// leaseClockSkew is the safety margin added before a lease is considered
-	// provably expired (§9.6.3.5 condition 3: now ≥ lastRenewal + duration + skew).
-	leaseClockSkew = 5 * time.Second
+	// defaultLeaseDuration is the fallback task-lease horizon: how long a robot may
+	// execute an assigned action without a renewal before it MUST self-stop
+	// (RFC-0001 §9.6.3.5). The control plane renews within this window while the
+	// assignment stands. The live value is resolved per-namespace from SwarmadaConfig
+	// (spec.scheduling.leaseDurationSeconds) by leaseTimings; this default matches
+	// that field's CRD default and applies only when no config is readable or it
+	// carries no positive value (ADR-0044).
+	defaultLeaseDuration = 30 * time.Second
+	// defaultLeaseRenewInterval is the fallback for how often the control plane
+	// refreshes the lease while the robot is reachable — well below the horizon
+	// (always duration/3, §9.3.2). It is DERIVED, never separately configurable.
+	defaultLeaseRenewInterval = defaultLeaseDuration / 3
+	// defaultLeaseClockSkew is the fallback safety margin added before a lease is
+	// considered provably expired (§9.6.3.5 condition 3: now ≥ lastRenewal +
+	// duration + skew). The live value comes from
+	// spec.scheduling.clockSkewMarginSeconds; this default matches that field's CRD
+	// default and applies only when no config is readable.
+	defaultLeaseClockSkew = 5 * time.Second
 
 	// tdeMinRetryAfter / tdeMaxRetryAfter are the fail-safe bounds on the requeue
 	// backoff after a TDE Denied (§9.1.11.10). They match the CRD defaults for
@@ -150,6 +156,40 @@ const cancellingMessage = "cancel requested — awaiting confirmed stop"
 // requeuingMessage marks a action awaiting confirmed stop before requeue.
 const requeuingMessage = "requeue requested — awaiting confirmed stop"
 
+// Hold messages. Every one of these lands on the SAME Paused phase, whose resume rule is
+// identical whatever produced it (ADR-0045). They differ only in naming the intake, so an
+// operator reading the object can tell an emergency stop from a declarative hold without
+// consulting events — the phase alone cannot say which, and the two call for different
+// investigation before a human decides to resume.
+const (
+	estopPausedAssignedMessage   = "paused by estop — operator resume/requeue/cancel required"
+	estopPausedInProgressMessage = "paused by estop — operator resume/cancel required"
+
+	desiredPausedAssignedMessage   = "held by desiredState=Paused — operator resume/requeue/cancel required"
+	desiredPausedInProgressMessage = "held by desiredState=Paused — operator resume/cancel required"
+
+	// returningReason is the cancel_action reason carried on the wire for a Returning
+	// recovery, so an adapter log names the intent rather than a bare cancel.
+	returningReason = "desiredState=Returning"
+	// returningMessage marks a Returning action still awaiting its confirmed stop.
+	returningMessage = "return requested — awaiting confirmed recovery"
+)
+
+// returningHeldMessage names how the adapter resolved a Returning recovery. The
+// disposition is the adapter's own account of how far the robot got (§9.6.3.5), and it is
+// what an operator needs before deciding whether the action can be resumed at all: a robot
+// that COMPLETED the work needs a different decision from one recovered mid-commitment.
+func returningHeldMessage(disp command.CancelDisposition) string {
+	switch disp {
+	case command.CancelCompleted:
+		return "held after desiredState=Returning — robot reported the action complete; operator resume/cancel required"
+	case command.CancelRecovered:
+		return "held after desiredState=Returning — robot recovered mid-commitment; operator resume/cancel required"
+	default:
+		return "held after desiredState=Returning — robot stopped safely; operator resume/cancel required"
+	}
+}
+
 // reasonCapabilityLost is the requeue reason recorded when a reachable robot's
 // in-flight action is reassigned because the robot no longer satisfies the action's
 // required capabilities (RFC-0001 Capability-loss reassignment).
@@ -171,7 +211,7 @@ const reasonCapabilityLostDuringExecution = "CapabilityLostDuringExecution"
 // The single-executor guarantee (RFC-0001 §9.6.3.5, RA-4): a lost robot's action is
 // NEVER reassigned on unreachability alone. It is held in Revoking until the lease
 // is provably dead — the robot confirms it is not running the action, or the lease
-// horizon (last renewal + leaseDuration + skew) passes, by which point the robot
+// horizon (last renewal + the namespace lease duration + skew) passes, by which point the robot
 // has self-stopped. Unreachable is not stopped; stopped is confirmed, never
 // inferred.
 func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -199,11 +239,36 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	original := action.DeepCopy()
 
+	// Resolve the namespace's lease horizon ONCE, and use it for every lease decision
+	// below — both the server-side horizon written to status.leaseExpiresAt and the
+	// value pushed to the robot as lease_duration_ms. Mixing a resolved horizon with
+	// the bare default constant would let the robot's self-stop timer and the control
+	// plane's reassignment horizon disagree (ADR-0044).
+	leaseDur, leaseRenew, leaseSkew := leaseTimings(ctx, r.Client, req.Namespace)
+
 	// ── Operator cancellation (§9.6.3, confirmed-cancel) ───────────────────────
 	// A cancel request frees the robot only once it provably stopped, so a cancel
 	// never strands a still-executing robot (single-executor safety).
 	if _, requested := action.Annotations[annCancelRequested]; requested {
-		return r.handleCancel(ctx, action, original)
+		return r.handleCancel(ctx, action, original, action.Annotations[annCancelRequested])
+	}
+
+	// ── Declarative cancel intent (spec.desiredState: Cancelled) ───────────────
+	// The level-triggered half of the same intent, and the enactment FleetTask
+	// depends on: FailFast and the Compensate path cancel a child by writing
+	// Cancelled onto its spec.desiredState and doing nothing else, so while this
+	// field went unread a composite could not actually stop its children.
+	//
+	// Routed into the SAME confirmed-cancel path as the operator annotation, so a
+	// declarative cancel carries the identical single-executor guarantee — the robot
+	// is freed only once it provably stopped, never on the write alone.
+	//
+	// Checked after the annotation so an explicit operator cancel keeps its reason.
+	// Paused and Returning are NOT enacted here: resume from a safe hold is
+	// operator-gated by §9.6.2.4, and reconciling them from this field would have to
+	// settle who may lift a hold. They stay disclosed in the RFC.
+	if action.Spec.DesiredState == fleetv1.DesiredStateCancelled {
+		return r.handleCancel(ctx, action, original, "desiredState=Cancelled")
 	}
 
 	// ── Forcible requeue (§9.1.11 ZoneMaintenance Immediate) ───────────────────
@@ -261,37 +326,62 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if found && robotUnderEstop(robot) {
 			switch action.Status.Phase {
 			case fleetv1.ActionPhaseAssigned:
-				// Table §9.6.2.4: the robot never started; release the binding so an
-				// operator can re-assign (a fresh assignment mints a new generation).
 				logger.Info("estop while Assigned — pausing and releasing robot",
 					"robot", action.Status.AssignedRobot)
-				if robot.Status.AssignedAction == action.Name {
-					robotOriginal := robot.DeepCopy()
-					robot.Status.AssignedAction = ""
-					_ = r.Status().Patch(ctx, robot, client.MergeFrom(robotOriginal))
-				}
 				r.recordActionPausedByEstop(ctx, action, fleetv1.ActionPhaseAssigned)
-				action.Status.Phase = fleetv1.ActionPhasePaused
-				action.Status.AssignedRobot = ""
-				action.Status.LeaseExpiresAt = nil
-				action.Status.Message = "paused by estop — operator resume/requeue/cancel required"
-				// The robot never entered the zone for this action; free its slot. (An
-				// InProgress→Paused robot is physically in-zone and keeps its slot.)
-				r.releaseReservation(ctx, req.Namespace, action.Spec.Zone, action.Name)
-				return ctrl.Result{}, r.Status().Patch(ctx, action, client.MergeFrom(original))
+				return r.applyPauseTransition(ctx, action, original, robot, found,
+					estopPausedAssignedMessage, now, leaseDur, leaseRenew)
 			case fleetv1.ActionPhaseInProgress:
-				// Robot stops mid-action; KEEP it bound and keep the lease so no other
-				// robot can take the action (single-executor, §9.6.3.5).
 				logger.Info("estop while InProgress — pausing, keeping robot bound",
 					"robot", action.Status.AssignedRobot)
 				r.recordActionPausedByEstop(ctx, action, fleetv1.ActionPhaseInProgress)
-				action.Status.Phase = fleetv1.ActionPhasePaused
-				action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDuration)}
-				action.Status.Message = "paused by estop — operator resume/cancel required"
-				return ctrl.Result{RequeueAfter: leaseRenewInterval},
-					r.Status().Patch(ctx, action, client.MergeFrom(original))
+				return r.applyPauseTransition(ctx, action, original, robot, found,
+					estopPausedInProgressMessage, now, leaseDur, leaseRenew)
 			}
 			// Already Paused/Revoking under estop → fall through to Paused handling.
+		}
+
+		// ── Declarative hold (spec.desiredState: Paused / Returning, ADR-0045) ──
+		//
+		// ORDERING. This runs AFTER the estop-pause check above, deliberately. Both
+		// intakes reach the same Paused phase through the same transitions, so when an
+		// estop is live it is the estop that names the hold — the more urgent cause wins
+		// the status message. Neither re-enters once the phase IS Paused (both switches
+		// only match Assigned/InProgress), so the two intents cannot oscillate on
+		// successive reconciles.
+		//
+		// Writing Running back does NOT appear here, and that is the decision, not an
+		// omission: a held action is lifted only by an operator through the verb-gated
+		// requeue/cancel intake (ADR-0045). Running therefore never contends with the
+		// estop-pause check above.
+		if action.Status.Phase == fleetv1.ActionPhaseAssigned ||
+			action.Status.Phase == fleetv1.ActionPhaseInProgress {
+			switch action.Spec.DesiredState {
+			case fleetv1.DesiredStatePaused:
+				logger.Info("desiredState=Paused — entering safe hold",
+					"phase", action.Status.Phase, "robot", action.Status.AssignedRobot)
+				msg := desiredPausedAssignedMessage
+				if action.Status.Phase == fleetv1.ActionPhaseInProgress {
+					msg = desiredPausedInProgressMessage
+				}
+				return r.applyPauseTransition(ctx, action, original, robot, found,
+					msg, now, leaseDur, leaseRenew)
+
+			case fleetv1.DesiredStateReturning:
+				// Adapter-CONFIRMED recovery, over the existing cancel_action wire path —
+				// no new message. An unconfirmed stop holds the action and keeps the robot
+				// bound: unreachable is not stopped (RA-4), and freeing here would be the
+				// double-execution the single-executor guarantee exists to prevent.
+				confirmed, disp := r.confirmedStopWithDisposition(
+					ctx, action, action.Status.AssignedRobot, returningReason)
+				if !confirmed {
+					return r.holdStop(ctx, action, original, returningMessage)
+				}
+				logger.Info("desiredState=Returning — recovery confirmed, holding",
+					"robot", action.Status.AssignedRobot, "disposition", disp)
+				return r.applyPauseTransition(ctx, action, original, robot, found,
+					returningHeldMessage(disp), now, leaseDur, leaseRenew)
+			}
 		}
 
 		// ── Paused is operator-gated (§9.6.2.4): NEVER auto-resume ─────────────
@@ -301,17 +391,17 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if action.Status.Phase == fleetv1.ActionPhasePaused {
 			if action.Status.AssignedRobot != "" && found &&
 				classifyRobot(action, robot, found) != robotLost {
-				action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDuration)}
+				action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDur)}
 				if err := r.Status().Patch(ctx, action, client.MergeFrom(original)); err != nil {
 					return ctrl.Result{}, fmt.Errorf("renewing lease for paused task: %w", err)
 				}
-				return ctrl.Result{RequeueAfter: leaseRenewInterval}, nil
+				return ctrl.Result{RequeueAfter: leaseRenew}, nil
 			}
 			return ctrl.Result{}, nil
 		}
 
 		switch evaluateLease(action.Status.Phase, classifyRobot(action, robot, found),
-			leaseTime(action.Status.LeaseExpiresAt), now, leaseClockSkew) {
+			leaseTime(action.Status.LeaseExpiresAt), now, leaseSkew) {
 		case actionRenew:
 			// Capability-loss reassignment (RFC-0001 control-plane): a reachable robot
 			// that no longer satisfies the action's required capabilities (filter 3, on
@@ -329,7 +419,7 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			// Reachable and executing T: refresh the lease. A Revoking action whose
 			// robot returned on a live lease is RE-ADOPTED at the SAME generation —
 			// never a new one (§9.6.3.4); reassigning here would double-execute.
-			action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDuration)}
+			action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDur)}
 			if action.Status.Phase == fleetv1.ActionPhaseRevoking {
 				logger.Info("re-adopting task on live lease", "robot", action.Status.AssignedRobot,
 					"generation", action.Status.AssignmentGeneration)
@@ -345,8 +435,8 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			// Refresh the robot's self-stop deadline over the wire (best-effort, AFTER
 			// the authoritative renewal). A failed push never changes the server-side
 			// lease — the robot will self-stop on its own timer if renewals stop.
-			r.pushRenewLease(ctx, action)
-			return ctrl.Result{RequeueAfter: leaseRenewInterval}, nil
+			r.pushRenewLease(ctx, action, leaseDur)
+			return ctrl.Result{RequeueAfter: leaseRenew}, nil
 
 		case actionRevoke:
 			// Connectivity loss / fault with a lease outstanding: stop renewing,
@@ -358,7 +448,7 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			action.Status.Message = "assigned robot unreachable — awaiting provable lease expiry"
 			if action.Status.LeaseExpiresAt == nil {
 				// Never reassign without a provable-death horizon; establish one.
-				action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDuration)}
+				action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDur)}
 			}
 			// Anchor the disconnect wall-clock for onDisconnect=AfterTimeout. Set once
 			// on the FIRST entry into Revoking-by-disconnect so the ceiling measures from
@@ -375,7 +465,7 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if err := r.Status().Patch(ctx, action, client.MergeFrom(original)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("entering revoking: %w", err)
 			}
-			return ctrl.Result{RequeueAfter: untilLeaseHorizon(action.Status.LeaseExpiresAt, now)}, nil
+			return ctrl.Result{RequeueAfter: untilLeaseHorizon(action.Status.LeaseExpiresAt, now, leaseRenew, leaseSkew)}, nil
 
 		case actionHold:
 			// Not yet safe to requeue. Never reassign on a guess. A Preempted action
@@ -384,7 +474,7 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if action.Status.Phase == fleetv1.ActionPhasePreempted {
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
-			return ctrl.Result{RequeueAfter: untilLeaseHorizon(action.Status.LeaseExpiresAt, now)}, nil
+			return ctrl.Result{RequeueAfter: untilLeaseHorizon(action.Status.LeaseExpiresAt, now, leaseRenew, leaseSkew)}, nil
 
 		case actionReassign:
 			// Lease PROVABLY dead (robot reachable & confirmed not running T, or the
@@ -604,7 +694,7 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// never reused (§9.6.3.5 failover safety). Never reset — a reassignment
 		// increments it. Establish the lease horizon at assignment time.
 		action.Status.AssignmentGeneration++
-		action.Status.LeaseExpiresAt = &metav1.Time{Time: time.Now().Add(leaseDuration)}
+		action.Status.LeaseExpiresAt = &metav1.Time{Time: time.Now().Add(leaseDur)}
 
 		// ── Commit: TASK FIRST, with optimistic concurrency ────────────────────
 		// This is the decisive write, and its order/locking matter for a real
@@ -649,7 +739,17 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		robotOriginal := robot.DeepCopy()
 		robot.Status.Phase = fleetv1.RobotPhaseInProgress
 		robot.Status.AssignedAction = action.Name
-		if err := r.Status().Patch(ctx, &robot, client.MergeFrom(robotOriginal)); err != nil {
+		// OPTIMISTIC LOCK, not a plain merge. The optimistic-concurrency guard above is on
+		// the ACTION; two reconciles for two different actions each pass their own guard
+		// independently, and a plain merge patch here would let the second robot write
+		// silently overwrite the first. Robot.status.assignedAction holds one name, so one
+		// action would be stranded Assigned to a robot executing the other — a direct
+		// violation of the single-executor guarantee ({{ref:safety-assignment-lease-and-the-single-executor-guarantee}}).
+		//
+		// With the precondition, the loser's write fails with a conflict and falls into the
+		// branch below, which already unreserves the TDE slot and reverts the action to
+		// Pending. That path was written for "the robot commit failed"; a lost race IS that.
+		if err := r.Status().Patch(ctx, &robot, client.MergeFromWithOptions(robotOriginal, client.MergeFromWithOptimisticLock{})); err != nil {
 			// The action now says Assigned to a robot that never got the memo —
 			// not a double-execution (only one robot's status was ever touched),
 			// but an assignment no robot will ever act on. Revert the action back
@@ -672,10 +772,10 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// authoritative commit; fencing token = the freshly-minted generation). An
 		// unreachable push leaves the assignment standing (best-effort); an EXPLICIT
 		// rejection means the robot won't run it → release and reschedule.
-		if r.pushAssignAction(ctx, action, robot.Name) {
+		if r.pushAssignAction(ctx, action, robot.Name, leaseDur) {
 			return r.releaseRejectedAssignment(ctx, req.Namespace, action, robot.Name)
 		}
-		return ctrl.Result{RequeueAfter: leaseRenewInterval}, nil
+		return ctrl.Result{RequeueAfter: leaseRenew}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -767,6 +867,38 @@ func evaluateLease(phase fleetv1.ActionPhase, r reachability, lease *time.Time, 
 // the controller must never reassign on it (RA-4).
 func leaseProvablyDead(lease *time.Time, now time.Time, skew time.Duration) bool {
 	return lease != nil && !now.Before(lease.Add(skew))
+}
+
+// leaseTimings resolves the namespace's task-lease horizon and clock-skew margin
+// (spec.scheduling.{leaseDurationSeconds,clockSkewMarginSeconds}) from a single
+// SwarmadaConfig read. Each FAILS SAFE to its built-in default — defaultLeaseDuration /
+// defaultLeaseClockSkew — on any problem (no config, list error, or a non-positive
+// value), so an unreadable policy never lengthens the window a disconnected robot
+// keeps moving (ADR-0044).
+//
+// This is the SINGLE resolution point for both halves of the single-executor
+// guarantee. The same `duration` is written to status.leaseExpiresAt and sent to the
+// robot as Command.lease_duration_ms, so the robot's self-stop timer and the control
+// plane's reassignment horizon can never be computed from different values. Callers
+// MUST resolve once per reconcile and thread the result — never mix a resolved value
+// with a bare default constant on the same action.
+//
+// `renew` is always duration/3 (§9.3.2): derived, not configured, so widening the
+// horizon cannot also slow the renewals that keep it fresh.
+//
+// It is a free function rather than a method because the Robot controller resolves the
+// same skew for assignedLeaseProvablyDead (§9.6.3.5), and both controllers must agree.
+func leaseTimings(ctx context.Context, c client.Client, namespace string) (duration, renew, skew time.Duration) {
+	duration, skew = defaultLeaseDuration, defaultLeaseClockSkew
+	if cfg, ok := namespaceConfig(ctx, c, namespace); ok {
+		if s := cfg.Spec.Scheduling.LeaseDurationSeconds; s > 0 {
+			duration = time.Duration(s) * time.Second
+		}
+		if s := cfg.Spec.Scheduling.ClockSkewMarginSeconds; s > 0 {
+			skew = time.Duration(s) * time.Second
+		}
+	}
+	return duration, duration / 3, skew
 }
 
 // classifyRobot maps the assigned robot's observed state to a reachability. A
@@ -895,7 +1027,7 @@ func (r *FleetActionReconciler) releaseReservation(ctx context.Context, namespac
 // reschedule. An UNREACHABLE push (no wire / send failure / timeout) returns false:
 // we cannot tell whether the robot got it, so the assignment stands and the lease
 // machinery governs a truly-lost robot (never freed on unconfirmed loss, RA-4).
-func (r *FleetActionReconciler) pushAssignAction(ctx context.Context, action *fleetv1.FleetAction, robotID string) (rejected bool) {
+func (r *FleetActionReconciler) pushAssignAction(ctx context.Context, action *fleetv1.FleetAction, robotID string, leaseDur time.Duration) (rejected bool) {
 	if r.Commander == nil {
 		return false
 	}
@@ -905,11 +1037,19 @@ func (r *FleetActionReconciler) pushAssignAction(ctx context.Context, action *fl
 		ActionType:      string(action.Spec.Type),
 		FencingToken:    gen,
 		LeaseGeneration: gen,
-		LeaseDurationMs: command.LeaseDurationMs(leaseDuration),
+		LeaseDurationMs: command.LeaseDurationMs(leaseDur),
 		Priority:        int32(priorityRank(action.Spec.Priority)),
 	}
 	if action.Spec.Deadline != nil {
 		a.DeadlineMs = action.Spec.Deadline.UnixMilli()
+	}
+	// The payload rides the assignment itself — it is how the robot receives the work
+	// to execute (§9.1.4.5), and since proto field 3 `destination` is deprecated it is
+	// the only channel for one. Nil-handling mirrors actionServableBy's read for the
+	// validate path: spec.payload is a pointer, and an absent payload sends no bytes
+	// rather than an empty non-nil slice.
+	if action.Spec.Payload != nil {
+		a.Payload = action.Spec.Payload.Raw
 	}
 	wctx, cancel := context.WithTimeout(ctx, wireTimeout)
 	defer cancel()
@@ -932,7 +1072,7 @@ func (r *FleetActionReconciler) pushAssignAction(ctx context.Context, action *fl
 // Best-effort and NON-GATING: it runs AFTER the authoritative lease renewal, so a
 // failed push never changes the server-side lease — if renewals stop reaching the
 // robot, its own timer self-stops it. A nil Commander is a no-op.
-func (r *FleetActionReconciler) pushRenewLease(ctx context.Context, action *fleetv1.FleetAction) {
+func (r *FleetActionReconciler) pushRenewLease(ctx context.Context, action *fleetv1.FleetAction, leaseDur time.Duration) {
 	if r.Commander == nil || action.Status.AssignedRobot == "" {
 		return
 	}
@@ -941,7 +1081,7 @@ func (r *FleetActionReconciler) pushRenewLease(ctx context.Context, action *flee
 	out, err := r.Commander.PushRenewLease(wctx, action.Namespace, action.Status.AssignedRobot, command.RenewLease{
 		ActionID:        action.Name,
 		LeaseGeneration: command.FencingToken(action.Status.AssignmentGeneration),
-		LeaseDurationMs: command.LeaseDurationMs(leaseDuration),
+		LeaseDurationMs: command.LeaseDurationMs(leaseDur),
 	})
 	if err != nil {
 		log.FromContext(ctx).V(1).Info("renew_lease not delivered (best-effort; server-side lease stands)",
@@ -1147,8 +1287,11 @@ func actionCompletionExpired(action *fleetv1.FleetAction, now time.Time) bool {
 // the cancel, or the lease is provably dead (the robot self-stopped). Otherwise it
 // holds the action "cancelling" and requeues; it NEVER frees the robot/slot while
 // the lease is alive, so a cancel cannot cause a double-execution.
-func (r *FleetActionReconciler) handleCancel(ctx context.Context, action *fleetv1.FleetAction, original *fleetv1.FleetAction) (ctrl.Result, error) {
-	reason := action.Annotations[annCancelRequested]
+//
+// The reason is supplied by the caller rather than read from the annotation here: the
+// same confirmed-cancel discipline serves both the operator annotation and the
+// declarative spec.desiredState: Cancelled intent, and only the caller knows which.
+func (r *FleetActionReconciler) handleCancel(ctx context.Context, action *fleetv1.FleetAction, original *fleetv1.FleetAction, reason string) (ctrl.Result, error) {
 	robotName := action.Status.AssignedRobot
 
 	// Not bound (nothing executes) or the robot is provably stopped → finalize.
@@ -1157,6 +1300,53 @@ func (r *FleetActionReconciler) handleCancel(ctx context.Context, action *fleetv
 	}
 	// Otherwise hold: the robot may still be executing. Never free it here.
 	return r.holdStop(ctx, action, original, cancellingMessage)
+}
+
+// applyPauseTransition performs the §9.6.2.4 Paused transitions for a hold, and is the
+// ONLY implementation of them. Both intakes call it — the estop path and the declarative
+// spec.desiredState: Paused/Returning path (ADR-0045) — because two copies of a
+// single-executor rule is how one of them silently stops matching the other.
+//
+// The split is physical, not procedural:
+//
+//   - Assigned: the robot never started this action, so the binding and the zone slot are
+//     released and an operator may re-assign it (a fresh assignment mints a new
+//     generation). Its lease is dropped with it.
+//   - InProgress: the robot is physically committed, so it stays bound and its lease keeps
+//     being renewed. No other robot may take the action while it is held — that is
+//     §9.6.3.5, and it does not care why the hold happened.
+//
+// Any other phase is left untouched: a Pending action is not executing and has nothing to
+// hold (§9.6.2.4 table, `Pending` → no change), and a terminal one is already settled.
+func (r *FleetActionReconciler) applyPauseTransition(
+	ctx context.Context, action, original *fleetv1.FleetAction,
+	robot *fleetv1.Robot, robotFound bool, message string,
+	now time.Time, leaseDur, leaseRenew time.Duration,
+) (ctrl.Result, error) {
+	switch action.Status.Phase {
+	case fleetv1.ActionPhaseAssigned:
+		if robotFound && robot.Status.AssignedAction == action.Name {
+			robotOriginal := robot.DeepCopy()
+			robot.Status.AssignedAction = ""
+			_ = r.Status().Patch(ctx, robot, client.MergeFrom(robotOriginal))
+		}
+		action.Status.Phase = fleetv1.ActionPhasePaused
+		action.Status.AssignedRobot = ""
+		action.Status.LeaseExpiresAt = nil
+		action.Status.Message = message
+		// The robot never entered the zone for this action; free its slot. (An
+		// InProgress→Paused robot is physically in-zone and keeps its slot.)
+		r.releaseReservation(ctx, action.Namespace, action.Spec.Zone, action.Name)
+		return ctrl.Result{}, r.Status().Patch(ctx, action, client.MergeFrom(original))
+
+	case fleetv1.ActionPhaseInProgress:
+		action.Status.Phase = fleetv1.ActionPhasePaused
+		action.Status.LeaseExpiresAt = &metav1.Time{Time: now.Add(leaseDur)}
+		action.Status.Message = message
+		return ctrl.Result{RequeueAfter: leaseRenew},
+			r.Status().Patch(ctx, action, client.MergeFrom(original))
+	}
+	return ctrl.Result{}, nil
 }
 
 // handleRequeue drives a forcible requeue (§9.1.11 ZoneMaintenance Immediate). It
@@ -1239,7 +1429,8 @@ func (r *FleetActionReconciler) confirmedStopWithDisposition(ctx context.Context
 			return true, disp
 		}
 	}
-	if leaseProvablyDead(leaseTime(action.Status.LeaseExpiresAt), time.Now(), leaseClockSkew) {
+	_, _, skew := leaseTimings(ctx, r.Client, action.Namespace)
+	if leaseProvablyDead(leaseTime(action.Status.LeaseExpiresAt), time.Now(), skew) {
 		return true, command.CancelStoppedSafely
 	}
 	return false, command.CancelStoppedSafely
@@ -1254,7 +1445,8 @@ func (r *FleetActionReconciler) holdStop(ctx context.Context, action *fleetv1.Fl
 			return ctrl.Result{}, fmt.Errorf("marking task awaiting stop: %w", err)
 		}
 	}
-	return ctrl.Result{RequeueAfter: leaseRenewInterval}, nil
+	_, renew, _ := leaseTimings(ctx, r.Client, action.Namespace)
+	return ctrl.Result{RequeueAfter: renew}, nil
 }
 
 // pushCancel pushes cancel_action and reports whether the adapter CONFIRMED the
@@ -1691,12 +1883,27 @@ func priorityRank(p fleetv1.ActionPriority) int {
 	}
 }
 
-// robotUnderEstop reports whether the robot has an ACTIVE emergency stop
-// (§9.6.2.3 states Stopping or Stopped). Normal and Resuming are not active; an
-// empty state is treated as Normal.
+// robotUnderEstop reports whether the robot has an ACTIVE emergency stop:
+// RFC-0001 candidate filter 10 — Stopping, Stopped, or Failed. Normal and
+// Resuming are not active; an empty state is treated as Normal.
+//
+// Failed is included because it is NOT "the stop was refused" — it is "a stop
+// was commanded and never confirmed" (dropped estop, silence, or STOPPING with
+// no STOPPED). The robot's physical state is unknown, it must never be treated
+// as at rest, and it already carries an operator obligation to escalate to an
+// edge or manual path. Excluding only the robots whose stop SUCCEEDED would
+// leave the fleet dispatching to the one robot whose stop did not.
+//
+// This predicate governs three paths, and Failed now reaches all three: the
+// dispatch candidate filter (adapter_readiness.go), the estop-pause of an
+// in-flight action (below), and preemption-victim selection.
 func robotUnderEstop(robot *fleetv1.Robot) bool {
-	return robot.Status.EstopState == fleetv1.RobotEstopStopping ||
-		robot.Status.EstopState == fleetv1.RobotEstopStopped
+	switch robot.Status.EstopState {
+	case fleetv1.RobotEstopStopping, fleetv1.RobotEstopStopped, fleetv1.RobotEstopFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // leaseTime unwraps an optional metav1.Time for the pure decision core.
@@ -1709,12 +1916,14 @@ func leaseTime(t *metav1.Time) *time.Time {
 }
 
 // untilLeaseHorizon returns how long to wait before re-checking a lease, bounded
-// below by 1s. A nil horizon falls back to the renew interval.
-func untilLeaseHorizon(expires *metav1.Time, now time.Time) time.Duration {
+// below by 1s. A nil horizon falls back to the renew interval. `renew` and `skew`
+// are the namespace-resolved values from leaseTimings — a pure function over them,
+// so it can never read a horizon the caller did not resolve (ADR-0044).
+func untilLeaseHorizon(expires *metav1.Time, now time.Time, renew, skew time.Duration) time.Duration {
 	if expires == nil {
-		return leaseRenewInterval
+		return renew
 	}
-	if d := expires.Time.Add(leaseClockSkew).Sub(now); d > time.Second {
+	if d := expires.Time.Add(skew).Sub(now); d > time.Second {
 		return d
 	}
 	return time.Second

@@ -146,7 +146,7 @@ func TestRolloutStatus_RefusedRobotsAreReportedNotHidden(t *testing.T) {
 	}
 	done := []*fleetv1.Robot{robotRunningModel("amr-3", "m", "4.0.0", fleetv1.ModelStatusActive)}
 
-	st := computeRolloutStatus("m", 3, done, nil, nil, nil, newer, false, nil, nil)
+	st := computeRolloutStatus("m", 3, done, nil, nil, nil, newer, nil, false, nil, nil)
 	if st.RobotsIneligible != 2 {
 		t.Fatalf("refused robots must be counted ineligible, got %d", st.RobotsIneligible)
 	}
@@ -165,7 +165,7 @@ func TestRolloutStatus_AllRefusedStillSettles(t *testing.T) {
 		robotRunningModel("amr-1", "m", "5.0.0", fleetv1.ModelStatusActive),
 		robotRunningModel("amr-2", "m", "5.0.0", fleetv1.ModelStatusActive),
 	}
-	st := computeRolloutStatus("m", 2, nil, nil, nil, nil, newer, false, nil, nil)
+	st := computeRolloutStatus("m", 2, nil, nil, nil, nil, newer, nil, false, nil, nil)
 	if st.Phase == fleetv1.RolloutPhaseInProgress {
 		t.Fatalf("a rollout whose targets are all ahead must settle, got phase %s", st.Phase)
 	}

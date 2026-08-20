@@ -34,7 +34,7 @@ import (
 
 func TestAudit_ActionPausedByEstop_InProgressRecordsPriorPhase(t *testing.T) {
 	a := &recordingAudit{}
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, _ := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, lease),
 		robotEstopped("r1", fleetv1.RobotEstopStopped, "t1"),
@@ -80,7 +80,7 @@ func TestAudit_ActionPausedByEstop_SealsOnceWhilePausedPersists(t *testing.T) {
 	// edge into Paused is an event. A per-reconcile writer would fill the chain with one
 	// robot's estop and bury everything else in the incident.
 	a := &recordingAudit{}
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, _ := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, lease),
 		robotEstopped("r1", fleetv1.RobotEstopStopped, "t1"),
@@ -99,7 +99,7 @@ func TestAudit_ActionPausedByEstop_SinkFailureDoesNotBlockThePause(t *testing.T)
 	// The safety-critical direction: an estop pause must never wait on, or be prevented
 	// by, an audit sink.
 	a := &recordingAudit{err: errors.New("sink unavailable")}
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, lease),
 		robotEstopped("r1", fleetv1.RobotEstopStopped, "t1"),
@@ -113,7 +113,7 @@ func TestAudit_ActionPausedByEstop_SinkFailureDoesNotBlockThePause(t *testing.T)
 }
 
 func TestAudit_ActionPausedByEstop_NilRecorderIsSafe(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, lease),
 		robotEstopped("r1", fleetv1.RobotEstopStopped, "t1"),
@@ -129,7 +129,7 @@ func TestAudit_ActionPausedByEstop_NoEstopNoEntry(t *testing.T) {
 	// The producer sits on the estop branch only; an ordinary in-flight action must not
 	// generate a safety entry.
 	a := &recordingAudit{}
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, _ := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, lease),
 		robotEstopped("r1", fleetv1.RobotEstopNormal, "t1"),

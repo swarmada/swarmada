@@ -27,8 +27,8 @@ type FleetZoneSpec struct {
 	DisplayName string `json:"displayName,omitempty"`
 
 	// ParentZone references a parent FleetZone for hierarchical zones.
-	// Leave empty for top-level zones. Admission (a FleetZone webhook, not yet
-	// built) rejects a non-existent parent and any cycle A→B→A (§9.3.1).
+	// Leave empty for top-level zones. The FleetZone admission webhook rejects a
+	// non-existent parent and any cycle A→B→A (§9.3.1).
 	// +optional
 	ParentZone string `json:"parentZone,omitempty"`
 
@@ -95,7 +95,7 @@ type PhysicalBounds struct {
 
 	// Polygon is the closed zone boundary (the last vertex connects back to the
 	// first). At least 3 vertices are required; a self-intersecting polygon is
-	// rejected by the FleetZone admission webhook (not yet built, §9.3.1).
+	// rejected by the FleetZone admission webhook (§9.3.1).
 	// +kubebuilder:validation:MinItems=3
 	Polygon []Point `json:"polygon"`
 

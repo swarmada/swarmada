@@ -24,7 +24,7 @@ type ModelPolicyTriggerType string
 
 const (
 	// ModelPolicyTriggerWebhook — training system POSTs metrics to a Swarmada-managed endpoint.
-	// ModelPolicyTriggerWebhook — POST /apis/swarmada.io/v1/namespaces/{ns}/modelpolicies/{name}/trigger
+	// ModelPolicyTriggerWebhook — POST /webhooks/v1/model-policy/{namespace}/{name}
 	ModelPolicyTriggerWebhook ModelPolicyTriggerType = "Webhook"
 
 	// ModelPolicyTriggerRegistryWatch — the ModelPolicy controller polls an OCI registry for new
@@ -40,7 +40,7 @@ const (
 // +kubebuilder:validation:Enum=Deploy;Reject;Pending
 type ModelPolicyDecision string
 
-// ModelPolicyDecision values (§9.1.9): the quality gate's verdict on a candidate model. Deploy
+// ModelPolicyDecision values (§9.1.10): the quality gate's verdict on a candidate model. Deploy
 // auto-creates a ModelRollout; Reject counts toward the consecutive-rejection suspension; Pending
 // means the gate has not yet evaluated this trigger.
 const (
@@ -180,6 +180,8 @@ type QualityGate struct {
 	// infinite gap and FAILS the gate — real-hardware validation is required, it is
 	// never skipped because real metrics were not reported.
 	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
 	MaxSimToRealGap *float64 `json:"maxSimToRealGap,omitempty"`
 
 	// RequireRealEval, when true, fails the gate closed unless the payload carries
@@ -220,6 +222,7 @@ type ModelPolicySpec struct {
 	// ModelName is the logical model name this policy governs.
 	// Must match InstalledModel.name on target robots.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	ModelName string `json:"modelName"`
 
 	// TargetRobotSelector selects which robots will receive auto-deployments.
@@ -254,7 +257,7 @@ type ModelPolicySpec struct {
 	// rejections after which the controller sets a FailedRepeatedly condition and
 	// SUSPENDS evaluation — further triggers are silently dropped until an operator
 	// resets the policy (swarmctl reset policy). 0 disables suspension (unlimited
-	// retries). §9.1.9.4.
+	// retries). §9.1.10.4.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=5
 	ConsecutiveRejectionLimit int32 `json:"consecutiveRejectionLimit,omitempty"`
@@ -314,7 +317,7 @@ type ModelPolicyStatus struct {
 	// ConsecutiveRejections counts quality-gate rejections since the last Deploy
 	// decision (reset to 0 on any Deploy). When it reaches
 	// spec.consecutiveRejectionLimit the FailedRepeatedly condition suspends
-	// evaluation. §9.1.9.4.
+	// evaluation. §9.1.10.4.
 	// +optional
 	ConsecutiveRejections int32 `json:"consecutiveRejections,omitempty"`
 

@@ -25,10 +25,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrSinkNotResumable is returned by [Log.Resume] when the configured sink cannot be
+// read back, so the chain necessarily restarts at genesis on every process restart.
+var ErrSinkNotResumable = errors.New("audit sink cannot be resumed; the chain restarts at genesis on each restart")
 
 // genesisHash seeds each namespace's chain (§9.6.5.2 — genesis chain_hash is all
 // zeros). It is the prev-hash for the first real entry.
@@ -71,6 +77,16 @@ const (
 	EventFirmwareRolloutCreat = "FIRMWARE_ROLLOUT_CREATED"
 	EventModelRolloutCreated  = "MODEL_ROLLOUT_CREATED"
 	EventSwarmadaConfigMod    = "SWARMADA_CONFIG_MODIFIED"
+
+	// Rollout pause and operator resume (§9.6.5.1). A paused rollout has stopped
+	// dispatching to a fleet mid-update, and the resume that releases it is an operator
+	// OVERRIDE of an automated safety halt — it abandons the robots that failed rather
+	// than retrying them (ADR-0041). Both halves are sealed: an incident review needs to
+	// know that the halt fired, and that a human chose to proceed past it and past which
+	// robots.
+	EventFirmwareRolloutPaused = "FIRMWARE_ROLLOUT_PAUSED"
+	EventModelRolloutPaused    = "MODEL_ROLLOUT_PAUSED"
+	EventRolloutResumed        = "ROLLOUT_RESUMED"
 
 	// Robot connectivity and capability lifecycle (§9.6.5.1). These seal the
 	// transitions an incident reconstruction turns on: when a robot dropped, how long
@@ -169,6 +185,24 @@ type Sink interface {
 	Append(Entry) error
 }
 
+// ResumableSink is a Sink that can report where each namespace's chain left off.
+//
+// Without this the chain is only tamper-evident WITHIN one process lifetime: Log keeps
+// the running sequence and previous hash in memory, so a restarted control plane starts
+// every namespace again at sequence 1 chained to genesis. An auditor verifying the file
+// then sees the chain restart, and — worse — cannot distinguish that restart from an
+// attacker truncating the log and re-sealing a shorter one, which is precisely the
+// property §9.6.5.2 exists to provide.
+//
+// Optional: a Sink that cannot be read back (a write-only SIEM forwarder) simply does not
+// implement it, and Log.Resume says so rather than pretending the chain is continuous.
+type ResumableSink interface {
+	Sink
+	// Tail returns the highest-sequence entry recorded for each namespace, keyed by
+	// namespace. A namespace with no entries is absent from the map.
+	Tail() (map[string]Entry, error)
+}
+
 // Recorder is the write side depended on by event producers.
 type Recorder interface {
 	Record(Entry) (Entry, error)
@@ -194,6 +228,32 @@ func New(sink Sink, swarmadaVersion string) *Log {
 		swarmadaVersion = "v0.1.0"
 	}
 	return &Log{sink: sink, state: map[string]*nsState{}, version: swarmadaVersion}
+}
+
+// Resume seeds each namespace's chain from what the sink already holds, so a restarted
+// control plane continues the existing chain instead of opening a second one at genesis.
+//
+// Returns ErrSinkNotResumable when the sink cannot be read back. That is a fact about the
+// deployment, not a failure — the caller decides whether a chain that restarts on every
+// process restart is acceptable for its safety case — but it must be surfaced, because the
+// silent version of it is indistinguishable from a working one until an audit.
+//
+// Safe to call only before the first Record: it overwrites in-memory chain state.
+func (l *Log) Resume() error {
+	rs, ok := l.sink.(ResumableSink)
+	if !ok {
+		return ErrSinkNotResumable
+	}
+	tail, err := rs.Tail()
+	if err != nil {
+		return fmt.Errorf("reading audit chain tail: %w", err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for ns, e := range tail {
+		l.state[ns] = &nsState{seq: e.SequenceNumber, prevHash: e.ChainHash}
+	}
+	return nil
 }
 
 func (l *Log) clock() time.Time {
@@ -283,6 +343,21 @@ func Verify(entries []Entry) VerifyResult {
 		res.OK = false
 	}
 	return res
+}
+
+// Tail reports the highest-sequence entry per namespace. Entries are appended in
+// sequence order per namespace, so the last one seen for a namespace is its tail;
+// the sequence comparison is kept anyway so the result does not depend on that.
+func (m *MemorySink) Tail() (map[string]Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]Entry{}
+	for _, e := range m.entries {
+		if cur, seen := out[e.Namespace]; !seen || e.SequenceNumber > cur.SequenceNumber {
+			out[e.Namespace] = e
+		}
+	}
+	return out, nil
 }
 
 // MemorySink is an in-memory append-only Sink for tests and dev.

@@ -411,7 +411,10 @@ spec:
                       description: |-
                         ModelURI is where the Robot Agent fetches the model artifact
                         (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
+                        Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
+                        validated identically wherever it is declared (RFC-0001 D3).
                       minLength: 1
+                      pattern: ^(oci|s3|https)://
                       type: string
                     name:
                       description: |-
@@ -572,6 +575,8 @@ spec:
                   bucket boundary — never on every telemetry tick (RA-1). For continuous
                   battery history, query the telemetry TSDB, not this field.
                 format: int32
+                maximum: 100
+                minimum: 0
                 type: integer
               capabilities:
                 description: |-

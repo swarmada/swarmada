@@ -75,6 +75,13 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["modelpolicies"]
     verbs: ["policy-reset"]
+  # rollout-resume (ADR-0041): an operator override of an AUTOMATED safety halt — releasing a
+  # rollout that pauseOnError stopped. It EXCLUDES the robots that failed rather than retrying
+  # them, so it abandons work rather than repeating it; scoped like policy-reset because it is
+  # a fleet-update call, not a safety-stop one.
+  - apiGroups: ["swarmada.io"]
+    resources: ["firmwarerollouts", "modelrollouts"]
+    verbs: ["rollout-resume"]
   # Safety audit log: read + verify (NOT export — admin only, §9.5.3.2).
   - apiGroups: ["swarmada.io"]
     resources: ["safetyauditlogs"]

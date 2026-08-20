@@ -129,3 +129,60 @@ func TestTDERetryBoundsFromConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestLeaseTimingsFromConfig verifies the task-lease horizon and clock-skew margin are
+// sourced from spec.scheduling and fail safe to the built-in constants (30s / 5s) when
+// the config is absent or carries a non-positive value, and that the renew interval is
+// always the resolved duration/3 rather than a separately configurable value (ADR-0044).
+func TestLeaseTimingsFromConfig(t *testing.T) {
+	const ns = "lease-ns"
+
+	tests := []struct {
+		name                         string
+		spec                         *fleetv1.SwarmadaConfigSpec // nil ⇒ no config
+		wantDur, wantRenew, wantSkew time.Duration
+	}{
+		{
+			name: "no config → constants", spec: nil,
+			wantDur: defaultLeaseDuration, wantRenew: defaultLeaseRenewInterval, wantSkew: defaultLeaseClockSkew,
+		},
+		{
+			name: "config honored",
+			spec: &fleetv1.SwarmadaConfigSpec{Scheduling: fleetv1.SwarmadaSchedulingConfig{
+				LeaseDurationSeconds: 90, ClockSkewMarginSeconds: 12}},
+			wantDur: 90 * time.Second, wantRenew: 30 * time.Second, wantSkew: 12 * time.Second,
+		},
+		{
+			name: "zero values fall back to constants",
+			spec: &fleetv1.SwarmadaConfigSpec{Scheduling: fleetv1.SwarmadaSchedulingConfig{
+				LeaseDurationSeconds: 0, ClockSkewMarginSeconds: 0}},
+			wantDur: defaultLeaseDuration, wantRenew: defaultLeaseRenewInterval, wantSkew: defaultLeaseClockSkew,
+		},
+		{
+			name: "each field falls back independently",
+			spec: &fleetv1.SwarmadaConfigSpec{Scheduling: fleetv1.SwarmadaSchedulingConfig{
+				LeaseDurationSeconds: 60}},
+			wantDur: 60 * time.Second, wantRenew: 20 * time.Second, wantSkew: defaultLeaseClockSkew,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var objs []client.Object
+			if tc.spec != nil {
+				objs = append(objs, configWithSpec(ns, *tc.spec))
+			}
+			c := defaultsTestClient(t, objs...)
+			gotDur, gotRenew, gotSkew := leaseTimings(context.Background(), c, ns)
+			if gotDur != tc.wantDur || gotRenew != tc.wantRenew || gotSkew != tc.wantSkew {
+				t.Errorf("leaseTimings = (%v, %v, %v), want (%v, %v, %v)",
+					gotDur, gotRenew, gotSkew, tc.wantDur, tc.wantRenew, tc.wantSkew)
+			}
+			// The renew interval is DERIVED, never configured: widening the horizon must
+			// always shorten the gap between renewals proportionally (§9.3.2).
+			if gotRenew != gotDur/3 {
+				t.Errorf("renew interval %v is not duration/3 (duration %v)", gotRenew, gotDur)
+			}
+		})
+	}
+}

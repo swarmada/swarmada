@@ -134,11 +134,31 @@ func (r *FirmwareRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("listing target robots: %w", err)
 	}
 
+	// An operator resume converts the robots that are currently failed into this rollout's
+	// excluded set (ADR-0041), so the pause cannot re-latch off the same robots on the very
+	// next reconcile. Applied BEFORE classification so this pass already sees them excluded.
+	if resumed, err := r.applyResume(ctx, rollout); err != nil {
+		return ctrl.Result{}, err
+	} else if resumed {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	excludedSet := make(map[string]bool, len(rollout.Status.ExcludedRobots))
+	for _, n := range rollout.Status.ExcludedRobots {
+		excludedSet[n] = true
+	}
+
 	now := time.Now()
 	windowOnly := rollout.Spec.SafetyConstraints.MaintenanceWindowOnly
-	var done, updating, eligible, failed []*fleetv1.Robot
+	var done, updating, eligible, failed, excluded []*fleetv1.Robot
 	for i := range robots.Items {
 		rob := &robots.Items[i]
+		if excludedSet[rob.Name] {
+			// An operator resumed past this robot: out of every bucket, so it neither
+			// re-pauses the rollout nor is re-dispatched to, and it counts as settled so
+			// the rollout can still reach a terminal phase.
+			excluded = append(excluded, rob)
+			continue
+		}
 		entry := batchEntryFor(rollout.Status.CurrentBatch, rob.Name)
 		switch {
 		case rob.Status.FirmwareVersion == rollout.Spec.NewVersion:
@@ -148,6 +168,8 @@ func (r *FirmwareRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			if entry != nil {
 				r.recordFirmwareInstalled(ctx, rollout, rob, entry)
 			}
+			// The install is over, so the PullOnIdle dispatch markers must not outlive it.
+			r.clearPendingFirmware(ctx, rob)
 		// Checked BEFORE the pending-annotation case below. A failed robot keeps that
 		// annotation — nothing clears it — so without this it would classify as forever
 		// "updating", which is precisely how a failed install used to wedge a rollout.
@@ -162,24 +184,38 @@ func (r *FirmwareRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	total := len(robots.Items)
-	slots := maxUnavailable(rollout.Spec.Strategy.RollingUpdateOrDefault().MaxUnavailable, total) - len(updating)
-	sort.Slice(eligible, func(i, j int) bool { return eligible[i].Name < eligible[j].Name })
-	for _, rob := range eligible {
-		if slots <= 0 {
-			break
+
+	// ── pauseOnError (§9.1.8.5) ────────────────────────────────────────────────
+	// A failed install halts the rollout: no FURTHER robot enters the batch while the
+	// failure stands, though in-flight updaters continue. This is the guard that stops a
+	// bad image reaching the whole fleet one batch at a time — firmware has no
+	// rollbackPolicy: Auto, so it is the only guard on this path.
+	//
+	// Derived per reconcile rather than latched, matching ModelRollout: the rollout
+	// un-pauses when nothing is failed any more, which happens when an operator resumes
+	// (the failed robots move to status.excludedRobots) or repairs them out of band.
+	paused := len(failed) > 0 && rollout.Spec.Strategy.RollingUpdateOrDefault().PauseOnError
+
+	if !paused {
+		slots := maxUnavailable(rollout.Spec.Strategy.RollingUpdateOrDefault().MaxUnavailable, total) - len(updating)
+		sort.Slice(eligible, func(i, j int) bool { return eligible[i].Name < eligible[j].Name })
+		for _, rob := range eligible {
+			if slots <= 0 {
+				break
+			}
+			if err := r.dispatch(ctx, rob, rollout); err != nil {
+				return ctrl.Result{}, err
+			}
+			updating = append(updating, rob)
+			slots--
 		}
-		if err := r.dispatch(ctx, rob, rollout); err != nil {
-			return ctrl.Result{}, err
-		}
-		updating = append(updating, rob)
-		slots--
 	}
 
 	// Was this rollout already verified on a previous pass? The condition is re-asserted
 	// every reconcile, so the entry has to hang off the edge, not the assertion.
 	prevVerified := conditionIsTrue(rollout.Status.Conditions, conditionSignatureVerified)
 
-	newStatus := computeFirmwareStatus(total, len(done), updating, failed, rollout.Status.CurrentBatch)
+	newStatus := computeFirmwareStatus(total, len(done), updating, failed, excluded, paused, rollout.Status.CurrentBatch)
 	upsertCondition(&newStatus.Conditions, conditionSignatureVerified, metav1.ConditionTrue,
 		"Verified", verifiedReason(rollout.Spec.FirmwareSignatureRef, signer))
 	if !prevVerified {
@@ -190,6 +226,18 @@ func (r *FirmwareRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				"verified_signer": signer,
 			})
 	}
+	// PausedAt anchors the halt for an operator and for the audit entry. Stamped on the EDGE
+	// into Paused so it records when the rollout stopped, not when it was last reconciled
+	// while stopped — and so it rides the material-change patch below.
+	if newStatus.Phase == fleetv1.RolloutPhasePaused {
+		if rollout.Status.PausedAt != nil {
+			newStatus.PausedAt = rollout.Status.PausedAt
+		} else {
+			pausedAt := metav1.Now()
+			newStatus.PausedAt = &pausedAt
+		}
+	}
+	pauseEdge := newStatus.Phase == fleetv1.RolloutPhasePaused && rollout.Status.Phase != fleetv1.RolloutPhasePaused
 	if !equality.Semantic.DeepEqual(rollout.Status, newStatus) {
 		base := rollout.DeepCopy()
 		rollout.Status = newStatus
@@ -197,6 +245,20 @@ func (r *FirmwareRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, fmt.Errorf("patching rollout status: %w", err)
 		}
 		logger.V(1).Info("firmware rollout progress", "phase", newStatus.Phase, "updated", newStatus.RobotsUpdated)
+		// §9.5.4 requires FIRMWARE_ROLLOUT_PAUSED. Until pauseOnError was implemented the
+		// transition could not occur, so the required event had no reachable writer.
+		// Sealed on the edge: a rollout sitting Paused seals one entry, not one per pass.
+		if pauseEdge {
+			failedNames := make([]string, 0, len(newStatus.FailedRobots))
+			for _, f := range newStatus.FailedRobots {
+				failedNames = append(failedNames, f.RobotName)
+			}
+			r.sealFirmwareEvent(ctx, rollout, audit.EventFirmwareRolloutPaused, "pause", audit.OutcomeError,
+				map[string]string{
+					"version":       rollout.Spec.NewVersion,
+					"failed_robots": strings.Join(failedNames, ","),
+				})
+		}
 		// The first time the phase leaves empty is the first (verified) processing of
 		// a newly-created rollout — record it once. Tied to the successful patch so a
 		// mid-reconcile error never records a phantom creation.
@@ -207,19 +269,82 @@ func (r *FirmwareRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
+// applyResume consumes a pending swarmada.io/rollout-resume annotation (ADR-0041).
+//
+// It moves the robots this rollout records as failed into status.excludedRobots and clears
+// status.pausedAt, so `paused` — derived per reconcile from len(failed), not latched — cannot
+// immediately re-latch off the same robots, and the rollout can reach a terminal phase and
+// become deletable.
+//
+// Returns resumed=true when it wrote status; the caller ends the reconcile and the write
+// requeues. Idempotent, and a rollout that is NOT paused still records the request as
+// processed so a stale annotation cannot silently resume a FUTURE pause.
+func (r *FirmwareRolloutReconciler) applyResume(ctx context.Context, rollout *fleetv1.FirmwareRollout) (bool, error) {
+	req, pending := pendingResume(rollout.Annotations)
+	if !pending {
+		return false, nil
+	}
+
+	resumed := false
+	if rollout.Status.Phase == fleetv1.RolloutPhasePaused {
+		newlyExcluded := make([]string, 0, len(rollout.Status.FailedRobots))
+		for _, f := range rollout.Status.FailedRobots {
+			newlyExcluded = append(newlyExcluded, f.RobotName)
+		}
+
+		base := rollout.DeepCopy()
+		rollout.Status.ExcludedRobots = mergeExcluded(rollout.Status.ExcludedRobots, newlyExcluded)
+		// The failure list is what re-derives `paused`; leaving it would re-pause on the very
+		// next reconcile and make the resume look like it did nothing.
+		rollout.Status.FailedRobots = nil
+		rollout.Status.PausedAt = nil
+		if err := r.Status().Patch(ctx, rollout, client.MergeFrom(base)); err != nil {
+			return false, fmt.Errorf("resuming firmware rollout: %w", err)
+		}
+		// The operator who wrote the resume annotation, stamped at admission (ADR-0046).
+		// The identity rides the envelope's Actor — never the Detail map, which must not
+		// duplicate envelope-carried identity (scripts/specdiff.py _ENVELOPE_FIELDS).
+		r.sealFirmwareEventAs(ctx, rollout,
+			estopActor(rollout.Annotations, "firmwarerollout-controller"),
+			audit.EventRolloutResumed, "resume", audit.OutcomeAllowed,
+			map[string]string{
+				"reason":          req,
+				"excluded_robots": strings.Join(newlyExcluded, ","),
+			})
+		resumed = true
+	}
+
+	if err := markResumeProcessed(ctx, r.Client, rollout, req); err != nil {
+		return false, err
+	}
+	return resumed, nil
+}
+
 // sealFirmwareEvent appends one §9.6.5.1 entry about a firmware rollout. Best-effort and
 // nil-safe: verification and dispatch decisions are made before this is called, and an
 // audit sink must never be able to stop a rollout being blocked — least of all the
 // signature-failure path, where refusing to dispatch is the safety-relevant behaviour.
 func (r *FirmwareRolloutReconciler) sealFirmwareEvent(ctx context.Context, rollout *fleetv1.FirmwareRollout,
 	eventType, action string, outcome audit.Outcome, detail map[string]string) {
+	r.sealFirmwareEventAs(ctx, rollout,
+		audit.Actor{Type: audit.ActorServiceAccount, Identity: "firmwarerollout-controller"},
+		eventType, action, outcome, detail)
+}
+
+// sealFirmwareEventAs is sealFirmwareEvent with an explicit actor. Only the operator-driven
+// events use it: ROLLOUT_RESUMED is an intent a person expressed (ADR-0041's resume
+// annotation), so it carries the person (ADR-0046). Everything else this controller seals —
+// install outcomes, the pause edge — is genuinely the controller's own act and keeps the
+// service-account actor, because claiming a user there would be a false attribution.
+func (r *FirmwareRolloutReconciler) sealFirmwareEventAs(ctx context.Context, rollout *fleetv1.FirmwareRollout,
+	actor audit.Actor, eventType, action string, outcome audit.Outcome, detail map[string]string) {
 	if r.Audit == nil {
 		return
 	}
 	if _, err := r.Audit.Record(audit.Entry{
 		EventType: eventType,
 		Namespace: rollout.Namespace,
-		Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: "firmwarerollout-controller"},
+		Actor:     actor,
 		Resource:  audit.Resource{Kind: "FirmwareRollout", Namespace: rollout.Namespace, Name: rollout.Name},
 		Action:    action,
 		Outcome:   outcome,
@@ -681,6 +806,30 @@ func (r *FirmwareRolloutReconciler) failVerification(ctx context.Context, rollou
 	return ctrl.Result{}, nil // terminal; do not requeue a bad signature into a dispatch
 }
 
+// clearPendingFirmware removes the PullOnIdle dispatch annotations from a robot that now
+// reports the target version running.
+//
+// Nothing cleared them before. The consequence is not cosmetic: the annotation is also the
+// "updating" classifier above, so a stale marker makes a finished robot indistinguishable
+// from one still installing, and a later rollout to the same version reads a leftover
+// dispatch as its own. Failures deliberately keep their annotation -- installFailedForRollout
+// is what reads it -- so only the success edge clears.
+//
+// Best-effort: a failure here is logged, not returned. The robot is already classified done
+// on this pass, and the next reconcile retries the clear.
+func (r *FirmwareRolloutReconciler) clearPendingFirmware(ctx context.Context, rob *fleetv1.Robot) {
+	if rob.Annotations[annPendingFirmwareVersion] == "" {
+		return
+	}
+	base := rob.DeepCopy()
+	delete(rob.Annotations, annPendingFirmwareVersion)
+	delete(rob.Annotations, annPendingFirmwareURI)
+	delete(rob.Annotations, annPendingFirmwareChecksum)
+	if err := r.Patch(ctx, rob, client.MergeFrom(base)); err != nil {
+		log.FromContext(ctx).Error(err, "clearing pending-firmware annotations", "robot", rob.Name)
+	}
+}
+
 // dispatch annotates a robot with the pending-firmware update (PullOnIdle).
 func (r *FirmwareRolloutReconciler) dispatch(ctx context.Context, rob *fleetv1.Robot, rollout *fleetv1.FirmwareRollout) error {
 	base := rob.DeepCopy()
@@ -722,7 +871,7 @@ func eligibleForFirmwareUpdate(rob *fleetv1.Robot, rollout *fleetv1.FirmwareRoll
 	return true
 }
 
-func computeFirmwareStatus(total, done int, updating, failed []*fleetv1.Robot,
+func computeFirmwareStatus(total, done int, updating, failed, excluded []*fleetv1.Robot, paused bool,
 	prior []fleetv1.RolloutBatchRobot) fleetv1.FirmwareRolloutStatus {
 	st := fleetv1.FirmwareRolloutStatus{
 		//nolint:gosec // small fleet counts
@@ -733,13 +882,25 @@ func computeFirmwareStatus(total, done int, updating, failed []*fleetv1.Robot,
 		// never settles, and an operator reading "3 pending" cannot tell work still to do
 		// from work that has already gone wrong.
 		//nolint:gosec // small fleet counts
-		RobotsPending: int32(total - done - len(failed)),
+		RobotsPending: int32(total - done - len(failed) - len(excluded)),
 		CurrentBatch:  buildRolloutBatch(updating, prior, firmwareInitialPhase, firmwarePrevVersion, false),
 		FailedRobots:  firmwareFailedResults(failed, prior),
 	}
+	if len(excluded) > 0 {
+		names := make([]string, 0, len(excluded))
+		for _, r := range excluded {
+			names = append(names, r.Name)
+		}
+		sort.Strings(names)
+		st.ExcludedRobots = names
+	}
 	switch {
-	case total > 0 && done == total:
+	// Excluded robots count as settled, so a resumed rollout can still reach a terminal
+	// phase — which is what makes its record deletable (ADR-0041).
+	case total > 0 && done+len(excluded) == total:
 		st.Phase = fleetv1.RolloutPhaseSucceeded
+	case paused:
+		st.Phase = fleetv1.RolloutPhasePaused
 	case len(updating) > 0 || done > 0 || len(failed) > 0:
 		st.Phase = fleetv1.RolloutPhaseInProgress
 	default:

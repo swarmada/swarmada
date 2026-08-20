@@ -33,6 +33,7 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
+	"github.com/swarmada/swarmada/internal/metrics"
 	"github.com/swarmada/swarmada/internal/safety"
 )
 
@@ -53,7 +54,12 @@ const (
 // the estop over the robot's SafetyStream and marks Stopped only on a CONFIRMED
 // EstopAck — a robot it cannot confirm resolves to Failed (escalate), never Stopped.
 type ZoneEstopper interface {
-	TriggerEstop(ctx context.Context, namespace, robotID, reason, issuedBy string) (safety.Result, error)
+	// scope names the OPERATOR ACTION that produced this stop (robot / zone / namespace),
+	// not the object being written. A zone or namespace estop fans out per robot through
+	// this same primitive, so nothing below this call can distinguish the three — the
+	// §9.3.8 `scope` label has to be carried in from the reconciler that fanned out.
+	TriggerEstop(ctx context.Context, namespace, robotID, reason, issuedBy string,
+		scope metrics.EstopScope) (safety.Result, error)
 	// ClearEstop resets a robot's estop to Normal on an operator-authorized clear
 	// (§9.6.2.3). No-op when the robot is not estopped; the action stays operator-gated.
 	ClearEstop(ctx context.Context, namespace, robotID, clearedBy string) (fleetv1.RobotEstopState, error)
@@ -112,7 +118,11 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if reason == "" || reason == "true" {
 		reason = "zone emergency stop"
 	}
-	issuedBy := "zone-estop:" + zone.Name
+	// The operator the mutating webhook stamped at admission (ADR-0046); falls back to
+	// an explicitly unattributed actor when none was resolvable — never to a synthetic
+	// name that reads like a real one.
+	actor := estopActor(zone.Annotations, "zone-estop:"+zone.Name)
+	issuedBy := actor.Identity
 
 	// ── Fan out to every robot in scope (confirmed estop each) ─────────────────
 	robots, err := r.robotsInEstopScope(ctx, req.Namespace, zone.Name, toChildren)
@@ -127,22 +137,32 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// that matters, because the §9.6.2.2 SLA is breached if ANY robot exceeds it.
 	inScope := make([]string, 0, len(robots))
 	var worstLatency time.Duration
-	for i := range robots {
-		inScope = append(inScope, robots[i].Name)
-		res, terr := r.Estopper.TriggerEstop(ctx, req.Namespace, robots[i].Name, reason, issuedBy)
-		if res.Delivered && res.Latency > worstLatency {
-			worstLatency = res.Latency
+	// Issued in PARALLEL (§9.6.2.1): one goroutine per robot, so a slow acknowledgement
+	// from one robot never delays the estop signal to the others. estopFanout also returns
+	// the episode's wall-clock duration — trigger to last robot resolved — which is the
+	// interval the per-robot latency histogram structurally cannot see (ADR-0042).
+	outcomes, fanout := estopFanout(ctx, r.Estopper, req.Namespace, robots, reason, issuedBy,
+		metrics.ScopeZone)
+	// Aggregated after the join, in robot order: the counts, the worst latency and the audit
+	// entry must not depend on which goroutine happened to finish first.
+	for _, o := range outcomes {
+		inScope = append(inScope, o.robot)
+		if o.result.Delivered && o.result.Latency > worstLatency {
+			worstLatency = o.result.Latency
 		}
-		if terr != nil || res.State != fleetv1.RobotEstopStopped {
+		if o.err != nil || o.result.State != fleetv1.RobotEstopStopped {
 			failed++
-			logger.Info("zone estop not confirmed for robot (escalate)", "robot", robots[i].Name,
-				"state", res.State, "err", errString(terr))
+			logger.Info("zone estop not confirmed for robot (escalate)", "robot", o.robot,
+				"state", o.result.State, "err", errString(o.err))
 			continue
 		}
 		stopped++
 	}
+	// Observed for every episode that fans out, including one that stopped nothing: a zone
+	// whose robots all failed to confirm is exactly the episode an operator needs timed.
+	metrics.ObserveEstopFanout(req.Namespace, metrics.ScopeZone, fanout)
 	logger.Info("zone estop fanned out", "zone", zone.Name, "reason", reason,
-		"robots", len(robots), "stopped", stopped, "unconfirmed", failed)
+		"robots", len(robots), "stopped", stopped, "unconfirmed", failed, "fanout", fanout)
 
 	if r.Audit != nil {
 		outcome := audit.OutcomeAllowed
@@ -154,7 +174,7 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			EventType: audit.EventEstopTriggered,
 			Action:    "estop-trigger",
 			Outcome:   outcome,
-			Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: issuedBy},
+			Actor:     actor,
 			Resource:  audit.Resource{Kind: "FleetZone", Namespace: req.Namespace, Name: zone.Name},
 			Detail: map[string]string{
 				"reason": reason,
@@ -223,7 +243,8 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, namespace stri
 	if p := zone.Spec.EstopPolicy; p != nil {
 		toChildren = p.PropagateToChildren
 	}
-	clearedBy := "zone-estop:" + zone.Name
+	actor := estopActor(zone.Annotations, "zone-estop:"+zone.Name)
+	clearedBy := actor.Identity
 
 	robots, err := r.robotsInEstopScope(ctx, namespace, zone.Name, toChildren)
 	if err != nil {
@@ -245,7 +266,7 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, namespace stri
 			EventType: audit.EventEstopCleared,
 			Action:    "estop-clear",
 			Outcome:   audit.OutcomeAllowed,
-			Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: clearedBy},
+			Actor:     actor,
 			Resource:  audit.Resource{Kind: "FleetZone", Namespace: namespace, Name: zone.Name},
 			Detail:    map[string]string{"robots": itoa(len(robots)), "cleared": itoa(cleared)},
 		}); aerr != nil {

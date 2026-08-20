@@ -93,7 +93,7 @@ func (v *FleetTaskValidator) ValidateCreate(context.Context, runtime.Object) (ad
 // ownerReferences, so deleting one mid-flight garbage-collects the children out from under their
 // assignment leases — freeing a robot the control plane cannot prove has stopped, which is exactly
 // what the confirmed-cancel discipline (§9.6.3.5) exists to prevent. The operator cancels first
-// (`swarmctl cancel task`, i.e. the swarmada.io/cancel-requested annotation), and deletes the settled
+// (`swarmctl cancel task`, i.e. spec.desiredState: Cancelled fanned out to the members), and deletes the settled
 // record afterwards.
 //
 // There is deliberately no drain-on-delete here: a deletion finalizer running the same

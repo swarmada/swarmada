@@ -37,7 +37,7 @@ func cancelAction(name, robot string, phase fleetv1.ActionPhase, gen int64, leas
 // Adapter acknowledges the cancel → the action is finalized Cancelled and the robot
 // is freed (Idle, unbound). This is a confirmed stop.
 func TestCancel_AdapterAckFinalizesAndFreesRobot(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		cancelAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live, "maintenance"),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -65,7 +65,7 @@ func TestCancel_AdapterAckFinalizesAndFreesRobot(t *testing.T) {
 // Unreachable adapter with a LIVE lease → HOLD: the robot may still be executing,
 // so the action is not finalized and the robot stays bound (single-executor safety).
 func TestCancel_UnreachableWithLiveLeaseHolds(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		cancelAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live, "true"),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -129,7 +129,7 @@ func TestCancel_UnboundFinalizesImmediately(t *testing.T) {
 // With no Commander (ControlStream disabled), a bound action with a live lease is
 // held (cannot confirm the stop), and finalizes only once the lease is dead.
 func TestCancel_NilCommanderHoldsThenFinalizesOnLeaseDeath(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		cancelAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live, "true"),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -149,5 +149,94 @@ func TestCancel_NilCommanderHoldsThenFinalizesOnLeaseDeath(t *testing.T) {
 	reconcileAction(t, r, "t1")
 	if getAction(t, c, "t1").Status.Phase != fleetv1.ActionPhaseCancelled {
 		t.Fatal("no-wire cancel should finalize once the lease is provably dead")
+	}
+}
+
+// ── Declarative cancel via spec.desiredState (Round-4 D3) ────────────────────
+//
+// spec.desiredState was read by nothing, so FleetTask's FailFast/Compensate fan-out —
+// which cancels a child by writing Cancelled onto that field and doing nothing else —
+// could not actually stop a child. D3 routes it into the SAME confirmed-cancel path as
+// the operator annotation. These tests pin that it carries the identical single-executor
+// guarantee and that it cannot fight the annotation path.
+
+// desiredAction builds a bound action carrying the declarative cancel intent instead of
+// the operator annotation.
+func desiredCancelAction(name, robot string, phase fleetv1.ActionPhase, gen int64, lease *metav1.Time) *fleetv1.FleetAction {
+	ft := assignedAction(name, robot, phase, gen, lease)
+	ft.Spec.DesiredState = fleetv1.DesiredStateCancelled
+	return ft
+}
+
+func TestDesiredStateCancel_UnboundFinalizesImmediately(t *testing.T) {
+	ft := desiredCancelAction("t1", "", fleetv1.ActionPhasePending, 0, nil)
+	ft.Status.AssignedRobot = ""
+	r, c := newActionReconciler(t, ft)
+
+	reconcileAction(t, r, "t1")
+
+	got := getAction(t, c, "t1")
+	if got.Status.Phase != fleetv1.ActionPhaseCancelled {
+		t.Fatalf("phase = %s, want Cancelled — an unread desiredState leaves the composite unable to stop children",
+			got.Status.Phase)
+	}
+}
+
+func TestDesiredStateCancel_LiveLeaseHoldsRobot(t *testing.T) {
+	// The single-executor guarantee must be identical to the annotation path: a
+	// declarative cancel NEVER frees a robot that might still be executing.
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
+	r, c := newActionReconciler(t,
+		desiredCancelAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live),
+		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
+	)
+	r.Commander = &fakeCommander{cancelAck: false} // adapter does not confirm
+
+	reconcileAction(t, r, "t1")
+
+	got := getAction(t, c, "t1")
+	if got.Status.Phase == fleetv1.ActionPhaseCancelled {
+		t.Fatal("a declarative cancel finalized while the lease was live — double-execution risk")
+	}
+	if got.Status.AssignedRobot != "r1" {
+		t.Errorf("robot released on an unconfirmed stop: %q", got.Status.AssignedRobot)
+	}
+	rob := getRobot(t, c, "r1", actionNS)
+	if rob.Status.AssignedAction != "t1" {
+		t.Errorf("robot unbound on an unconfirmed stop: assignedAction=%q", rob.Status.AssignedAction)
+	}
+}
+
+func TestDesiredStateCancel_AnnotationWinsAndTheyDoNotFight(t *testing.T) {
+	// Both intents set at once. The annotation is checked first so an explicit operator
+	// cancel keeps its reason; both converge on the same finalizer, so the outcome is one
+	// Cancelled action either way. The risk this pins is a LOOP — two paths alternately
+	// re-driving the same action — not a wrong phase.
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
+	ft := cancelAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live, "maintenance")
+	ft.Spec.DesiredState = fleetv1.DesiredStateCancelled
+	r, c := newActionReconciler(t, ft, robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"))
+	r.Commander = &fakeCommander{cancelAck: true}
+
+	reconcileAction(t, r, "t1")
+
+	got := getAction(t, c, "t1")
+	if got.Status.Phase != fleetv1.ActionPhaseCancelled {
+		t.Fatalf("phase = %s, want Cancelled", got.Status.Phase)
+	}
+	if got.Status.Message != "cancelled: maintenance" {
+		t.Errorf("message = %q, want the operator's reason to win over desiredState=Cancelled",
+			got.Status.Message)
+	}
+	// Terminal is terminal: re-reconciling must not re-enter either cancel path.
+	rv := got.ResourceVersion
+	reconcileAction(t, r, "t1")
+	again := getAction(t, c, "t1")
+	if again.Status.Phase != fleetv1.ActionPhaseCancelled {
+		t.Errorf("phase moved off Cancelled on re-reconcile: %s", again.Status.Phase)
+	}
+	if again.ResourceVersion != rv && again.Status.Message != got.Status.Message {
+		t.Errorf("the two cancel paths re-drove a terminal action: %q -> %q",
+			got.Status.Message, again.Status.Message)
 	}
 }

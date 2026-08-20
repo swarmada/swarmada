@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
+	"github.com/swarmada/swarmada/internal/metrics"
 	"github.com/swarmada/swarmada/internal/safety"
 )
 
@@ -43,14 +45,21 @@ import (
 
 // timedEstopper reports a delivered estop with a known latency.
 type timedEstopper struct {
+	// mu guards the recorders: a zone/namespace fan-out calls TriggerEstop concurrently.
+	mu        sync.Mutex
 	latency   time.Duration
 	violation bool
 	delivered bool
 	robots    []string
+	scopes    []metrics.EstopScope
 }
 
-func (f *timedEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string) (safety.Result, error) {
+func (f *timedEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
+	scope metrics.EstopScope) (safety.Result, error) {
+	f.mu.Lock()
+	f.scopes = append(f.scopes, scope)
 	f.robots = append(f.robots, robotID)
+	f.mu.Unlock()
 	return safety.Result{
 		State:            fleetv1.RobotEstopStopped,
 		Confirmed:        true,

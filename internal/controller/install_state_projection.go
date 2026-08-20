@@ -108,17 +108,41 @@ func projectFirmwareState(ctx context.Context, c client.Client, key client.Objec
 		return nil
 	}
 	return applyInstallState(ctx, c, key, func(rob *fleetv1.Robot) bool {
+		changed := false
+
+		// The success edge of a firmware rollout. The FirmwareRollout controller classifies
+		// a robot as updated by comparing Robot.status.firmwareVersion against
+		// spec.newVersion, and nothing else in the tree writes that field -- so before this,
+		// a robot that installed successfully stayed classified as updating forever and a
+		// PullOnIdle rollout never reached a terminal phase. The robot's own report is the
+		// only authority on what it is running, and it already arrives here.
+		//
+		// Gated on Running, not merely on a non-empty version: while an install is Updating
+		// the running version is still the OLD one, and a Failed install may leave the robot
+		// on its previous version, on a recovery image, or elsewhere -- promoting either into
+		// firmwareVersion would assert a fact the robot has not reported.
+		if state.Status == fleetv1.FirmwareInstallRunning && state.RunningVersion != "" &&
+			rob.Status.FirmwareVersion != state.RunningVersion {
+			if rob.Status.FirmwareVersion != "" {
+				// Captured on the transition only, so it names the version the robot was on
+				// before THIS change -- which is what a Manual revert targets.
+				rob.Status.PreviousFirmwareVersion = rob.Status.FirmwareVersion
+			}
+			rob.Status.FirmwareVersion = state.RunningVersion
+			changed = true
+		}
+
 		// ReportedAt alone must not trigger a write, or every redundant report becomes a
 		// status write and RA-1 is lost by the back door. Compare the substance first.
-		if cur := rob.Status.FirmwareInstall; cur != nil &&
-			cur.Status == state.Status &&
-			cur.RunningVersion == state.RunningVersion &&
-			cur.AttemptedVersion == state.AttemptedVersion &&
-			cur.FailureReason == state.FailureReason {
-			return false
+		if cur := rob.Status.FirmwareInstall; cur == nil ||
+			cur.Status != state.Status ||
+			cur.RunningVersion != state.RunningVersion ||
+			cur.AttemptedVersion != state.AttemptedVersion ||
+			cur.FailureReason != state.FailureReason {
+			rob.Status.FirmwareInstall = state
+			changed = true
 		}
-		rob.Status.FirmwareInstall = state
-		return true
+		return changed
 	})
 }
 

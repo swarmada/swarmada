@@ -167,7 +167,7 @@ func camNavAction(name, robot string, lease *metav1.Time, acceptDegraded *bool) 
 // (acceptDegraded=false) is marked for the confirmed-stop requeue, WITHOUT a bare
 // status flip: the action stays bound to the robot until the requeue path confirms a stop.
 func TestReconcile_CapabilityLoss_InitiatesReassignment(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		camNavAction("t1", "r1", lease, nil),
 		robotWithCaps("r1", "t1",
@@ -195,7 +195,7 @@ func TestReconcile_CapabilityLoss_InitiatesReassignment(t *testing.T) {
 // satisfies, so NO reassignment is initiated (the action keeps running).
 func TestReconcile_CapabilityLoss_AcceptDegradedNoReassign(t *testing.T) {
 	yes := true
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		camNavAction("t1", "r1", lease, &yes),
 		robotWithCaps("r1", "t1",
@@ -214,7 +214,7 @@ func TestReconcile_CapabilityLoss_AcceptDegradedNoReassign(t *testing.T) {
 // A fully-Active robot is not reassigned (regression guard: the check must not fire
 // on a healthy robot).
 func TestReconcile_CapabilityActive_NoReassign(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		camNavAction("t1", "r1", lease, nil),
 		robotWithCaps("r1", "t1",
@@ -233,7 +233,7 @@ func TestReconcile_CapabilityActive_NoReassign(t *testing.T) {
 // Case 1 — Connectivity loss: InProgress robot goes Offline → action Revoking, robot
 // stays bound, and NO reassignment happens while the lease is alive.
 func TestReconcile_ConnectivityLoss_RevokesWithoutReassign(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 3, lease),
 		robotInPhase("r1", fleetv1.RobotPhaseOffline, "t1"),
@@ -448,7 +448,7 @@ func TestReconcile_GenerationMonotonicAcrossRestart(t *testing.T) {
 // Case 3 — Delayed/duplicate message: repeated reconciles of a Revoking action with a
 // live lease are idempotent — no spurious reassignment, generation unchanged.
 func TestReconcile_DuplicateReconcileIsIdempotent(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseRevoking, 5, lease),
 		robotInPhase("r1", fleetv1.RobotPhaseOffline, "t1"),
@@ -469,7 +469,7 @@ func TestReconcile_DuplicateReconcileIsIdempotent(t *testing.T) {
 // A brief drop that recovers while the lease is live re-adopts the action at the
 // SAME generation (no reassignment, no new generation).
 func TestReconcile_ReadoptOnLiveLease(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseRevoking, 5, lease),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"), // reachable, still holding t1
@@ -543,7 +543,7 @@ func TestReconcile_StaleConassignedActionCommitIsRejected(t *testing.T) {
 	raced.Status.Phase = fleetv1.ActionPhaseAssigned
 	raced.Status.AssignedRobot = "r2"
 	raced.Status.AssignmentGeneration++
-	lease := metav1.NewTime(time.Now().Add(leaseDuration))
+	lease := metav1.NewTime(time.Now().Add(defaultLeaseDuration))
 	raced.Status.LeaseExpiresAt = &lease
 
 	err := c.Status().Patch(context.Background(), raced, client.MergeFromWithOptions(stale, client.MergeFromWithOptimisticLock{}))

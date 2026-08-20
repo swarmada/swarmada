@@ -85,10 +85,16 @@ lacking the grant is denied even if it could otherwise create a Robot.`,
 }
 
 func (o *options) runAdmit(ctx context.Context, args []string, a *admitOptions) error {
-	// Optional leading "robot" kind token, per the verb-first grammar
-	// (`admit robot <name>`); a bare `admit <name>` is also accepted.
-	if robotDef, err := resolveResource("robot"); err == nil {
-		args = stripKind(args, robotDef)
+	// Optional leading kind token, per the verb-first grammar. BOTH spellings are
+	// accepted because both are documented and both are truthful: the command's own
+	// Example shows `admit robot <name>`, lifecycle.go documents the RFC-0001 spelling
+	// `admit discoveredrobot <name>`, and the object admitted is a DiscoveredRobot that
+	// the control plane turns into a Robot. Only "robot" was stripped, so the documented
+	// discoveredrobot form fell through to "admit takes exactly one robot name".
+	for _, kind := range []string{"robot", "discoveredrobot"} {
+		if def, err := resolveResource(kind); err == nil {
+			args = stripKind(args, def)
+		}
 	}
 	if len(args) != 1 {
 		return fmt.Errorf("admit takes exactly one robot name")

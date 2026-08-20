@@ -135,17 +135,40 @@ func TestRolloutDelete_RefusedWhenNotTerminal(t *testing.T) {
 	}
 }
 
-// The refusal names a mechanism that exists (`pause rollout`) and does not invent an `abandon` verb.
+// The refusal must name only mechanisms that exist. It previously pointed at
+// `swarmctl pause rollout`, which has never existed — this test asserted the phantom.
 func TestRolloutDelete_MessageNamesOnlyRealVerbs(t *testing.T) {
 	_, err := (&ModelRolloutValidator{}).ValidateDelete(context.Background(), mrPhase(fleetv1.RolloutPhaseInProgress))
 	if err == nil {
 		t.Fatal("an InProgress ModelRollout must not be deletable")
 	}
-	if !strings.Contains(err.Error(), "pause rollout") {
-		t.Errorf("message should point at `swarmctl pause rollout`, got: %v", err)
+	for _, phantom := range []string{"abandon", "pause rollout"} {
+		if strings.Contains(strings.ToLower(err.Error()), phantom) {
+			t.Errorf("message references %q, which is not an implemented command: %v", phantom, err)
+		}
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "abandon") {
-		t.Errorf("message must not reference an abandon verb (not implemented), got: %v", err)
+}
+
+// A PAUSED rollout is the case where "let it reach a terminal phase" is useless advice: it makes
+// no further progress on its own, and delete is refused, which is exactly the wedge. The refusal
+// must point at the resume command that actually exists.
+func TestRolloutDelete_PausedMessagePointsAtResume(t *testing.T) {
+	_, err := (&ModelRolloutValidator{}).ValidateDelete(context.Background(), mrPhase(fleetv1.RolloutPhasePaused))
+	if err == nil {
+		t.Fatal("a Paused ModelRollout must not be deletable")
+	}
+	for _, want := range []string{"swarmctl rollout resume", "--kind model"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message should contain %q, got: %v", want, err)
+		}
+	}
+
+	_, fwErr := (&FirmwareRolloutValidator{}).ValidateDelete(context.Background(), fwPhase(fleetv1.RolloutPhasePaused))
+	if fwErr == nil {
+		t.Fatal("a Paused FirmwareRollout must not be deletable")
+	}
+	if !strings.Contains(fwErr.Error(), "--kind firmware") {
+		t.Errorf("firmware message should name --kind firmware, got: %v", fwErr)
 	}
 }
 

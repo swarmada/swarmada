@@ -124,7 +124,13 @@ func (s *DefaultScheduler) SelectRobot(action *fleetv1.FleetAction, candidates [
 	return eligible[0], nil
 }
 
-// isEligible checks all hard constraints for a (robot, action) pair.
+// isEligible checks the hard constraints for a (robot, action) pair that are decidable from the
+// pair alone: filter 1 (phase) plus the zone/capability/selector/parametric matcher.
+//
+// Filter 10 (active emergency stop) is NOT checked here. It is enforced by the caller, in
+// FleetActionReconciler.filterDispatchEligible, which is the single choke point for both the
+// normal selection and the preemption search and is the only place that emits an operator-facing
+// exclusion reason. A caller that builds its own candidate list MUST apply filter 10 itself.
 func (s *DefaultScheduler) isEligible(robot *fleetv1.Robot, action *fleetv1.FleetAction, acceptDegraded bool) bool {
 	// Must be Idle (not Busy, Charging, Degraded, Offline, or Pending), plus the
 	// zone/capability/selector match shared with preemption.

@@ -101,7 +101,10 @@ type FleetTaskAction struct {
 	// DependsOn lists member names that gate this action's start. Empty = a root action, eligible
 	// immediately (subject to the start barrier). Multiple entries are an AND-join: eligible only
 	// when EVERY predecessor has reached this action's StartCondition. Must be acyclic and name
-	// existing members (enforced at admission).
+	// existing members. Specified to be enforced at admission; at v0.3 this is validated by
+	// validateGraph on every non-terminal reconcile instead, not by the admission webhook — a
+	// cyclic or dangling entry is currently admitted and fails on the next reconcile. See
+	// crds/fleettask.md.
 	// +optional
 	// +listType=set
 	DependsOn []string `json:"dependsOn,omitempty"`
@@ -114,7 +117,11 @@ type FleetTaskAction struct {
 	StartCondition ActionPhase `json:"startCondition,omitempty"`
 
 	// Trigger controls eligibility. Auto (default): eligible when DependsOn is satisfied. OnEvent:
-	// dormant until an authorized append/patch activates it.
+	// dormant until an authorized append/patch activates it. Specified to allow an existing entry's
+	// Trigger to be flipped OnEvent -> Auto post-creation as the sole exception to Actions being
+	// otherwise immutable once created; at v0.3 this is not implemented — ValidateUpdate's
+	// append-only check rejects any change to an existing action, including a Trigger-only flip.
+	// See crds/fleettask.md.
 	// +kubebuilder:validation:Enum=Auto;OnEvent
 	// +kubebuilder:default=Auto
 	Trigger TriggerMode `json:"trigger,omitempty"`

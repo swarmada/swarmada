@@ -36,7 +36,7 @@ func robotEstopped(name string, estop fleetv1.RobotEstopState, assignedAction st
 
 // Core §9.6.2.4: InProgress + estop → Paused, robot KEPT bound, lease retained.
 func TestEstop_InProgressPausesAndKeepsBinding(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, lease),
 		robotEstopped("r1", fleetv1.RobotEstopStopped, "t1"),
@@ -58,7 +58,7 @@ func TestEstop_InProgressPausesAndKeepsBinding(t *testing.T) {
 
 // Core §9.6.2.4: Assigned + estop → Paused, robot RELEASED (table row Assigned).
 func TestEstop_AssignedPausesAndReleasesRobot(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	robot := robotEstopped("r1", fleetv1.RobotEstopStopped, "t1")
 	robot.Status.Phase = fleetv1.RobotPhaseAssigned
 	r, c := newActionReconciler(t,
@@ -84,7 +84,7 @@ func TestEstop_AssignedPausesAndReleasesRobot(t *testing.T) {
 
 // Stopping is also an active estop (not only Stopped).
 func TestEstop_StoppingAlsoPauses(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 1, lease),
 		robotEstopped("r1", fleetv1.RobotEstopStopping, "t1"),
@@ -122,7 +122,7 @@ func TestEstop_ConnectivityLoss_StaysPausedNeverReassigns(t *testing.T) {
 // Case 2 — Control-plane restart/failover: a fresh reconcile of a persisted Paused
 // action must NOT auto-resume; generation and binding are preserved across restarts.
 func TestEstop_RestartFailover_NoAutoResume(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhasePaused, 9, lease),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"), // estop already cleared (Normal)
@@ -144,7 +144,7 @@ func TestEstop_RestartFailover_NoAutoResume(t *testing.T) {
 // Case 3 — Delayed/duplicate: duplicate estop reconciles are idempotent, and a
 // delayed "estop cleared" (robot → Normal) must NOT auto-resume the Paused action.
 func TestEstop_DelayedDuplicate_Idempotent(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	robot := robotEstopped("r1", fleetv1.RobotEstopStopped, "t1")
 	r, c := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 5, lease),

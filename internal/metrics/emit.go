@@ -18,11 +18,18 @@ package metrics
 
 import "time"
 
+// EstopScope is the `scope` label on the estop metrics (§9.3.8): which operator
+// action produced the stop, not which object was written. A typed value rather than
+// a bare string because every emit site previously hard-coded ScopeRobot — a zone or
+// namespace estop fans out per robot through the same dispatcher, so nothing in the
+// robot-level code path can tell the three apart and the label has to be carried in.
+type EstopScope string
+
 // Estop scope label values (§9.3.8 swarmada_estop_command* `scope`).
 const (
-	ScopeRobot     = "robot"
-	ScopeZone      = "zone"
-	ScopeNamespace = "namespace"
+	ScopeRobot     EstopScope = "robot"
+	ScopeZone      EstopScope = "zone"
+	ScopeNamespace EstopScope = "namespace"
 )
 
 // Estop command result label values (§9.3.8 swarmada_estop_commands_total `result`).
@@ -34,8 +41,25 @@ const (
 )
 
 // ObserveEstopLatency records an estop send→EstopAck round-trip (§9.3.8).
-func ObserveEstopLatency(namespace, adapter, robot, scope string, d time.Duration) {
-	EstopCommandLatencySeconds.WithLabelValues(namespace, adapter, robot, scope).Observe(d.Seconds())
+//
+// This is a PER-ROBOT round trip and, for a fan-out, it is not the number that
+// matters: sequential dispatch delays each robot's SEND, so every robot in a
+// 50-robot zone estop can report a healthy sub-SLA round trip while the last one is
+// commanded tens of seconds after the operator hit the trigger. ObserveEstopFanout
+// measures that interval; see ADR-0042.
+func ObserveEstopLatency(namespace, adapter, robot string, scope EstopScope, d time.Duration) {
+	EstopCommandLatencySeconds.WithLabelValues(namespace, adapter, robot, string(scope)).Observe(d.Seconds())
+}
+
+// ObserveEstopFanout records one zone- or namespace-scoped estop episode end to end:
+// from the operator's trigger to the last robot in scope resolving (§9.6.2.2).
+//
+// Observed ONCE per episode, by the fanning-out controller — not per robot. A
+// robot-scoped estop has no fan-out and must not observe it, or the histogram's
+// population stops being "episodes that fan out" and its quantiles become
+// meaningless.
+func ObserveEstopFanout(namespace string, scope EstopScope, d time.Duration) {
+	EstopFanoutDurationSeconds.WithLabelValues(namespace, string(scope)).Observe(d.Seconds())
 }
 
 // IncEstopLatencyViolation records an estop ACK that breached the 500ms SLA (§9.3.8).
@@ -44,8 +68,8 @@ func IncEstopLatencyViolation(namespace, adapter, robot string) {
 }
 
 // IncEstopCommand records one issued estop Command by terminal disposition (§9.3.8).
-func IncEstopCommand(namespace, adapter, scope, result string) {
-	EstopCommandsTotal.WithLabelValues(namespace, adapter, scope, result).Inc()
+func IncEstopCommand(namespace, adapter string, scope EstopScope, result string) {
+	EstopCommandsTotal.WithLabelValues(namespace, adapter, string(scope), result).Inc()
 }
 
 // ── Telemetry pipeline emit helpers (§9.3.8) ──────────────────────────────────
@@ -96,7 +120,12 @@ func SetRobotsByPhase(namespace string, counts map[string]int) {
 }
 
 // SetRobotsInEstop sets swarmada_robots_in_estop for a namespace over the active
-// estop states (Stopping, Stopped; Normal is excluded per §9.3.8).
+// estop states (Stopping, Stopped, Failed; Normal is excluded per §9.3.8).
+//
+// Failed is an ACTIVE state for this gauge's purpose: a robot whose estop could not be
+// confirmed is withheld from dispatch and is exactly what an operator is looking for.
+// The sweeper has always counted it; until EstopStates listed it the count was computed
+// every sweep and discarded here.
 func SetRobotsInEstop(namespace string, counts map[string]int) {
 	for _, s := range EstopStates {
 		RobotsInEstop.WithLabelValues(namespace, s).Set(float64(counts[s]))
