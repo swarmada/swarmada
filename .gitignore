@@ -81,14 +81,3 @@ _to_delete/
 # would be silently ignored, and the symptom is a file that never appears.
 !rfcs/dist/
 
-# ── Local session and scratch state ──────────────────────────────────────────
-.claude/
-_to_delete/
-*.diff
-*.patch
-
-# `dist/` above was meant for Python build output, but it also matches rfcs/dist/ —
-# the one directory whose contents ARE the published deliverable. The spec file
-# survives only because a tracked file beats gitignore; a NEW artifact added there
-# would be silently ignored, and the symptom is a file that never appears.
-!rfcs/dist/
