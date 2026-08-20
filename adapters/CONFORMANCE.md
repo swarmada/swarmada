@@ -45,12 +45,31 @@ way that matters, the gap is named in the entry itself rather than left to infer
   fails. A conformance report's account of what it did **not** verify is part of its
   output, and an unchecked justification drifts exactly like any other unverified claim.
 
+### C0.x — harness context
+
+`C0.2` and above are recorded by the harness about **the run**, not about the adapter. They
+state what the suite established about *itself* before asserting anything, and they exist
+because a precondition that fails silently is how a check comes to assert the harness instead
+of the robot.
+
+**C0.x rows do NOT count toward conformance.** A failing C0.x row does not make an adapter
+non-conformant; it **invalidates the checks that depend on it**, whose results must then be read
+as unestablished rather than as passes. That distinction is the entire reason these carry their
+own prefix instead of a catalog id.
+
+- **C0.2 (context)** The `negotiated_contract_version` the harness set on its own `HelloAck`. Harness
+  state, not an adapter behaviour.
+- **C0.3 (context)** A matching `lease_generation` renews — the precondition for C4.3 and C4.4.
+- **C0.4 (context)** A fresh (higher) fencing token is accepted — the precondition for C3.2's stale
+  rejection, which cannot be demonstrated without first establishing a high-water mark.
+
 ## C1 — Connection and handshake
 
 - **C1.1 (MUST)** Dial the control plane as a gRPC client and open both
   `ControlStream` and `SafetyStream` in the same dial step.
 - **C1.2 (MUST)** Send `AdapterHello` as the first `AdapterMessage` on
-  `ControlStream`, carrying the `contract_version` this adapter implements, and
+  `ControlStream`, carrying the `contract_version` this adapter implements and
+  `protocol_version` as the wire package identity (`fleet_adapter.v1`), and
   not proceed until `HelloAck.accepted` is true. A control plane that accepts the
   hello but returns no `negotiated_contract_version` has refused REGISTRATION for
   that connection (ADR-0032): the adapter stays observable and stoppable, but
@@ -79,6 +98,10 @@ way that matters, the gap is named in the entry itself rather than left to infer
 
 - **C3.1 (MUST)** Persist the highest accepted fencing token per robot so it
   survives an adapter restart.
+  **This suite verifies only the across-reconnect half** — that a faulted and redialled
+  stream does not reset the mark. Durability across a process **restart** is C3.7, and it
+  is recorded SKIP: no reference adapter persists the mark anywhere, so the requirement
+  has no implementation in the project to test.
 - **C3.2 (MUST)** Reject any `AssignAction` or `CancelAction` whose `fencing_token`
   is less than or equal to the highest accepted token for that robot, returning
   the matching `STALE_FENCING_TOKEN` / stale rejection.
@@ -89,6 +112,11 @@ way that matters, the gap is named in the entry itself rather than left to infer
 - **C3.5 (MUST)** Echo the fenced token in `AssignActionResult.accepted_fencing_token`.
 - **C3.6 (MUST)** Report a valid `CancelDisposition` on `CancelActionResult`, so the
   control plane can tell a safe stop from a completion or a recovery.
+- **C3.7 (MUST)** The persisted high-water mark survives an adapter **process restart**,
+  not only a stream reconnect. A reconnect does not touch process memory, so an adapter
+  holding the mark in a plain dict passes C3.1 and fails this. The hazard is a control
+  plane re-issuing tokens to an adapter that restarted and forgot: two executors accepting
+  the same assignment, which is what C3 exists to prevent.
 
 ## C4 — Assignment leases (self-stop)
 
@@ -109,8 +137,31 @@ way that matters, the gap is named in the entry itself rather than left to infer
 - **C5.2 (MUST)** Return `EstopAck` on `SafetyStream`, setting `state` to
   `ESTOP_STATE_STOPPED` only when the robot is confirmed halted in a safe state,
   and `ESTOP_STATE_FAILED` when a stop cannot be confirmed.
+  This constrains **when an adapter may say STOPPED**; it does not require the FIRST
+  ack to be terminal. An adapter MAY answer immediately with
+  `ESTOP_STATE_STOPPING` ("command received; robot is decelerating") and send the
+  terminal `STOPPED`/`FAILED` when rest is confirmed. C5.5 bounds the first ack;
+  this entry governs the terminal one. A single terminal ack remains conformant.
 - **C5.3 (MUST NOT)** Report `STOPPED` by inferring it from absent motion, a
-  timeout, or telemetry; the state MUST be adapter-confirmed.
+  timeout, or telemetry; the state MUST be adapter-confirmed. An `EstopAck`
+  reporting `ESTOP_STATE_STOPPED` MUST populate `stop_initiated_at` — whether an
+  adapter *inferred* a stop is not decidable from the wire, and that timestamp is
+  the only artefact attesting the stop was commanded. Necessary evidence, not
+  proof.
+- **C5.5 (MUST)** Answer an `estop` on `SafetyStream` with an `EstopAck` within
+  500 ms. Measured by the harness from queueing the `Estop` to dequeuing the ack,
+  so the harness's own transport is included and the figure is conservative.
+  This bounds the **first** ack, which MAY be `ESTOP_STATE_STOPPING`. It is an
+  acknowledgement budget, not a stopping-distance budget: a real base takes
+  substantially longer to reach confirmed rest than 500 ms, and RFC-0001's
+  SafetyStream row already requires the physical stop to BEGIN before the ack —
+  a clause that only has meaning if the ack may precede confirmed rest.
+- **C5.6 (MUST)** An `EstopAck` reporting `ESTOP_STATE_STOPPING` MUST be followed by
+  a terminal `ESTOP_STATE_STOPPED` or `ESTOP_STATE_FAILED`. Acking STOPPING and never
+  following up satisfies C5.5 while telling the control plane nothing, leaving the
+  robot in an unresolved emergency. The permitted interval is a property of the base,
+  not a constant in this document — it is bounded here by a documented harness value
+  pending an adapter-declared figure in `CapabilitiesSnapshot`.
 - **C5.4 (MUST NOT)** Carry estop traffic on `ControlStream`; the deprecated
   `Command.estop` / `CommandResult.estop` arms exist only for wire
   compatibility and MUST NOT be used by new adapters.
@@ -195,16 +246,22 @@ way that matters, the gap is named in the entry itself rather than left to infer
 
 ## C11 — Pause / resume (when implemented)
 
-- **C11.1 (MAY)** Accept `pause` (`PauseCapabilities`) and `resume`
+- **C11.1 (MUST)** Accept `pause` (`PauseCapabilities`) and `resume`
   (`ResumeCapabilities`), answering with a `PauseResult` / `ResumeResult`. When
   `require_stop_before_ack` is set, `paused=true` MUST be reported only once the
-  robot is CONFIRMED at rest (never inferred). Declining (C7.1) remains conformant.
+  robot is CONFIRMED at rest (never inferred). Declining is NOT conformant: these
+  are in RFC-0001's Required-message table and absent from its optional-command
+  list, and the ZoneMaintenance resource drains a zone through them — an adapter that
+  declines makes a maintenance window silently do nothing.
 
 ## C12 — Capabilities scan (when implemented)
 
-- **C12.1 (MAY)** Answer a `ScanCapabilities` request with a full
-  `CapabilitiesSnapshot` (all hardware / installed models), rather than declining.
-  Declining (C7.1) remains conformant.
+- **C12.1 (MUST)** Answer a `ScanCapabilities` request with a full
+  `CapabilitiesSnapshot` (all hardware / installed models). Declining is NOT
+  conformant: `scan` is how the control plane learns the adapter's
+  `supported_actions` catalog, which is the pre-dispatch gate whenever the
+  optional `validate_action` is declined. An adapter declining both is
+  undispatchable in practice.
 
 ## C13 — Contract-version negotiation (ADR-0032)
 
@@ -219,7 +276,7 @@ way that matters, the gap is named in the entry itself rather than left to infer
   then accept an `AssignAction`. This is defence in depth, not a MUST: a control
   plane withholds the dispatch itself (ADR-0032's assignment gate is on work
   dispatch only), so an adapter that accepts a command it should never have been
-  sent is not currently non-conforming. The harness exercises it by faulting the
+  sent is not non-conforming. The harness exercises it by faulting the
   ControlStream after the other checks and refusing the redial's registration; an
   adapter that does not reconnect records a `skip`, never a pass.
 
@@ -239,7 +296,7 @@ way that matters, the gap is named in the entry itself rather than left to infer
 - **C15.1 (MUST)** The report carries the `contract_version` its result was earned
   against. The control plane copies this to
   `FleetAdapter.status.conformanceContractVersion` and refuses assignment when it
-  is absent or out of range, so an unstamped report does not merely look
+  is absent or out of range, so an unstamped report does not only look
   incomplete — it makes the adapter unassignable.
 - **C15.2 (MUST)** A non-conformant report stays version-bound and fully
   observable: `conformant: false` while still carrying the contract version and
@@ -255,11 +312,14 @@ it does not (C7.1).
 
 ### What the report attests, and against which version
 
-A result is earned against a specific **contract version** — a semver over the proto surface, the
-`SupportedAction` schema, and these checks — not against the standard as a whole. The harness stamps
-it into the report as `contract_version` (alongside `protocol_version`, the wire-package identity
-`fleet_adapter.v1`, which is not a semver and cannot express compatibility). Record that semver in
-your [`REGISTRY.md`](REGISTRY.md) row.
+A result is earned against a specific **contract version** — a semver over the proto surface and the
+`SupportedAction` schema — not against the standard as a whole. It is not a version of this suite: the
+checks below are the *evidence* for a result, never a component of the version it is earned against, which
+is why adding a check re-attests adapters without moving the version any adapter negotiates. The harness
+stamps the contract version into the report as `contract_version` (alongside `protocol_version`, the
+wire-package identity `fleet_adapter.v1`, which is not a semver and cannot express compatibility). Record
+that semver in your [`REGISTRY.md`](REGISTRY.md) row, and record the suite revision you ran alongside it —
+never folded into it — both in that row and in `FleetAdapter.spec.conformanceReport.suiteVersion`.
 
 A **major** bump is breaking: re-run `make conformance` and update the row. Minor and patch bumps are
 compatible and never invalidate an existing qualification.

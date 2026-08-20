@@ -29,8 +29,10 @@ operator, a scheduler) and the robots that carry the work out.
 
 1. **Declarative and reconciliation-based.** Operators declare *what* should be
    true; controllers work continuously to make reality match. This is the
-   Kubernetes model, and it is the reason Swarmada recovers from connectivity
-   loss and mid-task failure without operator intervention.
+   Kubernetes model, and it is the reason Swarmada converges after connectivity
+   loss and mid-task failure with minimal operator intervention. Minimal, not
+   none: admission, the `Manual` rollback default, and clearing an estop are
+   deliberately operator-gated.
 2. **Vendor-neutral by construction.** No vendor assumptions live in the core. A
    single gRPC contract — the Fleet Adapter protocol — is the only integration
    surface, and any manufacturer can implement it without a licensing
@@ -76,7 +78,7 @@ execution (the **data plane**).
 │                  (cloud or on-premise Kubernetes cluster)              │
 │                                                                        │
 │   operator tooling ──REST──▶ API Server ──controller-runtime──▶        │
-│   (swarmctl, WMS)                 │        Scheduler · Health Monitor  │
+│   (swarmctl, WMS)                 │        Scheduler · Robot Ctrl      │
 │                                   │        Zone Controller             │
 │                                   │        Traffic Deconfliction       │
 │                                   │        OTA / Model Update Manager  │
@@ -100,8 +102,11 @@ calling other components directly.
 - **Scheduler** — selects the robot for each pending `FleetTask` by capability
   match, proximity, and load. The selection algorithm is pluggable; the interface
   is standardized, the policy is not.
-- **Health Monitor** — ingests heartbeat and telemetry streams and updates robot
-  status conditions.
+- **Robot reconciler** — drives the robot lifecycle: capability derivation, the
+  aggregate `status.health` summary, heartbeat-timeout offline detection and the
+  prolonged-offline escalation. Together with the Probe Controller, the FleetAdapter
+  controller and the telemetry pipeline it realises what RFC-0001 §9.3.3 groups as
+  robot health and connectivity; there is no single "Health Monitor" component.
 - **Zone Controller** — reconciles `FleetZone` resources and enforces zone-level
   capacity and access policy.
 - **Traffic Deconfliction Engine** — a synchronous gate the Scheduler must clear
@@ -209,7 +214,7 @@ adapter cannot silently control physical hardware.
 ## Telemetry and state: the two-plane data split
 
 High-frequency robot telemetry — position, battery, raw sensor metrics — flows
-through the Health Monitor into a time-series backend and is **never** written to
+through the telemetry pipeline into a time-series backend and is **never** written to
 etcd at telemetry cadence. Only *material transitions* (a zone change, a
 connectivity phase change, a capability health change, a battery-bucket crossing)
 are patched onto a resource's status.
@@ -286,8 +291,11 @@ Swarmada is pre-release and evolving. Public claims track the code:
 - **Adapters:** three reference adapters — ROS 2/Nav2, VDA5050, and MAVLink/PX4 —
   plus the in-tree simulation adapter run against the executable conformance
   harness (`adapters/conformance/`, run via `make conformance`). The harness
-  covers checks C0–C16; each reference adapter is conformant via its simulated
-  binding with no failed MUST/MUST NOT. The lease self-stop (C4.2) and the
+  covers checks C0–C16. The reference adapters are exercised against it through
+  simulated bindings only; none has been run against a live runtime, and
+  `adapters/REGISTRY.md` — the authoritative per-adapter record — grades all
+  three `partial` as of this revision. Only a `passing` grade maps to
+  `FleetAdapter.status.conformance: Passed`, which robot admission requires. The lease self-stop (C4.2) and the
   telemetry-path checks (C6.x) are asserted in the suite itself, not separately:
   an adapter reports the stop it performs, which is what makes the primary
   dual-execution safeguard observable rather than assumed. Bindings
@@ -298,7 +306,7 @@ Swarmada is pre-release and evolving. Public claims track the code:
 
 This document describes the architecture as designed; the normative behavior is
 defined by [RFC-0001](../rfcs/dist/RFC-0001-core-spec.md), and the status list above
-is the authoritative statement of what currently runs.
+is the authoritative statement of what runs.
 
 ## Further reading
 

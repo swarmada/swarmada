@@ -45,45 +45,46 @@ verbs** marked *(custom)*: `admit`, `reject`, `cancel`, `estop-trigger`, `estop-
     <tr><td>re-admit an admitted robot</td><td><code>admit</code> <em>(custom)</em></td><td>fleet-manager</td><td><code>admit robot &lt;n&gt; --force --class … [-n &lt;ns&gt;]</code></td></tr>
     <tr><td>reject a discovered robot (records reason)</td><td><code>reject</code> <em>(custom)</em></td><td>fleet-manager</td><td><code>delete robot &lt;n&gt; --reason … [-n &lt;ns&gt;]</code></td></tr>
     <tr><td>delete an admitted robot</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete robot &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>set a robot's charging policy</td><td><code>update</code></td><td>fleet-manager</td><td><code>set charging &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>set a robot's charging policy</td><td><code>update</code></td><td>fleet-manager</td><td><em>(planned)</em> — today <code>kubectl patch robot &lt;n&gt; --type merge -p '{"spec":{"charging":{"dockName":"&lt;dock&gt;"}}}'</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Tasks</strong></td></tr>
-    <tr><td>create a task</td><td><code>create</code></td><td>operator</td><td><code>create task … [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read a task</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get task [-n &lt;ns&gt;]</code>, <code>describe task &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>resume a system-paused task</td><td><code>update</code></td><td>operator</td><td><code>resume task &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>cancel a task (confirmed stop → Cancelled)</td><td><code>cancel</code> <em>(custom)</em></td><td>operator</td><td><code>cancel task &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete a settled task (Pending or terminal only)</td><td><code>delete</code></td><td>operator</td><td><code>delete task &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>create a task</td><td><code>create</code></td><td>operator</td><td><code>kubectl apply -f &lt;fleetaction.yaml&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read a task</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get fleetaction [-n &lt;ns&gt;]</code>, <code>describe fleetaction &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>resume a system-paused task</td><td><code>update</code></td><td>operator</td><td><em>(planned)</em> — today <code>kubectl annotate fleetaction &lt;n&gt; swarmada.io/requeue-requested="&lt;reason&gt;"</code></td></tr>
+    <tr><td>cancel a task (confirmed stop → Cancelled)</td><td><code>cancel</code> <em>(custom)</em></td><td>operator</td><td><code>cancel &lt;fleetaction&gt; --reason … [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>delete a settled task (Pending or terminal only)</td><td><code>delete</code></td><td>operator</td><td><code>kubectl delete fleetaction &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Zones</strong></td></tr>
-    <tr><td>create a zone</td><td><code>create</code></td><td>fleet-manager</td><td><code>create zone … [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read a zone</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get zone [-n &lt;ns&gt;]</code>, <code>describe zone &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete a zone</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete zone &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>create a zone</td><td><code>create</code></td><td>fleet-manager</td><td><code>kubectl apply -f &lt;fleetzone.yaml&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read a zone</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get fleetzone [-n &lt;ns&gt;]</code>, <code>describe fleetzone &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>delete a zone</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete fleetzone &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Maintenance</strong></td></tr>
-    <tr><td>create maintenance</td><td><code>create</code></td><td>fleet-manager</td><td><code>create maintenance … [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read maintenance</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get maintenance [-n &lt;ns&gt;]</code>, <code>describe maintenance &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>activate a scheduled one now</td><td><code>update</code></td><td>fleet-manager</td><td><code>activate maintenance &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>end an active one (keeps the record)</td><td><code>update</code></td><td>fleet-manager</td><td><code>deactivate maintenance &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>remove a maintenance (finalizer resumes robots)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete maintenance &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>create maintenance</td><td><code>create</code></td><td>fleet-manager</td><td><code>kubectl apply -f &lt;zonemaintenance.yaml&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read maintenance</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get zonemaintenance [-n &lt;ns&gt;]</code>, <code>describe zonemaintenance &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>activate a scheduled one now</td><td><code>update</code></td><td>fleet-manager</td><td>creation is activation — omit <code>spec.scheduledStart</code></td></tr>
+    <tr><td>end an active one (keeps the record)</td><td><code>update</code></td><td>fleet-manager</td><td><em>(planned)</em> — no operator intake; a window closes on its <code>autoResumeAfterMinutes</code> deadline, or on delete (record removed)</td></tr>
+    <tr><td>remove a maintenance (finalizer resumes robots)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete zonemaintenance &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Emergency stop</strong></td></tr>
     <tr><td>estop a zone</td><td><code>estop-trigger</code> <em>(custom)</em></td><td>fleet-manager</td><td><code>estop trigger &lt;zone&gt; --reason … [-n &lt;ns&gt;]</code></td></tr>
     <tr><td>clear an estop on a zone</td><td><code>estop-clear</code> <em>(custom)</em></td><td><strong>admin</strong></td><td><code>estop-clear &lt;zone&gt; --reason … [-n &lt;ns&gt;]</code></td></tr>
     <tr><td><em>(planned)</em> robot- and namespace-scoped estop / clear</td><td><code>estop-trigger</code> / <code>estop-clear</code> <em>(custom)</em></td><td>fleet-manager / <strong>admin</strong></td><td>not in the current release — the controllers back only zone scope today</td></tr>
     <tr><td colspan="4" align="center"><strong>Rollouts (firmware and model)</strong></td></tr>
-    <tr><td>create a rollout</td><td><code>create</code></td><td>fleet-manager</td><td><code>create rollout … [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read a rollout</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get rollout &lt;n&gt; [-n &lt;ns&gt;]</code>, <code>describe rollout &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>pause, resume, undo, or stop a rollout</td><td><code>update</code></td><td>fleet-manager</td><td><code>pause|resume|undo|stop rollout &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete a terminal rollout record (Succeeded/Failed only)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete rollout &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>create a rollout</td><td><code>create</code></td><td>fleet-manager</td><td><code>kubectl apply -f &lt;rollout.yaml&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read a rollout</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get|describe firmwarerollout|modelrollout &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td><em>(planned)</em> pause, resume, undo, or stop a rollout</td><td>—</td><td>—</td><td>not in the current release — no rollout controller carries an operator intake for these today</td></tr>
+    <tr><td>delete a terminal rollout record (Succeeded/Failed only)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete firmwarerollout|modelrollout &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Model policy</strong></td></tr>
-    <tr><td>create a policy</td><td><code>create</code></td><td>fleet-manager</td><td><code>apply -f … [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read a policy</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get policy &lt;n&gt; [-n &lt;ns&gt;]</code>, <code>describe policy &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete a policy (stops auto-deploy)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete policy &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>evaluate, deploy, reset, or set a policy</td><td><code>update</code></td><td>fleet-manager</td><td><code>evaluate|deploy|reset|set policy &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>create a policy</td><td><code>create</code></td><td>fleet-manager</td><td><code>kubectl apply -f &lt;modelpolicy.yaml&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read a policy</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get modelpolicy [-n &lt;ns&gt;]</code>, <code>describe modelpolicy &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>delete a policy (stops auto-deploy)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete modelpolicy &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>reset a suspended policy</td><td><code>policy-reset</code> <em>(custom)</em></td><td>fleet-manager</td><td><code>modelpolicy reset &lt;n&gt; --reason … [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td><em>(planned)</em> evaluate or deploy a policy</td><td><code>update</code></td><td>fleet-manager</td><td>today <code>kubectl annotate modelpolicy &lt;n&gt; swarmada.io/model-trigger='&lt;payload&gt;'</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Probes, adapters, robotclasses, config</strong></td></tr>
-    <tr><td>create a probe</td><td><code>create</code></td><td>fleet-manager</td><td><code>create probe … [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete a probe</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete probe &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete a robotclass (template; admitted robots keep their spec)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete robotclass &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>delete an adapter (deregisters; guard planned)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>delete adapter &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read a probe, adapter, or robotclass</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get probe|adapter|robotclass [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>read config</td><td><code>get</code></td><td>viewer</td><td><code>get config [-n &lt;ns&gt;]</code></td></tr>
-    <tr><td>change config</td><td><code>update</code></td><td><strong>admin</strong></td><td><code>set config --… [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>create a probe</td><td><code>create</code></td><td>fleet-manager</td><td><code>kubectl apply -f &lt;robotprobe.yaml&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>delete a probe</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete robotprobe &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>delete a robotclass (template; admitted robots keep their spec)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete robotclass &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>delete an adapter (deregisters; guard planned)</td><td><code>delete</code></td><td>fleet-manager</td><td><code>kubectl delete fleetadapter &lt;n&gt; [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read a probe, adapter, or robotclass</td><td><code>get</code>, <code>list</code></td><td>viewer</td><td><code>get robotprobe|fleetadapter|robotclass [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>read config</td><td><code>get</code></td><td>viewer</td><td><code>get swarmadaconfig [-n &lt;ns&gt;]</code></td></tr>
+    <tr><td>change config</td><td><code>update</code></td><td><strong>admin</strong></td><td><code>kubectl edit swarmadaconfig swarmada-config [-n &lt;ns&gt;]</code></td></tr>
     <tr><td colspan="4" align="center"><strong>Audit</strong></td></tr>
     <tr><td>read the safety audit log</td><td><code>read</code></td><td>fleet-manager</td><td><code>get audit [-n &lt;ns&gt;]</code></td></tr>
     <tr><td>verify the audit hash chain</td><td><code>verify</code></td><td>fleet-manager</td><td><code>verify audit [-n &lt;ns&gt;]</code></td></tr>
@@ -98,7 +99,10 @@ verbs** marked *(custom)*: `admit`, `reject`, `cancel`, `estop-trigger`, `estop-
 - **`swarmctl <VERB> <RESOURCE> [NAME] [--flags]`** — verb first, always; no noun-first
   forms. `get`, `describe`, `apply`, `create`, `delete`, and `edit` are the kubectl
   verbs; the Swarmada verbs (`admit`, `estop`, `cancel`, `undo`, …) use the same shape.
-- **Resource is the singular noun** (`get robot`, `get task`) — no plurals.
+- **Resource is the singular CRD name** (`get robot`, `get fleetaction`) — or its
+  plural, lowercased kind, or registered short name (`rob`, `fz`, `mp`). Abbreviations
+  the CLI does not register (`task`, `zone`, `rollout`, `policy`, `maintenance`) do not
+  resolve.
 - **`get` is the only read command** — no name lists everything, a name returns one
   (`get robot` vs `get robot <name>`); there is no separate `list` command. At the API
   layer this is two Kubernetes verbs (`list` with no name, `get` with a name) plus
@@ -110,8 +114,10 @@ verbs** marked *(custom)*: `admit`, `reject`, `cancel`, `estop-trigger`, `estop-
 - **`--reason` is required and non-empty on every `estop` and `estop-clear`** — the API
   rejects an empty or whitespace-only reason; the value is written to the safety audit
   log (`ESTOP_TRIGGERED`, `ESTOP_CLEARED`).
-- **`apply -f`** is the declarative path for every resource; **`create <resource>
-  --flags`** is the imperative alternative where the spec reduces to flags.
+- **`kubectl apply -f`** is the declarative path for every resource. `swarmctl` has no
+  `apply` and no `create`: it is a read and lifecycle-verb tool over the same API, not a
+  replacement for `kubectl`. An imperative `create <resource> --flags` is a possible
+  future convenience, not a current command.
 - **A named resource resolves on its own** — filter flags (`--discovered`) apply only
   to `get`, never when a resource is named.
 
@@ -121,12 +127,20 @@ verbs** marked *(custom)*: `admit`, `reject`, `cancel`, `estop-trigger`, `estop-
 swarmctl get robot [-n <namespace>]                  # admitted robots (-A for all namespaces)
 swarmctl get robot --discovered [-n <namespace>]     # pre-admission (DiscoveredRobot) robots
 swarmctl describe robot <name> [-n <namespace>]      # name resolves whether admitted or discovered
-swarmctl admit robot <name> --zone <leaf-zone> [--class <robotclass>] [--name <override>] [--force] [-n <namespace>]
-swarmctl set charging <name> [--dock <dock>] [--min-pct <n>] [--target-pct <n>] [-n <namespace>]
+swarmctl admit robot <name> --zone <leaf-zone> [--class <robotclass>] [--adapter <fleetadapter>] \
+                            [--name <override>] [--dock <dock>] [--manufacturer <m>] [--model <m>] [-n <ns>]
+                                                     # --adapter is REQUIRED unless --class supplies one.
+                                                     # --manufacturer/--model override the discovered values.
+swarmctl admit robot <name> --force --class <robotclass> [-n <namespace>]
+                                                     # re-admit an already-admitted Robot: re-applies the
+                                                     # RobotClass. --class is REQUIRED here; --zone and
+                                                     # --name are not read on the re-admit path.
+kubectl patch robot <name> --type merge -p '{"spec":{"charging":{"dockName":"<dock>"}}}' -n <namespace>
+                                                     # a `swarmctl set charging` shorthand is planned, not current
 swarmctl delete robot <name> [--reason "<text>"] [-n <namespace>]
                                                      # discovered ⇒ reject (reason recorded); admitted ⇒ delete
 ```
-**Admit and re-admit are the same command** — re-admit is just `admit robot` with
+**Admit and re-admit are the same command** — re-admit is only `admit robot` with
 `--force`, so it takes the same flags. First admission of a `--discovered` robot
 requires `--zone` (a new `Robot` needs one) and optionally `--class` and `--name`. If
 the name already resolves to an admitted `Robot`, the command is rejected unless
@@ -151,7 +165,7 @@ schedulable — `get robot` is the confirmation. Two things follow from that spl
   directly would be able to step around it.
 - A rejection is distinguishable from a TTL sweep. Both end in the same delete, so without
   a recorded decision the audit chain could not tell an operator's refusal from a robot
-  that was simply never admitted.
+  that was never admitted.
 
 If the control plane cannot complete a marked admission (say the `--class` was deleted in
 between), it records an `AdmissionFailed` event on the `DiscoveredRobot` rather than
@@ -163,17 +177,25 @@ columns. Not in `api/v1` today — a small status-only, RA-1-safe backlog item.
 
 ### Tasks
 
+`FleetAction` is the atomic unit of dispatch; `FleetTask` is the composite that owns a
+graph of them. The commands below name the CRD kind, because the word "task" alone does
+not distinguish the two and does not resolve at the CLI.
+
 ```
-swarmctl create task <name> --type <Navigate|PickUp|DropOff|Patrol|Charge|Custom> --zone <zone> \
-        [--capability <cap>]… [--priority Critical|High|Normal|Low] [--payload '<json>'] \
-        [--deadline <rfc3339>] [--timeout <sec>] [--robot <name>] [-n <namespace>]   # imperative
-swarmctl apply -f <fleettask.yaml> [-n <namespace>]  # declarative
-swarmctl get task [-n <namespace>]
-swarmctl describe task <name> [-n <namespace>]
-swarmctl resume task <name> [-n <namespace>]         # resume a task the SYSTEM paused (estop, maintenance, preemption)
-swarmctl cancel task <name> [-n <namespace>]         # terminal: confirmed stop → Cancelled (NOT resumable)
-swarmctl delete task <name> [-n <namespace>]         # remove a settled record — Pending or terminal (Succeeded/Failed/Cancelled) only
+kubectl apply -f <fleetaction.yaml> [-n <namespace>]  # or a fleettask.yaml for the composite
+swarmctl get fleetaction [-n <namespace>]
+swarmctl describe fleetaction <name> [-n <namespace>]
+swarmctl cancel <fleetaction> [-n <namespace>]          # no reason flag; use the annotation below to record one
+kubectl annotate fleetaction <name> swarmada.io/cancel-requested="<reason>" [-n <namespace>]
+                                                     # terminal: confirmed stop → Cancelled (NOT resumable)
+kubectl annotate fleetaction <name> swarmada.io/requeue-requested="<reason>" [-n <namespace>]
+                                                     # return a SYSTEM-paused action to Pending (estop, maintenance, preemption)
+kubectl delete fleetaction <name> [-n <namespace>]   # remove a settled record — Pending or terminal (Succeeded/Failed/Cancelled) only
 ```
+**`swarmctl` has no `FleetTask` surface today** — the composite is not registered as a
+CLI resource, so read and delete it with `kubectl`. A `swarmctl resume` verb over the
+requeue annotation is planned; the annotation is the operator intake the `FleetAction`
+controller already reconciles.
 A ready-to-apply example ships at `config/samples/fleettask_sample.yaml` — a
 three-member `receiving-round` chain whose members gate on `dependsOn`:
 
@@ -181,35 +203,34 @@ three-member `receiving-round` chain whose members gate on `dependsOn`:
 kubectl apply -f config/samples/fleettask_sample.yaml -n warehouse-a
 ```
 
-There is **no operator `pause task`** — a task reaches `Paused` only via estop,
-`ZoneMaintenance`, or preemption (§9.6.2.4). `resume` un-pauses; `cancel` ends it. (An
-operator-initiated pause is a possible backlog capability, not a current command.)
+There is **no operator pause** — a `FleetAction` reaches `Paused` only via estop,
+`ZoneMaintenance`, or preemption (§9.6.2.4). The requeue annotation un-pauses it; `cancel`
+ends it. (An operator-initiated pause is a possible backlog capability, not a current
+command.)
 
 `cancel` and `delete` are **not** interchangeable. `cancel` *stops* a running task
 through the confirmed-stop path (the robot is freed only once it provably stopped) and
 leaves a `Cancelled` record for audit. `delete` *removes the record* and is accepted
-**only** when nothing is executing — a `Pending` task or a terminal one. On an active
-task (`Assigned`/`InProgress`/`Revoking`) it is rejected; `cancel` first, then delete if
-you want the record gone. (Making `delete` safe on an active task needs a drain
+**only** when nothing is executing — a `Pending` action or a terminal one. On an active
+action (`Assigned`/`InProgress`/`Revoking`) it is rejected; `cancel` first, then delete if
+you want the record gone. (Making `delete` safe on an active action needs a drain
 finalizer — tracked in the backlog, not in the current release.)
 
 ### Zones and maintenance
 
 ```
-swarmctl create zone <name> [--parent <zone>] [--display-name "<text>"] [--floor <n>] [--max-robots <n>] [-n <namespace>]
-                                                     # complex physicalBounds geometry ⇒ apply -f
-swarmctl apply -f <fleetzone.yaml> [-n <namespace>]
-swarmctl get zone [-n <namespace>]
-swarmctl describe zone <name> [-n <namespace>]
-swarmctl delete zone <name> [-n <namespace>]
-swarmctl create maintenance --zone <zone> [--mode Graceful|Immediate] [--at <rfc3339>] [--reason "<text>"] [-n <namespace>]
-                                                     # omit --zone ⇒ namespace-wide; --at schedules
-swarmctl apply -f <zonemaintenance.yaml> [-n <namespace>]
-swarmctl get maintenance [-n <namespace>]
-swarmctl describe maintenance <name> [-n <namespace>]
-swarmctl activate maintenance <name> [-n <namespace>]        # activate a Scheduled one now
-swarmctl deactivate maintenance <name> [-n <namespace>]      # end an Active one → Completed (record kept)
-swarmctl delete maintenance <name> [-n <namespace>]          # remove; finalizer resumes robots (also cancels a Scheduled one)
+kubectl apply -f <fleetzone.yaml> [-n <namespace>]
+swarmctl get fleetzone [-n <namespace>]
+swarmctl describe fleetzone <name> [-n <namespace>]
+kubectl delete fleetzone <name> [-n <namespace>]
+kubectl apply -f <zonemaintenance.yaml> [-n <namespace>]
+                                                     # creation IS activation: omit spec.scheduledStart and the
+                                                     # controller activates on first reconcile; scope.type
+                                                     # Zone|Namespace selects a zone or the whole namespace
+swarmctl get zonemaintenance [-n <namespace>]
+swarmctl describe zonemaintenance <name> [-n <namespace>]
+kubectl delete zonemaintenance <name> [-n <namespace>]       # closes an Active window (the zonemaintenance-resume
+                                                     # finalizer resumes every paused robot) and cancels a Scheduled one
 ```
 
 ### Emergency stop
@@ -220,8 +241,8 @@ swarmctl estop-clear <zone> --reason "<text>" [-n <namespace>]
 ```
 the current release is **zone-scoped**: `estop trigger` and `estop-clear` act on a FleetZone via the
 zone-estop controller. Robot- and namespace-scoped estops — and the `estop-clear`
-`--requeue-paused-tasks` / `--cancel-paused-tasks` task-handling options — are planned
-but not yet implemented.
+`--requeue-paused-actions` / `--cancel-paused-actions` bulk options — are planned
+but not implemented at v0.3.
 
 `estop-clear` **requires a non-empty `--reason`** (swarmctl rejects an empty or
 whitespace value before acting); the reason is written to the safety audit log. `estop
@@ -244,35 +265,33 @@ swarmctl estop trigger floor-2 --reason "fire alarm" -n hospital-east
 
 # Clear the zone after inspecting:
 swarmctl estop-clear floor-2 --reason "all clear after drill" -n hospital-east
-#   → estop state → Normal; paused tasks stay Paused (operator-gated) — resume with `resume task`.
+#   → estop state → Normal; paused actions stay Paused (operator-gated) — requeue each with the annotation above.
 ```
 Automation may not clear an estop (§9.6.2.3; RFC-0006 is the supervised exception).
-`estop` stops the *robot*; `cancel task` stops the *task* — different layers.
+`estop` stops the *robot*; `cancel` stops the *action* — different layers.
 
 ### Rollouts (one family — FirmwareRollout and ModelRollout)
 
 ```
-swarmctl create rollout <name> --type firmware|model --selector <labels> --version <v> \
-        --uri <artifact-uri> [--checksum <sha256>] [--signature-ref <ref>] [--model-name <name>] \
-        [--max-unavailable <n|pct>] [--min-battery <pct>] [--idle-only] [--rollback Manual|Auto] [-n <namespace>]
-swarmctl apply -f <rollout.yaml> [-n <namespace>]
-swarmctl get rollout <name> [-n <namespace>]
-swarmctl describe rollout <name> [-n <namespace>]
-swarmctl pause rollout <name> [-n <namespace>]
-swarmctl resume rollout <name> [-n <namespace>]
-swarmctl undo rollout <name> [-n <namespace>]
-swarmctl stop rollout <name> [-n <namespace>]        # terminal: freeze robots on current versions → Failed (not resumable)
-swarmctl delete rollout <name> [-n <namespace>]      # remove a terminal (Succeeded/Failed) record only
+kubectl apply -f <rollout.yaml> [-n <namespace>]     # FirmwareRollout or ModelRollout
+swarmctl get firmwarerollout|modelrollout [-n <namespace>]
+swarmctl describe firmwarerollout|modelrollout <name> [-n <namespace>]
+kubectl delete firmwarerollout|modelrollout <name> [-n <namespace>]
+                                                     # remove a terminal (Succeeded/Failed) record only
+# (planned) pause | resume | undo | stop a rollout — see below
 ```
-`--type firmware|model` disambiguates only if a name is ambiguous. There is no
-`modelrollout` command family.
+`FirmwareRollout` and `ModelRollout` are separate kinds and are named separately; there
+is no single `rollout` spelling that resolves to both.
 
-`pause` and `stop` are the halt pair: `pause` is a **temporary** halt (no new robots
-selected; `resume` continues it), `stop` is **terminal** — it freezes robots on their
-current versions, marks the rollout `Failed`, and is not resumable, while keeping the
-per-robot history and leaving `undo` available. To halt an in-flight rollout use `pause`
-or `stop`, not `delete`: `delete` only removes a **settled** record and is accepted
-**only** on a terminal rollout (`Succeeded`/`Failed`), rejected while `Progressing`/`Paused`.
+**Operator control of an in-flight rollout is planned, not in the current release.**
+`pause`, `resume`, `undo` and `stop` describe the intended surface: `pause` a temporary
+halt (no new robots selected) that `resume` continues, `stop` terminal — freezing robots
+on their current versions and marking the rollout `Failed` while keeping the per-robot
+history. None of the four is backed today: neither rollout controller carries an operator
+intake for them, and `status.phase: Paused` is written by the controller alone, on
+`pauseOnError`. A rollout in flight runs to completion or to its configured failure
+handling. `delete` only removes a **settled** record and is accepted **only** on a
+terminal rollout (`Succeeded`/`Failed`), rejected while `Progressing`/`Paused`.
 
 **Where the artifact lives.** `--uri` sets the CRD's `firmwareUri` / `modelUri` — the
 location of the binary. Supported schemes: `oci://<registry>/<repo>@sha256:<digest>`
@@ -301,14 +320,15 @@ artifact value. Tracked as an RFC-scoped enhancement.
 ### Model policy
 
 ```
-swarmctl apply -f <modelpolicy.yaml> [-n <namespace>]
-swarmctl get policy <name> [-n <namespace>]
-swarmctl describe policy <name> [-n <namespace>]
-swarmctl evaluate policy <name> [-n <namespace>]
-swarmctl deploy policy <name> [-n <namespace>]
-swarmctl reset policy <name> [-n <namespace>]
-swarmctl set policy <name> --<field>=<value> [-n <namespace>]
-swarmctl delete policy <name> [-n <namespace>]       # stops auto-deploy; in-flight rollouts already created are unaffected
+kubectl apply -f <modelpolicy.yaml> [-n <namespace>]
+swarmctl get modelpolicy [-n <namespace>]
+swarmctl describe modelpolicy <name> [-n <namespace>]
+swarmctl modelpolicy reset <name> --reason "<text>" [-n <namespace>]
+                                                     # clears a FailedRepeatedly suspension (custom verb: policy-reset)
+kubectl annotate modelpolicy <name> swarmada.io/model-trigger='<metrics-json>' [-n <namespace>]
+                                                     # (planned as `evaluate`/`deploy`) the single evaluation path
+kubectl patch modelpolicy <name> --type merge -p '{"spec":{"qualityGate":{...}}}' [-n <namespace>]
+kubectl delete modelpolicy <name> [-n <namespace>]   # stops auto-deploy; in-flight rollouts already created are unaffected
 ```
 **What it's for.** `ModelPolicy` is the **deploy gate** between a model-training pipeline
 and the fleet: it watches for a new model version (webhook, registry-watch, or manual),
@@ -320,28 +340,29 @@ Training = CI; the policy = the release gate that keeps bad models off robots.
 posts metrics (pick-success 0.94, 500 episodes) → gate passes → a `ModelRollout` deploys
 `v2` automatically. Next night `v3` posts 0.85 → gate fails → rejected with the metrics
 in a Kubernetes event, nothing deploys, robots stay on `v2`. After
-`consecutiveRejectionLimit` rejections the policy suspends until `reset policy`.
-`evaluate policy` forces a run; `deploy policy` is the manual path.
+`consecutiveRejectionLimit` rejections the policy suspends until `modelpolicy reset`.
+Writing the `model-trigger` annotation forces a run; it is also the manual deploy path.
 
 ### Probes, adapters, robotclasses, config
 
 ```
-swarmctl create probe <name> --robot-selector <labels> --type hardware|capability|model --target <name> [--interval <sec>] [-n <namespace>]
-swarmctl get probe | adapter | robotclass [-n <namespace>]
-swarmctl describe probe <name> | adapter <name> | robotclass <name> [-n <namespace>]
-swarmctl delete probe <name> [-n <namespace>]        # stops the active check; nothing to drain (plain delete)
-swarmctl delete robotclass <name> [-n <namespace>]   # removes the template; already-admitted robots keep their merged spec
-swarmctl delete adapter <name> [-n <namespace>]      # deregisters the adapter — robots it serves go unmanaged until it reconnects
-swarmctl get config [-n <namespace>]
-swarmctl set config --<field>=<value> [-n <namespace>]
+kubectl apply -f <robotprobe.yaml> [-n <namespace>]
+swarmctl get robotprobe | fleetadapter | robotclass [-n <namespace>]
+swarmctl describe robotprobe <name> | fleetadapter <name> | robotclass <name> [-n <namespace>]
+kubectl delete robotprobe <name> [-n <namespace>]    # stops the active check; nothing to drain (plain delete)
+kubectl delete robotclass <name> [-n <namespace>]    # removes the template; already-admitted robots keep their merged spec
+kubectl delete fleetadapter <name> [-n <namespace>]  # deregisters the adapter — robots it serves go unmanaged until it reconnects
+swarmctl get swarmadaconfig [-n <namespace>]
+kubectl edit swarmadaconfig swarmada-config [-n <namespace>]
 ```
-`RobotClass`, `ModelPolicy`, and `FleetAdapter` have no imperative `create` — their
-specs (hardware inventory, quality gates, trust material) don't reduce to flags, so
-they are authored with `apply -f`. Every resource still supports `apply -f`.
+No resource has an imperative `create` — `swarmctl` has no `create` verb. For
+`RobotClass`, `ModelPolicy` and `FleetAdapter` the spec (hardware inventory, quality
+gates, trust material) would not reduce to flags in any case; every resource is authored
+with `kubectl apply -f`.
 
 Two resources have **no `delete`** on purpose. `SwarmadaConfig` is a namespace singleton
 the control plane auto-creates with defaults — deleting it is a no-op (it is recreated),
-so change it with `set config`, never delete it. The **safety audit log** is append-only
+so change it with `kubectl edit`, never delete it. The **safety audit log** is append-only
 and tamper-evident (`verify audit` recomputes its hash chain); it has no `delete` verb by
 design, so the record cannot be edited or truncated. `delete adapter` is the one delete
 that touches live operation — see the caveat above; a guard is planned so it is rejected
@@ -356,8 +377,23 @@ that reports Healthy while dropping 60% of frames). Probes are debounced
 *Example.* `create probe cam-liveness --robot-selector class=acme --type hardware
 --target camera-front --interval 30`. Every 30s the control plane verifies `camera-front`
 (e.g. frame-rate ≥ 80%); after 3 bad cycles it goes `Degraded` → the `item-pick.ai-guided`
-capability (needs a healthy camera) goes `Unavailable` → the scheduler stops sending pick
-tasks to that robot **before** it fails one; two good cycles later it recovers.
+capability (needs a healthy camera) stops being schedulable → the scheduler stops sending pick
+tasks to that robot **before** it fails one; two good cycles later it recovers. (The capability
+status written in that state is `Inactive`. RFC-0001's truth table specifies `Unavailable`; the
+control plane does not write that value at v0.3, so tooling should match on `Inactive`.)
+
+### Miscellaneous
+
+```
+swarmctl version                                     # client version and the contract version it targets
+swarmctl robotclass rollout <class> [-n <ns>]        # re-admit every Robot of a class after a class change
+swarmctl modelpolicy reset <policy> --reason "<text>" [-n <ns>]
+                                                     # clear a suspended ModelPolicy (--reason required)
+```
+
+`--yes` skips the interactive confirmation on every command that prompts (`admit --force`,
+`delete`, `cancel`, `estop`, `robotclass rollout`). Use it only in automation; the prompt exists
+because each of these commands changes robot state.
 
 ### Audit (safety audit log)
 

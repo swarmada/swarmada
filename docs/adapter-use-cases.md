@@ -116,6 +116,12 @@ simulated backends (`--binding` / `--comms` / `--link simulated`). See
 
 When no live adapter is running (the projection-based quickstart), degrade the
 `Robot` status by hand. Note `status.hardware` is an **array** of
+
+> **This is a demo shortcut, not an operator workflow.** `Robot.status` is controller-owned
+> and operators must not write it (`rfcs/rfc-0001-core-spec/crds/robot.md:312-314`; RA-1,
+> `terminology.md:55`) — `status.hardware[]` is a control-plane-owned field, written from
+> adapter telemetry by the Robot status sink (RFC-0001 §9.3.3). Use this only against a simulated fleet with no
+> live adapter, and never against a real one.
 `{name, status}` components:
 
 ```bash
@@ -237,5 +243,5 @@ cookiecutter adapters/template/
 The generated adapter is wired to the audited `swarmada-sdk` safety
 primitives (fencing, confirmed estop, lease self-stop) and passes the
 conformance handshake immediately. Implement the `RobotBinding` seam for the
-target class/protocol, then run `make conformance` against it until every
+target robot interface, then run `make conformance` against it until every
 non-skipped check passes before proposing a Registry entry.
