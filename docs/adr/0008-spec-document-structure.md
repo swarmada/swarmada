@@ -27,7 +27,7 @@ Two forces are in tension:
   Alternatives are meant to be read in light of the Proposal.
 
 A mechanical constraint also applies: the assembler generates section numbers
-from manifest order, but chapter *bodies* currently carry hand-authored
+from manifest order, but chapter *bodies* carry hand-authored
 subsection numbers (e.g. `5.2.4.1`), so any reorder desyncs those numbers and the
 cross-references that point at them.
 

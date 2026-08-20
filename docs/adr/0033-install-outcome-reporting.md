@@ -41,7 +41,7 @@ findings, each verified against the tree:
 
 3. **`FIRMWARE_INSTALL_FAILED` has no signal to key on**, and `status.failedRobots` is never populated.
 
-Two of those audit rows are currently marked `emitted` in §9.6.5.1. They pass the mechanical Status check
+Two of those audit rows are marked `emitted` in §9.6.5.1. They pass the mechanical Status check
 because it verifies that a production writer *references* the event constant — a weaker property than the
 writer being *reachable*. The column has drifted again, in a way the existing gate is blind to.
 
@@ -77,7 +77,7 @@ jobs, and project it onto `Robot.status` so both rollout controllers and the aud
 - **Confirmed, never inferred — the audit boundary.** `FIRMWARE_INSTALL_FAILED` and `MODEL_UPDATE_FAILED` seal
   **only** on a reported terminal `FAILED`. A rollout that gives up on an unresponsive robot is a legitimate
   *operational* outcome and is recorded as such on the rollout, as **unconfirmed** — it MUST NOT seal an
-  install-failure entry. "We never heard" is not "it failed", and a chain whose value rests on every entry
+  install-failure entry. "Nothing was heard" is not "it failed", and a chain whose value rests on every entry
   being confirmed cannot carry an inference. This is the same discipline that keeps a TTL sweep from
   masquerading as an operator rejection.
 

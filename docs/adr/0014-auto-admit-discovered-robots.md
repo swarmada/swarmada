@@ -60,7 +60,7 @@ gated on a full class+zone match.**
   every announce. The controller reconcile loop is the right place for a privileged,
   occasionally-run action.
 - **Derive the zone instead of adding a field** — e.g. auto-select the namespace's
-  sole leaf zone. Rejected as too magical and fragile (breaks the moment a second
+  sole leaf zone. Rejected as too implicit and fragile (breaks the moment a second
   zone appears); an explicit `autoAdmitZone` is predictable and auditable.
 - **Put the zone on the RobotClass.** Rejected: a RobotClass is a reusable hardware
   template shared across zones; binding it to one zone conflates template with

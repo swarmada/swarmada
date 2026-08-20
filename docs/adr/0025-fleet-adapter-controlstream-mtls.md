@@ -89,7 +89,7 @@ default — a plaintext listener becomes an explicit dev-only opt-in.
   renewal) takes effect without a manager restart — the same reload intent as the
   webhook serving cert. Kept minimal; the client-CA pool is read at startup.
 
-- **Turnkey overlay `config/controlstream-tls/`.** A cert-manager `Certificate`
+- **Ready-made overlay `config/controlstream-tls/`.** A cert-manager `Certificate`
   for the server cert (`dnsNames: swarmada-controlstream.<ns>.svc` and
   `swarmada-controlstream.<ns>.svc.cluster.local`, matching the existing
   ControlStream `Service` name) issued by a CA `Issuer`; a strategic-merge patch on
@@ -107,13 +107,13 @@ with no change to `parseAdapterSAN`.
 
 - **Synthesize a `Verified` identity from `AdapterHello` in insecure mode.** This
   would unblock presence without certificates, but it authenticates from
-  client-supplied data — trivially spoofable, and directly contrary to the
+  client-supplied data — readily spoofable, and directly contrary to the
   `identity.go` contract that only a verified SAN is the boundary. Rejected: it
   would turn a dev convenience into a way to forge adapter identity.
 
 - **Plaintext by default, mTLS opt-in.** Smaller migration, but it makes the
   insecure posture the default for a security control — fail-open. A deployment
-  that simply doesn't set the flags would silently run without transport security.
+  that doesn't set the flags would silently run without transport security.
   Rejected: the safe state must be the default; opting *out* (via the existing
   dev-only flag) is the correct direction.
 
@@ -141,7 +141,7 @@ with no change to `parseAdapterSAN`.
 - **New operational obligations.** Adapters must now be issued client certs with
   the `<adapter>.<namespace>.svc.cluster.local` SAN; the manager needs a server
   cert and the client-CA. The `config/controlstream-tls` overlay makes this
-  turnkey (cert-manager), and hot reload avoids restart-on-rotation — but
+  ready-made (cert-manager), and hot reload avoids restart-on-rotation — but
   cert-manager is now an assumed dependency of that overlay (it is the first
   cert-manager consumer wired in `config/`; `config/default` still does not
   provision certs). Certs must be valid for the Service DNS because the server runs

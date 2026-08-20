@@ -54,7 +54,7 @@ Specifics:
 ## Alternatives considered
 
 - **Per-robot drain deadline** (measured from when each robot began winding down).
-  Rejected for now: it needs a per-robot "windingDownSince" timestamp in status and
+  Rejected at v0.3: it needs a per-robot "windingDownSince" timestamp in status and
   more bookkeeping, for a semantic the field wording does not ask for. The
   maintenance-level deadline is simpler and sufficient; per-robot can be a later
   refinement if operators need it.

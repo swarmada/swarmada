@@ -87,7 +87,7 @@ the facility and the control plane, and it initiates that connection **outbound*
 - **Harder:** the edge Zone Controller's responsibilities grow (session
   management, reconnection, backpressure over one multiplexed link). Its
   specification must state the connection-direction inversion and the offline
-  contract precisely, and the conformance harness's edge checks (C8, currently
+  contract precisely, and the conformance harness's edge checks (C8, a
   follow-on) must cover disconnect/reconnect and offline-authority behaviour.
 - **To revisit:** `docs/architecture.md` describes "the control plane connects to
   each adapter" and lists deployment topologies that predate this inversion; both

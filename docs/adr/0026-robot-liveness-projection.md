@@ -90,7 +90,7 @@ the pattern already used for the per-zone pending-action index.
 patch may lose to a concurrent reconcile ("object has been modified"). Wrap each
 Robot patch in `retry.RetryOnConflict` (re-Get, re-apply, re-patch) so a conflict is
 retried, not surfaced as an error. `CapabilitiesIngestor.IngestCapabilities`
-currently uses a full `Status().Update` with no retry (`capabilities_ingestor.go:62`)
+uses a full `Status().Update` with no retry (`capabilities_ingestor.go:62`)
 — it shares this bug and is brought onto the same retry-on-conflict discipline.
 
 ## Alternatives considered
@@ -107,7 +107,7 @@ currently uses a full `Status().Update` with no retry (`capabilities_ingestor.go
 - **Only write on material transitions (first-seen + recovery), never refresh.**
   Rejected: without periodic refresh the persisted `lastSeenAt` ages past
   `heartbeatTimeout` and a steadily-live Robot falsely lapses to `Offline`. The
-  throttle must still refresh, just rate-limited.
+  throttle must still refresh, only rate-limited.
 
 - **A dedicated robot-liveness sink wired to presence in `cmd/manager`.** More
   decoupled, but adds wiring and splits one operation; not warranted now (see
@@ -117,7 +117,7 @@ currently uses a full `Status().Update` with no retry (`capabilities_ingestor.go
   Robot in the namespace on each heartbeat. Rejected on cost.
 
 - **Projection only, leave `robot_controller` unchanged.** This is the literal
-  "just write the field" framing, but per Context §2 it leaves `Ready=Unknown`
+  "write the field" framing, but per Context §2 it leaves `Ready=Unknown`
   forever — the Robot still never reaches Ready. Rejected: the consumer promotion is
   required for the stated outcome.
 

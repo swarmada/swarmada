@@ -69,7 +69,7 @@ key it reads was established at admission time.
   semantics.
 - **Stamp only at auto-admit, not in the defaulter.** Rejected: it would leave
   hand-created and pre-existing Robots silently unjoined — the same empty-status
-  failure, just for a different provenance. Doing both closes the gap for every path
+  failure, only for a different provenance. Doing both closes the gap for every path
   a Robot can enter the cluster by.
 - **Resolve `robot_id` by writing it onto status and matching there.** Rejected
   outright: it inverts the dependency (status would have to exist before the first

@@ -19,7 +19,7 @@
   consumes it, and there is no representation of a "Critical" connectivity state.
 
 The field forces one decision: **where does "Critical" connectivity live in the
-API, and what writes it?** The escalation itself is trivial to compute — the Robot
+API, and what writes it?** The escalation itself is cheap to compute — the Robot
 controller already runs on a periodic requeue, already owns the Offline transition,
 and already records `status.offlineSince`, so `now − offlineSince ≥
 connectivityCriticalThresholdSeconds` is available with no new inputs. The hard part
@@ -72,7 +72,7 @@ No `api/v1` schema change is required — conditions are already part of
 - **New `RobotPhase = Critical`.** Rejected. It would evict the `Offline` phase for a
   robot that is precisely Offline, losing information; it would require every phase
   consumer (scheduler eligibility, metrics label set, the offline-duration
-  accounting keyed on the Offline phase) to learn a new state that is really just
+  accounting keyed on the Offline phase) to learn a new state that is really only
   "Offline, but longer"; and two duration-derived phases (Offline then Critical)
   invite a cascade of further phase splits.
 - **New enum field `ConnectivityStatus.State` (Online/Offline/Critical).** Rejected

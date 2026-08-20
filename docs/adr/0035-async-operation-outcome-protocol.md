@@ -13,7 +13,7 @@ band. ADR-0033 solved this for firmware and model install — a terminal outcome
 on `UpdateProgress`, durable snapshot fields, and a projection onto `Robot.status` —
 but it solved it **bespoke, per operation**. The acknowledgement-vs-outcome gap it
 named is general: the ack and the outcome are two facts arriving at two times, and
-each future long-running command (e.g. calibration, bulk configuration) currently
+each future long-running command (e.g. calibration, bulk configuration)
 re-derives its own outcome carrier, terminal enum, snapshot field, and status
 projection, along with its own copy of the confirmed-never-inferred and
 stream/snapshot rules — which then risk drifting apart.

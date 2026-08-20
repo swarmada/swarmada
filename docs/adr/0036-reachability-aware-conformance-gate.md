@@ -1,4 +1,4 @@
-# ADR-0036: The Required-Events/conformance gate must assert reachability, not just reference
+# ADR-0036: The Required-Events/conformance gate must assert reachability, not only reference
 
 - **Status:** proposed
 - **Date:** 2026-08-05
@@ -17,14 +17,14 @@ state they key on, so the events could never fire. As that ADR put it, the colum
 
 A gate that a dangling reference can satisfy gives **false assurance**: it lets an
 incomplete design ship marked done. That is the systemic cause behind ADR-0033, not
-just its symptom — review missed it twice, and the gate is meant to be the backstop.
+only its symptom — review missed it twice, and the gate is meant to be the backstop.
 
 ## Decision
 
 _(Pending — this is a proposal stub.)_ Proposed direction: strengthen the
 Required-Events / conformance gate so a row may be marked `emitted` **only** when its
 writer is demonstrably reachable — for example an exercised test that observes the
-event fire, or static reachability analysis — not merely that the constant is
+event fire, or static reachability analysis — not only that the constant is
 referenced. Where reachability cannot be established mechanically, the gate must
 record its own limitation where a reader will see it, rather than reporting a false
 pass.

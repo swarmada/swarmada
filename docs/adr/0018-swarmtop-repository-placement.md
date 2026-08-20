@@ -29,7 +29,7 @@ overhead that buys nothing while swarmtop's only job is to make demos legible).
 
 ## Decision
 
-**Keep `swarmtop` in-tree at `tools/swarmtop/` as demo-only tooling for now, and
+**Keep `swarmtop` in-tree at `tools/swarmtop/` as demo-only tooling at v0.3, and
 defer both repository extraction and packaged distribution** until its v1 scope
 is proven end-to-end and there is external demand to install it standalone.
 
@@ -54,7 +54,7 @@ is proven end-to-end and there is external demand to install it standalone.
 
 - **Extract to a separate repo and set up packaged distribution now**
   (GoReleaser → Homebrew/Scoop/krew). This is the likely eventual end state, but
-  rejected *for now*: it adds a second repo, release workflow, tap, and bucket to
+  rejected *at v0.3*: it adds a second repo, release workflow, tap, and bucket to
   maintain before anyone needs to install swarmtop outside a demo. Premature
   overhead — the same reasoning ADR-0002 uses to defer polyrepo generally.
 - **Publish swarmtop in the core tree as a first-class product.** Rejected: it

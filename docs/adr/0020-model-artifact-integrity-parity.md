@@ -34,7 +34,7 @@ firmware given equal or greater physical consequence; a digest and a signature
 are neutral primitives that add no model-specific coupling to the API;
 simulation-first and local development workflows must not be blocked by
 mandatory signing; and the metrics that gate deployment are themselves a trust
-input, not just the artifact.
+input, not only the artifact.
 
 ## Decision
 
