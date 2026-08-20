@@ -86,7 +86,7 @@ else:          # ESTOP_FAILED
     escalate() # could not confirm within the bound
 ```
 
-This prevents the worst adapter bug: reporting "stopped" merely because the stop
+This prevents the worst adapter bug: reporting "stopped" only because the stop
 *command* was sent while the robot kept moving.
 
 ## Why a shared package

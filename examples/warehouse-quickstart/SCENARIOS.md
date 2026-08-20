@@ -214,17 +214,18 @@ the stop at the end, so a drill that silently never ran cannot report success.
 Not a fleet scenario — tears down the `kind` cluster, kills any live/stale port-forward or adapter
 processes this script tracked, removes local pidfile/log state (`/tmp/swq-*`), and exits without
 bringing anything up. Reminder to run this (or `kind delete cluster`) is printed on every exit path
-(success, failure, or Ctrl-C) unless `--clean` itself was what just ran.
+(success, failure, or Ctrl-C) unless `--clean` itself was what last ran.
 
 ---
 
 ## Cross-cutting gaps to keep in view
 
-These apply to every LIVE scenario, not just one:
+These apply to every LIVE scenario, not only one:
 
 - **No automatic `Discovered` → `Idle` admission transition exists in the control plane.**
   `sim-robot-001` reaching `Idle` in every LIVE scenario is `run.sh` projecting it (gated on real
-  observed telemetry, not a blind timer) — not a real control-plane feature. This is the single
+  observed telemetry, not a blind timer) — not a real control-plane feature. See the project memory
+  `project_swarmada_no_discovered_to_idle_transition.md` for the full trace. This is the single
   biggest thing that would change if/when the real Health Monitor admission path gets built.
 - **`sim-robot-002`/`003` are never live.** Every scenario's "healthy baseline" is a status
   projection. If a future scenario needs two genuinely live robots (e.g., a true head-to-head
@@ -249,7 +250,7 @@ camera degrades → `perception.camera` capability degrades → task reroutes �
 camera recovers → capability recovers — happens entirely inside
 `status.hardware[]`/`status.capabilities[]`, invisible without `-o yaml`/`-o
 jsonpath` mid-demo. `estop-drill` (§6, `status.estopState`) has the same problem,
-just less central to its story. `comms-flaky` (§5) does NOT belong here: its
+only less central to its story. `comms-flaky` (§5) does NOT belong here: its
 payoff never reaches any status field — `status.connectivity` is never written
 (RA-1) — so it's a logs story, watched via the adapter/manager logs.
 `battery-edge`/`battery-handoff` don't need this either — `Battery` is already a

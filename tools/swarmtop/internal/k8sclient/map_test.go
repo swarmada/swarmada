@@ -226,3 +226,41 @@ func TestMapFleetZone(t *testing.T) {
 		t.Fatalf("slices: %+v", v)
 	}
 }
+
+// The health column was blank for every robot in every cluster until the Robot
+// reconciler started deriving status.health (RFC-0001 §9.3.3): mapRobot nil-guards the
+// field, so an unwritten one silently produced an empty column rather than an error.
+// This pins what the guard now receives.
+func TestMapRobot_PopulatesHealthColumn(t *testing.T) {
+	r := &swarmadav1.Robot{
+		ObjectMeta: metav1.ObjectMeta{Name: "robot-3"},
+		Status: swarmadav1.RobotStatus{
+			Phase: swarmadav1.RobotPhaseIdle,
+			Health: &swarmadav1.RobotHealth{
+				Status:  swarmadav1.HealthStateDegraded,
+				Message: "hardware degraded: lidar",
+			},
+		},
+	}
+
+	v := mapRobot(r)
+
+	if v.HealthStatus != "Degraded" {
+		t.Errorf("HealthStatus = %q, want %q", v.HealthStatus, "Degraded")
+	}
+	if v.HealthMessage != "hardware degraded: lidar" {
+		t.Errorf("HealthMessage = %q", v.HealthMessage)
+	}
+}
+
+// A robot whose health has not been derived yet must still map cleanly — the guard is
+// what keeps an absent aggregate from becoming a crash.
+func TestMapRobot_AbsentHealthLeavesTheColumnEmpty(t *testing.T) {
+	r := &swarmadav1.Robot{
+		ObjectMeta: metav1.ObjectMeta{Name: "robot-3"},
+		Status:     swarmadav1.RobotStatus{Phase: swarmadav1.RobotPhaseIdle},
+	}
+	if v := mapRobot(r); v.HealthStatus != "" || v.HealthMessage != "" {
+		t.Errorf("expected an empty health column, got %q / %q", v.HealthStatus, v.HealthMessage)
+	}
+}

@@ -1,0 +1,107 @@
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+# SPDX-License-Identifier: Apache-2.0
+#
+# Install each Python package into a CLEAN venv from its OWN pyproject.toml, then do
+# nothing but `import` it.
+#
+# WHY THIS EXISTS
+#
+# Every package declared `protobuf>=4.25` while the committed `_pb2.py` gencode calls
+# `runtime_version.ValidateProtobufRuntimeVersion(..., 6, 33, 5, ...)` — an API that did
+# not exist before protobuf 5.27. Anyone who cloned the public repo and installed per the
+# declared dependencies got a failure on FIRST IMPORT. The repo was public for over a week
+# in that state.
+#
+# It was invisible because every environment that ever ran this code already had a modern
+# protobuf pulled in by something else — the testbed image installs one explicitly, and
+# developer machines had one from unrelated tooling. Nothing ever exercised the declared
+# dependency set on its own.
+#
+# So this job deliberately does the least possible: no ROS, no Docker, no GPU, no test
+# suite. A clean interpreter, the package's own metadata, and one import. That is the
+# whole check, and it is the one that was missing.
+
+name: install-smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A dependency floor can also be broken by the outside world moving, not just by an edit
+  # here — a yanked release, a new major. Catch that without waiting for a commit.
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  import-from-declared-deps:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # one broken package must not hide the others
+      matrix:
+        include:
+          - name: swarmada-sdk
+            path: ./sdk/python
+            module: swarmada_sdk
+            needs_sdk: "false"
+          - name: fleet-adapter-ros2
+            path: ./adapters/external/fleet-adapter-ros2
+            module: fleet_adapter_ros2
+            needs_sdk: "true"
+          - name: fleet-adapter-vda5050
+            path: ./adapters/external/fleet-adapter-vda5050
+            module: fleet_adapter_vda5050
+            needs_sdk: "true"
+          - name: fleet-adapter-mavlink
+            path: ./adapters/external/fleet-adapter-mavlink
+            module: fleet_adapter_mavlink
+            needs_sdk: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Makefile runs a Go-discovery preflight at parse time, so any `make` target
+      # needs Go present even when it compiles nothing. Mirrors ci.yml's python job.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      # adapters/external/ is gitignored — `make adapters` git-clones the three reference
+      # adapters from their own public repositories. A checkout alone leaves those paths
+      # absent, so three of the four matrix entries fail on a missing directory rather
+      # than on the dependency floor this job exists to test.
+      - name: Fetch the reference adapters
+        if: matrix.needs_sdk == 'true'
+        run: make adapters
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # the floor every pyproject declares
+
+      - name: Install ${{ matrix.name }} into a clean venv from its own pyproject
+        run: |
+          set -euo pipefail
+          test -f "${{ matrix.path }}/pyproject.toml" || {
+            echo "::error::${{ matrix.path }}/pyproject.toml is absent - the package was not"
+            echo "::error::produced. Failing rather than skipping: a job that passes by not"
+            echo "::error::running is indistinguishable from one that found nothing wrong."
+            exit 1
+          }
+          python -m venv /tmp/venv
+          # swarmada-sdk is not published to PyPI; the adapters depend on it by name, so a
+          # monorepo consumer installs the in-tree copy first. This is a property of the
+          # repository layout, NOT a relaxation of the dependency set under test.
+          if [ "${{ matrix.needs_sdk }}" = "true" ]; then
+            /tmp/venv/bin/pip install --quiet ./sdk/python
+          fi
+          /tmp/venv/bin/pip install --quiet "${{ matrix.path }}"
+
+      - name: Import it, and nothing else
+        run: |
+          set -euo pipefail
+          /tmp/venv/bin/python - <<'PY'
+          import google.protobuf as p
+          import ${{ matrix.module }}   # noqa: F401 — the import IS the assertion
+          print("imported ${{ matrix.module }} against protobuf", p.__version__)
+          PY
+
+      # The adapters are checked out here for convenience; in their own repositories this
+      # job runs standalone. If that ever diverges, this job is the thing that notices.

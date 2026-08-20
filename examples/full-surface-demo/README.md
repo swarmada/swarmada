@@ -75,7 +75,7 @@ walk. Only the latency-violation counter resists projection.
 
 To gate on all 7, run the demo under **mTLS** (adapter presents a client cert whose
 SAN names the FleetAdapter) and pass `--gate-known-gaps` to `demo_test.py`. That is a
-larger change — `sim_adapter.py` currently dials `insecure_channel` — tracked as
+larger change — `sim_adapter.py` dials `insecure_channel` — tracked as
 follow-up work, not part of this harness.
 
 ## RA-1 end-to-end
@@ -99,7 +99,7 @@ or control-plane metrics — the adapter emits an `EDGE_ESTOP_CONFIRMED` log mar
 ## kind validation checklist
 
 Run `make demo-test` on a machine with Docker + kind + Go. It should end with a
-single ✅ and exit 0. If it fails, confirm each of these (the parts that could not be
+single success line and exit 0. If it fails, confirm each of these (the parts that could not be
 validated without a live cluster):
 
 - [ ] `go build ./cmd/edge` succeeds and `bin/edge --insecure … --safety-input-file …` starts.

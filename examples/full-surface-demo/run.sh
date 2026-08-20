@@ -29,10 +29,14 @@
 #     status.estopState Stopping→Stopped, Offline + FleetAction Revoking (comms drop →
 #     lease expiry), Assigned/InProgress (scheduler), the adapter-connected gauge, the
 #     reconnect counter, and RA-1 (status_writes vs frames_received).
-#   - PROJECTED via kubectl (no control-plane writer exists — same mechanism the
-#     quickstart uses to project Idle): RobotPhase Idle-bootstrap, Charging, Error,
-#     Maintenance, and FleetAction Succeeded. demo_test.py asserts they were OBSERVED;
-#     the run output labels them projected.
+#   - PROJECTED via kubectl --subresource=status (the RA-1 anti-pattern; RFC-0001
+#     crds/robot.md:312-314 reserves status to controllers): RobotPhase Idle-bootstrap,
+#     Charging, Error, Maintenance, and FleetAction Succeeded. Idle-bootstrap is not a
+#     cosmetic shortcut — no component owns the Discovered->Idle transition
+#     (crds/discoveredrobot.md:342 requires it; no ownership table in control-plane.md
+#     claims it), so no robot is schedulable without it. demo_test.py asserts these were
+#     OBSERVED, which is weaker than asserting the control plane produced them; the run
+#     output labels them projected. See docs/quickstart.md, Honest notes.
 #   - Fault FIXTURES for the range alerts: a SwarmadaConfig pointing the TSDB sink at
 #     an unreachable endpoint (dropped-frames + tsdb-write-errors), a delayed estop
 #     ack via SWARMADA_SIM_ESTOP_ACK_DELAY_MS (estop-latency SLO breach), and a task
@@ -425,6 +429,10 @@ launch_live_adapter() {
   step "3 — Launch the live full-surface adapter (with estop-ack delay fixture)"
   kubectl annotate "robot/$LIVE_ROBOT" -n "$NS" "swarmada.io/robot-id=$LIVE_ROBOT" --overwrite >/dev/null
   # Non-live robots: healthy baseline so the scheduler has a real 3-robot fleet.
+  # SHORTCUT — status.phase is controller-owned (RFC-0001 crds/robot.md:312-314, RA-1).
+  # Patched here because nothing transitions a Robot Discovered->Idle; scheduler filter 1
+  # admits only Idle robots. See docs/quickstart.md, Honest notes.
+  info "projecting status.phase=Idle on sim-robot-002/003 (SHORTCUT — the control plane does not do this)"
   for r in sim-robot-002 sim-robot-003; do
     kubectl patch "robot/$r" -n "$NS" --subresource=status --type=merge \
       -p '{"status":{"phase":"Idle","batteryPercent":85}}'
@@ -461,7 +469,9 @@ scheduler_stall_fixture() {
   # latency (>60s bucket → SwarmadaSchedulerAssignmentLatencyHigh fires). A dedicated
   # robot is required because the three sample robots are busy/nondeterministically
   # placed — the task would otherwise never land on an Idle capable robot.
-  step "6 — Scheduler assignment-latency fixture (dedicated Idle robot, ~${SCHED_STALL_SECONDS}s)"
+  step "6 — Scheduler assignment-latency fixture (dedicated robot, phase=Idle PROJECTED, ~${SCHED_STALL_SECONDS}s)"
+  info "demotest-sched-robot's status.phase=Idle is patched by hand here and again after the"
+  info "capability grant — same shortcut as the pool above (no Discovered->Idle owner exists)."
   kubectl apply -f - <<EOF >/dev/null 2>&1 || true
 apiVersion: swarmada.io/v1
 kind: Robot

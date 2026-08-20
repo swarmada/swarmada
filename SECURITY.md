@@ -11,7 +11,7 @@ Email **`<security@swarmada.io>`** with:
 - the version, commit, or deployment where you observed it, and
 - steps to reproduce, if you have them.
 
-You will receive an acknowledgement within **five business days**. We will work with
+You will receive an acknowledgement within **five business days**. The maintainers will work with
 you on a fix and a coordinated disclosure timeline, and will credit you in the
 release notes unless you prefer to remain anonymous.
 

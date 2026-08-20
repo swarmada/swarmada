@@ -188,6 +188,10 @@ class NoopAdapter:
             # TODO(vendor): cancel on the robot.
             self._cancel_lease(robot)
             self._emit_action_status(robot, self._action.get(robot, ""), "CANCELLED")
+            # C4.4: the action is no longer executing — clear it the same way
+            # _lease_expired does, so a renew_lease after this point correctly
+            # reports running=false instead of a silent (undetectable) completion.
+            self._action[robot] = ""
             # A canned safe stop. On a capability-loss cancel a real adapter chooses
             # the disposition from the robot's physical state (STOPPED_SAFELY /
             # COMPLETED / RECOVERED); the no-op adapter always stops safely.
@@ -202,6 +206,16 @@ class NoopAdapter:
             ok = self._renew_lease(robot, renew.lease_generation, renew.lease_duration_ms)
             result.renew_lease.CopyFrom(pb.RenewActionLeaseResult(
                 renewed=ok, running=self._action.get(robot, "") == renew.action_id))
+        elif which == "scan":
+            # C12.1 — REQUIRED (RFC-0001 Required-message table): answer with a full
+            # (non-delta) CapabilitiesSnapshot, never decline via unsupported=true.
+            # TODO(vendor): populate hardware[]/installed_models[]/supported_actions[]
+            # from the robot's real inventory. The no-op adapter has none to report, and
+            # an empty list here is a true statement ("this robot has no hardware"), not
+            # a withheld one — see ADR-0039 if a future revision needs to distinguish
+            # "no hardware" from "not yet observed".
+            result.scan.CopyFrom(pb.CapabilitiesSnapshot(
+                robot_id=robot, snapshot_ms=int(time.time() * 1000)))
         else:
             # C7.1: decline every optional command we do not implement.
             result.unsupported = True
