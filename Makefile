@@ -426,10 +426,11 @@ docker-push-edge: proto-go  ##! Build + push the multi-arch edge-node image (amd
 
 HELM_CHART ?= deploy/swarmada
 
-helm-sync:      ##! Regenerate the chart CRDs from config/crd/bases (run after `make manifests`)
+helm-sync:      ##! Regenerate the chart CRDs + webhooks from config/ (run after `make manifests`)
 	bash hack/sync-helm-crds.sh
+	$(PYTHON) hack/sync-helm-webhooks.py
 
-helm-verify-sync: ##! Fail if the chart CRDs have drifted from config/crd/bases (CI guard)
+helm-verify-sync: ##! Fail if the chart CRDs or webhooks have drifted from config/ (CI guard)
 	@tmp=$$(mktemp); OUT=$$tmp bash hack/sync-helm-crds.sh >/dev/null; \
 	  if ! diff -u $(HELM_CHART)/templates/crds.yaml $$tmp; then \
 	    echo "ERROR: $(HELM_CHART)/templates/crds.yaml is out of sync with config/crd/bases."; \
@@ -437,6 +438,14 @@ helm-verify-sync: ##! Fail if the chart CRDs have drifted from config/crd/bases 
 	    rm -f $$tmp; exit 1; \
 	  fi; \
 	  rm -f $$tmp; echo "chart CRDs are in sync with config/crd/bases"
+	@tmp=$$(mktemp); OUT=$$tmp $(PYTHON) hack/sync-helm-webhooks.py >/dev/null; \
+	  if ! diff -u $(HELM_CHART)/templates/webhook.yaml $$tmp; then \
+	    echo "ERROR: $(HELM_CHART)/templates/webhook.yaml is out of sync with config/webhook/manifests.yaml."; \
+	    echo "       A webhook declared in config/ but missing from the chart is NOT enforced on a"; \
+	    echo "       Helm-installed cluster. Run 'make helm-sync' and commit the result."; \
+	    rm -f $$tmp; exit 1; \
+	  fi; \
+	  rm -f $$tmp; echo "chart webhooks are in sync with config/webhook/manifests.yaml"
 
 helm-lint:      ##! Lint the Helm chart (requires helm; brew install helm)
 	@command -v helm >/dev/null 2>&1 || { echo "helm not found. Install: brew install helm"; exit 1; }
@@ -570,23 +579,20 @@ quickstart-test: ## Run the quickstart end-to-end on kind, assert ✅, then dele
 	bash examples/warehouse-quickstart/run.sh
 
 # ── RFC spec ──────────────────────────────────────────────────────────────────
-# RFC-0001 is the only RFC in this repository; RFC-0002..0007 ship in a later
-# release. `specs` is the all-RFCs alias, which today means RFC-0001 alone.
-
-.PHONY: spec spec-check spec-status specs specs-status
-
-spec:           ##! Assemble RFC-0001 chapter files -> rfcs/dist/RFC-0001-core-spec.md
-	$(PYTHON) rfcs/assemble.py
-
-spec-check:     ##! Diff RFC-0001 §9.1 schema examples against the generated CRDs (paths, required, defaults)
-	@$(PYTHON) scripts/specdiff.py
-
-spec-status:    ##! Show RFC-0001 drafting progress across chapters
-	$(PYTHON) rfcs/assemble.py --status
-
-specs: spec     ##! Assemble every RFC in this repository (RFC-0001)
-
-specs-status: spec-status  ##! Show drafting progress for every RFC in this repository
+# There are no spec-assembly targets in this repository, deliberately.
+#
+# RFC-0001 is published here as an assembled document (rfcs/dist/). The chapter
+# sources it is assembled FROM, and the tooling that assembles and checks them
+# (rfcs/assemble.py, scripts/specdiff.py), are not part of this repository —
+# they live in the authoring tree. Targets that invoked them existed here until
+# draft 3 and could not work: every recipe failed on a missing script.
+#
+# They had been hidden from `make help`, which was the wrong remedy. A hidden
+# target that fails is worse than an absent one: it is still findable by anyone
+# reading this file, and it fails in a way that reads as a broken checkout.
+#
+# Read the specification at rfcs/dist/RFC-0001-core-spec.md. To regenerate it,
+# work in the authoring tree.
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 # `clean` removes only what the build/test targets write into the working tree,
