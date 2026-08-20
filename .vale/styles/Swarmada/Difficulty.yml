@@ -1,0 +1,14 @@
+extends: existence
+message: "'%s' asserts that something is easy. It is not easy for the reader who is stuck."
+level: error
+ignorecase: true
+tokens:
+  - simply
+  - just
+  - easily
+  - obviously
+  - of course
+  - merely
+  - trivially
+  - trivial
+  - straightforward

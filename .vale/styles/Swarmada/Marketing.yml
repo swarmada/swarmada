@@ -1,0 +1,38 @@
+extends: existence
+message: "'%s' is marketing register. State the mechanism or the measurement instead."
+level: error
+ignorecase: true
+tokens:
+  - seamless
+  - seamlessly
+  - revolutionary
+  - game-changing
+  - game changer
+  - cutting-edge
+  - cutting edge
+  - best-in-class
+  - world-class
+  - industry-leading
+  - state-of-the-art
+  - next-generation
+  - next-gen
+  - enterprise-grade
+  - battle-tested
+  - turnkey
+  - powerful
+  - robust
+  - blazing
+  - blazingly
+  - lightning-fast
+  - effortless
+  - effortlessly
+  - magical
+  - supercharge
+  - supercharged
+  - thrilled
+  - excited
+  - exciting
+  - delighted
+  - huge milestone
+  - synergy
+  - holistic

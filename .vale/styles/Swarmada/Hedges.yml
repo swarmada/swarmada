@@ -1,0 +1,14 @@
+extends: existence
+message: "'%s' hedges. Assert the fact, or quantify the condition under which it holds."
+level: warning
+ignorecase: true
+tokens:
+  - should generally
+  - tends to
+  - more or less
+  - kind of
+  - sort of
+  - we believe
+  - I think
+  - pretty much
+  - fairly
