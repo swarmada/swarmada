@@ -1,10 +1,10 @@
 ---
 title: "RFC-0001: Swarmada Core Specification"
-author: "Alex Bahel alexbahel@gmail.com"
+author: "Alex Bahel <maintainers@swarmada.io>"
 status: Review
 created: 2026-06-03
-updated: 2026-07-02
-swarmada-version: v0.2
+updated: 2026-08-14
+swarmada-version: v0.3
 ---
 
 # RFC-0001: Swarmada Core Specification
@@ -15,13 +15,40 @@ swarmada-version: v0.2
 Swarmada is an open-source, cloud-native, vendor-neutral orchestration platform for fleets of mobile robots. This RFC defines the core API specification: thirteen Custom Resource Definitions (RobotClass, DiscoveredRobot, Robot, FleetAction, FleetTask, FleetZone, RobotProbe, FirmwareRollout, ModelRollout, ModelPolicy, ZoneMaintenance, SwarmadaConfig, FleetAdapter), the Fleet Adapter gRPC protocol, the control plane architecture, and the safety and security models. Swarmada enables operators to declare desired fleet state in YAML and have the system continuously reconcile actual fleet state toward it — coordinating heterogeneous mobile robots from multiple manufacturers under a single, standardized control plane. The spatial model (zones, positions, and traffic deconfliction) targets robots that move through a shared workspace; stationary manipulators are out of scope (see Non-Goals). Throughout this specification, unless explicitly qualified, "robot" means a mobile robot.
 
 **How to read the assurance behind each part.** This document mixes two kinds of statement, and a reader
-should know which is which. **Normative claims about the system** — the CRD schemas in [§9.1](#crds), the wire
-contract in [§9.2](#fleet-adapter-protocol), the metric names and label sets in
-[§9.3.8](#control-plane-observability-prometheus-metrics-contract), and the audit-event contract in
-[§9.6.5](#safety-safety-audit-log) — are mechanically checked against the reference implementation: schema
-paths, enum values, numeric bounds, required-ness, defaults, metric shapes, audit event and detail fields,
-and every cross-reference into this document from the `.proto`. A disagreement between those statements and
-the code fails the build.
+should know which is which. **Normative claims about the system** — the CRD schemas in [§9.1](#crds), the
+metric names and label sets in [§9.3.8](#control-plane-observability-prometheus-metrics-contract), and the
+audit-event contract in [§9.6.5](#safety-safety-audit-log) — are mechanically checked against the reference
+implementation: schema paths, required-ness, defaults, metric names and label KEYS, audit event and
+detail fields, and every cross-reference into this document from the `.proto`. A disagreement on any of
+those fails the maintainers' assembly pipeline, which runs the check on every revision of this document.
+
+**What that check does not cover, stated so it is not over-read.** Four gaps, enumerated in full so the
+checked list above is not read as broader than it is.
+
+1. **Schema constraints other than required-ness and defaults are not compared.** The `enum`, `minimum`,
+   `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, `pattern` and `format` markers shown in
+   the schema examples in [§9.1](#crds) are reviewed by hand, not diffed against the generated CRDs.
+2. **The protobuf blocks reproduced in [§9.2](#fleet-adapter-protocol) are not diffed against the
+   `.proto`** — message, field, field-number and enum-value agreement rests on review. Three narrower
+   checks around that chapter *are* mechanical: every cross-reference from the `.proto` into this
+   document is verified to resolve; the Optional-command list in
+   [§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist) is diffed against the `Command`
+   field comments in the `.proto`; and every identifier named in the conformance catalog is verified to
+   exist in the `.proto` and to match the harness's check set in both directions.
+3. **For metrics** the check compares the set of metric names and the set of label *keys*. It does not
+   verify the metric type, histogram bucket boundaries, gauge zero-initialisation, or the label *values*
+   a metric actually emits. Where a table below enumerates the values a label takes — `scope`,
+   `transition_type`, `reason`, `estop_state` — that enumeration is prose.
+4. **Behavioural prose is not checked, with two exceptions.** No maturity label, no Known-gaps entry and
+   no *specified, not implemented* marker is verified against the code in general, and no claim that a
+   controller reads a given field is verified — those rest on review. The exceptions are the Status
+   column in [§9.6.5](#safety-safety-audit-log), where a row marked `emitted` must have a writer in the
+   reference implementation and a row not so marked must not, checked both ways; and the deferred-metric
+   labels in [§9.3.8](#control-plane-observability-prometheus-metrics-contract), where a metric marked
+   specified-but-not-emitted must be absent from the implementation's registry.
+
+Read anything falling in those four categories as an assertion this specification makes, not as one the
+pipeline has verified.
 
 **Rationale and analysis are editorial** — [§6](#design-details), [§7](#drawbacks) and
 [§8](#alternatives) argue for the choices made and weigh their costs. They are reviewed but not
@@ -49,24 +76,28 @@ As deployments grow and span multiple vendors, running each fleet as an independ
 
 **Manufacturer-native tools.** Every major AMR vendor ships fleet management software optimized for its own hardware. These tools are capable within their own ecosystem and actively maintained. They are not designed to interoperate. An operator running two vendors' robots cannot assign a task to whichever robot is closest regardless of vendor; they must decide which robot family handles which zone and manage the boundary conditions manually. The same fragmentation holds beyond the warehouse floor: aerial fleet operators run their own vendor-specific ground-control and fleet software, with no cross-vendor coordination layer either.
 
-**Standardized robot protocols (VDA5050).** VDA5050, a communication standard from the German automotive (VDA) and material-handling (VDMA) associations, lets AMRs from different vendors speak to a common fleet manager. It is complementary to — not a substitute for — a neutral orchestration standard: VDA5050 standardizes the robot-to-fleet-manager link (precisely the layer a Swarmada Fleet Adapter can consume), not the vendor-neutral control plane, task model, safety model, and open governance above it.
+**Standardized robot protocols (VDA5050).** VDA5050, a communication standard from the German automotive (VDA) and material-handling (VDMA) associations, lets AMRs from different vendors speak to a common fleet manager [41]. It is complementary to — not a substitute for — a neutral orchestration standard: VDA5050 standardizes the robot-to-fleet-manager link (precisely the layer a Swarmada Fleet Adapter can consume), not the vendor-neutral control plane, task model, safety model, and open governance above it.
 
-**Proprietary multi-fleet orchestrators.** Commercial orchestration products do coordinate mixed fleets across vendors, and several are capable at it. What distinguishes them from this specification is not capability but structure: where such a product's API is controlled by its vendor and its roadmap is set by that vendor, an implementer takes on a licensing relationship and has no governance recourse. An open, foundation-hosted standard any manufacturer can implement without one is a different arrangement, not a better product.
+**Published robot-to-robot interoperability (MassRobotics AMR Interoperability Standard).** The MassRobotics AMR Interoperability Standard, version 1.0 (May 2021) [43], specifies how autonomous mobile robots from different vendors report identity and status to one another in a shared space. Its schema admits two message types, both uplink reports; it defines no order, task, or command message in either direction. Its publisher states that the standard is not a fleet management, vehicle navigation, or safety system, and that task management is not part of it. The standard is therefore evidence from a second, independent source that the coordination layer above the robot interface was left deliberately unspecified: two vehicles that both implement it can share a corridor safely and still have no common answer to which of them should carry the next pallet.
 
-**Open-RMF.** Open Robotics Fleet Management Framework (Open-RMF) is a well-designed, technically capable open-source project with genuine adoption in logistics and healthcare facilities. While the project now operates under the Open Source Robotics Alliance (OSRA, community governance since 2024), its codebase originated within, and remains associated with, a single technology vendor's corporate structure rather than a neutral foundation — a governance distinction still relevant to operators and manufacturers evaluating long-term neutrality. Architecturally it predates the cloud-native Kubernetes reconciliation model this specification is built on. Both points are examined in [Alternatives Considered](#alternatives).
+**In-flight interoperability standards (ISO 21423).** ISO 21423, "Robotics — Industrial mobile robots — Communications and interoperability" (ISO/TC 299), is not a published International Standard as of this revision. Its FDIS ballot closed on 2026-07-21 (stage 50.60) and the document advanced the same day to stage 60.00, "International Standard under publication"; ISO commits to no publication date at that stage [42]. Its scope as balloted specifies the communication requirements between industrial mobile robots, an industrial mobile robot fleet manager, and other machines, equipment and applications in the working environment — enterprise systems and building infrastructure among them — and states that the document is not safety-related. It names the fleet manager as a party that communicates; it does not specify how a fleet manager decides. ISO 21423 therefore stands in the same relation to this specification as VDA5050: an interoperability layer beneath orchestration, standardizing links a Swarmada Fleet Adapter can consume — including the link across which an assignment is conveyed to a robot — rather than the vendor-neutral control plane, task model, safety model, and open governance above it. That characterization rests on the scope clause as balloted at DIS stage and on the ISO catalogue record; if the published text specifies allocation behaviour rather than the interfaces across which assignments travel, this paragraph is wrong and will be revised.
 
-**Cloud provider offerings.** AWS and Azure each launched managed robotics services between 2018 and 2022; AWS discontinued RoboMaker on 2025-09-10, and Azure's robotics offerings have narrowed in scope. These services were cloud-vendor-specific, required data egress to a managed cloud environment, and produced no open interoperability standard.
+**Commercial multi-fleet orchestrators.** Commercial orchestration products do coordinate mixed fleets across vendors, and several are capable at it. Licence is not the distinction: in February 2026 a commercial vendor announced a self-hostable fleet-management platform, derived from its production stack, to be published under a permissive open-source licence [45], so an open licence and a commercial origin are not mutually exclusive — nor would a comparison drawn on the expectation that such a release will not happen. What distinguishes these products from this specification is structure. Each is an implementation whose interface is defined by the code its vendor ships and whose direction is set by that vendor; an implementer inherits that roadmap and has, at most, whatever recourse a commercial relationship provides and none in governance, whether or not the source is published. This document is a specification — a versioned interface contract with a published conformance catalog that independent implementations can be measured against, structured so that the contract itself can be held by a neutral foundation rather than by any single vendor. That is a different arrangement, not a better product.
+
+**Open-RMF.** Open-RMF (Robotics Middleware Framework) is a well-designed, technically capable open-source project with genuine adoption in logistics and healthcare facilities. It is licensed Apache-2.0, its intellectual property is held by the Open Source Robotics Foundation, and it has been managed by the Open Source Robotics Alliance under a published project charter since 2024 [31]. It is therefore a foundation-hosted project, and this specification does not argue otherwise. Two differences remain: architecturally it predates the cloud-native Kubernetes reconciliation model this specification is built on, and it specifies its fleet adapter as a software interface inside a reference implementation rather than as a versioned contract with a published conformance catalog. Both are examined in [Alternatives Considered](#alternatives).
+
+**Cloud provider offerings.** Managed robotics services launched by cloud providers were cloud-vendor-specific, required data egress to a managed cloud environment, and produced no open interoperability standard. AWS discontinued RoboMaker on 2025-09-10 [32][33].
 
 **Manual integration.** The default approach for most multi-vendor deployments today is custom integration code written per deployment: a bespoke middleware layer that translates between an upstream system's task formats (a WMS, a flight-ops system, a home-automation hub) and each vendor's API. This works once, for one facility configuration. It does not survive vendor software updates, does not generalize to a second facility, and creates a maintenance burden that grows with the number of robot families in the fleet.
 
 <a id="motivation-why-now"></a>
 ### 2.3 Why Now
 
-**Facility fleets increasingly span several vendors.** As a single facility's fleet grows to include robots from more than one manufacturer [28], coordination increasingly requires a dedicated orchestration layer rather than manual, per-vendor operation.
+**Facility fleets increasingly span several vendors.** This specification's premise is that a single facility's fleet comes to include robots from more than one manufacturer, and that at that point coordination requires a dedicated orchestration layer rather than manual, per-vendor operation. It is stated as a premise rather than a sourced figure: the published forecasts [28] project growth in robot deployment overall, not the multi-vendor-per-facility share, and this document does not claim a number for it.
 
-**Per-robot operating budgets already exist.** Warehouse robots are increasingly procured under Robots-as-a-Service (RaaS) — a recurring per-robot subscription model — rather than as capital purchases [29][30]. Operators therefore already budget fleet automation on a per-robot basis, so an orchestration layer fits an existing operational line item rather than requiring a new capital category.
+**Per-robot operating budgets already exist.** Warehouse robots are offered under Robots-as-a-Service (RaaS) — a recurring per-robot subscription model — alongside capital purchase. The available sources are vendor and aggregator listings [29][30] rather than independent market research, and they establish that the model is offered and priced per robot, not what share of procurement it accounts for. Where an operator does budget on that basis, an orchestration layer fits an existing operational line item rather than requiring a new capital category.
 
-**The cloud-native-neutral layer is unoccupied.** Kubernetes has become a default infrastructure substrate for cloud-native workloads, and neutral, vendor-governed foundations host projects across every major infrastructure layer — networking, storage, observability, security. The robot fleet orchestration layer has no equivalent: no vendor-neutral project, no open governance structure, and no standard gRPC protocol that any manufacturer can implement without a licensing relationship. A stable specification under community governance is what would occupy this layer as an open standard rather than a proprietary one.
+**The layer has no cloud-native specification and no conformance oracle.** Kubernetes has become a default infrastructure substrate for cloud-native workloads, and neutral foundations host projects across every major infrastructure layer — networking, storage, observability, security. The robot fleet orchestration layer has open, foundation-hosted software in it, but no declarative Kubernetes-native specification: fleet state is not expressible as API objects reconciled by controllers, and no protocol in the layer is versioned as a standalone contract an implementer can build against independently of any particular codebase. Nor does the layer have a conformance oracle. The interoperability standards below it publish schemas but operate no conformance scheme and recognise no certification body, and the one open project in the layer itself publishes no enumerated check catalog. A stable specification under community governance, versioned as a contract and accompanied by the catalog that measures conformance to it, is what would occupy this layer as an open standard rather than a proprietary one.
 
 ---
 
@@ -75,11 +106,11 @@ As deployments grow and span multiple vendors, running each fleet as an independ
 
 1. Define a vendor-neutral, declarative Kubernetes-native API for describing and reconciling robot fleet state across heterogeneous hardware.
 2. Define the Fleet Adapter gRPC protocol as an open standard that any robot manufacturer can implement to make their hardware Swarmada-compatible.
-3. Define the control plane components (API Server, Scheduler, Health Monitor, Zone Controller, Traffic Deconfliction Engine, OTA/Model Update Manager) and the single responsibility of each.
+3. Define the control plane components — API Server (with the admission webhook server and the robot registrar), Scheduler, Zone Controller, Traffic Deconfliction Engine, OTA/Model Update Manager, Estop Coordinator, safety audit log writer, and the *Robot health and connectivity* responsibility grouping ([§5.1](#architecture)) realised across the Robot reconciler, the Probe Controller, the FleetAdapter controller and the telemetry pipeline — and the single responsibility of each.
 4. Define a two-phase robot discovery model (`DiscoveredRobot` → `Robot` admission) — passive registration followed by active capability verification — modeled on the Kubernetes node admission pattern.
 5. Define a hierarchical zone model in which Kubernetes namespaces provide administrative boundaries and `FleetZone` resources form a parent–child tree for spatial and policy inheritance.
 6. Define capability health tracking that distinguishes hardware-native capabilities (present by construction), model-driven capabilities (present when a model is installed and healthy), and parametric hardware-native capabilities (hardware-native capabilities that additionally expose numeric constraints — such as payload capacity — sourced from hardware spec fields).
-7. Define an AI model lifecycle framework — `ModelRollout`, staged deployment, rollback, and capability gating — so that a robot's advertised capabilities accurately reflect the models currently running on it.
+7. Define an AI model lifecycle framework — `ModelRollout`, staged deployment, rollback, and capability gating — so that a robot's advertised capabilities accurately reflect the models running on it.
 8. Define a hardware component declaration schema that makes sensor, manipulator, load platform, and motion system specifications explicit, machine-readable, and linkable to runtime health conditions.
 9. Define a `ZoneMaintenance` resource for planned maintenance pauses that is semantically distinct from emergency stop: maintenance is scheduled, reversible, and does not trigger safety escalation.
 10. Define a `SwarmadaConfig` mechanism that triggers automatic capability re-scanning across the fleet when global configuration changes, without requiring per-robot operator intervention.
@@ -99,15 +130,20 @@ As deployments grow and span multiple vendors, running each fleet as an independ
 4. Defining a scheduling algorithm — the Scheduler component interface is specified here, but the algorithm (nearest-robot, least-loaded, priority-weighted, etc.) is pluggable and not standardized by this RFC.
 5. AI model training, fine-tuning, or evaluation — Swarmada manages the lifecycle of already-trained models deployed to robots; integration with training pipelines is out of scope.
 6. AI inference orchestration at the execution level — GPU resource allocation, inference batching, and multi-model serving are the responsibility of the Robot OS and its inference runtime; Swarmada only manages which models are installed and whether they are healthy.
-7. Automatically declaring new, previously-undeclared hardware components into `Robot.spec.hardware[]` — at v1, a component must first be declared by the operator (in `Robot` or `RobotClass`) before Swarmada will track or schedule against it; auto-populating undeclared components is deferred to a future revision. This is narrower than "no automatic hardware awareness": `DiscoveredRobot` already reports a live hardware inventory from the Fleet Adapter at admission time ([§9.1.1.4](#robotclass-relationship-to-discoveredrobot)), and `SwarmadaConfig.spec.health.capabilityRescanIntervalSeconds` periodically re-verifies the health of *already-declared* components against a fresh `CapabilitiesSnapshot` ([§9.1.12.4](#swarmadaconfig-the-scan-command-and-capabilityrescaninterval-in-practice)). Neither of those adds a component nobody declared. The reason declaration stays a deliberate, explicit operator step rather than fully automatic: there is no cross-vendor standard for hardware self-description (each manufacturer's onboard interface exposes hardware differently, and the Fleet Adapter — not the control plane — is the only component that understands a given vendor's specifics, per [§6](#design-details)'s translation-boundary design), and letting a component silently self-report into the scheduling-eligible capability set removes the operator's chance to catch a misconfigured or miscalibrated component before it is scheduled against, not just after (contrast the rescan mechanism, which only ever *demotes* health on an already-declared, already-reviewed component).
-8. Multi-cluster or federated fleet management — each Swarmada deployment governs a single Kubernetes cluster; cross-cluster coordination is deferred to a future RFC.
-9. Cross-namespace robot task assignment — `FleetAction` resources are scoped to a single namespace; routing tasks across namespace boundaries is deferred to a future RFC.
+7. Automatically declaring new, previously-undeclared hardware components into `Robot.spec.hardware[]` — at v1, a component must first be declared by the operator (in `Robot` or `RobotClass`) before Swarmada will track or schedule against it; auto-populating undeclared components is deferred to a future revision. This is narrower than "no automatic hardware awareness": `DiscoveredRobot` already reports a live hardware inventory from the Fleet Adapter at admission time ([§9.1.1.5](#robotclass-relationship-to-discoveredrobot)), and `SwarmadaConfig.spec.health.capabilityRescanIntervalSeconds` is specified to periodically re-verify the health of *already-declared* components against a fresh `CapabilitiesSnapshot` ([§9.1.12.5](#swarmadaconfig-the-scan-command-and-capabilityrescaninterval-in-practice)) — **that rescan is not implemented at v0.3**: nothing issues the `scan` Command, so at v0.3 only the admission-time inventory applies and re-verification depends on adapter-initiated telemetry. Neither of those adds a component nobody declared, which is what this item is about; the argument for keeping declaration explicit does not rest on the rescan being live. The reason declaration stays a deliberate, explicit operator step rather than fully automatic: there is no cross-vendor standard for hardware self-description (each manufacturer's onboard interface exposes hardware differently, and the Fleet Adapter — not the control plane — is the only component that understands a given vendor's specifics, per [§6](#design-details)'s translation-boundary design), and letting a component silently self-report into the scheduling-eligible capability set removes the operator's chance to catch a misconfigured or miscalibrated component before it is scheduled against, not only after (contrast the rescan mechanism, which only ever *demotes* health on an already-declared, already-reviewed component).
+8. Multi-cluster or federated fleet management — each Swarmada deployment governs a single Kubernetes cluster; cross-cluster coordination is deferred to RFC-0002 (Multi-Site Coordination).
+9. Cross-namespace robot task assignment — `FleetAction` resources are scoped to a single namespace; routing tasks across namespace boundaries is deferred to RFC-0002 (Multi-Site Coordination).
 10. Natural language or LLM-driven task generation — Swarmada accepts structured `FleetAction` declarations; the question of how tasks are authored or generated upstream is out of scope for this RFC.
 11. Hosted or managed-service offerings — any commercially operated, hosted version of Swarmada is a separate product and is not specified here; this RFC defines only the open standard.
 12. Replacement of physical safety hardware — Swarmada's emergency stop protocol operates at the software layer; it does not replace and must never be treated as a substitute for light curtains, safety PLCs, or other IEC 62061 / ISO 13849-compliant physical safeguards.
 13. Orchestration of stationary or fixed-base manipulators — Swarmada's spatial model (zones, positions, traffic deconfliction, and destination-based tasks) targets robots that move through a shared workspace. Fixed industrial arms and workcell/assembly-line sequencing are out of scope. Mobile manipulators (an arm on a mobile base) are in scope as mobile robots; a fixed arm may still use Swarmada's fleet-lifecycle features (health, firmware and model rollout) but is not the target of the task-orchestration model.
 14. Peer-robot corroboration of a disconnected robot's task progress — if a robot goes unreachable mid-task, Swarmada does not ask other robots to observe, infer, or vouch for its progress. Reassignment is driven only by provable lease expiry or the robot's own reported state on reconnect, per the "never infer, only confirm" safety discipline this specification uses throughout ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). A future revision could add corroborated-observation as an additional signal, but it is not part of this RFC's disconnected-robot model.
 15. Coordinated multi-robot start — synchronized simultaneous execution across robots. A single `FleetTask`'s actions are scheduled independently, with no cross-robot start-synchronization guarantee; the synchronized-start barrier, and the `FleetAction` start-gate primitive it rests on, are deferred to RFC-0007 (Multi-Robot Task Coordination) and layered additively on the composite `FleetTask`.
+16. Deciding when a robot charges — `Robot.spec.charging` and `RobotClass.spec.defaultChargingConfig` declare a dock name and the battery thresholds at which a robot should begin and end charging, and `dockName` is validated at admission against the `ChargingDock` shared resources declared in the robot's zone or its ancestors ([§9.1.3.4](#robot-field-validation-rules)). The thresholds are a **declared surface with no control-plane behaviour at v0.3**: no component reads them to send a robot to a dock, to withhold it from scheduling as its charge falls, or to return it to service once charged. The `Charging` phase exists in the phase set and is reported by the Fleet Adapter; it is not entered by any control-plane decision. A separate field, `RobotClass.spec.defaultConstraints.minBatteryPctForAction` (or the per-robot override on `Robot.spec.constraints`), is declared for exactly this purpose — it lives on the **constraints** block, not the charging one, which carries only `minBatteryPctToCharge` and `targetBatteryPct` but is **specified, not implemented at v0.3**: no controller reads it, and the Scheduler ([§9.3.2](#control-plane-scheduler)) does not filter on battery level at all — it only ranks already-eligible robots battery-descending as a tiebreaker. At v0.3 there is no automatic scheduling guard tied to battery level whatsoever. Charging policy, idle disposition, and their interaction with the shared-resource reservation queue are deferred to RFC-0009 (Energy Management and Idle Disposition). Implementations MUST NOT treat the charging thresholds as a behavioural contract at this revision.
+17. Commanding facility infrastructure that is not a robot — lifts, doors, chargers, conveyors, and barriers are not actuated by Swarmada. `FleetZone.spec.sharedResources[]` declares `ChargingDock`, `Corridor`, `Elevator`, `Entrance`, and `Custom` entries, and the Traffic Deconfliction Engine grants, queues, and releases reservations against their declared capacity ([§9.4.5](#tde-shared-resource-queue-management)). **A reservation is a capacity token and nothing more.** Holding an `Elevator` reservation entitles a robot to use that lift and imposes no obligation on the lift; the Fleet Adapter operates the device by whatever means the facility provides, exactly as it is already responsible for preventing the physical conflict the reservation is designed to avoid ([§9.1.6](#fleetzone)). The protocol carries no command that opens a door, calls a lift, or engages a charger, and a conformant implementation is not required to be able to. An actuation contract for non-robot infrastructure — a second device class with its own registration, health, and safety envelope — is deferred to RFC-0008 (Facility Infrastructure Actuation).
+18. Teleoperation transport and operator consoles — video pipelines, input protocols, latency budgets, and operator UI are out of scope for this RFC and for the portfolio. A specification cannot state a teleoperation latency requirement for a network it does not define, and a requirement that cannot be tested weakens the requirements that can. The separable half — a per-robot custody state recording that control of a robot has been transferred to a person, and gating scheduling eligibility on it — is not specified at v0.3 and is deferred to RFC-0011 (Intervention and Custody). Until it exists, a robot under manual control remains schedulable; the consequence is stated in [§7](#drawbacks), item 13.
+19. Versioning the facility model — `FleetZone.spec.waypoints[]` is a declarative vocabulary of named poses, and `spec.physicalBounds` a declarative geometry ([§9.1.6](#fleetzone)). Neither carries a revision, a map identity, or a checksum, and the control plane does not resolve a waypoint name: a `FleetAction`'s destination rides in its opaque `spec.payload` and is resolved by the Fleet Adapter against the robot's own map ([§9.1.4.5](#fleetaction-the-payload-field)). Two unversioned copies of the vocabulary therefore exist — the `FleetZone` declaration and the map onboard the robot — and no mechanism compares them or detects that they have diverged. A facility remap that moves the pose named `dock-07` silently changes what every task targeting `dock-07` means, and produces no event, no condition, and no scheduling change. Operators MUST treat waypoint renaming and remapping as a change requiring coordinated redeployment of both the `FleetZone` resources and the robots' maps. A versioned facility model, a map identity reported by the Fleet Adapter, and a scheduler filter that excludes a robot whose map does not match its zone are deferred to RFC-0010 (Facility Model and Map Versioning).
+20. Defining a command-line client. `swarmctl` is a convenience client and is **not part of this specification's conformance surface** — no conformance requirement references it, and none can. Every operation this document shows with `swarmctl` is performed against the Kubernetes API and is equally available through `kubectl` or any API client, because the north surface *is* the Kubernetes API (ADR-0006). Authority does not depend on the client: the custom verbs are enforced server-side by SubjectAccessReview at admission, so a raw `kubectl annotate` is gated identically to the equivalent `swarmctl` invocation ([§9.5.3](#security-authorization-swarmada-rbac-roles)). Where this document shows a `swarmctl` invocation it is illustrating an operator workflow, never specifying an interface.
 
 ---
 
@@ -126,12 +162,14 @@ RFC-0001 defines a two-plane architecture that separates fleet-wide coordination
 
 | Component | Single Responsibility |
 | :---- | :---- |
-| **API Server** | Exposes Swarmada's control-plane surface: the Kubernetes apiserver serving every Swarmada CRD (REST) plus the `fleet_adapter.v1` gRPC contract ([§9.2](#fleet-adapter-protocol)); validates and persists all custom resource mutations. This surface is not specific to RFC-0001 — it is the general Swarmada API Server, and RFC-0001 is the first specification to define resources on it. Future RFCs (e.g. the multi-site cross-namespace routing noted under Deployment Topology below) extend this same surface additively — new CRDs, new fields on existing CRDs — rather than introducing a separate API Server per RFC. |
+| **API Server** | Exposes Swarmada's control-plane surface: the Kubernetes apiserver serving every Swarmada CRD (REST) plus the `fleet_adapter.v1` gRPC contract ([§9.2](#fleet-adapter-protocol)); validates and persists all custom resource mutations. This surface is not specific to RFC-0001 — it is the general Swarmada API Server, and RFC-0001 is the first specification to define resources on it. Future RFCs (e.g. the multi-site cross-namespace routing noted under Deployment Topology below) extend this same surface additively — new CRDs, new fields on existing CRDs — rather than introducing a separate API Server per RFC. The admission webhook server (schema, CEL and cross-field validation, and the custom-verb `SubjectAccessReview` gates in [§9.5.3](#security-authorization-swarmada-rbac-roles)) and the robot registrar that serves `discover`/`register` ([§9.1.2](#discoveredrobot)) are parts of this component, not separate ones. |
 | **Scheduler** | Selects the optimal robot for each pending task based on proximity, capability, and current load. |
-| **Health Monitor** | Aggregates heartbeat and telemetry streams from all Robot Agents and updates robot status conditions. |
+| **Robot health and connectivity** | Aggregates heartbeat and telemetry streams from all Fleet Adapters and updates robot health, hardware and connectivity status. A responsibility grouping realised by the Robot reconciler, the Probe Controller, the FleetAdapter controller and the telemetry pipeline — not a single component ([§9.3.3](#control-plane-robot-health-and-connectivity)). |
 | **Zone Controller** | Reconciles `FleetZone` resources and enforces zone-level capacity and access policies. |
 | **Traffic Deconfliction Engine** | Synchronous blocking gate between the Scheduler and every task assignment. Enforces `FleetZone.spec.maxConcurrentRobots` and manages shared resource reservation queues. Calls `RequestReservation` before any assignment is committed; stores all reservation state in `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]`. See [§9.4](#tde). |
-| **OTA/Model Update Manager** | Distributes firmware and model artifacts to Robot Agents according to `FirmwareRollout` and `ModelRollout` resources, verifying each artifact's signature and checksum against `SwarmadaConfig.spec.signing` trust roots ([§9.5.5](#security-secrets-management)) before any dispatch — an unverified or tampered artifact is never sent to a robot. |
+| **OTA/Model Update Manager** | Distributes firmware and model artifacts to Fleet Adapters according to `FirmwareRollout` and `ModelRollout` resources, verifying each artifact's signature and checksum against `SwarmadaConfig.spec.signing` trust roots ([§9.5.5](#security-secrets-management)) before any dispatch — an unverified or tampered artifact is never sent to a robot. |
+| **Estop Coordinator** | Delivers emergency stops over the `SafetyStream` and tracks each to a confirmed outcome ([§9.6.2](#safety-emergency-stop-protocol)). A zone- or namespace-scope estop is dispatched to every robot in scope **concurrently**, one dispatch per robot, and each resolves to `Stopped` or `Failed` — never to a falsely-confirmed stop. |
+| **Safety audit log writer** | Appends every state-changing operation to the per-namespace tamper-evident hash chain ([§9.6.5](#safety-safety-audit-log)). |
 
 **Data Plane** *(edge hardware and on-robot compute)*
 
@@ -152,7 +190,7 @@ Three communication patterns are used consistently across the system:
 
 **Controller-runtime reconciliation** — All internal state transitions are driven by Kubernetes controller-runtime watch events, not direct calls between control-plane components. A component observes that the desired state of a resource differs from its actual state and acts to close that gap.
 
-**Telemetry fast path** — High-frequency robot telemetry (position, battery, raw hardware metrics) flows from Fleet Adapters through the Health Monitor into the configured telemetry backend (TSDB sink). This path bypasses etcd entirely for raw values. Only derived state transitions (zone change, capability change, connectivity phase change, material battery crossing) propagate from the telemetry backend to etcd as `Robot.status` patches, subject to the write policy in `SwarmadaConfig.spec.telemetry` ([§9.1.12.7](#swarmadaconfig-telemetry-pipeline-and-status-projection)).
+**Telemetry fast path** — High-frequency robot telemetry (position, battery, raw hardware metrics) flows from Fleet Adapters through the telemetry pipeline into the configured telemetry backend (TSDB sink). This path bypasses etcd entirely for raw values. Only derived state transitions (zone change, capability change, connectivity phase change, material battery crossing) propagate from the telemetry backend to etcd as `Robot.status` patches, subject to the write policy in `SwarmadaConfig.spec.telemetry` ([§9.1.12.8](#swarmadaconfig-telemetry-pipeline-and-status-projection)).
 
 <a id="architecture-the-reconciliation-model"></a>
 #### 5.1.3 The Reconciliation Model
@@ -168,7 +206,7 @@ This model is particularly valuable for robot fleets. If a robot loses connectiv
 
 **Single-site Production** — The control plane runs on an on-premise Kubernetes cluster. A Zone Controller edge node is deployed per physical zone, and Fleet Adapters run on Jetson hardware co-located with the robot charging infrastructure.
 
-**Multi-site** — Each site is represented as a dedicated Kubernetes namespace containing its own control-plane deployment and `FleetZone` set. Cross-site task routing and resource sharing are deferred to RFC-0002.
+**Multi-site** — Each site is represented as a dedicated Kubernetes namespace with its own `FleetZone` set, all served by a **single** control-plane deployment: a Swarmada deployment governs one Kubernetes cluster and resolves each namespace's `SwarmadaConfig` at read time, rather than running a control plane per site ([§4](#non-goals) item 8). Multi-cluster and federated topologies, cross-site task routing, and cross-site resource sharing are all deferred to RFC-0002.
 
 <a id="architecture-architecture-diagram"></a>
 #### 5.1.5 Architecture Diagram
@@ -183,11 +221,12 @@ This model is particularly valuable for robot fleets. If a robot loses connectiv
 │  │  Tooling    │              └────────────────┬─────────────────┘  │
 │  │ (swarmctl,  │                               │ controller-runtime │
 │  │  dashboard, │              ┌────────────────▼─────────────────┐  │
-│  │  upstream   │              │  Scheduler  │  Health Monitor    │  │
+│  │  upstream   │              │  Scheduler  │  Robot Ctrl        │  │
 │  │  system:    │              │  Zone Ctrl  │  Deconfliction Eng │  │
-│  │  WMS/flight-│              │             │  OTA/Model Mgr     │  │
-│  │  ops/home)  │              └─────────────────────────────┬────┘  │
-│  └─────────────┘                                            │       │
+│  │  WMS/flight-│              │  Probe Ctrl │  OTA/Model Mgr     │  │
+│  │  ops/home)  │              │ Estop Coord │  Audit log writer  │  │
+│  └─────────────┘              └─────────────────────────────┬────┘  │
+│                                                             │       │
 └─────────────────────────────────────────────────────────────┼───────┘
                                                               │
                               gRPC: ControlStream / SafetyStream / EdgeStream
@@ -230,7 +269,7 @@ The Fleet Adapter is the only box that moves: it may run on nearby edge compute 
 <a id="architecture-telemetry-architecture"></a>
 #### 5.1.6 Telemetry Architecture
 
-See [§9.1.12.7](#swarmadaconfig-telemetry-pipeline-and-status-projection) for the full configuration surface. This section covers the architectural boundary.
+See [§9.1.12.8](#swarmadaconfig-telemetry-pipeline-and-status-projection) for the full configuration surface. This section covers the architectural boundary.
 
 **The telemetry/etcd boundary:**
 
@@ -253,31 +292,31 @@ The Zone Controller derives zone membership from the **live telemetry stream** a
 | 25 robots | ~5–15 |
 | 50 robots | ~5–20 |
 | 200 robots | ~20–60 |
-| 200 robots (full-cadence, 5s interval) | ~40 writes/s/robot = **8,000+** — do not do this |
+| 200 robots (full-cadence, 5s interval) | ~0.2 writes/s/robot (one write per 5s) = **40 writes/s fleet-wide** — sits mid-range within the ~20–60 zone-transition-only range on the row above, meaning full-cadence, every-frame projection alone produces write load on the same order as normal zone-transition traffic, on top of it; do not do this |
 
 ---
 
 <a id="architecture-traffic-deconfliction-engine-summary"></a>
 #### 5.1.7 Traffic Deconfliction Engine Summary
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. The TDE and the `FleetZone` capacity/reservation fields it depends on (`spec.maxConcurrentRobots`, `spec.sharedResources[]`, `status.reservations[]`, `status.sharedResourceQueues[]`) are defined: a blocking deconfliction gate runs before every action assignment, with zone-capacity gating, shared-resource reservation and queueing, preemptor-band (Critical/High) preemption, and startup reservation recovery (see [§9.4](#tde)).
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps,** all detailed in [§9.4](#tde) — the four below, plus the TDE-7/TDE-8 release defects, the in-process-mutex rather than compare-and-swap serialisation, and the absence of any TDE Kubernetes Event or Prometheus metric at v0.3 (the engine has **no observability surface**): (1) the `Manual` reservation policy behaves as `Priority`; (2) a `Granted` response confirms **zone capacity only** — shared resources named on the same request are granted or queued, never denied, so a granted action may still be waiting behind a full lift or corridor; (3) the Scheduler does not populate `ReservationRequest.Resources` at v0.3, so the queue disciplines in [§9.4.5](#tde-shared-resource-queue-management) are reachable only from the adapter-initiated `ReserveResource` path; (4) the reservation-expiry reconciler in [§9.4.8](#tde-reservation-expiry-reconciler) is **specified, not implemented** — an expired `Reserved` entry stops counting against capacity but is never removed from `FleetZone.status`, and no `SwarmadaConfig.spec.trafficDeconfliction.onReservationExpiry` behaviour runs. The TDE and the `FleetZone` capacity/reservation fields it depends on (`spec.maxConcurrentRobots`, `spec.sharedResources[]`, `status.reservations[]`, `status.sharedResourceQueues[]`) are defined: a blocking deconfliction gate runs before every action assignment that names a zone, with zone-capacity gating, shared-resource reservation and queueing, preemptor-band (Critical/High) preemption, and startup reservation recovery (see [§9.4](#tde)).
 
 The TDE is a **synchronous blocking gate** called by the Scheduler before every task assignment. It enforces zone capacity (`FleetZone.spec.maxConcurrentRobots`) and shared resource reservations (`FleetZone.spec.sharedResources[]`). All reservation state is stored in `FleetZone.status`.
 
-The Scheduler MUST NOT write `FleetAction.status.assignedRobot` or transition a task to Assigned without a `Granted` or `PreemptedGranted` response from the TDE.
+For any action naming a zone, the Scheduler MUST NOT write `FleetAction.status.assignedRobot` or transition a task to Assigned without a `Granted` or `PreemptedGranted` response from the TDE. That response confirms zone capacity; it does not confirm that every shared resource on the request is held (see the Maturity note above). An action with no `spec.zone` does not reach the gate at v0.3 — see [§9.4.10](#tde-normative-invariants) TDE-1.
 
 Critical or High actions may preempt a lower-priority (Normal or Low) Occupied reservation when a zone is at capacity, causing a transient over-capacity of +1 while the evicted robot exits. When the TDE denies a reservation, the Scheduler returns the action to Pending with a `RetryAfter` hint.
 
 On TDE restart, Reserved entries are released unconditionally (transit state cannot be safely reconstructed); Occupied entries are validated against `Robot.status.currentZone` (etcd-durable) and retained if the robot is still physically in the zone. If the Zone Controller is not ready within `zoneControllerWaitTimeoutSeconds`, all reservations are released (`conservativeRecoveryFallback: ReleaseAll`).
 
-Full TDE specification: [§9.4](#tde). Configuration: [§9.1.12.10](#swarmadaconfig-traffic-deconfliction-engine-configuration).
+Full TDE specification: [§9.4](#tde). Configuration: [§9.1.12.11](#swarmadaconfig-traffic-deconfliction-engine-configuration).
 
 ---
 
 <a id="resource-model"></a>
 ### 5.2 Resource Model at a Glance
 
-Swarmada defines thirteen namespace-scoped Custom Resource Definitions (CRDs). They are ordered here by admission lifecycle: discovery first, then the template and robot objects, then the task and zone resources a robot operates within, then the health and update management resources that govern it over time. The full normative schema for each is in [§9](#detailed-specification); this section is the map.
+Swarmada defines thirteen namespace-scoped Custom Resource Definitions (CRDs). They are ordered here by admission lifecycle: the template first, then the discovery and robot objects, then the task and zone resources a robot operates within, then the health and update management resources that govern it over time. The full normative schema for each is in [§9](#detailed-specification); this section is the map.
 
 **Reading guidance by audience:**
 
@@ -297,7 +336,7 @@ Swarmada defines thirteen namespace-scoped Custom Resource Definitions (CRDs). T
 - `ZoneMaintenance` references `FleetZone` by name.
 - All CRDs inherit namespace defaults from `SwarmadaConfig`.
 
-**Three version numbers, deliberately independent.** This document carries `swarmada-version: v0.2` and is
+**Three version numbers, deliberately independent.** This document carries `swarmada-version: v0.3` and is
 **pre-1.0**: breaking changes to the resources and semantics described here are permitted between 0.x
 revisions, and nothing in this specification should be read as a 1.0 stability commitment or as a
 supported-version range for the spec itself. Two other version numbers appear throughout and move on their own
@@ -305,63 +344,71 @@ schedules:
 
 | Version | What it covers | Current |
 | :---- | :---- | :---- |
-| RFC-0001 spec version | This document's revision. Pre-1.0; breaking changes allowed | `v0.2` |
+| RFC-0001 spec version | This document's revision. Pre-1.0; breaking changes allowed | `v0.3` |
 | Kubernetes API group | The CRD group/version every resource here is served under | `swarmada.io/v1` |
 | Fleet-adapter contract | The semantic contract over the proto surface, `SupportedAction` schema, and conformance suite ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)) | `1.0.0` |
 
 The API group being `v1` is a Kubernetes naming convention for the served version, not a stability claim about
-this specification; the CRDs' own stability is carried by `stage:` in the table below, and every v0.2 CRD is
+this specification; the CRDs' own stability is carried by `stage:` in the table below, and every v0.3 CRD is
 `alpha`. Likewise the fleet-adapter contract reaching `1.0.0` states that the *adapter wire contract* is
 stable enough to negotiate against — it says nothing about the spec revision that describes it. An
 implementer tracking compatibility should track the contract version; an operator reading resource semantics
 should track this document's version.
 
-**Maturity status (v0.2).**
+**Maturity status (v0.3).**
 
-The schemas in [§9.1](#crds) are the normative target. `stage:` is the API-stability contract (all v0.2 CRDs are `alpha`); `impl:` is how much a controller delivers today — `specified` (type/schema only), `partial` (some controller behaviour), or `implemented` (full). `implemented` means the CRD's own behaviour is complete; it does not mean nothing is outstanding anywhere it touches. The **Known gaps** column carries what remains per CRD, so a row marked `implemented` with an entry there is distinguishable from one with none. Individual field-level deferrals in the per-CRD detail below the table remain the authoritative record.
+The schemas in [§9.1](#crds) are the normative target. Maturity is reported on **three** axes, because a single label cannot distinguish a resource whose controller is finished from one whose behaviour has been exercised against a real robot.
 
-The per-CRD detail beneath the table describes what each CRD does **now**. It is not a changelog: dated implementation history belongs in `docs/adr/` and the release notes, not in a normative specification, because a reader six months from now needs the current contract rather than the order in which it was reached. The fleet-adapter gRPC contract ([§9.2](#fleet-adapter-protocol)) and its proto are the most complete surface by implementation (`impl: implemented`), though the API-stability contract remains `stage: alpha` at v0.2. That contract carries its own semantic **contract version** — distinct from the `fleet_adapter.v1` package identity and from any adapter's build version — and a release advertises the range it implements; the negotiation, its N/N-1 skew, and the conformance result bound to it are specified in [§9.2.2](#fleet-adapter-protocol-package-and-versioning).
+- **`stage:`** — the API-stability contract. All v0.3 CRDs are `alpha`.
+- **`control-plane:`** — how much of the resource's own behaviour the reference control plane delivers: `specified` (type and schema only), `partial` (some controller behaviour, with the shortfall named), or `implemented` (the resource's own controller behaviour is complete).
+- **`end-to-end:`** — whether the full vertical has been exercised: an operator surface, through the control plane, through a Fleet Adapter, to a robot runtime.
 
-Twelve rows cover the thirteen CRDs: `FirmwareRollout` and `ModelRollout` share one, because their stage, implementation state and remaining gaps are the same and their behaviour is described together.
+**Every resource in this specification is `end-to-end: partial` at v0.3, without exception.** The reference adapters — ROS 2/Nav2, VDA5050 and MAVLink/PX4 — are exercised against the C0–C16 harness using **simulated bindings**; none has been exercised against a live runtime (a sourced ROS 2/Nav2 workspace, an MQTT broker, PX4 SITL), and the VDA5050 adapter's target interface has not been exercised at all. The in-tree simulation adapter is test infrastructure, not a deployment target. A passing conformance report establishes that an adapter speaks the protocol correctly; it is not evidence that the vertical works, and this specification does not offer it as such. The per-adapter grades are in `adapters/REGISTRY.md`, which is the authoritative record — and all three carry `partial` there as of this revision. Because only a `passing` grade maps to `FleetAdapter.status.conformance: Passed`, and the admission gate in [§9.1.13](#fleetadapter) requires `Passed`, **no adapter in the registry is admission-eligible at v0.3.**
 
-| CRD | stage | impl | Known gaps |
-| :---- | :---- | :---- | :---- |
-| RobotClass | alpha | implemented | None known. |
-| DiscoveredRobot | alpha | implemented | Eleven `HardwareComponent` attributes the wire does not carry (`maxGripForceN`, `strokeMm`, `reachMm`, `degreesOfFreedom`, `resolutionH`, `resolutionV`, `tempRangeMinC`, `tempRangeMaxC`, `channels`, `sampleRateHz`, `touchCapable`) — an additive proto change, not a controller gap. |
-| Robot | alpha | implemented | Four admission rules in [§9.3.1](#control-plane-swarmada-api-server) are specified but unenforced: leaf-zone `spec.zone`, `providingModel` resolution, `charging.dockName` resolution, and `swarmada.io/robot-id` uniqueness. |
-| FleetAction | alpha | implemented | None known. |
-| FleetTask | alpha | implemented | No deletion finalizer: `delete` on a live composite is refused at admission rather than drained, so the guard is an admission check, not a confirmed-cancel drain. |
-| FleetZone | alpha | implemented | None known. |
-| RobotProbe | alpha | implemented | None known. |
-| FirmwareRollout / ModelRollout | alpha | implemented | Rekor log-consistency proofs between observed roots; cosign keyless/Fulcio certificate-identity verification; `spec.newVersion` carries no semver pattern on the firmware path, and no downgrade guard runs at rollout start. |
-| ModelPolicy | alpha | implemented | A repository whose images are all epoch-pinned reproducible builds and versionlessly tagged cannot be ordered; the poller does nothing rather than guess. |
-| ZoneMaintenance | alpha | implemented | `spec.scope.zoneName` existence is specified but not enforced at admission. |
-| SwarmadaConfig | alpha | implemented | None known. |
-| FleetAdapter | alpha | implemented | None known. |
+A `control-plane: implemented` row with an entry in **Known gaps** is therefore distinguishable from one with none, and neither is a claim about end-to-end support. Individual field-level deferrals in the per-CRD detail below the table remain the authoritative record.
+
+The per-CRD detail beneath the table describes what each CRD does **now**. It is not a changelog: dated implementation history belongs in `docs/adr/` and the release notes, not in a normative specification, because a reader six months from now needs the current contract rather than the order in which it was reached. The fleet-adapter gRPC contract ([§9.2](#fleet-adapter-protocol)) and its proto are the most complete surface by implementation, though the API-stability contract remains `stage: alpha` at v0.3. That contract carries its own semantic **contract version** — distinct from the `fleet_adapter.v1` package identity and from any adapter's build version — and a release advertises the range it implements; the negotiation, its N/N-1 skew, and the conformance result bound to it are specified in [§9.2.2](#fleet-adapter-protocol-package-and-versioning).
+
+Twelve rows cover the thirteen CRDs: `FirmwareRollout` and `ModelRollout` share one, because their stage and implementation state are the same and their behaviour is described together. Their remaining gaps are **not** the same; where the Known-gaps cell names a gap that applies to only one of the two, it says which.
+
+| CRD | stage | control-plane | end-to-end | Known gaps |
+| :---- | :---- | :---- | :---- | :---- |
+| RobotClass | alpha | partial | partial | `defaultConstraints.minBatteryPctForAction` is schema-only — validated and merged onto the `Robot` at admission, read by no controller. The Scheduler applies no battery filter at all (it only ranks already-eligible robots battery-descending as a tiebreaker), so a class declaring a floor of 20 will still have its robots assigned actions at 5% — see [§9.1.1](#robotclass). The class merge assigns `manufacturer` and `model` where the `Robot` omits them, and `constraints.*` and `charging.*` inherit per field, so a `Robot` that sets one sub-field keeps the rest of the class block. One merge behaviour remains **specified, not implemented at v0.3**: the `swarmctl admit` path overwrites all three `defaultTelemetry` scalars unconditionally rather than filling only the unset ones. Note the consequence of per-field charging inheritance: a `Robot`-set `minBatteryPctToCharge` combined with a class-supplied `targetBatteryPct` can now fail the `RobotChargingConfig` CEL rule at admission, where the whole-block merge silently discarded the class value instead. `status.conditions[Ready]` with reason `ClassResolved` is specified and written by no v0.3 controller. |
+| DiscoveredRobot | alpha | partial | partial | Eleven `HardwareComponent` attributes the wire does not carry (`maxGripForceN`, `strokeMm`, `reachMm`, `degreesOfFreedom`, `resolutionH`, `resolutionV`, `tempRangeMinC`, `tempRangeMaxC`, `channels`, `sampleRateHz`, `touchCapable`) — an additive proto change, not a controller gap. Three of the eight attributes that *are* carried (`frameRateFps`, `platformLengthMm`, `platformWidthMm`) are `double` on the wire and 32-bit integers on `Robot.spec.hardware[]`, so admission rounds them and drops a NaN or out-of-range reading to unset — the attribute vanishes rather than being admitted wrong. Four further behaviours are **specified, not implemented at v0.3**: the `dr-`-prefixed name sanitisation and collision hash (the registrar requires `robot_id` to already be a DNS-1123 subdomain and uses it verbatim as the object name); `status.lastAnnouncedAt` as the TTL anchor (never written — `connectedAt` is rewritten on every announce and the staleness window is computed from it); the Case 1b adapter-ownership conflict check (a same-`robot_id` announce from a **different** adapter overwrites the record and is accepted, rather than being refused `ALREADY_EXISTS`); and `Register` validation steps 2–5 (the `adapter_version` major-mismatch rejection and the firmware/hardware diff events). `DiscoverAck.ttl_seconds` is likewise never populated, so an adapter reads `0`, treats the TTL as disabled and re-announces every 60 s regardless of `discoveredRobotTTLMinutes` — and setting that field to `0` restores the 30-minute default rather than disabling the TTL. |
+| Robot | alpha | partial | partial | Capability derivation does not write `Failed` or `Unavailable`; a degraded-hardware/active-model capability resolves `Degraded` where the truth table specifies `Inactive`; model-granted capabilities are unioned in as `Active` without running the truth table. The `swarmada.io/robot-source` annotation (ADR-0038) is not stamped. Four of the five `status.conditions` in [§9.1.3](#robot) are specified and written by no v0.3 controller — `HardwareHealthy`, `CapabilitiesFullyActive`, `InConfiguredZone`, `ChargingConfigured`; the shipped `Ready` condition is set on adapter liveness alone rather than on the phase-and-health predicate the chapter states, and an undocumented `ConnectivityCritical` condition is also written. Three status fields are specified and written by nothing: `status.position` (pose reaches the TSDB and the zone derivation only, never etcd), `status.connectivity.latencyMs`, and `status.hardware[].degradedMetrics` on the probe path. |
+| FleetAction | alpha | partial | partial | `spec.timeoutSeconds` is silently unenforced: `status.startTime` is never written by any controller, so the completion-expiry check always returns false and the `TimedOut` condition never transitions. `status.conditions[]` is specified but written by no v0.3 controller — `status.phase` and the typed timestamp/reason fields carry the lifecycle signal instead. `spec.minBatteryPct` is schema-only; the candidate filter does not read it. `spec.desiredState` is enacted: `Cancelled` routes into the same confirmed-cancel path as the `swarmada.io/cancel-requested` annotation, `Paused` enters the operator-gated hold through the same transitions the estop path uses, and `Returning` runs an adapter-confirmed recovery over the existing `cancel_action` path before holding in that same phase — so all three carry the single-executor guarantee. Writing `Running` back does not lift a hold, because a hold is lifted only by an operator (ADR-0045, [§9.1.4](#fleetaction)). `spec.robotSelector` bypasses the parametric-constraint filter as well as the zone and capability filters, so a pinned action can reach a robot whose declared payload capacity is below `spec.constraints.maxPayloadKg`. |
+| FleetTask | alpha | partial | partial | No deletion finalizer: `delete` on a live composite is refused at admission rather than drained, so the guard is an admission check, not a confirmed-cancel drain. `dependsOn` acyclicity and existence are specified to be checked at admission and are checked at reconcile instead, so a cyclic or dangling graph is admitted and fails later. The FailFast, `desiredState: Cancelled` and Compensate paths all work by writing `Cancelled` onto each child's `spec.desiredState`, which the FleetAction controller now reads (see the FleetAction row), so the composite's cancellation semantics reach the robot through the confirmed-stop path. Per-child adapter validation is specified to run before any child is generated and in fact runs when each child is created. `status.conditions[Ready]`, `status.conditions[BarrierSatisfied]` and `status.actions[].attempt` are specified and written by no v0.3 controller. |
+| FleetZone | alpha | partial | partial | `spec.sharedResources[].reservationPolicy: Manual` selects no queue discipline in the reference TDE — a Manual resource is granted, queued and backfilled exactly as `Priority`. Five spec fields are **specified, read by no controller at v0.3**: `spec.provisioningPolicy` (so a zone-level `TwoPhase` override does not suppress a namespace-wide auto-admit), `spec.sharedResources[].durationFallback`, `spec.physicalBounds.minAltitude` and `maxAltitude` (never transmitted, so no adapter or edge node can enforce the ceiling the chapter attributes to them), and `spec.edgeNode.tlsSecretRef`. `status.activeActions` is specified, is a print column, and is written by nothing. The `ZoneStatusChanged` notification in [§9.1.6](#fleetzone) has no wire message at v0.3, the `status.reservations` operator-edit rejection (TDE-4) is not enforced by the admission webhook, and the Scheduler filters on `spec.zone` rather than `status.currentZone`, so a robot whose position matches no polygon stays eligible for work. |
+| RobotProbe | alpha | implemented | partial | No unimplemented fields: every `spec` field is consumed. Two documented limits on downstream propagation — scope boundaries rather than gaps — are set out in [§9.1.7](#robotprobe): degrading `Robot.status.hardware[]` applies to **hardware** probes only (a capability or model probe records its outcome in `status.robotResults[]` and touches `hardware[]` not at all, because neither names a component to degrade), and a hardware probe whose `targetComponent` is absent from `Robot.status.hardware[]` is a silent no-op. Three items are **specified, not implemented at v0.3**: the `SwarmadaConfig.spec.health.defaultHardwareProbeIntervalSeconds` / `defaultProbeTimeoutSeconds` inheritance is unreachable, because `spec.intervalSeconds` and `spec.timeoutSeconds` carry CRD-level defaults the API server always applies and the namespace fallback fires only on a non-positive value (the pointer-typed threshold fields resolve correctly); the `ProbeFailure` Kubernetes Event is not emitted, a `PROBE_FAILURE` audit seal being written instead; and the probe path does not write `Robot.status.hardware[].degradedMetrics`. The "exactly one target must be set" rule is not enforced, so a probe whose `probeType` and target field disagree is admitted and is a silent no-op. |
+| FirmwareRollout / ModelRollout | alpha | partial | partial | The `Unavailable` capability status specified in [§9.3](#control-plane) and the `Robot` CRD schema for a capability suspended by a `ModelRollout` is **not implemented at v0.3** in the reference control plane, which writes `Inactive` instead; a capability granted only by a prior rollout is also not withdrawn during a re-rollout. Cosign **keyless**/Fulcio certificate-identity verification is not implemented (key-based verification, including the cosign multi-layer convention, is). Rekor inclusion-proof and signed-entry-timestamp verification IS implemented, but degrades silently to index-presence-only when `signing.rekorPublicKey` is unset — see [§9.1.12](#swarmadaconfig). (Firmware `newVersion` carrying no version pattern is by design, not a gap — see [§9.1.8](#firmwarerollout).) **FirmwareRollout only:** the success edge closes through the robot's own report — the install-state projection promotes `status.firmwareInstall.runningVersion` into `Robot.status.firmwareVersion` (and the version it replaces into `status.previousFirmwareVersion`) once the robot reports `Running`, which is what the updated-classifier compares against `spec.newVersion` ([§9.1.8](#firmwarerollout)). `spec.deliveryMechanism` and `spec.rollbackPolicy` are schema-only, and the `swarmada.io/pending-firmware-signature-ref` annotation is not written, so the Robot Agent cannot perform the signature check the pull path describes. **ModelRollout only:** `spec.maxDownloadTimeMinutes` and `spec.attestationRef` are schema-only; `status.robotsIneligible` counts robots refused as a **downgrade**, not robots missing required hardware (a hardware-short robot is counted in `robotsTotal` and appears in `robotsPending`); `status.rollbackVersions` is keyed by robot name, not by model name; and the `newVersion` ordering check runs at rollout start rather than at admission. |
+| ModelPolicy | alpha | partial | partial | A repository whose images are all epoch-pinned reproducible builds and versionlessly tagged cannot be ordered; the poller does nothing rather than guess. `spec.maxConcurrentRollouts` is **specified, not implemented at v0.3** — the controller admits one active rollout unconditionally, so any value behaves as `1`. `status.webhookEndpoint` is specified and written by nothing. The webhook endpoint is **asynchronous** at v0.3: it verifies the HMAC, writes the `swarmada.io/model-trigger` annotation and returns `202 Accepted` with a plain-text body, rather than the synchronous Deploy/Reject decision document described in [§9.1.10](#modelpolicy); a suspended policy drops the trigger silently instead of returning `409 Conflict`. Three of the five documented `status.conditions` — `WebhookReady`, `QualityGateConfigured`, `RolloutActive` — are written by no v0.3 controller. |
+| ZoneMaintenance | alpha | partial | partial | `status.activatedBy` is specified and written by nothing, so a maintenance window carries no operator attribution. All three documented `status.conditions` — `DrainComplete`, `AutoResumeScheduled`, `EstopInterference` — are **specified, not implemented at v0.3**; the controller writes a single condition, `ResumeBlockedByEstop`, which [§9.1.11](#zonemaintenance) does not document. An operator MUST NOT wait on `DrainComplete` before entering a zone, because it never appears. `SwarmadaConfig.spec.maintenance.defaultAutoResumeMinutes` is read by no controller (only the per-window `autoResumeAfterMinutes` is), phase `Cancelled` is never assigned, and the six print columns the chapter shows are four in the shipped CRD. Most consequentially, the `Command.pause` / `Command.resume` dispatch in [§9.2](#fleet-adapter-protocol) is **not issued at v0.3**: a paused robot is moved to `Robot.status.phase = Maintenance` in the control plane and is never told to stop, so no `PauseResult` is requested and no robot is physically halted by a maintenance window. |
+| SwarmadaConfig | alpha | implemented | partial | The following are schema-only — validated and defaulted, read by no controller: `scheduling.actionRequeueBackoffSeconds`; `estop.delivery.retryPolicy.*` and `estop.delivery.partialDeliveryBehavior`; `estop.requireExplicitClearAfterEstop` (the prohibition it names is nonetheless unconditionally enforced, because no auto-clear path exists — the field is inert, the rule is not); `trafficDeconfliction.tdeCallTimeoutMs` and `trafficDeconfliction.onReservationExpiry`; `health.capabilityRescanIntervalSeconds`; `health.defaultHardwareProbeIntervalSeconds` and `health.defaultProbeTimeoutSeconds` (unreachable behind the `RobotProbe` CRD defaults — see the RobotProbe row); and `maintenance.defaultAutoResumeMinutes`. `actionCancellation.onDisconnect: WhenActionExpired` is inert for the same reason `FleetAction.spec.timeoutSeconds` is (`status.startTime` is never written). |
+| FleetAdapter | alpha | implemented | partial | `spec.simulated` (ADR-0038) is **specified, not present in the API at v0.3**: it has no Go field and no CRD schema property, so a `spec.simulated` key written by an operator is silently pruned by the API server rather than validated, stored or rejected. An adapter declaring itself simulated is treated exactly as a real one, and no `swarmada.io/robot-source` annotation is stamped. `spec.tlsSecretRef` is read by no controller — adapter identity is resolved from the client certificate's SAN, not from the referenced Secret, so the field pins nothing. The `UnknownConformanceSuite` warning in [§9.1.13](#fleetadapter) is not emitted: an unrecognised `suiteVersion` is recorded and otherwise ignored. |
 
 **What each CRD does today.**
 
-***RobotClass.*** Carries the Gripper/Arm/Thermal/Microphone/Display hardware attribute fields. A mutating admission webhook merges the class onto each referencing `Robot`: union-by-name for hardware/models/capabilities, whole-value fill for constraints/charging, adapter name/version fallback, and the `defaultTelemetry` cadence scalars (`telemetryIntervalSeconds`/`motionThresholdMeters`/`maxIdleIntervalSeconds`) filled where the Robot left them unset. A status controller reports `status.referencingRobots` (Robots in-namespace naming this class) and `status.observedGeneration` (the merge generation robots inherit); it aggregates read-only and writes only `RobotClass.status`.
+***RobotClass.*** Carries the Gripper/Arm/Thermal/Microphone/Display hardware attribute fields. A mutating admission webhook merges the class onto each referencing `Robot`: union-by-name for hardware/models/capabilities, whole-value fill for constraints/charging, adapter name/version fallback, and the `defaultTelemetry` cadence scalars (`telemetryIntervalSeconds`/`motionThresholdMeters`/`maxIdleIntervalSeconds`) filled where the Robot left them unset. A status controller reports `status.referencingRobots` (Robots in-namespace naming this class) and `status.observedGeneration` (the merge revision robots inherit); it aggregates read-only and writes only `RobotClass.status`.
 
-***DiscoveredRobot.*** The Discover/Register handler is served over the ControlStream. **Discover** validates `robot_id` as a DNS-1123 subdomain (empty/malformed → `DiscoverAck` with `RegistrationRejection = INVALID_ROBOT_ID`), rejects an already-admitted robot (`ALREADY_EXISTS` — reconnect via Register), and otherwise upserts a status-only `DiscoveredRobot` (idempotent re-announce refresh), populating `status.macAddress`, the identity/adapter fields, `reportedCapabilities`, defensively-mapped `reportedHardware`/`reportedModels` (identity/health — name, type, status, model, plus `customType` for an operator-defined subtype — and the numeric attribute fields `maxPayloadKg`, `resolutionMp`, `rangeM`, `horizontalFovDeg`, `depthCapable`, `frameRateFps`, `platformLengthMm`, `platformWidthMm`, carried from the wire with explicit presence so an attribute the adapter does not report stays unset rather than 0), and `ttlExpiresAt`. **Register** validates `robot_id` (`INVALID_ROBOT_ID`), returns `NOT_ADMITTED` when no `Robot` exists, else accepts with the binding hints (`telemetryIntervalSeconds`, `assignedZone`) and never writes `Robot.status`. Register also returns the full reconnect-state (§9.2.5) so an adapter resynchronises after a disconnect: `authoritative_action_state` (the assigned FleetAction's phase mapped to the wire `RobotActionPhase` plus the fencing token / lease generation = `assignmentGeneration`, so the adapter resumes under the same lease or self-stops per §9.6.3.5; no task → `IDLE`, a claimed-but-unrecorded task → `UNKNOWN`/halt), `active_capabilities`, and `edge_endpoints` (the robot's zone-chain `spec.edgeNode` addresses, leaf-first, §9.2.10) — all read-only projections. A TTL/Stale sweeper marks an un-admitted DiscoveredRobot `Stale` in the last quarter of its `connectedAt→ttlExpiresAt` window and deletes it once `ttlExpiresAt` passes (admission/rejection deletes it first, so a survivor was never acted on), requeuing to the next event; it cooperates with the registrar without coordination — a re-announce rewrites `phase=Discovered` and a fresh `ttlExpiresAt`, so an actively-reconnecting robot is never reaped and `Stale` clears on reconnect.  Both hops are full-fidelity for everything the wire carries — `status.reportedHardware` is populated from `fleet_adapter.v1 HardwareComponent` (identity/health plus the eight numeric attributes, explicit presence preserved so an unreported attribute stays unset rather than 0), and `swarmctl admit` projects all twelve shared fields into `Robot.spec.hardware[]` (`status` is excluded as health, which `Robot.status.hardware[]` owns).
+***DiscoveredRobot.*** The Discover/Register handler is served over the ControlStream. **Discover** validates `robot_id` as a DNS-1123 subdomain (empty/malformed → `DiscoverAck` with `RegistrationRejection = INVALID_ROBOT_ID`), rejects an already-admitted robot (`ALREADY_EXISTS` — reconnect via Register), and otherwise upserts a status-only `DiscoveredRobot` (idempotent re-announce refresh), populating `status.macAddress`, the identity/adapter fields, `reportedCapabilities`, defensively-mapped `reportedHardware`/`reportedModels` (identity/health — name, type, status, model, plus `customType` for an operator-defined subtype — and the numeric attribute fields `maxPayloadKg`, `resolutionMp`, `rangeM`, `horizontalFovDeg`, `depthCapable`, `frameRateFps`, `platformLengthMm`, `platformWidthMm`, carried from the wire with explicit presence so an attribute the adapter does not report stays unset rather than 0), and `ttlExpiresAt`. **Register** validates `robot_id` (`INVALID_ROBOT_ID`), returns `NOT_ADMITTED` when no `Robot` exists, else accepts with the binding hints (`telemetryIntervalSeconds`, `assignedZone`) and never writes `Robot.status`. Register also returns the full reconnect-state (§9.2.5) so an adapter resynchronises after a disconnect: `authoritative_action_state` (the assigned FleetAction's phase mapped to the wire `RobotActionPhase` plus the fencing token / lease generation = `assignmentGeneration`, so the adapter resumes under the same lease or self-stops per §9.6.3.5; no action → `IDLE`, a claimed-but-unrecorded action → `UNKNOWN`/halt), `active_capabilities`, and `edge_endpoints` (the robot's zone-chain `spec.edgeNode` addresses, leaf-first, §9.2.10) — all read-only projections. A TTL/Stale sweeper marks an un-admitted DiscoveredRobot `Stale` in the last quarter of its `connectedAt→ttlExpiresAt` window and deletes it once `ttlExpiresAt` passes (admission/rejection deletes it first, so a survivor was never acted on), requeuing to the next event; it cooperates with the registrar without coordination — a re-announce rewrites `phase=Discovered` and a fresh `ttlExpiresAt`, so an actively-reconnecting robot is never reaped and `Stale` clears on reconnect.  Both hops preserve explicit presence for everything the wire carries — `status.reportedHardware` is populated from `fleet_adapter.v1 HardwareComponent` (identity/health plus the eight numeric attributes, an unreported attribute staying unset rather than 0) — though the second hop is not full-fidelity for three of the eight: `frameRateFps`, `platformLengthMm` and `platformWidthMm` are `double` on the wire and 32-bit integers on `Robot.spec.hardware[]`, so admission rounds them and drops a NaN or out-of-range reading to unset ([§9.1.2](#discoveredrobot)) — and `swarmctl admit` projects all twelve shared fields into `Robot.spec.hardware[]` (`status` is excluded as health, which `Robot.status.hardware[]` owns).
 
-***Robot.*** The reconciler drives the full §6.10 capability truth table (hardware-native/model-driven/manual, `Degraded`/`Inactive`/`Paused`) and the structured `status` objects (`hardware[]`, `capabilities[]`, `installedModels[]`, `modelGrantedCapabilities[]`, `currentZone`, `connectivity`, `health`); the adapter binding is enforced end-to-end by an admission-time RobotClass merge (mutating webhook) plus a validating gate that resolves the specific `spec.adapter.name` and requires it Connected/conformant. Dynamic capability-parameter resolution applies: a parametric capability's `sourceField: hardware[<name>].spec.<field>` is resolved from the robot's `spec.hardware[]` numeric attribute at each capability evaluation (not only at admission), so a post-admission hardware change is reflected without re-admission; an unresolvable path/component/field/unset-attribute is skipped, exactly as an invalid static value is.
+***Robot.*** The reconciler drives the [§6.10](#design-details-capability-type-system) capability truth table (hardware-native/model-driven/manual, `Degraded`/`Inactive`/`Paused`) — with the three derivation gaps named in the table above — and the structured `status` objects (`hardware[]`, `capabilities[]`, `installedModels[]`, `modelGrantedCapabilities[]`, `currentZone`, `connectivity`, `health`); the adapter binding is enforced by an admission-time RobotClass merge (mutating webhook) plus a validating gate that resolves the specific `spec.adapter.name` and requires it Connected/conformant. Dynamic capability-parameter resolution applies: a parametric capability's `sourceField: hardware[<name>].spec.<field>` is resolved from the robot's `spec.hardware[]` numeric attribute at each capability evaluation (not only at admission), so a post-admission hardware change is reflected without re-admission; an unresolvable path/component/field/unset-attribute is skipped, exactly as an invalid static value is.
 
-***FleetAction.*** Drives the full phase machine: `Revoking` (lease single-executor guarantee), `Paused` (operator-gated on estop), and `Preempted`. Preemption is band-driven — both **Critical and High** priority displace a lower-band (Normal/Low) victim, in both the scheduler and the Traffic Deconfliction Engine zone-reservation path; the victim rule stays Normal/Low only, so a preemptor never evicts another Critical/High (FIFO within the preemptor bands). Over the adapter wire, after the authoritative commit the control plane pushes `assign_action` (delivering the task with the fencing token = `assignmentGeneration`) and, at each steady-state lease renewal, `renew_lease` (refreshing the robot's self-stop deadline, §9.6.3.5). These pushes are best-effort and non-gating — bounded by a short timeout so a silent adapter never stalls reconciliation, and a rejection or unreachable result is logged and evented but never alters the server-side single-executor lease/generation/phase state, which remains the sole source of truth; with ControlStream disabled the state machine is unchanged. Cancellation is a **confirmed cancel** (§9.6.3.5): a `swarmada.io/cancel-requested` annotation (set by the `swarmctl cancel task` verb) finalizes the task to `Cancelled` — releasing the robot binding (→ Idle), lease, and TDE slot — only when the robot is provably not executing (it is unbound, the adapter acknowledges `cancel_action`, or the lease is provably dead); otherwise the task holds in a cancelling state and requeues, never freeing a robot while its lease is alive, the same discipline as revocation and confirmed-estop. An explicit adapter rejection of a pushed `assign_action` (robot busy/unavailable/invalid/stale-fencing) releases the just-committed assignment back to `Pending` (generation preserved), frees the robot to Idle, and releases the TDE slot, so a refused assignment reschedules instead of leaving a phantom `Assigned`/`InProgress`; an unreachable push stays best-effort and the assignment stands, so a robot that got the task but whose ack was lost is never wrongly freed (RA-4). `SwarmadaConfig.actionCancellation.onDisconnect` governs the Revoking→reassign decision (§9.1.11.9), failing safe to `Never` on a missing or unreadable config: `Never` (default) holds the disconnected task in Revoking with its robot bound once the lease is provably dead — an operator cancels via the confirmed-cancel path (safest for physical-side-effect tasks); `AfterTimeout` auto-reassigns to `Pending`, but only once the disconnect has also outlasted `disconnectTimeoutSeconds` (a `status.disconnectedAt` anchors the wall-clock ceiling on top of the provably-dead lease, which stays the single-executor safety floor); `WhenActionExpired` uses `spec.timeoutSeconds` (a completion timeout measured from `status.startTime`, distinct from the start-by `spec.deadline`) to auto-cancel a Revoking task once its completion window has passed rather than reassign it, since expiry renders completion moot — a task with no timeout or one that never started cannot expire and fails safe by holding like `Never`. All three dispositions are supported, and the lease horizon stays the single-executor safety floor under each. Assignment eligibility additionally requires the candidate robot's bound `FleetAdapter` to be `Connected`, with `conformance: Passed` earned against a contract version inside the range this control plane supports (`status.conformanceContractVersion`; a report naming none counts as unsupported), at dispatch time (ADR-0032's assignment gate), evaluated **fail-closed** — an unset `spec.adapter.name`, an absent adapter, or an unreadable one withholds the robot. The admission gate checks the same three conditions once, at admission; this re-check closes the window in which an adapter degrades, or its conformance flips to `Failed`, while its already-admitted robots keep drawing work. It filters the shared candidate set, so it governs the preemption search too, and a `FleetAdapter` watch re-evaluates affected actions on a readiness transition. The gate is on **work dispatch only**: telemetry, heartbeats and emergency stop are unaffected (ADR-0032 pins estop as state-invariant), and an action already `Assigned`/`InProgress` is never revoked by it. (`renew_lease` also pushes on the Revoking→InProgress re-adopt; the paused/estop edge is intentionally not renewed — an estopped robot is stopped by the estop, not the lease.)
+***FleetAction.*** Drives the full phase machine: `Revoking` (lease single-executor guarantee), `Paused` (operator-gated on estop), and `Preempted`. Preemption is band-driven — both **Critical and High** priority displace a lower-band (Normal/Low) victim, in both the scheduler and the Traffic Deconfliction Engine zone-reservation path; the victim rule stays Normal/Low only, so a preemptor never evicts another Critical/High. Queue order is by priority **value**, not by preemptor group: Critical precedes High, and FIFO applies within one value ([§9.1.4.3](#fleetaction-priority-semantics)). Over the adapter wire, after the authoritative commit the control plane pushes `assign_action` (delivering the action with the fencing token = `assignmentGeneration`) and, at each steady-state lease renewal, `renew_lease` (refreshing the robot's self-stop deadline, §9.6.3.5). These pushes are best-effort and non-gating — bounded by a short timeout so a silent adapter never stalls reconciliation, and a rejection or unreachable result is logged and evented but never alters the server-side single-executor lease/generation/phase state, which remains the sole source of truth; with ControlStream disabled the state machine is unchanged. Cancellation is a **confirmed cancel** (§9.6.3.5): a `swarmada.io/cancel-requested` annotation (set by the `swarmctl cancel <fleetaction>` verb) finalizes the action to `Cancelled` — releasing the robot binding (→ Idle), lease, and TDE slot — only when the robot is provably not executing (it is unbound, the adapter acknowledges `cancel_action`, or the lease is provably dead); otherwise the action holds in a cancelling state and requeues, never freeing a robot while its lease is alive, the same discipline as revocation and confirmed-estop. An explicit adapter rejection of a pushed `assign_action` (robot busy/unavailable/invalid/stale-fencing) releases the newly committed assignment back to `Pending` (generation preserved), frees the robot to Idle, and releases the TDE slot, so a refused assignment reschedules instead of leaving a phantom `Assigned`/`InProgress`; an unreachable push stays best-effort and the assignment stands, so a robot that got the action but whose ack was lost is never wrongly freed (RA-4). `SwarmadaConfig.actionCancellation.onDisconnect` governs the Revoking→reassign decision ([§9.1.12.10](#swarmadaconfig-action-cancellation-on-disconnect)), failing safe to `Never` on a missing or unreadable config: `Never` (default) holds the disconnected action in Revoking with its robot bound once the lease is provably dead — an operator cancels via the confirmed-cancel path (safest for physical-side-effect actions); `AfterTimeout` auto-reassigns to `Pending`, but only once the disconnect has also outlasted `disconnectTimeoutSeconds` (a `status.disconnectedAt` anchors the wall-clock ceiling on top of the provably-dead lease, which stays the single-executor safety floor); `WhenActionExpired` uses `spec.timeoutSeconds` (a completion timeout measured from `status.startTime`, distinct from the start-by `spec.deadline`) to auto-cancel a Revoking action once its completion window has passed rather than reassign it, since expiry renders completion moot — a action with no timeout or one that never started cannot expire and fails safe by holding like `Never`. `Never` and `AfterTimeout` are supported; **`WhenActionExpired` is inert at v0.3** because the expiry check reads `status.startTime`, which no controller writes, so selecting it behaves as `Never` ([§9.1.12](#swarmadaconfig)). The lease horizon stays the single-executor safety floor under each. Assignment eligibility additionally requires the candidate robot's bound `FleetAdapter` to be `Connected`, with `conformance: Passed` earned against a contract version inside the range this control plane supports (`status.conformanceContractVersion`; a report naming none counts as unsupported), at dispatch time (ADR-0032's assignment gate), evaluated **fail-closed** — an unset `spec.adapter.name`, an absent adapter, or an unreadable one withholds the robot. The admission gate checks the same three conditions once, at admission; this re-check closes the window in which an adapter degrades, or its conformance flips to `Failed`, while its already-admitted robots keep drawing work. It filters the shared candidate set, so it governs the preemption search too, and a `FleetAdapter` watch re-evaluates affected actions on a readiness transition. The gate is on **work dispatch only**: telemetry, heartbeats and emergency stop are unaffected (ADR-0032 pins estop as state-invariant), and an action already `Assigned`/`InProgress` is never revoked by it. (`renew_lease` also pushes on the Revoking→InProgress re-adopt; the paused/estop transition is intentionally not renewed — an estopped robot is stopped by the estop, not the lease.)
 
-***FleetTask.*** Composite, upstream-facing objective composing one or more `FleetAction`s via `ownerReferences`: dependency graph (`dependsOn`/`startCondition`), `completionPolicy` (All/Any/Quorum), `failurePolicy` (FailFast/ContinueOthers/Compensate) with saga compensation, declarative `spec.desiredState`, and append-only plan growth under a scoped RBAC verb. The type and schema are normative; the composite controller is implemented. Coordinated multi-robot start (the synchronized-start barrier) is specified separately in RFC-0007. `delete` is guarded at admission: the validating webhook refuses to delete a FleetTask that is not settled — deletable only in an unset phase, `Pending`, or a terminal phase (`Succeeded`/`Failed`/`Cancelled`/`Compensated`); `Running` and `Compensating` are refused, because deleting a live composite would garbage-collect its owned FleetActions out from under their assignment leases (the operator cancels through the confirmed-cancel path first, then deletes the settled record). The permit-set is expressed positively, so a phase added later is refused by default.
+***FleetTask.*** Composite, upstream-facing objective composing one or more `FleetAction`s via `ownerReferences`: dependency graph (`dependsOn`/`startCondition`), `completionPolicy` (All/Any/Quorum), `failurePolicy` (FailFast/ContinueOthers/Compensate) with saga compensation, declarative `spec.desiredState`, and append-only plan growth under a scoped RBAC verb. The type and schema are normative; the composite controller is implemented. `spec.desiredState` fans out onto each child's `FleetAction.spec.desiredState`, which the FleetAction controller enacts ([§9.1.4](#fleetaction)) — so FailFast, `desiredState: Cancelled` and Compensate stop the robots through the confirmed-cancel path, and phase aggregation then sees the terminal phase it waits on. A task holding children under `Paused`/`Returning` reports `Running` until each held child is resolved through the per-child operator intake; `Paused` is not terminal, so the hold is a wait rather than a wedge ([§9.1.5](#fleettask)). Coordinated multi-robot start (the synchronized-start barrier) is specified separately in RFC-0007. `delete` is guarded at admission: the validating webhook refuses to delete a FleetTask that is not settled — deletable only in an unset phase, `Pending`, or a terminal phase (`Succeeded`/`Failed`/`Cancelled`/`Compensated`); `Running` and `Compensating` are refused, because deleting a live composite would garbage-collect its owned FleetActions out from under their assignment leases (the operator cancels through the confirmed-cancel path first, then deletes the settled record). The permit-set is expressed positively, so a phase added later is refused by default.
 
-***FleetZone.*** Full spec build-out (`physicalBounds`, `edgeNode`, `maxConcurrentRobots`, `sharedResources`, `estopPolicy`, `provisioningPolicy`), a Zone Controller deriving `status.currentZone` from live position and `status.{isLeaf,childZones,robotCount}`, and the Traffic Deconfliction Engine ([§9.4](#tde)) reserving zone/shared-resource capacity before every task commit. The admission webhook enforces the cross-resource and geometric invariants: `parentZone` must exist in-namespace and not be self; the parent chain must be acyclic; `physicalBounds.polygon` must be a simple (non-self-intersecting) polygon; and a zone with child zones cannot be deleted. Zone-level emergency stop with hierarchical propagation is supported (§9.6.2.5): a `swarmada.io/estop-triggered` FleetZone annotation (set by the `estop-trigger` verb) confirmed-estops every robot in the zone (a robot that cannot be confirmed resolves to `Failed`/escalate, never falsely Stopped) and, per `estopPolicy.propagateToChildren` (default true), every robot in a descendant zone (bounded `parentZone` walk); when `estopPolicy.propagateToParent` (default false) it emits a `ChildEstopTriggered` event on the parent without auto-estopping it; records an `ESTOP_TRIGGERED` audit entry; and is idempotent via a `swarmada.io/estop-processed` marker (a new trigger value re-fires). The inverse clear/resume path — removing the `estop-triggered` annotation (the operator-authorized `estop-clear` verb) — resets each in-scope robot's `estopState` to `Normal` (single-writer; a task Paused by the estop stays operator-gated, not auto-resumed, §9.6.2.4), records `ESTOP_CLEARED`, and drops the processed marker. The estop custom verbs are enforced by SubjectAccessReview (§F-2b): the validating webhook watches the `swarmada.io/estop-triggered` annotation transition on update — added/re-valued ⇒ requires the `estop-trigger` verb, removed ⇒ requires the stricter `estop-clear` verb — and delegates to cluster RBAC via a `SubjectAccessReview` for the admission user. It fails closed: no authorizer, no admission request, an SAR error, or a denied review all deny, so an estop cannot be triggered or cleared at the API by a user lacking the verb, whether it arrives via `swarmctl` or a raw `kubectl annotate`; non-estop updates are unaffected. The adapter-side `zone_admission` accepting path is now implemented in the reference simulation adapter (`adapters/simulation/sim_adapter.py`): `admit=false` holds the robot — it stops the sim and records the held zone, and that hold also suppresses motion on a subsequent `assign_action` (the assignment is still ACCEPTED, since a capacity hold is not a rejection and refusing would bounce the task back to `Pending`) — while `admit=true` clears the hold and lets the assigned task proceed; both return `ZoneAdmissionAck{acknowledged}` instead of declining via the optional-command rule. Releasing a hold is not a move command: an idle robot stays put, and because the estop safe-hold drops the task, an admit after an estop resumes nothing. This matters because the control plane cannot physically prevent entry — enforcement *is* the adapter honouring the hold. Still declining (C7.1) remains conformant, and the other reference adapter (`example-noop`) and the external adapters continue to decline it. `status.conditions` is written by the Zone Controller (a `Ready` condition and a `CapacityAvailable` condition), so no sub-field caveat remains.
+***FleetZone.*** Full spec build-out (`physicalBounds`, `edgeNode`, `maxConcurrentRobots`, `sharedResources`, `estopPolicy`, `provisioningPolicy`), a Zone Controller deriving `status.currentZone` from live position and `status.{isLeaf,childZones,robotCount}`, and the Traffic Deconfliction Engine ([§9.4](#tde)) reserving zone/shared-resource capacity before every action commit. The admission webhook enforces the cross-resource and geometric invariants: `parentZone` must exist in-namespace and not be self; the parent chain must be acyclic; `physicalBounds.polygon` must be a simple (non-self-intersecting) polygon; and a zone with child zones cannot be deleted. Zone-level emergency stop with hierarchical propagation is supported ([§9.6.2.1](#safety-estop-scopes)): a `swarmada.io/estop-triggered` FleetZone annotation (set by the `estop-trigger` verb) confirmed-estops every robot in the zone (a robot that cannot be confirmed resolves to `Failed`/escalate, never falsely Stopped) and, per `estopPolicy.propagateToChildren` (default true), every robot in a descendant zone (bounded `parentZone` walk); when `estopPolicy.propagateToParent` (default false) it emits a `ChildEstopTriggered` event on the parent without auto-estopping it; records an `ESTOP_TRIGGERED` audit entry; and is idempotent via a `swarmada.io/estop-processed` marker (a new trigger value re-fires). The inverse clear/resume path — removing the `estop-triggered` annotation (the operator-authorized `estop-clear` verb) — resets each in-scope robot's `estopState` to `Normal` (single-writer; a action Paused by the estop stays operator-gated, not auto-resumed, §9.6.2.4), records `ESTOP_CLEARED`, and drops the processed marker. The estop custom verbs are enforced by SubjectAccessReview ([§9.5.3](#security-authorization-swarmada-rbac-roles)): the validating webhook watches the `swarmada.io/estop-triggered` annotation transition on update — added/re-valued ⇒ requires the `estop-trigger` verb, removed ⇒ requires the stricter `estop-clear` verb — and delegates to cluster RBAC via a `SubjectAccessReview` for the admission user. It fails closed: no authorizer, no admission request, an SAR error, or a denied review all deny, so an estop cannot be triggered or cleared at the API by a user lacking the verb, whether it arrives via `swarmctl` or a raw `kubectl annotate`; non-estop updates are unaffected. The adapter-side `zone_admission` accepting path is now implemented in the reference simulation adapter (`adapters/simulation/sim_adapter.py`): `admit=false` holds the robot — it stops the sim and records the held zone, and that hold also suppresses motion on a subsequent `assign_action` (the assignment is still ACCEPTED, since a capacity hold is not a rejection and refusing would bounce the action back to `Pending`) — while `admit=true` clears the hold and lets the assigned action proceed; both return `ZoneAdmissionAck{acknowledged}` instead of declining via the optional-command rule. Releasing a hold is not a move command: an idle robot stays put, and because the estop safe-hold drops the action, an admit after an estop resumes nothing. This matters because the control plane cannot physically prevent entry — enforcement *is* the adapter honouring the hold. Still declining (C7.1) remains conformant, and the other reference adapter (`example-noop`) and the external adapters continue to decline it. `status.conditions` is written by the Zone Controller — a `ZoneReady` condition and a `CapacityAvailable` condition. The zone-level gaps that do remain are named in the table above.
 
-***RobotProbe.*** The controller verifies robots via the `Verify*` RPCs and fail-safe binds the result to the proto `ProbeStatus` enum (RPC error/timeout/unsupported never optimistically `Healthy`). It pushes a `verify_hardware`/`verify_capability`/`verify_model` `Command` over each verified live ControlStream and correlates the returned `CommandResult` by `command_id`, so probes run live end-to-end (a missing stream, send failure, or timeout → unreachable → `Failed`; `unsupported` → `Unknown`; only a confirmed `HEALTHY` with thresholds met → `Healthy`). When ControlStream is disabled, probes report `Unknown`. This command-push path is the shared foundation the FleetAction lease wire (§C) and the ModelRollout `model_update` push (§9.3.6) reuse. All three probe types execute: `probeType` selects the target (`targetComponent`/`targetCapability`/`targetModel`) and the matching `verify_hardware`/`verify_capability`/`verify_model` Command, with `syntheticInput` attached for model probes only (never on a hardware or capability probe). Every `spec` field is consumed by the controller, so no sub-field caveat remains.  §9.1.6.5 propagation is implemented — crossing `failureThreshold` marks the matching `Robot.status.hardware[]` entry `Degraded` (with `degradationReason` and `lastHealthyAt`) and `recoveryThreshold` clears it, so the §6.10 capability derivation reacts. Written **transition-only**: the streaks are clamped at their thresholds, so only the crossing writes — a sustained failure does not write per probe tick (RA-1), and a sub-threshold flap writes nothing. Hardware probes only; degrading hardware from a capability probe would invert the derivation direction.
+***RobotProbe.*** The controller verifies robots via the `Verify*` RPCs and fail-safe binds the result to the proto `ProbeStatus` enum (RPC error/timeout/unsupported never optimistically `Healthy`). It pushes a `verify_hardware`/`verify_capability`/`verify_model` `Command` over each verified live ControlStream and correlates the returned `CommandResult` by `command_id`, so probes run live end-to-end (a missing stream, send failure, or timeout → unreachable → `Failed`; `unsupported` → `Unknown`; only a confirmed `HEALTHY` with thresholds met → `Healthy`). When ControlStream is disabled, probes report `Unknown`. This command-push path is the shared foundation the FleetAction lease wire ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) and the ModelRollout `model_update` push (§9.3.6) reuse. All three probe types execute: `probeType` selects the target (`targetComponent`/`targetCapability`/`targetModel`) and the matching `verify_hardware`/`verify_capability`/`verify_model` Command, with `syntheticInput` attached for model probes only (never on a hardware or capability probe). Every `spec` field is consumed by the controller; the caveats that remain are the unreachable namespace-level interval/timeout defaults, the un-emitted `ProbeFailure` Event and the un-written `degradedMetrics`, all named in the table above.  [§9.1.7.5](#robotprobe-probe-failure-effect-what-happens-downstream) propagation is implemented — crossing `failureThreshold` marks the matching `Robot.status.hardware[]` entry `Degraded` (with `degradationReason` and `lastHealthyAt`) and `recoveryThreshold` clears it, so the §6.10 capability derivation reacts. Written **transition-only**: the streaks are clamped at their thresholds, so only the crossing writes — a sustained failure does not write per probe tick (RA-1), and a sub-threshold flap writes nothing. Hardware probes only; degrading hardware from a capability probe would invert the derivation direction.
 
-***FirmwareRollout / ModelRollout.*** Rollout controllers drive batch selection under safety constraints (`minBatteryPct`, `requireIdleState`, and `maintenanceWindowOnly` — a robot is eligible only while inside its recurring `spec.maintenanceWindow`, a wrap-safe weekly-UTC check that correctly spans midnight and the Sunday→Monday boundary; a window-only rollout skips a robot with no window configured); FirmwareRollout verifies artifact signature and checksum fail-closed before any dispatch. A non-inline `firmwareSignatureRef` that is an `https://` URL is fetched (https-only — `http`/`file`/other are rejected as an SSRF/`file://` guard — with a request timeout and a response-size cap) and verified against a configured trust root, preserving the trust boundary end-to-end: fetched bytes are trusted only after verification, so a hostile URL or redirect cannot inject a valid signature. Registry credentials are read from a conventional per-namespace Secret `swarmada-registry-credentials` (bearer `token` or `username`/`password`; absent → anonymous). Signature-reference resolution scheme-dispatches: inline `bundle:`, `https://` (fetched), and `oci://` — a digest-addressed `oci://<registry>/<repo>@sha256:<digest>` ref is fetched as a content-addressed blob and content-verified (`sha256(blob) == digest`, fail-closed on mismatch) before signature verification, the same trust boundary as https; a tag-addressed `oci://<registry>/<repo>:<tag>` ref resolves the tag's manifest, requires exactly one layer (the signature blob; multi-layer/cosign artifacts fail closed with an explicit error), and content-verifies the fetched blob against the manifest's declared layer digest before verification. A Bearer token-auth handshake against the OCI registry (shared with the ModelPolicy poller) lets both the `oci://` signature fetch and RegistryWatch work against token-auth registries such as ghcr.io and Docker Hub. ModelRollout's adapter-side `model_update` push is **push-then-mark**: it pushes the `model_update` Command (model name, old and new version, uri) first and marks the model `Updating` (which suspends model-driven capabilities) only on an acknowledged ack; an unreachable/timed-out/declined push defers the robot — it does not enter the batch, consumes no `maxUnavailable` slot, and is retried on requeue — so capabilities are never suspended for an update that cannot be delivered; with ControlStream disabled the rollout falls back to observe-only. When `SwarmadaConfig.spec.signing.rekorUrl` is set, FirmwareRollout additionally requires the artifact checksum to appear in the Rekor transparency log (≥1 index entry) after the trust-root signature verifies — fail-closed (absent entry, query error, or non-https rekorUrl → the rollout Fails with no dispatch); unset skips the check. `Auto` model rollback (§6.7) pushes a rollback `model_update` (a proto `ModelUpdate.rollback` flag — the adapter reactivates the robot-retained previous model, no re-download) on a failed update instead of pausing; the revert target is captured at batch entry into `status.rollbackVersions` and carried forward, a reverted robot is recorded in `status.rolledBackRobots` and excluded from re-update (no revert→re-update loop), and `status.robotsRolledBack` surfaces the resulting fleet version fragmentation (the rollout completes `Succeeded` with reverted robots counted, not hidden). Rollback uses the same push-then-mark discipline (an undeliverable rollback leaves the robot failed and retries) and fails safe to `Manual` (no auto-revert) when the previous version is unknown. `Manual` (the default) is unchanged: failed robots stay in `failedRobots[]` and the rollout Pauses. Remaining deferrals are adapter-side or format concerns, not control-plane CRD gaps: the cosign `.sig`-tag / multi-layer signature convention (the fetcher fails closed on it today), adapter-side artifact-body checksum/signature re-verification (§9.2.8 — `ModelRollout` spec carries no checksum/signatureRef, so the `model_update` Command sends name/versions/uri only), and full Rekor inclusion-proof plus SET verification (which would prove log consistency, not just indexing). `delete` is guarded at admission for both rollout kinds: only a terminal record (`Succeeded`/`Failed`) may be deleted, so a rollout that is still live cannot be stranded mid-update — for `ModelRollout` that would leave model-granted capabilities suspended (`Updating`) with no owner left to restore them. `Pending` and an unset phase are refused too (the permit-set is terminal-only per `docs/operations.md`, and the controller may already be selecting a batch); an operator pauses a rollout and lets it settle, then deletes the record. `capabilitiesSuspendedAt` is stamped at batch entry on the model path (ADR-0023): the shared batch builder records it for a new entrant when the model is marked `Updating`, and preserves it for a continuing entrant, so no sub-field caveat remains.  Artifact verification is complete on both paths. Robot-side **body** re-verify is implemented in the in-tree adapter and, more importantly, **enforced** by conformance C7.2, which pushes a deliberately-wrong checksum and requires refusal (an adapter that declines the command records a `skip`, never a pass). The fetcher supports the cosign `.sig`-tag/multi-layer convention, reading the signature from the layer annotation, verifying it over the simplesigning payload and **binding** that payload to the dispatched digest so a genuine signature for another artifact is refused. Rekor verification checks the RFC-6962 inclusion proof and the signed entry timestamp against an operator-pinned `signing.rekorPublicKey`, plus that the entry covers this artifact. `ModelRollout.spec` carries `modelChecksum`/`modelSignatureRef` and the controller populates the wire fields.
+***FirmwareRollout / ModelRollout.*** Rollout controllers drive batch selection under safety constraints (`minBatteryPct`, `requireIdleState`, and `maintenanceWindowOnly` — a robot is eligible only while inside its recurring `spec.maintenanceWindow`, a wrap-safe weekly-UTC check that correctly spans midnight and the Sunday→Monday boundary; a window-only rollout skips a robot with no window configured); FirmwareRollout verifies artifact signature and checksum fail-closed before any dispatch. A non-inline `firmwareSignatureRef` that is an `https://` URL is fetched (https-only — `http`/`file`/other are rejected as an SSRF/`file://` guard — with a request timeout and a response-size cap) and verified against a configured trust root, preserving the trust boundary end-to-end: fetched bytes are trusted only after verification, so a hostile URL or redirect cannot inject a valid signature. Registry credentials are read from a conventional per-namespace Secret `swarmada-registry-credentials` (bearer `token` or `username`/`password`; absent → anonymous). Signature-reference resolution scheme-dispatches: inline `bundle:`, `https://` (fetched), and `oci://` — a digest-addressed `oci://<registry>/<repo>@sha256:<digest>` ref is fetched as a content-addressed blob and content-verified (`sha256(blob) == digest`, fail-closed on mismatch) before signature verification, the same trust boundary as https; a tag-addressed `oci://<registry>/<repo>:<tag>` ref resolves the tag's manifest, requires exactly one layer (the signature blob; multi-layer/cosign artifacts fail closed with an explicit error), and content-verifies the fetched blob against the manifest's declared layer digest before verification. A Bearer token-auth handshake against the OCI registry (shared with the ModelPolicy poller) lets both the `oci://` signature fetch and RegistryWatch work against token-auth registries such as ghcr.io and Docker Hub. ModelRollout's adapter-side `model_update` push is **push-then-mark**: it pushes the `model_update` Command (model name, old and new version, uri) first and marks the model `Updating` (which suspends model-driven capabilities) only on an acknowledged ack; an unreachable/timed-out/declined push defers the robot — it does not enter the batch, consumes no `maxUnavailable` slot, and is retried on requeue — so capabilities are never suspended for an update that cannot be delivered; with ControlStream disabled the rollout falls back to observe-only. When `SwarmadaConfig.spec.signing.rekorUrl` is set, FirmwareRollout additionally requires the artifact checksum to appear in the Rekor transparency log (≥1 index entry) after the trust-root signature verifies — fail-closed (absent entry, query error, or non-https rekorUrl → the rollout Fails with no dispatch); unset skips the check. `Auto` model rollback (§6.7) pushes a rollback `model_update` (a proto `ModelUpdate.rollback` flag — the adapter reactivates the robot-retained previous model, no re-download) on a failed update instead of pausing; the revert target is captured at batch entry into `status.rollbackVersions` and carried forward, a reverted robot is recorded in `status.rolledBackRobots` and excluded from re-update (no revert→re-update loop), and `status.robotsRolledBack` surfaces the resulting fleet version fragmentation (the rollout completes `Succeeded` with reverted robots counted, not hidden). Rollback uses the same push-then-mark discipline (an undeliverable rollback leaves the robot failed and retries) and fails safe to `Manual` (no auto-revert) when the previous version is unknown. `Manual` (the default) is unchanged: failed robots stay in `failedRobots[]` and the rollout Pauses. `delete` is guarded at admission for both rollout kinds: only a terminal record (`Succeeded`/`Failed`) may be deleted, so a rollout that is still live cannot be stranded mid-update — for `ModelRollout` that would leave model-granted capabilities suspended (`Updating`) with no owner left to restore them. `Pending` and an unset phase are refused too (the permit-set is terminal-only per `docs/operations.md`, and the controller may already be selecting a batch); an operator waits for a live rollout to reach a terminal phase, then deletes the record. `capabilitiesSuspendedAt` is stamped at batch entry on the model path (ADR-0023): the shared batch builder records it for a new entrant when the model is marked `Updating`, and preserves it for a continuing entrant. Artifact verification is complete on both paths. Robot-side **body** re-verify is implemented in the in-tree adapter and, more importantly, **enforced** by conformance C7.2, which pushes a deliberately-wrong checksum and requires refusal (an adapter that declines the command records a `skip`, never a pass). The fetcher supports the cosign `.sig`-tag/multi-layer convention, reading the signature from the layer annotation, verifying it over the simplesigning payload and **binding** that payload to the dispatched digest so a genuine signature for another artifact is refused. Rekor verification checks the RFC-6962 inclusion proof and the signed entry timestamp against an operator-pinned `signing.rekorPublicKey`, plus that the entry covers this artifact. `ModelRollout.spec` carries `modelChecksum`/`modelSignatureRef` and the controller populates the wire fields. **One caveat does remain, and it is a silent one:** when `signing.rekorPublicKey` is left unset, Rekor verification degrades to index-presence only — the inclusion proof and signed entry timestamp are not verified, the rollout dispatches, and the degradation is recorded nowhere an operator will see it (no condition, no event, no status field). See [§9.1.12](#swarmadaconfig). **A second caveat, firmware-only:** nothing writes `Robot.status.firmwareVersion`, and that is the field the FirmwareRollout controller compares against `spec.newVersion` to classify a robot as updated. A successful install is therefore not recognised at v0.3 and a `PullOnIdle` rollout stays `InProgress`; the robot's own report does arrive, as `Robot.status.firmwareInstall.runningVersion`, but the classifier does not read it. Failures **are** detected, through the same `status.firmwareInstall` report ([§9.1.8](#firmwarerollout)).
 
-***ModelPolicy.*** The controller evaluates the quality gate and auto-creates a `ModelRollout` on pass. Consecutive-rejection auto-suspend (§9.1.9.4) is supported: `spec.consecutiveRejectionLimit` (default 5) and `status.consecutiveRejections` (reset to 0 on any Deploy) — after the limit consecutive gate rejections the controller sets a `FailedRepeatedly` condition and `PolicySuspended` event and suspends evaluation (no polling, and any further trigger is silently dropped) until an operator resets the policy; `0` disables suspension. A webhook HTTP endpoint (`POST /webhooks/v1/model-policy/{ns}/{name}`) verifies the `X-Swarmada-Signature-256` HMAC-SHA256 (constant-time) against the `hmac-secret` from `webhook.authSecretRef`, translates the Isaac Lab payload, and writes the `swarmada.io/model-trigger` annotation the reconciler consumes (the single evaluation path). A RegistryWatch OCI poller uses a dependency-free OCI Distribution API client to list a repository's tags and resolve the newest tag's manifest digest (the artifact checksum) and image-config `Labels`; it polls `RegistryWatch` policies at `pollIntervalSeconds` and, on a strictly-newer version-sorted tag (tracked in a `swarmada.io/registry-last-tag` annotation), parses the `metricsLabel` JSON and writes the same `swarmada.io/model-trigger` annotation, so the quality-gate evaluation and `ModelRollout` creation run unchanged. Credentials may be anonymous, HTTP-basic, or bearer (the conventional `swarmada-registry-credentials` Secret); `http` is used for a `localhost` dev registry, `https` otherwise. A Bearer token-auth handshake — a `401` with a `WWW-Authenticate: Bearer realm=…,service=…,scope=…` challenge triggers a token exchange at the realm (basic creds or anonymous for public repos), retried with the bearer — lets the poller (and the FirmwareRollout `oci://` fetcher that shares this client) work against ghcr.io, Docker Hub, and basic-auth registries. The CRD behaviour is complete (all three trigger modes, the quality gate, auto-deploy, consecutive-rejection suspend, and the poll→trigger→rollout path); remaining deferrals are OCI-client polish rather than ModelPolicy gaps: per-scope token caching (a token is fetched per request), OAuth2 refresh-token grants (only the GET bearer flow), multi-arch index manifests, and push-time tag ordering (newness relies on version-sortable tags).  `swarmctl modelpolicy reset` clears a `FailedRepeatedly` suspension through the `policy-reset` custom verb — SelfSubjectAccessReview-gated fail-closed and scoped like `admit`/`reject` — writing an annotation the controller reconciles, so the CLI never edits `status`; it clears the condition and zeroes `consecutiveRejections`, and runs before the suspension early-return or it would be unreachable. The OCI client gained a per-scope bearer-token cache keyed on the challenge **and** a credential fingerprint (challenge alone leaked a token across callers), OAuth2 refresh grants, multi-arch index-manifest resolution that errors rather than guessing an architecture, and build-time ordering for versionless tags as a **tie-break** only (time-first would let a rebuilt old release downgrade robot firmware).
+***ModelPolicy.*** The controller evaluates the quality gate and auto-creates a `ModelRollout` on pass. Consecutive-rejection auto-suspend ([§9.1.10.4](#modelpolicy-repeated-failure-handling)) is supported: `spec.consecutiveRejectionLimit` (default 5) and `status.consecutiveRejections` (reset to 0 on any Deploy) — after the limit consecutive gate rejections the controller sets a `FailedRepeatedly` condition and `PolicySuspended` event and suspends evaluation (no polling, and any further trigger is silently dropped) until an operator resets the policy; `0` disables suspension. A webhook HTTP endpoint (`POST /webhooks/v1/model-policy/{ns}/{name}`) verifies the `X-Swarmada-Signature-256` HMAC-SHA256 (constant-time) against the `hmac-secret` from `webhook.authSecretRef`, translates the Isaac Lab payload, and writes the `swarmada.io/model-trigger` annotation the reconciler consumes (the single evaluation path). A RegistryWatch OCI poller uses a dependency-free OCI Distribution API client to list a repository's tags and resolve the newest tag's manifest digest (the artifact checksum) and image-config `Labels`; it polls `RegistryWatch` policies at `pollIntervalSeconds` and, on a strictly-newer version-sorted tag (tracked in a `swarmada.io/registry-last-tag` annotation), parses the `metricsLabel` JSON and writes the same `swarmada.io/model-trigger` annotation, so the quality-gate evaluation and `ModelRollout` creation run unchanged. Credentials may be anonymous, HTTP-basic, or bearer (the conventional `swarmada-registry-credentials` Secret); `http` is used for a `localhost` dev registry, `https` otherwise. A Bearer token-auth handshake — a `401` with a `WWW-Authenticate: Bearer realm=…,service=…,scope=…` challenge triggers a token exchange at the realm (basic creds or anonymous for public repos), retried with the bearer — lets the poller (and the FirmwareRollout `oci://` fetcher that shares this client) work against ghcr.io, Docker Hub, and basic-auth registries. The CRD behaviour is complete: all three trigger modes, the quality gate, auto-deploy, consecutive-rejection suspend, and the poll→trigger→rollout path.  `swarmctl modelpolicy reset` clears a `FailedRepeatedly` suspension through the `policy-reset` custom verb — SelfSubjectAccessReview-gated fail-closed and scoped like `admit`/`reject` — writing an annotation the controller reconciles, so the CLI never edits `status`; it clears the condition and zeroes `consecutiveRejections`, and runs before the suspension early-return or it would be unreachable. The OCI client gained a per-scope bearer-token cache keyed on the challenge **and** a credential fingerprint (challenge alone leaked a token across callers), OAuth2 refresh grants, multi-arch index-manifest resolution that errors rather than guessing an architecture, and build-time ordering for versionless tags as a **tie-break** only (time-first would let a rebuilt old release downgrade robot firmware).
 
-***ZoneMaintenance.*** The maintenance-window lifecycle controller drives `status.phase` `Scheduled → Active → Completed`; while Active it resolves the robots in scope (`scope.namespace` → all robots; `scope.zone` → robots whose assigned/current zone is the target or a descendant, via a bounded `parentZone` ancestor-walk) and pauses each Idle, unassigned robot into `Robot.status.phase = Maintenance` (recording `status.pausedRobots`), while an InProgress robot is tracked in `status.windingDownRobots` (Graceful wind-down — never yanked mid-task). Resume restores paused robots to `Idle` on the `autoResumeAfterMinutes` deadline or on deletion (a `swarmada.io/zonemaintenance-resume` finalizer guarantees the “deleting it resumes all robots” contract), and is overlap-safe — a robot still covered by another Active ZoneMaintenance is not un-paused. As the third writer of `Robot.status.phase`, it is coordinated with the existing seam: the Robot controller respects `Maintenance` (never clobbering it on a live heartbeat) and the scheduler only assigns to Idle robots, so the writers do not conflict; phase writes are transition-driven, never per telemetry tick. Immediate-mode forcible requeue: an `Immediate` ZoneMaintenance on an in-progress robot sets a `swarmada.io/requeue-requested` annotation on its FleetAction, consumed under the same confirmed-stop discipline as cancel (adapter-ack or provable lease death) but returning the task to `Pending` (re-schedulable elsewhere, `assignmentGeneration` preserved) instead of Cancelled, so a robot is freed for pausing only once provably stopped, never mid-execution (single-executor safe); Graceful mode winds down naturally. The per-robot recurring `spec.maintenanceWindow` (a separate concept) is also wired for rollouts' `maintenanceWindowOnly`. `status.continuousCapabilities` records, for each paused robot, the non-pauseable capabilities still running — derived from the robot's `status.capabilities` (`Paused==false && Status != Inactive`, since only pauseable capabilities are paused), so operators can see which safety/monitoring capabilities stay live during maintenance; it is cleared on resume/completion. `requireEstopClearBeforeResume` is honoured (the ZoneMaintenance field first, else the namespace `SwarmadaConfig.spec.maintenance` default) and `status.pausedRobotsCount` / `status.windingDownRobotsCount` are maintained alongside the robot lists, so no sub-field caveat remains.
+***ZoneMaintenance.*** The maintenance-window lifecycle controller drives `status.phase` `Scheduled → Active → Completed`; while Active it resolves the robots in scope (`scope.namespace` → all robots; `scope.zone` → robots whose assigned/current zone is the target or a descendant, via a bounded `parentZone` ancestor-walk) and pauses each Idle, unassigned robot into `Robot.status.phase = Maintenance` (recording `status.pausedRobots`), while an InProgress robot is tracked in `status.windingDownRobots` (Graceful wind-down — never yanked mid-action). Resume restores paused robots to `Idle` on the `autoResumeAfterMinutes` deadline or on deletion (a `swarmada.io/zonemaintenance-resume` finalizer guarantees the “deleting it resumes all robots” contract), and is overlap-safe — a robot still covered by another Active ZoneMaintenance is not un-paused. As the third writer of `Robot.status.phase`, it is coordinated with the existing seam: the Robot controller respects `Maintenance` (never clobbering it on a live heartbeat) and the scheduler only assigns to Idle robots, so the writers do not conflict; phase writes are transition-driven, never per telemetry tick. Immediate-mode forcible requeue: an `Immediate` ZoneMaintenance on an in-progress robot sets a `swarmada.io/requeue-requested` annotation on its FleetAction, consumed under the same confirmed-stop discipline as cancel (adapter-ack or provable lease death) but returning the action to `Pending` (re-schedulable elsewhere, `assignmentGeneration` preserved) instead of Cancelled, so a robot is freed for pausing only once provably stopped, never mid-execution (single-executor safe); Graceful mode winds down naturally. The per-robot recurring `spec.maintenanceWindow` (a separate concept) is also wired for rollouts' `maintenanceWindowOnly`. `status.continuousCapabilities` records, for each paused robot, the non-pauseable capabilities still running — derived from the robot's `status.capabilities` (`Paused==false && Status != Inactive`, since only pauseable capabilities are paused), so operators can see which safety/monitoring capabilities stay live during maintenance; it is cleared on resume/completion. `requireEstopClearBeforeResume` is honoured (the ZoneMaintenance field first, else the namespace `SwarmadaConfig.spec.maintenance` default) and `status.pausedRobotsCount` / `status.windingDownRobotsCount` are maintained alongside the robot lists. The gaps that remain — `status.activatedBy`, the three documented conditions, the namespace `defaultAutoResumeMinutes` fallback, and the un-issued `pause`/`resume` Command — are named in the table above.
 
-***SwarmadaConfig.*** All six spec blocks (`telemetry`, `signing`, `estop` delivery, `actionCancellation`, `trafficDeconfliction`, `coordinateSystem`) present, plus the `status` subresource and auto-creation on the first `FleetZone` in a namespace. The cross-field admission webhook enforces the six inter-block invariants (§9.1.11): `onDisconnect=AfterTimeout` ⇒ `disconnectTimeoutSeconds`; `disconnectedReservationTTLSeconds > disconnectTimeoutSeconds`; a real telemetry sink ⇒ `sink.endpoint`; `requireSignatureVerification` ⇒ `signing.trustRoots`; `coordinateSystem.referenceFrame=Geodetic` ⇒ a `geodetic` block (mutually exclusive with the Local frame); and `connectivityCriticalThresholdSeconds` > `connectivityOfflineThresholdSeconds` (the two fields' CEL bounds overlap, so an inverted pair is individually legal and only a cross-field check catches it). Runtime consumption of the telemetry write-policy is built: `internal/telemetry.Router` resolves each namespace's `spec.telemetry` onto a TSDB sink and a projector write-policy (`statusWriteMinIntervalSeconds` / `maxStatusWritesPerMinutePerRobot` / `materialBatteryThresholds`), memoized per namespace and fail-safe to Drop. The four remaining scalars are consumed: `scheduling.maxPendingActionsPerZone` gates admission in the FleetAction webhook, `scheduling.preferSameManufacturer` ranks candidates in the FleetAction controller (defaulting true), `health.disableAllProbes` is the RobotProbe kill switch, and `maintenance.requireEstopClearBeforeResume` is the namespace default the ZoneMaintenance resume gate reads. No sub-field caveat remains.
+***SwarmadaConfig.*** All six spec blocks (`telemetry`, `signing`, `estop` delivery, `actionCancellation`, `trafficDeconfliction`, `coordinateSystem`) present, plus the `status` subresource and auto-creation on the first `FleetZone` in a namespace. The cross-field admission webhook enforces the six inter-block invariants ([§9.1.12](#swarmadaconfig)): `onDisconnect=AfterTimeout` ⇒ `disconnectTimeoutSeconds`; `disconnectedReservationTTLSeconds > disconnectTimeoutSeconds`; a real telemetry sink ⇒ `sink.endpoint`; `requireSignatureVerification` ⇒ `signing.trustRoots`; `coordinateSystem.referenceFrame=Geodetic` ⇒ a `geodetic` block (mutually exclusive with the Local frame); and `connectivityCriticalThresholdSeconds` > `connectivityOfflineThresholdSeconds` (the two fields' CEL bounds overlap, so an inverted pair is individually legal and only a cross-field check catches it). Runtime consumption of the telemetry write-policy is built: `internal/telemetry.Router` resolves each namespace's `spec.telemetry` onto a TSDB sink and a projector write-policy (`statusWriteMinIntervalSeconds` / `maxStatusWritesPerMinutePerRobot` / `materialBatteryThresholds`), memoized per namespace and fail-safe to Drop. The four remaining scalars are consumed: `scheduling.maxPendingActionsPerZone` gates admission in the FleetAction webhook, `scheduling.preferSameManufacturer` ranks candidates in the FleetAction controller (defaulting true), `health.disableAllProbes` is the RobotProbe kill switch, and `maintenance.requireEstopClearBeforeResume` is the namespace default the ZoneMaintenance resume gate reads. Five sub-field caveats do remain, all schema-only: `scheduling.actionRequeueBackoffSeconds`, the `estop.delivery` retry/partial-delivery fields, `trafficDeconfliction.tdeCallTimeoutMs` and `onReservationExpiry`, and `health.capabilityRescanIntervalSeconds` — see the Implementation status block in [§9.1.12](#swarmadaconfig) for what each would do once read.
 
 ***FleetAdapter.*** An admission-gating webhook plus a status controller drive `status.phase` from live connectivity and `status.conformance` from the conformance report. Per §9.1.12 authenticity: on top of the digest/integrity check, when the namespace `SwarmadaConfig.spec.signing.requireSignatureVerification` is set the report's detached signature (a `bundle:<base64>` `signature` key in the report ConfigMap) is verified against the configured trust roots — fail-closed (`Failed`) on a missing, malformed, or non-verifying signature. `status.phase` includes a `Degraded` intermediate: as heartbeats lapse an adapter moves Connected → Degraded (missed ≥1 but < threshold intervals) → Disconnected, recovering to Connected on a fresh heartbeat; the admission gate still requires `Connected`, so a Degraded adapter does not onboard new robots. Contract-version negotiation (ADR-0032) resolves into the same phase: a handshake reporting a contract version outside the supported range — or none at all, which is treated as incompatible — lands the adapter in `Rejected` and records no `status.negotiatedContractVersion`, so an empty value always means "nothing compatible was agreed". `Rejected` is a negotiation verdict rather than a liveness one, so a heartbeat does not clear it; only a fresh, compatible handshake does. The refusal is scoped to work: the session stands, telemetry and heartbeats keep flowing, and estop is always delivered. `status.connectedRobots` is counted by the status controller from the Robots bound to this adapter through `spec.adapter.name` — the same binding §9.5 anchors authority on, not `servesRobotClasses` — excluding `Offline`, written transition-only with the rest of the status patch and refreshed by a `Robot` watch.
 
@@ -372,7 +419,7 @@ Twelve rows cover the thirteen CRDs: `FirmwareRollout` and `ModelRollout` share 
 - **FirmwareRollout / ModelRollout** — the per-robot `status.currentBatch[].updatePhase` is implemented: `api/v1` carries a structured `RolloutBatchRobot` (robotName, namespace, updateStartedAt, previousVersion, updatePhase), populated by the rollout controller and advanced by the adapter's advisory `UpdateProgress` over ControlStream.
 - **ModelPolicy** — the `NotEqual` custom-metric operator is implemented in the `api/v1` `CustomMetricOperator` enum.
 
-`SwarmadaConfig.spec.coordinateSystem` (including the `Geodetic` / WGS84 / AGL–MSL frame) is implemented in `api/v1`.
+`SwarmadaConfig.spec.coordinateSystem` (including the `Geodetic` / WGS84 / AGL–MSL frame) is implemented in `api/v1`. Within it, `lengthUnit` and `angleUnit` are read by the Robot defaulter and `referenceFrame` by the cross-field webhook; `geodetic.origin` and `geodetic.altitudeReference` are validated and stored but read by no controller ([§9.1.12](#swarmadaconfig)).
 
 ---
 <a id="design-details"></a>
@@ -423,7 +470,7 @@ They solve different problems and cannot substitute for each other.
 
 **Kubernetes namespaces provide administrative isolation.** Namespaces define RBAC boundaries, resource quota domains, and team separation. A warehouse that runs three shifts with three different operations teams can use three namespaces to ensure each team can only see and control their own robots; a drone operator separates its delivery fleet from its inspection fleet the same way; a smart-home platform isolates one household's robots from another's. A multi-tenant managed service provider can use namespaces to isolate customers from each other regardless of vertical. Namespaces have no physical meaning; they are purely administrative.
 
-**FleetZones provide physical spatial hierarchy.** A FleetZone is a named polygon on a floor plan at a specific floor level. It carries capacity limits for robots, shared resource declarations (lifts, corridors), and estop propagation policies. FleetZones form a tree: zone-aisle-b3 is a child of zone-floor-1, which is a child of zone-warehouse-east. A FleetAction targeting zone-floor-1 is eligible for any robot in any of floor-1's descendant leaf zones. An estop on zone-floor-1 propagates to all descendant zones. None of this semantics can be expressed with Kubernetes namespaces.
+**FleetZones provide physical spatial hierarchy.** A FleetZone is a named polygon on a floor plan at a specific floor level. It carries capacity limits for robots, shared resource declarations (lifts, corridors), and estop propagation policies. FleetZones form a tree: zone-aisle-b3 is a child of zone-floor-1, which is a child of zone-warehouse-east. A FleetAction targeting zone-floor-1 is specified to be eligible for any robot in any of floor-1's descendant leaf zones — **specified, not implemented at v0.3**: the reference Scheduler matches `spec.zone` by exact equality and does not resolve the leaf set, so an action naming a parent zone matches no robot ([§9.3.2](#control-plane-scheduler), candidate filter 2). An estop on zone-floor-1 does propagate to all descendant zones, and that half is implemented. None of this semantics can be expressed with Kubernetes namespaces.
 
 **Using namespaces as physical zones would conflate boundaries.** Some Kubernetes projects use namespaces as physical regions (one namespace per building floor). This creates the wrong abstraction: changing the physical layout of a floor would require renaming or recreating a namespace, which disrupts RBAC bindings, resource quotas, and all CRD names. Conversely, a team restructuring (splitting one operations team into two) would require re-creating zone polygons. The two concerns evolve at different rates and for different reasons; they belong in different resources.
 
@@ -436,20 +483,20 @@ The Non-Goals section ([§4](#non-goals)) lists motion control, navigation waypo
 
 **Hard real-time constraints.** Motion control loops for mobile robots operate at 100–1000 Hz (1–10 ms control-loop periods). At 100 Hz, the control loop has a 10ms budget for sensing, computation, and actuation. Kubernetes controller-runtime operates at seconds-to- tens-of-seconds. gRPC over Wi-Fi has variable latency of 1–50ms per round trip. Neither the control plane architecture nor the network transport can meet motion-control timing requirements. Attempting to add motion control to Swarmada would either require a separate real-time subsystem (making Swarmada more complex) or would produce unsafe robot motion under network load.
 
-**Safety certification implications.** Motion control systems for mobile robots in human environments require certification under ISO 10218 and ISO 3691-4. Certifying a motion controller requires fixed, deterministic software stacks that can be audited and tested under defined operating conditions. A cloud-native platform running on Kubernetes — with rolling updates, autoscaling, and variable latency — cannot be certified under these standards in its current architecture. Adding motion control to Swarmada would either prevent Swarmada from being deployed alongside certified systems (because it would need to be part of the certification scope) or would require a separate certified embedded subsystem, eliminating any benefit of unifying the control.
+**Safety certification implications.** Motion control systems for mobile robots in human environments require certification under ISO 10218 and ISO 3691-4 [12]. Certifying a motion controller requires fixed, deterministic software stacks that can be audited and tested under defined operating conditions. A cloud-native platform running on Kubernetes — with rolling updates, autoscaling, and variable latency — cannot be certified under these standards in its current architecture. Adding motion control to Swarmada would either prevent Swarmada from being deployed alongside certified systems (because it would need to be part of the certification scope) or would require a separate certified embedded subsystem, eliminating any benefit of unifying the control.
 
-**The Robot OS ecosystem already has this.** ROS 2 Nav2 (for AMRs), MoveIt (for manipulators), and vendor-specific navigation stacks are mature, tested, and in production at hundreds of facilities. They are better at motion control than any new implementation Swarmada could produce in a reasonable timeframe. Swarmada's value is at the task orchestration layer, not the navigation layer. The Fleet Adapter is explicitly designed to bridge between Swarmada's task model and whatever navigation stack the robot uses.
+**The Robot OS ecosystem already has this.** ROS 2 Nav2 (for AMRs), MoveIt (for manipulators), and vendor-specific navigation stacks are mature, widely deployed, and actively maintained. Rebuilding that capability is outside what this project scopes for itself, and outside what a cloud-native control plane is positioned to do (see the timing and certification argument below). Swarmada's value is at the task orchestration layer, not the navigation layer. The Fleet Adapter is explicitly designed to bridge between Swarmada's task model and whatever navigation stack the robot uses.
 
-**Tractability.** A specification that covers task orchestration AND motion control AND safety certification would require a team of 20 and several years to write correctly. A specification that covers task orchestration, with a clean interface to the navigation layer, can be implemented by a small team and is proposable to the CNCF. Scope discipline is what makes this project achievable.
+**Tractability.** A specification that covers task orchestration AND motion control AND safety certification would require a team of 20 and several years to write correctly. A specification that covers task orchestration, with a clean interface to the navigation layer, can be implemented by a small team and is structured to be proposable to a neutral foundation. Scope discipline is what makes this project achievable.
 
 ---
 
 <a id="design-details-why-spec-hardware-vs-status-hardware-why-the-split"></a>
 ### 6.5 Why `spec.hardware` vs `status.hardware`? Why the Split?
 
-`Robot.spec.hardware[]` declares the hardware inventory (what components are installed). `Robot.status.hardware[]` reports runtime health (what is currently working). They are separate fields for the same reason that any Kubernetes resource separates spec from status.
+`Robot.spec.hardware[]` declares the hardware inventory (what components are installed). `Robot.status.hardware[]` reports runtime health (what is working). They are separate fields for the same reason that any Kubernetes resource separates spec from status.
 
-**Spec is operator intent; status is system-observed state.** This is the fundamental Kubernetes contract. `spec` is what the operator declares; the system works to make `status` reflect reality. In the Robot CRD: the operator declares that `camera-front` is an Intel RealSense D435 with 8.0 MP depth capability (`spec`). The Health Monitor writes that `camera-front` is currently `Degraded` with a stalled depth pipeline (`status`). These are different facts written by different actors.
+**Spec is operator intent; status is system-observed state.** This is the fundamental Kubernetes contract. `spec` is what the operator declares; the system works to make `status` reflect reality. In the Robot CRD: the operator declares that `camera-front` is an Intel RealSense D435 with 8.0 MP depth capability (`spec`). The control plane writes that `camera-front` is `Degraded` with a stalled depth pipeline (`status`) — from adapter telemetry, or from a `RobotProbe` outcome. These are different facts written by different actors.
 
 **Conflating them would violate the contract.** If hardware health were in `spec`, either: (a) The operator must update `spec` every time a component changes health state (telemetry writes to `spec` — wrong; spec is the operator's domain), or (b) The controller updates `spec` on health changes, overwriting operator intent.
 
@@ -497,7 +544,7 @@ This narrows the case against `Auto` without eliminating it. What remains is the
 
 **The silent incorrect output problem.** A model that fails its inference health check may have been producing incorrect outputs before the check detected the failure. If the health check threshold is a p99 latency metric and the model degraded gradually, the model may have been returning low-confidence or incorrect detections for minutes before the threshold was crossed. Auto-reversing to the previous version does not tell the operator this happened. Manual rollback forces a review that can catch this failure mode.
 
-**The model-firmware asymmetry.** FirmwareRollout also defaults to Manual, but the risk is lower: a firmware that fails to install leaves the robot on its previous firmware (a known-good state). A model that fails its health check leaves the robot with capabilities `Unavailable` — it is not operating normally. The pressure to restore capabilities quickly makes Auto rollback tempting, but the version inconsistency risk is higher for models than for firmware because model behaviour is harder to verify on a per-robot basis post-rollback.
+**The model-firmware asymmetry.** FirmwareRollout also defaults to Manual, but the risk is lower: a firmware that fails to install leaves the robot on its previous firmware (a known-good state). A model that fails its health check leaves the robot with the capabilities that model provides no longer schedulable — it is not operating normally. (The capability status the truth table specifies for that state is `Unavailable`; the reference control plane writes `Inactive` instead — **specified, not implemented at v0.3**, see the Capability Type System Maturity note below.) The pressure to restore capabilities quickly makes Auto rollback tempting, but the version inconsistency risk is higher for models than for firmware because model behaviour is harder to verify on a per-robot basis post-rollback.
 
 ---
 
@@ -506,9 +553,9 @@ This narrows the case against `Auto` without eliminating it. What remains is the
 
 Capabilities in Swarmada are plain dot-namespaced strings: `navigation.2d`, `item-pick.ai-guided`, `transport.payload`. They are not structured objects with required type fields, subtype fields, version fields, or parameter fields embedded in the name.
 
-**Label-selector simplicity.** A `FleetAction` that requires `navigation.2d` and `transport.payload` lists those two strings in `spec.requiredCapabilities[]`. The Scheduler checks whether each string appears in `Robot.status.capabilities[]` with `status: Active`. This is a set membership check — O(n) in the number of capabilities, trivially implementable in any language. A structured capability query language (version ranges, parameter predicates, type hierarchies) would require a query engine in the Scheduler — a complex and potentially slow operation across 35 robots per scheduling decision.
+**Label-selector simplicity.** A `FleetAction` that requires `navigation.2d` and `transport.payload` lists those two strings in `spec.requiredCapabilities[]`. The Scheduler checks whether each string appears in `Robot.status.capabilities[]` with `status: Active` — or `Degraded`, where the action opts in through `acceptDegradedCapabilities` (see Capability Status Transitions below). This is a set membership check — O(n) in the number of capabilities, readily implementable in any language. A structured capability query language (version ranges, parameter predicates, type hierarchies) would require a query engine in the Scheduler — a complex and potentially slow operation across 35 robots per scheduling decision.
 
-**Fleet Adapter compliance simplicity.** The Fleet Adapter compliance checklist ([§9.2.7](#fleet-adapter-protocol-transport-security)) can be verified by listing strings. A Fleet Adapter that says it supports `navigation.2d` either does or does not; there is no version negotiation. Structured capability objects would require Fleet Adapters to implement a capability negotiation protocol — an additional gRPC round trip per capability, adding latency to every `register` exchange.
+**Fleet Adapter compliance simplicity.** The Fleet Adapter compliance checklist ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)) can be verified by listing strings. A Fleet Adapter that says it supports `navigation.2d` either does or does not; there is no version negotiation. Structured capability objects would require Fleet Adapters to implement a capability negotiation protocol — an additional gRPC round trip per capability, adding latency to every `register` exchange.
 
 **Numeric constraints are separate spec fields.** The alternative to flat string names is embedding parameters in the name: `transport.payload.maxKg.45` or `transport.payload[maxPayloadKg=45]`. This creates a proliferation of capability strings that differ only in parameter values, making capability matching a prefix-or-range query rather than a set membership check. Swarmada avoids this: `transport.payload` is the capability string (present/absent); `maxPayloadKg` is a separate spec field on the Robot and a separate constraint field on the FleetAction. The Scheduler does set membership first (does the robot have `transport.payload` Active?) and then numeric filtering (is `resolvedParameters.maxPayloadKg ≥ 10.0`?). The two steps are independent and implementable with standard data structures.
 
@@ -519,7 +566,7 @@ Capabilities in Swarmada are plain dot-namespaced strings: `navigation.2d`, `ite
 <a id="design-details-why-does-fleetaction-spec-payload-use-opaque-bytes"></a>
 ### 6.9 Why Does `FleetAction.spec.payload` Use Opaque Bytes?
 
-`FleetAction.spec.payload` is declared as an arbitrary JSON object. Swarmada does not parse, validate, or act on its contents.
+`FleetAction.spec.payload` is an object carrying a single byte field, `raw`, holding the payload's JSON bytes. Swarmada does not parse, validate, or act on its contents.
 
 **The industry diversity problem.** A warehouse pick task needs: `pickLocation`, `skuId`, `quantity`, `destinationBin`, `orderLineId`. A hospital supply delivery needs: `fromLocation`, `toLocation`, `supplyType`, `urgency`, `patientRef`. A factory inspection needs: `shelfId`, `checkType`, `referenceImageUri`, `tolerancePct`. A cold-chain delivery needs: `productTemp`, `maxTransitSeconds`. These schemas have nothing in common beyond the fact that they are task instructions. Any attempt to define a common schema that covers all of them would produce either an unusably abstract structure or a combinatorial explosion of optional fields.
 
@@ -527,16 +574,16 @@ Capabilities in Swarmada are plain dot-namespaced strings: `navigation.2d`, `ite
 
 **The Fleet Adapter translation argument.** The Fleet Adapter is already the protocol translation layer between Swarmada's task model and the robot's application layer. Translating an opaque JSON payload into whatever format the robot's application expects is a natural part of the Fleet Adapter's job. A typed payload would not eliminate this translation — it would add a step where the Fleet Adapter first unpacks the typed Swarmada payload and then re-packs it for the robot. Opaque bytes skip the first step.
 
-**What "opaque" means in practice.** The payload is not opaque to the operator or the Fleet Adapter — they define and implement the schema for their domain. It is opaque to the Swarmada control plane. Operators can inspect task payloads with `kubectl get fleetaction -o yaml` because JSON is human-readable. The Fleet Adapter receives the payload as-is and routes it to the robot's task executor. Schema validation, if required, belongs in the operator's upstream-system integration layer, not in Swarmada. In practice the payload carries robot-native ("Robot OS") commands understood by the target robot, and each Fleet Adapter provider decides which Robot-OS commands it supports and at what granularity — which is why Swarmada mandates no fixed action decomposition and leaves the command vocabulary to the adapter and the robot it drives.
+**What "opaque" means in practice.** The payload is not opaque to the operator or the Fleet Adapter — they define and implement the schema for their domain. It is opaque to the Swarmada control plane. Because `raw` is a byte field, `kubectl get fleetaction -o yaml` renders it base64-encoded, so an operator inspecting a payload decodes `payload.raw` rather than reading keys directly. The Fleet Adapter receives the payload as-is and routes it to the robot's task executor ([§9.1.4.5](#fleetaction-the-payload-field)). Schema validation, if required, belongs in the operator's upstream-system integration layer, not in Swarmada. In practice the payload carries robot-native ("Robot OS") commands understood by the target robot, and each Fleet Adapter provider decides which Robot-OS commands it supports and at what granularity — which is why Swarmada mandates no fixed action decomposition and leaves the command vocabulary to the adapter and the robot it drives.
 
 ---
 
 <a id="design-details-capability-type-system"></a>
 ### 6.10 Capability Type System
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. The Robot reconciler derives the structured `status.capabilities[]`, `status.installedModels[]`, and `status.modelGrantedCapabilities[]` objects, with hardware-native and model-driven capabilities and the `paused`/`degraded` states, per the full truth table below (see [§9.1.3](#robot) and the [§9.1](#crds) status table).
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps:** the derivation does not write `Failed` or `Unavailable`, resolves degraded-hardware/active-model to `Degraded` rather than `Inactive`, does not run model-granted capabilities through the truth table, and does not validate the `pauseable: false` requirement for safety capabilities (see The `pauseable` Field below). The Robot reconciler derives the structured `status.capabilities[]`, `status.installedModels[]`, and `status.modelGrantedCapabilities[]` objects, with hardware-native and model-driven capabilities and the `paused`/`degraded` states, per the full truth table below (see [§9.1.3](#robot) and the [§9.1](#crds) status table).
 
-A robot's `status.capabilities` list is the authoritative, runtime-computed set of things that robot can currently do. The Scheduler reads this list when matching tasks to robots; a capability absent from the list is never scheduled against, regardless of what the robot's spec declares. This section defines the three types a capability can belong to, the rules that govern when each type is considered active, and the `pauseable` field that cuts across all three types.
+A robot's `status.capabilities` list is the authoritative, runtime-computed set of things that robot can do. The Scheduler reads this list when matching tasks to robots; a capability absent from the list is never scheduled against, regardless of what the robot's spec declares. This section defines the capability types, the rules that govern when each is considered active, and the `pauseable` field that cuts across all of them. The `type` enum carries three values — `hardware-native`, `model-driven` and `manual` — of which the first two are described below; **`manual`** declares a capability with no hardware or model gate, which the derivation therefore holds `Active` unconditionally and which never leaves that state. *Parametric hardware-native* is a fourth thing the section describes but not a fourth enum value: it is `hardware-native` with a `parameters` block.
 
 <a id="design-details-hardware-native-capabilities"></a>
 #### 6.10.1 Hardware-Native Capabilities
@@ -557,7 +604,7 @@ capabilities:
       - drive-system
 ```
 
-The Fleet Adapter is the authoritative source for component health. It reports each hardware component's status on every telemetry heartbeat. The Health Monitor writes these into the `Robot` resource's `status.hardware[*].status` fields; the Capability Controller re-evaluates all hardware-native capabilities on every such write.
+The Fleet Adapter is the authoritative source for component health. It reports each hardware component's status on every telemetry heartbeat. The telemetry projection writes these into the `Robot` resource's `status.hardware[*].status` fields; the Robot reconciler re-evaluates all hardware-native capabilities on every such write.
 
 <a id="design-details-model-driven-capabilities"></a>
 #### 6.10.2 Model-Driven Capabilities
@@ -569,7 +616,7 @@ A model-driven capability requires both a healthy hardware component and an acti
 1. Every component in `requiredHardware` has `status: Healthy`, **and**
 2. The model referenced in `providingModel` has `status: Active` on this robot.
 
-A model enters `Active` status after a `ModelRollout` completes its staged deployment to a given robot and the Robot Agent reports a successful inference health check. A model that fails its health check transitions to `Failed`, which immediately deactivates any capability that depends on it.
+A model enters `Active` status after a `ModelRollout` completes its staged deployment to a given robot and the Robot Agent reports a successful inference health check. A model that fails its health check transitions `Robot.status.installedModels[*].status` to `Failed`, and the capability that depends on it deactivates in response: the reference derivation gates every capability declared `type: model-driven` on its `providingModel` being `Active`, and writes the dependent capability `Inactive` with a reason naming the model when it is not. **The one gap is narrower than the whole rule, and is on a different path:** capabilities that arrive through `Robot.status.modelGrantedCapabilities[]` — granted by a rollout rather than declared in `spec.capabilities[]` — are unioned in as `Active` without running the truth table at all, so *those* do not reflect a model's `Failed` transition. A capability declared in the robot's spec does.
 
 **Examples:** `item-pick.ai-guided` (requires camera-front Healthy + item-recognition model Active), `navigation.semantic` (requires lidar Healthy + map-model Active).
 
@@ -607,26 +654,43 @@ capabilities:
     parameters:
       maxPayloadKg:
         sourceField: hardware[load-platform].spec.maxPayloadKg
-      maxSpeedMs:
-        sourceField: hardware[drive-system].spec.maxSpeedMs
 ```
 
-The Scheduler uses parametric values as filter predicates. A `FleetAction` that declares `constraints.maxPayloadKg: 30` will only match robots whose `transport.payload` capability is Active and whose `maxPayloadKg` parameter is ≥ 30. Robots that lack the capability entirely, or whose hardware is degraded, are excluded before the parametric filter is applied.
+A `sourceField` resolves against the numeric attributes a `HardwareComponent` actually declares
+([§9.1.1](#robotclass)). `maxSpeedMs` is **not** one of them — it lives on `spec.constraints`, not on a
+hardware component — so `sourceField: hardware[drive-system].spec.maxSpeedMs` resolves to nothing. An
+unresolvable `sourceField` is skipped, the parameter is absent from `resolvedParameters`, and a
+`FleetAction` constraining that parameter then matches no robot. Declare a parameter only against an
+attribute the component carries.
+
+The Scheduler uses parametric values as filter predicates. A `FleetAction` that declares `constraints.maxPayloadKg: 30` will only match robots whose `transport.payload` capability is Active and whose `maxPayloadKg` parameter is ≥ 30. Robots that lack the capability entirely are excluded before the parametric filter is applied. A robot whose capability is `Degraded` is **not** automatically excluded: a Degraded capability may still satisfy a parametric constraint when its definition declares `degradedPolicy.schedulable: true`, and may still satisfy plain set membership when the action opts in through `acceptDegradedCapabilities` — see Capability Status Transitions below.
 
 <a id="design-details-the-pauseable-field"></a>
 #### 6.10.4 The `pauseable` Field
 
 Every capability — regardless of type — carries a `pauseable: bool` field. This field controls behavior during a `ZoneMaintenance` event.
 
-**`pauseable: true` (default):** When a `ZoneMaintenance` resource is created for the robot's zone, the Robot Agent suspends task execution for all pauseable capabilities. The capabilities remain listed in `status.capabilities` with `status: Paused`; they are not available for scheduling until the maintenance window closes.
+**`pauseable: true` (default):** When a `ZoneMaintenance` window becomes Active and the robot enters `status.phase: Maintenance`, every pauseable capability is marked `status: Paused`. The capabilities remain listed in `status.capabilities` and are not available for scheduling until the maintenance window closes.
 
-**`pauseable: false`:** The capability continues to operate through a `ZoneMaintenance` event without interruption. This is the correct value for capabilities that provide continuous safety or monitoring functions — functions that must not stop simply because the zone is in a planned maintenance state.
+Two points of precision about *when* and *where* that happens. The mark follows the robot's **phase**, not the creation of the `ZoneMaintenance` resource: an Idle, unassigned robot enters `Maintenance` promptly, while an in-progress robot is tracked in `status.windingDownRobots` and keeps its capabilities until it winds down ([§9.1.11](#zonemaintenance)). And at v0.3 this is a **control-plane status change only** — the `Command.pause` dispatch that tells the Robot Agent to suspend execution is specified but not issued ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)), so a paused capability is withheld from scheduling without the robot being told to stop.
+
+**`pauseable: false`:** The capability continues to operate through a `ZoneMaintenance` event without interruption. This is the correct value for capabilities that provide continuous safety or monitoring functions — functions that must not stop because the zone is in a planned maintenance state.
 
 Capabilities that must be declared `pauseable: false`:
 
 - `estop.receive` — the robot must remain able to receive and act on an emergency stop signal at all times.
-- `health.heartbeat` — the Health Monitor must continue receiving liveness signals during maintenance so that an actual fault is not masked by the maintenance state.
+- `health.heartbeat` — the control plane must continue receiving liveness signals during maintenance so that an actual fault is not masked by the maintenance state.
 - Any manufacturer-defined safety feed capability registered under the `safety.*` capability namespace.
+
+**These are obligations on the author of the `RobotClass` or `Robot`, not constraints the control plane
+enforces at v0.3.** `pauseable` carries a schema default of `true` and no admission check tests the list
+above, so a resource that omits the field on `estop.receive`, `health.heartbeat` or a `safety.*`
+capability gets `pauseable: true` — and that capability *will* be marked `Paused` during a maintenance
+window. The `CapabilityViolation` detector described below does not catch it: that detector fires on a
+non-pauseable capability reporting `Inactive`, and a mis-declared capability is `Paused`, not `Inactive`.
+Aggregate `status.health` is derived from the same unvalidated field and stays `Healthy` for the same
+reason. Admission validation of this list is **specified, not implemented at v0.3**; until it lands, the
+requirement is enforced by review of the `RobotClass`.
 
 ```yaml
 capabilities:
@@ -648,7 +712,7 @@ capabilities:
       - drive-system
 ```
 
-Implementers note: a Fleet Adapter that reports a `pauseable: false` capability as `Inactive` during a `ZoneMaintenance` event SHOULD cause the control plane to raise a `CapabilityViolation` event and alert the Health Monitor. Silence of a non-pauseable capability is treated as a fault condition, not an expected maintenance behavior. *(impl: implemented — the non-pauseable/continuous-capability tracking is built via `ZoneMaintenance.status.continuousCapabilities`, and the ZoneMaintenance controller emits a `CapabilityViolation` Warning event on a robot whose non-pauseable capability is `Inactive` during maintenance.)*
+Implementers note: a Fleet Adapter that reports a `pauseable: false` capability as `Inactive` during a `ZoneMaintenance` event SHOULD cause the control plane to raise a `CapabilityViolation` event and surface the robot as unhealthy. Silence of a non-pauseable capability is treated as a fault condition, not an expected maintenance behavior. *(impl: implemented — the non-pauseable/continuous-capability tracking is built via `ZoneMaintenance.status.continuousCapabilities`, and the ZoneMaintenance controller emits a `CapabilityViolation` Warning event on a robot whose non-pauseable capability is `Inactive` during maintenance.)*
 
 <a id="design-details-capability-status-transitions"></a>
 #### 6.10.5 Capability Status Transitions
@@ -656,42 +720,49 @@ Implementers note: a Fleet Adapter that reports a `pauseable: false` capability 
 The following state machine applies to all three capability types:
 
 ```text
-              hardware/model becomes healthy
-                         │
-              ┌──────────▼──────────┐
-              │        Active       │◀──── maintenance window closes
-              └──────────┬──────────┘
-                         │
-          ┌──────────────┼──────────────┐
-          │              │              │
-   hw degrades    ZoneMaintenance   model fails
-          │         created          health check
-          ▼              │              │
-     Degraded        Paused          Failed
-          │              │              │
-   hw recovers    maintenance       model re-
-                   closes +        deployed +
-                  pauseable:true  health check ok
-                         │              │
-                         └──────┬───────┘
-                                ▼
-                             Active
+                 hardware/model becomes healthy
+                              │
+                   ┌──────────▼──────────┐
+                   │        Active       │◀──── maintenance window closes
+                   └──────────┬──────────┘
+                              │
+        ┌─────────────┬───────┴───────┬─────────────┐
+        │             │               │             │
+  hw degrades   required hw     ZoneMaintenance  model fails
+        │       absent/Disabled/     created      health check
+        │       Failed, or the          │             │
+        │       providing model         │             │
+        │       is not Active           │             │
+        ▼             ▼                 ▼             ▼
+   Degraded      Inactive            Paused        Failed
+        │             │                 │             │
+  hw recovers   the gate clears    maintenance    model re-
+        │             │             closes +     deployed +
+        │             │           pauseable:true health check ok
+        └─────────────┴─────────────────┴─────────────┘
+                              │
+                              ▼
+                           Active
 ```
 
-`Degraded` is a distinct state from `Inactive`: a Degraded capability may still satisfy lower-constraint tasks when its capability definition declares a `degradedPolicy` with `schedulable: true`. The capability derivation surfaces that policy as `Robot.status.capabilities[].degradedSchedulable`, and the Scheduler then evaluates a task's parametric constraints against the capability's current (reduced) resolved parameters — so a degraded capability serves the tasks it can still meet and is excluded from those its reduced parameters no longer satisfy. Without a `degradedPolicy` (or with `schedulable: false`), **a Degraded capability is treated as Inactive for scheduling purposes.**
+**This diagram shows the specified target state machine, not v0.3 shipped behaviour.** Per the Maturity note above, the reference derivation writes `Active`, `Degraded`, `Paused` and `Inactive`, and never writes `Failed` or `Unavailable`. **`Inactive` is the substitute it reaches for in every case the truth table calls `Failed` or `Unavailable`,** with a reason naming the failing component or model. One further divergence in the same direction: a capability with degraded hardware and an active model resolves `Degraded` where the truth table specifies `Inactive`. Treat the `Active`/`Degraded`/`Paused`/`Inactive` transitions as live, and `Failed` and `Unavailable` as specified, controller pending. Capabilities declared `type: manual` do not participate in this state machine at all — the derivation holds them `Active` and they never transition.
+
+`Degraded` is a distinct state from `Inactive`: a Degraded capability may still satisfy lower-constraint tasks when its capability definition declares a `degradedPolicy` with `schedulable: true`. The capability derivation surfaces that policy as `Robot.status.capabilities[].degradedSchedulable`, and the Scheduler then evaluates a task's parametric constraints against the capability's current (reduced) resolved parameters — so a degraded capability serves the tasks it can still meet and is excluded from those its reduced parameters no longer satisfy.
+
+Two independent gates govern whether a Degraded capability is usable, and both must be read together. `degradedPolicy.schedulable` governs whether the capability's reduced **parameters** can satisfy a task's numeric constraints. Separately, `FleetAction.spec.acceptDegradedCapabilities` — defaulting from `SwarmadaConfig.spec.scheduling.defaultAcceptDegradedCapabilities` — governs whether a Degraded capability counts toward the action's `requiredCapabilities[]` **set membership** at all. Without a `degradedPolicy` (or with `schedulable: false`), a Degraded capability cannot satisfy a parametric constraint; it may still satisfy a plain capability requirement for an action that opts in via `acceptDegradedCapabilities` ([§9.3.2](#control-plane-scheduler), candidate filter 3).
 
 ---
 
 <a id="drawbacks"></a>
 ## 7. Drawbacks
 
-An RFC that does not honestly describe its drawbacks is a sales document, not a specification. The following drawbacks are real, present in v0.2, and some are structural rather than implementation gaps. Reviewers should weigh each against the problem being solved before accepting this RFC.
+An RFC that does not honestly describe its drawbacks is a sales document, not a specification. The following drawbacks are real, present in v0.3, and some are structural rather than implementation gaps. Reviewers should weigh each against the problem being solved before accepting this RFC.
 
 ---
 
 **1. Kubernetes is a hard dependency.**
 
-Swarmada's control plane runs on Kubernetes. There is no non-K8s deployment path in RFC-0001. Many robot operators — particularly in manufacturing and healthcare — do not run Kubernetes today and have no in-house Kubernetes expertise. Adopting Swarmada requires either hiring Kubernetes engineers, contracting managed K8s (EKS, GKE, AKS), or using minikube for smaller deployments. The operational overhead of a K8s cluster — certificate rotation, node upgrades, etcd backup, RBAC maintenance — is non-trivial and is transferred entirely to the operator. The Developer/Prototype topology (minikube, [§5.1.4](#architecture-deployment-topology)) reduces the barrier for evaluation but does not reduce the production operational burden.
+Swarmada's control plane runs on Kubernetes. There is no non-K8s deployment path in RFC-0001. Many robot operators — particularly in manufacturing and healthcare — do not run Kubernetes today and have no in-house Kubernetes expertise. Adopting Swarmada requires either hiring Kubernetes engineers, contracting managed K8s (EKS, GKE, AKS), or using minikube for smaller deployments. The operational overhead of a K8s cluster — certificate rotation, node upgrades, etcd backup, RBAC maintenance — is substantial and is transferred entirely to the operator. The Developer/Prototype topology (minikube, [§5.1.4](#architecture-deployment-topology)) reduces the barrier for evaluation but does not reduce the production operational burden.
 
 There is no honest mitigation for this at v1. Managed Kubernetes services reduce but do not eliminate the overhead. This is the correct architectural choice given the reconciliation model, Helm packaging, and CRD ecosystem, but operators should not underestimate the prerequisite investment.
 
@@ -726,7 +797,7 @@ An incorrect `currentZone` causes incorrect task routing (a task targeting zone-
 
 **5. Capability declaration is manual and error-prone.**
 
-At v1, the hardware a robot is *scheduled against* is declared by the operator in `Robot.spec.hardware[]` or `RobotClass.spec.hardware[]`. A Fleet Adapter does report a live inventory at admission — `DiscoveredRobot.status.reportedHardware` carries component identity, health, and numeric attributes — and `swarmctl admit` projects it into the Robot's spec, but nothing adds a component the operator never declared, and no rescan promotes one later ([§4](#non-goals) item 7). A robot CRD that declares `load-platform.maxPayloadKg: 45.0` when the actual robot has a 40 kg load cell will be scheduled for tasks it cannot safely execute. A robot CRD that omits a hardware component will never be scheduled for tasks requiring that component even when the hardware is physically present and healthy.
+At v1, the hardware a robot is *scheduled against* is declared by the operator in `Robot.spec.hardware[]` or `RobotClass.spec.hardware[]`. A Fleet Adapter does report a live inventory at admission — `DiscoveredRobot.status.reportedHardware` carries component identity, health, and numeric attributes — and `swarmctl admit` projects it into the Robot's spec, but nothing adds a component the operator never declared, and no rescan promotes one later ([§4](#non-goals) item 7). The gap is narrower than "nothing is verified," and the boundary matters. **At admission it is verified:** `swarmctl admit` merges the reported inventory ahead of the class template, so a reported component wins a name collision, and constraint resolution clamps a declared cap down to the hardware rating — a class declaring `load-platform.maxPayloadKg: 45.0` against a robot reporting a 40 kg load cell yields a Robot carrying 40.0, not 45.0. **After admission nothing re-checks it:** a load cell recalibrated, swapped or degraded in service leaves the declared value standing, no rescan promotes the change ([§4](#non-goals) item 7), and a robot admitted without a `RobotClass` or without a reported value for an attribute carries whatever the operator wrote. A robot whose declared capacity has drifted above its real one will be scheduled for tasks it cannot safely execute. A robot CRD that omits a hardware component will never be scheduled for tasks requiring that component even when the hardware is physically present and healthy.
 
 Automatic hardware discovery is deferred to a future RFC (Non-Goals, [§4](#non-goals), item 7). Until then, the correctness of the capability model depends entirely on accurate manual declaration. In a heterogeneous fleet where different units of the same model have different hardware configurations (a common situation when robots are sourced in batches with different component revisions), maintaining accurate per-robot declarations is an ongoing operational burden that scales with fleet size. `RobotClass` reduces but does not eliminate this burden.
 
@@ -734,7 +805,7 @@ Automatic hardware discovery is deferred to a future RFC (Non-Goals, [§4](#non-
 
 **6. Manual rollback creates an on-call requirement for model updates.**
 
-`ModelRollout.spec.rollbackPolicy: Manual` is the recommended default ([§9.1.9](#modelrollout)). The reasoning is sound: automatic rollback can create silent fleet version fragmentation. The consequence is that when a model update fails its inference health check at 03:00 on a Saturday, the failed robot's capabilities remain `Unavailable` until an operator reviews the failure and runs `swarmctl undo rollout`. In a 24/7 warehouse, this capability gap directly reduces throughput until the operator acts. For facilities without 24/7 on-call engineering coverage, this creates a choice between accepting throughput reduction or accepting the version-fragmentation risk of `Auto` rollback. Neither option is free of cost.
+`ModelRollout.spec.rollbackPolicy: Manual` is the recommended default ([§9.1.9](#modelrollout)). The reasoning is sound: automatic rollback can create silent fleet version fragmentation. The consequence is that when a model update fails its inference health check at 03:00 on a Saturday, the capabilities that model provided remain unschedulable until an operator reviews the failure and reverts the robot by hand (the truth table specifies `Unavailable` for that state; the shipped derivation writes `Inactive` — see drawback 14) — operator-initiated revert is not specified at v0.3 ([§9.1.9](#modelrollout)). In a 24/7 warehouse, this capability gap directly reduces throughput until the operator acts. For facilities without 24/7 on-call engineering coverage, this creates a choice between accepting throughput reduction or accepting the version-fragmentation risk of `Auto` rollback. Neither option is free of cost.
 
 Scheduling model rollouts during planned maintenance windows partially mitigates this, but model updates are often driven by training pipeline outputs that do not align with facility maintenance schedules.
 
@@ -750,7 +821,7 @@ This is a real adoption barrier for small and mid-sized operators. It does not e
 
 **8. Graceful drain creates a predictable capacity reduction window.**
 
-`ZoneMaintenance` with `mode: Graceful` pauses robots as they complete their current tasks, up to `gracefulDrainTimeoutSeconds` (default 300s). During the drain window, in-scope robots are unavailable for new assignments but the zone is not yet safe for technicians to enter. The fleet operates below full capacity without the zone being in a formally safe state — the worst of both outcomes for a brief period. For high-throughput environments where every robot-minute has measurable order-value impact, a 5-minute capacity reduction in a busy zone represents a non-trivial cost if maintenance windows are frequent.
+`ZoneMaintenance` with `mode: Graceful` pauses robots as they complete their current tasks, up to the namespace-level `SwarmadaConfig.spec.maintenance.defaultGracefulDrainTimeoutSeconds` (default 300s). The bound is namespace-wide: `ZoneMaintenance` carries no per-window drain timeout, so an operator cannot shorten or lengthen the window for one maintenance event. During the drain window, in-scope robots are unavailable for new assignments but the zone is not yet safe for technicians to enter. The fleet operates below full capacity without the zone being in a formally safe state — the worst of both outcomes for a brief period. For high-throughput environments where every robot-minute has measurable order-value impact, a 5-minute capacity reduction in a busy zone represents a substantial cost if maintenance windows are frequent.
 
 `mode: Immediate` eliminates the drain window but introduces task requeue overhead and interrupts in-progress work. There is no option that is both instantaneous and non-disruptive. Operators must choose which cost they prefer and factor maintenance frequency and timing into their SLA planning.
 
@@ -762,55 +833,177 @@ The `TwoPhase` provisioning model ([§9.1.2](#discoveredrobot)) requires an oper
 
 ---
 
-**10. capabilityRescanInterval creates a bounded but non-zero silent failure window.**
+**10. capabilityRescanInterval is specified to bound the silent failure window, but v0.3 does not implement it.**
 
-The Zone Controller polls Fleet Adapters for full capability snapshots at `capabilityRescanIntervalSeconds` (default 300s, [§9.1.12.4](#swarmadaconfig-the-scan-command-and-capabilityrescaninterval-in-practice)). Between scans, silent hardware degradations that passive delta telemetry does not report can persist undetected for up to 5 minutes. A robot whose camera depth pipeline stalls at T+0 may continue to be assigned AI-guided pick tasks until T+300, when the rescan detects the degradation. Reducing the interval to 60 seconds narrows the window but increases gRPC traffic proportionally. The silent failure window cannot be eliminated without replacing delta telemetry with full snapshots on every heartbeat, which is impractical at fleet scale. `RobotProbe` resources ([§9.1.7](#robotprobe)) address specific failure modes actively but require per-component configuration and also operate on polling intervals, not continuously.
+The design intent is for the Zone Controller to poll Fleet Adapters for full capability snapshots at `capabilityRescanIntervalSeconds` (default 300s, [§9.1.12.5](#swarmadaconfig-the-scan-command-and-capabilityrescaninterval-in-practice)), bounding at 5 minutes how long a silent hardware degradation that passive delta telemetry does not report can persist undetected. **This is specified, not implemented at v0.3**: `capabilityRescanIntervalSeconds` is a real, validated field on `SwarmadaConfig`, but no controller in the shipped codebase constructs or sends the `ScanCapabilities` command, and nothing triggers a rescan on any interval. A robot whose camera depth pipeline stalls is not detected by any rescan today — only by passive telemetry or an active `RobotProbe`, and only if one is configured for that failure mode. The drawback is therefore not a bounded window but an unbounded one: absent a `RobotProbe` covering the specific component, a silent degradation that delta telemetry never reports can persist indefinitely. `RobotProbe` resources ([§9.1.7](#robotprobe)) address specific failure modes actively but require per-component configuration and also operate on polling intervals, not continuously. Implementing the rescan mechanism would close this gap to the bounded window the design already assumes.
 
 ---
 
 **11. The `payload` field is opaque, so Swarmada cannot validate task correctness.**
 
-`FleetAction.spec.payload` is an arbitrary JSON object passed verbatim to the Fleet Adapter ([§9.1.4.5](#fleetaction-the-payload-field)). Swarmada does not validate its contents at any point. A FleetAction with a malformed payload — missing a required field that the Fleet Adapter's robot expects, wrong data type, invalid bin address — will be admitted, scheduled, and dispatched to the robot before the error is discovered. The robot's Fleet Adapter will receive the malformed payload, fail execution, and report the task as Failed. The failure will be requeued per the retry policy, potentially exhausting retries before anyone notices the payload is wrong. There is no schema validation, no dry-run mode, and no pre-dispatch check. Operators integrating WMS systems must implement payload validation in their own tooling; Swarmada cannot do it for them.
+`FleetAction.spec.payload` carries opaque bytes in `payload.raw`, passed to the Fleet Adapter and on to the robot ([§9.1.4.5](#fleetaction-the-payload-field)). Swarmada does not validate its contents at any point. Swarmada performs no schema validation and offers no dry-run mode, and it never inspects the payload's
+contents. There **is** a pre-dispatch check, and its limits are the drawback: before an assignment is
+committed, the control plane pushes the candidate action — payload included — to the target adapter as a
+`validate_action` Command, and a candidate whose adapter rejects it is dropped from the candidate set with
+the action left `Pending` ([§9.3.2](#control-plane-scheduler)). What that buys is bounded in two ways.
+`validate_action` is an **Optional** Command, so an adapter that declines it is passed on the action-catalog
+gate alone and a malformed payload reaches the robot exactly as described below. And the check is the
+*adapter's* judgement, not Swarmada's: an adapter that accepts a payload its robot will later choke on
+gives a pass. In both cases the robot's Fleet Adapter receives the malformed payload, fails execution, and
+reports the task Failed; the failure is requeued per the retry policy, potentially exhausting retries before
+anyone notices the payload is wrong. Operators integrating WMS systems should implement payload validation
+in their own tooling rather than relying on an optional adapter-side check; Swarmada cannot do it for them.
 
 ---
 
 **12. `Robot.status` is coarse and eventually-consistent by design.**
 
-To keep high-cadence telemetry out of etcd ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), `Robot.status` is written only on a *material transition* — a phase change, a battery-bucket crossing, a hardware-health change, or an assigned-task change — and is rate-capped per robot. The continuous values an operator might expect to read live on the resource are therefore not live on `Robot.status`: `status.position` is a coarse, heavily-throttled last-known pose, and `status.batteryPercent` advances only across configured buckets. Both lag the robot's true state by up to the telemetry interval plus the status-write cap, and continuous histories are served from the telemetry TSDB, not from etcd. The cost is borne by anyone reading `Robot.status` expecting real-time fidelity: `kubectl get robot` shows a battery figure correct to a bucket, not to the percent, and a pose that can be minutes stale during quiet periods. Tooling that needs live values MUST query the TSDB. This is the deliberate price of bounding etcd write load so that fleet size is not capped by the control-plane store. This load, previously flagged as a fatal scaling flaw, is considered resolved by this two-plane split ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), with coarse status as its accepted, documented trade-off.
+To keep high-cadence telemetry out of etcd ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), `Robot.status` is written only on a *material transition* — a phase change, a battery-bucket crossing, a hardware-health change, or an `assignedAction` change — and is rate-capped per robot. (`status.installedModels[*].status` is **not** on this path; it is written by the separate event-driven install/rollout projection and is not subject to this throttle.) The continuous values an operator might expect to read live on the resource are therefore not live on `Robot.status`: `status.batteryPercent` advances only across configured buckets, lagging the robot's true state by up to the telemetry interval plus the status-write cap. **`status.position` is worse than throttled: no v0.3 controller writes it at all.** Pose reaches the TSDB sink and the Zone Controller's live derivation and stops there, so the field is permanently empty and `swarmctl describe` shows no pose rather than a stale one — the field is specified, and its writer is controller pending. Continuous histories are served from the telemetry TSDB, not from etcd. The cost is borne by anyone reading `Robot.status` expecting real-time fidelity: `kubectl get robot` shows a battery figure correct to a bucket, not to the percent. Tooling that needs live position or live values MUST query the TSDB. This is the deliberate price of bounding etcd write load so that fleet size is not capped by the control-plane store. This load, previously flagged as a fatal scaling flaw, is considered resolved by this two-plane split ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), with coarse status as its accepted, documented trade-off.
 
 ---
 
+**13. A robot under manual control is still schedulable.**
+
+`Robot` carries no custody state. Scheduling eligibility is gated on
+`Robot.status.phase` being `Idle`, plus zone, capability, and selector match
+([§9.3.2](#control-plane-scheduler)); nothing in the resource model records that a
+person has taken control of a specific robot. An operator who drives a robot
+manually — by pendant, by a vendor console, or by any path that does not run
+through the Fleet Adapter — leaves it in whatever phase the control plane last
+observed. If that phase is `Idle`, the Scheduler will select it, and the Fleet
+Adapter will receive an `assign_action` for a robot a person is already operating.
+
+Every available mitigation is coarser than the problem. `ZoneMaintenance` pauses
+robots into the `Maintenance` phase, but its scope is a zone or a namespace, never
+a single robot ([§9.1.11.4](#zonemaintenance-the-pause-and-resume-commands)). Emergency
+stop removes the robot from service, but it is a safety action with an
+operator-gated clear, not a scheduling control, and using it routinely to reserve
+a robot degrades the signal it exists to carry
+([§9.6.4](#safety-zonemaintenance-vs-estop-explicit-separation)). Deleting or
+re-zoning the `Robot` discards state the operator will want back. There is no
+per-robot equivalent of a cordon.
+
+Operators who mix manual intervention with automatic dispatch must enforce that
+separation procedurally, and must treat the absence of a custody signal as a
+standing assumption rather than a configurable one. A custody state that gates
+scheduling eligibility is deferred to RFC-0011 ([§4](#non-goals), item 18).
+
+---
+
+**14. Several capability-affecting transitions are specified but not written by any v0.3 controller.**
+
+The capability model's target state machine ([§6.10.5](#design-details-capability-status-transitions)) specifies that a model or hardware component health failure drives the dependent `Capability` to `Failed`, and that an unschedulable-but-not-failed model drives it to `Unavailable`. At v0.3, no shipped controller writes `CapabilityStatusFailed` or `CapabilityStatusUnavailable` onto a
+`Capability` itself. What it writes instead is `Inactive`, and that distinction bounds the drawback: for a
+capability **declared in `spec.capabilities[]`**, absent, `Disabled` or `Failed` required hardware, and a
+`providingModel` that is not `Active`, all resolve the capability to `Inactive` with a reason naming the
+cause — and `Inactive` is never schedulable. The failure *is* reflected; it is reflected under a different
+status value than the truth table specifies.
+
+Two real gaps remain. Capabilities arriving through `status.modelGrantedCapabilities[]` are unioned in as
+`Active` **without** running the truth table, so those genuinely can read `Active` after the model backing
+them has failed. And a capability with degraded hardware and an active model resolves `Degraded` where the
+truth table specifies `Inactive`, which an action opting into `acceptDegradedCapabilities` will still match.
+This compounds drawback 5 on the model-granted path in particular: the capability is neither verified at
+declaration time nor corrected at runtime. Tooling that keys on the literal strings `Failed` or
+`Unavailable` in `Capability.status` will never match at v0.3 and should key on `Inactive` as well.
+
+---
+
+**15. `spec.estop.delivery.retryPolicy` and `partialDeliveryBehavior` are specified in detail but not read by any v0.3 controller.**
+
+`SwarmadaConfig.spec.estop.delivery` specifies a per-adapter retry loop (`retryPolicy.maxAttempts`, `retryPolicy.retryIntervalMs`, default indefinite retry) and a `partialDeliveryBehavior` choice (`BlockNewActions`, the default, blocking new action assignment to a zone with non-ACKing adapters and surfacing `status.estopStatus: PartialActive` plus a `ZoneEstopPartialDelivery` Warning event; or `Alert`, which only warns). At v0.3, none of this is implemented: `retryPolicy` and `partialDeliveryBehavior` are read by no controller, `PartialActive` is not a value `FleetZone.status.estopStatus` can hold (`ZoneEstopStatus` admits only `Clear`, `Triggered`, `ChildTriggered`), and `ZoneEstopPartialDelivery` is not an event any controller emits. Only `spec.estop.delivery.perAdapterTimeoutMs` is honored. The shipped zone- and namespace-scoped estop handlers dispatch to every in-scope robot concurrently ([§9.6.2.1](#safety-estop-scopes)), but make a single delivery attempt per robot: an adapter that does not ACK within `perAdapterTimeoutMs` resolves that one robot to `Failed` and is not retried, and there is no zone-level aggregation, blocking, or partial-delivery event distinguishing that outcome from any other robot's. Operators should not configure `retryPolicy` or `partialDeliveryBehavior` expecting an effect, and should not look for `PartialActive` zone status or a `ZoneEstopPartialDelivery` event in their monitoring — neither exists at v0.3. An adapter's failure to ACK is visible only as that one robot's `Failed` estop state and the existing per-robot escalation path.
+
+---
+
+**16. The `Manual` traffic-deconfliction reservation policy has no distinct behavior at v0.3 — it silently behaves as `Priority`.**
+
+`FleetZone`'s `sharedResourceQueues[].policy` accepts `Manual` as a documented value, whose specified intent is that the TDE grants and dequeues nothing for that resource and an operator arbitrates access out of band ([§9.4.5](#tde-shared-resource-queue-management)). At v0.3 the TDE's reservation logic takes no branch for `Manual`: it is unconditional on policy and grants a `Manual`-policy resource under capacity exactly as it would a `Priority`-policy one. An operator who selects `Manual` expecting the TDE to step back and leave arbitration to them instead gets automatic granting indistinguishable from `Priority` ordering — the queue is not held open for manual intervention. This is scheduling-relevant in the same way as drawback 14: a shared resource an operator believes is manually gated is not actually gated, and a robot may be dispatched to it without the out-of-band arbitration the policy name promises.
 <a id="alternatives"></a>
 ## 8. Alternatives Considered
 
+Alternatives to this specification fall into two families, and they answer different questions. Section A weighs *ecosystem* alternatives: whether an existing project or a published interoperability standard already occupies the layer this specification defines, or could be extended to occupy it, so that no new specification is warranted. Section B weighs *design* alternatives: granting that the layer is specified here, whether its internal mechanisms should have been built differently.
+
+Ecosystem alternatives are weighed on architecture and governance — the structural questions a specification can settle — and not on capability, maturity, or deployed scale, which are properties of implementations and of operational history rather than of a document. Where a comparison rests on a fact about another project or standard, that fact is cited and dated in the References chapter, and a reader is expected to re-check it: this landscape moves faster than a specification revision cycle.
+
+<a id="alternatives-a-ecosystem-alternatives"></a>
+### A. Ecosystem alternatives
+
+Each alternative in this family was assessed against one question: could the orchestration layer this specification defines, under the vendor-neutrality and cloud-native constraints stated in [§3](#goals), be obtained by adopting or extending something that already exists? The five are of three kinds — an existing open-source project (A.1), published or in-flight interoperability standards (A.2 through A.4), and commercial fleet management products (A.5) — and each kind admits a different form of extension. A project can be contributed to. A standard can be extended only through the body that governs it, on that body's timetable. A product is extended on terms its vendor sets, whatever its licence permits a fork to do.
+
 <a id="alternatives-a-1-extend-open-rmf"></a>
-### A.1 Extend Open RMF
+#### A.1 Extend Open-RMF
 
-Open-RMF is the most technically capable existing open-source fleet-coordination project and the most natural starting point for this comparison. Two considerations led to a new project rather than a contribution to it: governance and architecture.
+Open-RMF is the open-source project closest to the layer this specification defines, and therefore the first alternative this section has to answer. Two considerations led to a new specification rather than a contribution to it: governance and architecture. Per the method stated above, neither is a claim about Open-RMF's capability, maturity, or deployed scale.
 
-**What Open RMF does well.** Open RMF has demonstrated real-world deployments in hospital logistics and airport ground handling — environments with demanding requirements for multi-vendor robot coordination. Its traffic management system handles conflict resolution at intersections and through narrow corridors with measurable effectiveness. The ROS 2 Fleet Adapter specification is a thoughtful interface that numerous manufacturers have implemented. And the project has a genuine community of contributors across research institutions and robotics integrators. These are substantive achievements that this RFC does not diminish.
+**What this section does not assess.** Open-RMF is deployed in production, has a multi-institution contributor community, and specifies a fleet adapter interface that manufacturers have implemented. This document makes no comparative claim about any of that, in either direction: capability, maturity and deployed scale are properties of an implementation and of operational history, this specification has none of the latter, and the method stated above excludes them from the comparison. The two considerations below are structural, and each is falsifiable against a published document.
 
-**The governance distinction.** Open-RMF's codebase originated within, and remains associated with, a single technology company's corporate structure; since 2024 it has operated under the Open Source Robotics Alliance (OSRA), which provides community participation in governance. A vendor-neutral, foundation-hosted standard — one in which no single vendor has unilateral control over a project's direction, roadmap, or governance — is an explicit goal of this specification (Goals, item 14). A contribution would remain within the existing project's governance structure, which third-party contributions do not themselves change. (A fuller treatment of the neutrality rationale is maintained separately as project positioning material and is out of scope for this specification.)
+**The governance distinction.** Open-RMF's intellectual property is held by the Open Source Robotics Foundation, an independent non-profit, and since 2024 the project has been governed by the Open Source Robotics Alliance, a multi-vendor body [31]. The observation relevant to Goal 14 is narrower and is one of maintainer concentration rather than ownership: open-rmf.org's own Project Governance page, accessed 2026-08-12, lists a Project Management Committee of six members and one further committer, all seven giving the same employer, and the project charter published alongside it, read on the same date, states no employer-diversity requirement. This is a structural observation about a published governance document, not a claim about any contributor's conduct, and it is falsifiable by that page. A vendor-neutral, foundation-hosted standard — one in which no single vendor has unilateral control over a project's direction, roadmap, or governance — is an explicit goal of this specification (Goals [§3](#goals), item 14), and a contribution would remain within the existing project's governance structure, which third-party contributions do not themselves change. The same measure applies to this specification's reference implementation, which is pre-1.0 and has a single maintainer as of 2026-08; the governance document that accompanies it states the multi-employer maintainer threshold the project commits to meeting, and the project's compliance with that threshold is stated in `MAINTAINERS.md` rather than asserted here.
 
-**The architectural distinction.** Open RMF was designed before cloud-native Kubernetes patterns became the default substrate for infrastructure software. It does not use Kubernetes Custom Resource Definitions, the operator pattern, kubebuilder, Helm, or Prometheus natively. Its coordination model is primarily event-driven: systems publish and subscribe to events, and fleet state is assembled from event streams. Swarmada's architecture is built on the Kubernetes reconciliation model — desired state is declared in CRDs, controllers continuously reconcile actual state toward it, and every state change is a Kubernetes event observable via standard tooling. This is not a stylistic preference. The reconciliation model is the reason that Swarmada handles connectivity loss, mid-task robot failure, and maintenance windows without operator intervention: the controller re-reconciles whenever conditions change. Grafting this model onto an event-driven architecture would require a near-complete rewrite of Open RMF's coordination layer, not an additive contribution.
+**The architectural distinction.** Open-RMF was designed before cloud-native Kubernetes patterns became the default substrate for infrastructure software. It is not built on Kubernetes Custom Resource Definitions or the operator pattern; a reader should verify this against the project's current architecture documentation rather than take it from this text, since a project can invalidate a claim of this sort in one release. Its coordination model is, on the same reading, primarily event-driven: systems publish and subscribe to events, and fleet state is assembled from event streams. Both statements are this document's reading of Open-RMF's published architecture as of 2026-08-12, and carry the same verify-it-yourself caveat. Swarmada's architecture is built on the Kubernetes reconciliation model — desired state is declared in CRDs, controllers continuously reconcile actual state toward it, and every state change is a Kubernetes event observable via standard tooling. This is not a stylistic preference. The reconciliation model is the reason that Swarmada converges on connectivity loss, mid-task robot failure, and maintenance windows with *minimal* operator intervention — the controller re-reconciles whenever conditions change — while keeping the decisions this specification deliberately gates on a human (admission, `Manual`-default rollback, estop clear) in the loop rather than automating them away ([§6.2](#design-details-why-kubernetes-crds-rather-than-a-custom-api-server)). On that reading, grafting this model onto an event-driven architecture would be a rewrite of the receiving project's coordination layer rather than an additive contribution — a judgement about the scope of change, offered as such.
 
-**Why a contribution would not achieve the same outcome.** The architectural difference is the decisive one: Open-RMF's coordination model is event-driven, and the Kubernetes reconciliation model this specification depends on is not an additive layer on top of it — adopting it would require a near-complete rewrite of the coordination layer, disruptive to Open-RMF's existing users. Combined with the governance point above, contributing this design to Open-RMF would not yield the vendor-neutral, cloud-native standard that is one of this specification's explicit goals (Goals [§3](#goals), item 14).
+**Why a contribution would not achieve the same outcome.** The architectural difference is decisive on its own: contributing this design to Open-RMF would not yield the declarative, Kubernetes-native standard that is one of this specification's explicit goals (Goals [§3](#goals), item 14), and the versioned contract and conformance catalog described in [§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist) would have no counterpart in the receiving project's structure. A rewrite of that scale would also be disruptive to Open-RMF's existing users.
 
-**The relationship going forward.** Swarmada and Open RMF are not mutually exclusive. A robot running Open RMF-based navigation can be managed by Swarmada through a ROS 2 Fleet Adapter: the adapter translates Swarmada's task assignment protocol into ROS 2 action calls, and reports position and hardware status back via telemetry on the `ControlStream` ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)). Operators with existing Open RMF deployments can adopt Swarmada incrementally without replacing their navigation stack. The two projects address the same coordination layer under different governance and architectural models; operators can choose based on their governance requirements, cloud infrastructure preferences, and existing technology stack.
+**The relationship going forward.** Swarmada and Open-RMF are not mutually exclusive. A robot running Open-RMF-based navigation can be managed by Swarmada through a ROS 2 Fleet Adapter: the adapter translates Swarmada's task assignment protocol into ROS 2 action calls, and reports position and hardware status back via telemetry on the `ControlStream` ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)). Operators with existing Open-RMF deployments can adopt Swarmada incrementally without replacing their navigation stack. The two projects address the same coordination layer under different governance and architectural models; operators can choose based on their governance requirements, cloud infrastructure preferences, and existing technology stack.
 
-<a id="alternatives-a-2-other-alternatives-considered"></a>
-### A.2 Other Alternatives Considered
+<a id="alternatives-a-2-adopt-iso-21423-as-the-orchestration-layer"></a>
+#### A.2 Adopt ISO 21423 as the orchestration layer
 
-Three further alternatives were weighed and set aside; each is treated in more depth elsewhere in this RFC and is summarised here for completeness.
+**Status of the standard.** ISO 21423, "Robotics — Industrial mobile robots — Communications and interoperability" (ISO/TC 299), entered stage 60.00, *International Standard under publication*, on 2026-07-21, immediately following the close of its FDIS ballot at stage 50.60 on the same date [42]. It is not yet published: stage 60.60 has not been reached, and ISO commits to no publication date for a project at stage 60.00. This section cites the stage history rather than the bare status line because search indexes still title the catalogue record "ISO/FDIS 21423" — a designation that was current only between 2026-03-11 and 2026-07-21 — and a reader checking the claim against a search result rather than the live record will otherwise conclude this text is wrong. Everything below is written against a standard that is imminent but unpublished, and is dated accordingly.
 
-**A custom aggregated API server** (rather than CRDs) was considered and rejected for the reasons given in [§6.2](#design-details-why-kubernetes-crds-rather-than-a-custom-api-server): CRDs inherit the controller-runtime reconciliation loop, RBAC, `kubectl`/Helm tooling, and etcd persistence without reimplementation, at the cost of some schema-validation flexibility that Swarmada does not need at v1.
+**Why adopting it would not settle the question this specification addresses.** ISO 21423's scope, as balloted at DIS stage and published by the UK national mirror body, specifies "the communication requirements between" industrial mobile robots (IMRs), the IMR fleet manager (IMRFM), and other machines, equipment, and applications in the working environment [42]. That text contains none of the words *task*, *mission*, *order*, *assignment*, *allocation*, *dispatch*, *schedule*, or *orchestration*, and it names the fleet manager as a party that communicates rather than as a system whose internals it specifies. The negative claim drawn from this is deliberately narrow, because the full scope clause and the normative message set are not publicly readable as of 2026-08-12: what has been verified is the scope statement as balloted, not the clause list, and a standard framed as a communication interface can still define an order or task message, as VDA 5050 does. On the evidence available, ISO 21423 governs a wire that a Fleet Adapter would speak, in the position VDA 5050 already occupies ([§9.2](#fleet-adapter-protocol)), while this document specifies what sits on the other side of that boundary: a declarative resource model, a reconciliation loop, RBAC and admission control, assignment leases, and an audit trail. Those are not deferred by waiting, and they are not supplied by adopting. A fleet manager that speaks ISO 21423 still has to be deployed, upgraded, access-controlled, and audited. Nor are the two in competition over allocation policy, because this document declines to standardize allocation policy as well — the Scheduler interface is specified here and the algorithm behind it is explicitly pluggable and out of scope ([§4](#non-goals), item 4). Were ISO 21423 to specify allocation behaviour, that behaviour would be implementable as a Scheduler policy within this architecture rather than as a replacement for it.
 
-**An event-driven / event-sourced coordination model** — the design used by Open RMF and by many message-bus architectures — was considered and rejected in favour of the Kubernetes desired-state reconciliation model ([§5.1.3](#architecture-the-reconciliation-model)). Reconciliation is what lets the control plane recover from connectivity loss, mid-task failure, and maintenance windows without operator intervention; an event-sourced core would have to reconstruct the same convergence guarantees on top of an event log.
+**What is claimed, and what is not.** No conformance claim to ISO 21423 is made in this specification, and none can be made: no ISO 21423 Fleet Adapter exists as of 2026-08-12, and no adapter can be exercised against a live endpoint until conformant implementations ship. Conformance in this project means conformance to `fleet_adapter.v1` as measured by the published compliance checklist ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)), and nothing else. The claim made here is narrower and is a claim about this document's own design: the Fleet Adapter boundary is where an external wire protocol is translated into control-plane state, and ISO 21423 is consumable at that boundary on the same terms as any other robot-to-fleet-manager protocol.
 
-**Building directly on a robotics transport** (ROS 2 / DDS, or Zenoh) rather than gRPC was considered for the Fleet Adapter protocol and rejected for the reasons in [§6.1](#design-details-why-grpc-for-the-fleet-adapter-protocol-rather-than-rest): those transports are excellent for intra-robot and LAN-local motion data but assume multicast-friendly, low-latency networks, whereas the Fleet Adapter link must traverse NAT, captive portals, and lossy facility Wi-Fi from adapter to control plane. gRPC over HTTP/2 with adapter-initiated streams ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)) is the deployable choice for that link; a ROS 2 or Zenoh Fleet Adapter remains free to use those transports on the robot side of the boundary.
+**A domain precedent, and the condition under which this section is wrong.** ISO has already standardized a dispatch interface once, in a different domain. ISO 23725:2024, "Autonomous system and fleet management system interoperability" (ISO/TC 82/SC 8, published 2024-08), specifies the interfaces between a fleet management system and an autonomous haulage system — including message structure, mine map sharing, truck dispatching, and task assignment — and is scoped to surface mining [44]. It is named here for the distinction rather than the analogy. It establishes that a task-assignment layer can be standardized where a single industry has converged on one vehicle class and one workload; it does not establish that a cross-industry standard for that layer exists for mixed mobile-robot fleets, and no such standard has been identified as of 2026-08-12. The argument in this section rests entirely on where ISO 21423's boundary falls, and it is falsifiable on a single reading of the published text: **if ISO 21423 Clause 1 or its normative message set specifies allocation behaviour rather than the interface across which assignments travel, the framing in this section is wrong and will be revised.** The scope clause and table of contents will be read on publication, and this section corrected in public if that is what they say.
+
+<a id="alternatives-a-3-extend-the-massrobotics-amr-interoperability-standard"></a>
+#### A.3 Extend the MassRobotics AMR Interoperability Standard
+
+The MassRobotics AMR Interoperability Standard is an open interoperability standard for industrial mobile robots, published at version 1.0 in May 2021 by the MassRobotics AMR Interoperability Working Group. Its specification document, JSON Schema, reference sender and reference receiver are all obtainable from a public repository with no membership, purchase, or paywall step [43]. Robots implementing it report identity and status — manufacturer, model, serial number, footprint, pose relative to a shared planar datum, operational state, battery, velocity, near-term destinations, and error codes — as JSON over WebSocket. Because it is open, unencumbered by fee or membership, and addressed at exactly the mixed-vendor population this specification targets, extending it upward into task allocation was considered as an alternative to defining a separate control plane.
+
+**Its published scope excludes the layer this specification defines.** MassRobotics states the boundary in its own published description of the standard: it "isn't a fleet management, vehicle navigation, or safety system," and "[t]his is not a task management type of system" [43]. The normative artifacts match that description. The schema's top-level construct admits exactly two messages, `identityReport` and `statusReport`, both directed from the robot to a receiver; no command, order, cancellation, acknowledgement, or reservation message is defined in the opposite direction [43]. Extending the standard into orchestration would therefore not extend an existing mechanism but introduce a new one — a downlink, a task model, an assignment lifecycle, and correlation identifiers — into a document whose working group recorded a decision not to specify that layer. That decision, published by a third-party working group of robot manufacturers rather than asserted by this specification, is the clearest external evidence that the orchestration layer is unoccupied by design rather than by oversight.
+
+**The relationship going forward, and one item to watch.** The two documents are complementary rather than competing: the MassRobotics standard defines how robots from different vendors make their identity and state legible to one another, and this specification defines how a fleet decides what to do about it. A Fleet Adapter built over the standard would be telemetry-ingest only — identity and status reports map onto the uplink half of the `ControlStream` ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)) — while assignment, cancellation, and emergency stop have no counterpart in it. A robot reachable only over this standard can be observed but not commanded, and in particular cannot be confirmed stopped, so an adapter with no second channel to the robot could not satisfy this specification's estop requirements ([§9.6.2.3](#safety-estop-state-machine)). A version 2.0 adding a mission-communication API, by which agents would request and respond to work, was announced in 2022; as of 2026-08-12 no draft, schema, or other public artifact of it has been released [43]. Mission-level communication is directionally toward the layer this specification occupies; when version 2.0 publishes, this section should be re-assessed against its text.
+
+<a id="alternatives-a-4-extend-vda-5050-upward-into-orchestration"></a>
+#### A.4 Extend VDA 5050 upward into orchestration
+
+Extending VDA5050 upward, so that the robot-to-fleet-manager interface grows into the orchestration layer above it, was considered and set aside. The boundary at issue is one the standard draws deliberately and states in its own text: in release 3.0.0 (March 2026, MIT-licensed, published on GitHub) [41], section 5.2 places route and route-network configuration outside the document, and section 5.3 names traffic control a responsibility of the fleet control without specifying how that responsibility is discharged. The decisions an orchestration layer exists to make therefore fall on the far side of the interface by the standard's own construction, and the safety contract this specification requires has no counterpart there: release 3.0.0 defines no emergency-stop command in either direction, reports safety state read-only, and leaves transport security to broker configuration (section 4.1). Adding a task model, an admission and traffic model, a safety model, and a governance structure to VDA5050 would not extend the standard so much as replace its scope with a different one. The relationship taken instead is the complementary one set out in Motivation ([§2.2](#motivation-why-existing-approaches-are-insufficient)): VDA5050 standardizes the link this specification consumes, and a Fleet Adapter speaks it on the robot side of the boundary ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)).
+
+<a id="alternatives-a-5-adopt-or-extend-a-commercial-vendor-s-fleet-management-product"></a>
+#### A.5 Adopt or extend a commercial vendor's fleet management product
+
+**What these products do well.** Two adjacent options were weighed together: adopting a manufacturer-native fleet management system as the coordination layer, and building on the API of a commercial multi-fleet orchestration product. Neither was rejected on capability. AMR vendors ship fleet management software optimised for their own hardware, and several commercial products coordinate mixed fleets across vendors ([§2.2](#motivation-why-existing-approaches-are-insufficient)). These are mature implementations with operational histories, and no argument here depends on any of them being technically deficient. Deployed scale and operational maturity are properties of an implementation and of its operating history rather than of a specification, and this section does not weigh them.
+
+The strongest form of this alternative is not a capability comparison but an economic one: an implementation that already exists, already has users, and is already published costs nothing to specify, and its vendor may itself participate in the neutral standards bodies whose output this specification consumes ([§2.2](#motivation-why-existing-approaches-are-insufficient)). The question this section answers is therefore not whether such a product is capable, or open, or standards-engaged — it may be all three — but whether adopting one yields an interface whose document of record is independent of any implementation.
+
+**Licence is not the distinction.** In February 2026 a commercial vendor announced a self-hostable fleet-management platform, derived from its production stack, to be published under a permissive open-source licence [45]; an open licence and a commercial origin are therefore not mutually exclusive, and a comparison drawn on licence terms would not hold — nor would one drawn on the expectation that it will not.
+
+**The distinction is who controls the interface.** A vendor-controlled fleet-management API is specified by its implementation: one party sets the roadmap, the extension points, the versioning policy, and the terms on which third parties may depend on it, and an implementer building against it has, at most, whatever recourse its commercial relationship provides, and no governance recourse. A permissive licence lowers the cost of running such an implementation and removes the lock-in objection to doing so; it does not by itself make the interface a standard, because the document of record remains the implementation. What this specification sets out to produce is the other arrangement — an interface defined independently of any implementation, under a maintainer structure in which no single vendor has unilateral control over direction, roadmap, or governance — an explicit goal of this specification (Goals [§3](#goals), item 14) — and against which independent implementations can be measured by a published compliance checklist ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)). Adopting a manufacturer-native fleet manager carries a further problem specific to it: extending one vendor's system to command another vendor's robots reproduces the per-vendor boundary that the mixed-fleet problem begins with ([§2.2](#motivation-why-existing-approaches-are-insufficient)).
+
+**The relationship going forward.** None of this requires displacing existing fleet-management software. The Fleet Adapter boundary is defined between the control plane and an adapter serving many robots, rather than between the control plane and a single robot ([§9.2](#fleet-adapter-protocol)), so an adapter may front an existing vendor fleet manager rather than an individual robot, with that fleet manager on the south side of the boundary. This document specifies the boundary and the north face of the adapter that meets it; it names no south-side interface and mandates none ([§4](#non-goals), item 3).
+
+<a id="alternatives-b-design-alternatives"></a>
+### B. Design alternatives
+
+The three alternatives in this family are internal design choices rather than choices about the ecosystem. Each was weighed and set aside, each is treated in more depth elsewhere in this specification, and each is summarised here so that the record of what was considered is complete in one place.
+
+<a id="alternatives-b-1-a-custom-aggregated-api-server"></a>
+#### B.1 A custom aggregated API server
+
+Serving Swarmada's resources from a custom aggregated API server, rather than as Kubernetes Custom Resource Definitions, was considered and rejected for the reasons given in [§6.2](#design-details-why-kubernetes-crds-rather-than-a-custom-api-server): CRDs inherit the controller-runtime reconciliation loop, RBAC, `kubectl`/Helm tooling, and etcd persistence without reimplementation, at the cost of some schema-validation flexibility that Swarmada does not need at v1.
+
+<a id="alternatives-b-2-event-sourced-coordination"></a>
+#### B.2 Event-sourced coordination
+
+An event-driven / event-sourced coordination model — the design used by Open-RMF and by many message-bus architectures — was considered and rejected in favour of the Kubernetes desired-state reconciliation model ([§5.1.3](#architecture-the-reconciliation-model)). Reconciliation is what lets the control plane converge after connectivity loss, mid-task failure, and maintenance windows with minimal operator intervention — minimal, not none: admission, `Manual`-default rollback and estop clear stay operator-gated by design. An event-sourced core would have to reconstruct the same convergence guarantees on top of an event log.
+
+<a id="alternatives-b-3-a-robotics-transport-for-the-fleet-adapter-link"></a>
+#### B.3 A robotics transport for the Fleet Adapter link
+
+Building directly on a robotics transport (ROS 2 / DDS, or Zenoh) rather than gRPC was considered for the Fleet Adapter protocol and rejected on the network the link has to cross. Those transports are strong for intra-robot and LAN-local motion data but assume multicast-friendly, low-latency networks, whereas the Fleet Adapter link must traverse NAT, captive portals, and lossy facility Wi-Fi from adapter to control plane — the deployment constraint set out in [§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams). (The gRPC-over-REST argument in [§6.1](#design-details-why-grpc-for-the-fleet-adapter-protocol-rather-than-rest) is a separate question and does not cover this one.) gRPC over HTTP/2 with adapter-initiated streams ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)) is the deployable choice for that link; a ROS 2 or Zenoh Fleet Adapter remains free to use those transports on the robot side of the boundary.
 
 ---
-
 <a id="detailed-specification"></a>
 ## 9. Detailed Specification
 
@@ -820,7 +1013,7 @@ This chapter is the normative reference: the full per-CRD schemas, the Fleet Ada
 <a id="crds"></a>
 ### 9.1 Custom Resource Definitions
 
-The full normative schema for each of Swarmada's thirteen namespace-scoped Custom Resource Definitions (CRDs) follows, in the same admission-lifecycle order introduced in [§5.2](#resource-model): discovery first, then the template and robot objects, then the task and zone resources a robot operates within, then the health and update management resources that govern it over time. For reading guidance by audience, CRD dependencies, and the v0.2 maturity table, see [§5.2](#resource-model).
+The full normative schema for each of Swarmada's thirteen namespace-scoped Custom Resource Definitions (CRDs) follows, in the same admission-lifecycle order introduced in [§5.2](#resource-model): discovery first, then the template and robot objects, then the task and zone resources a robot operates within, then the health and update management resources that govern it over time. For reading guidance by audience, CRD dependencies, and the v0.3 maturity table, see [§5.2](#resource-model).
 
 ---
 
@@ -829,8 +1022,49 @@ The full normative schema for each of Swarmada's thirteen namespace-scoped Custo
 
 A `RobotClass` is a namespace-scoped template resource that captures the shared hardware inventory, default inference models, base capabilities, and operational defaults common to all robots of the same physical type in a fleet. When a `Robot` resource references a `RobotClass` via `spec.robotClass`, the admission controller merges the class fields into the `Robot` spec before the object is persisted — eliminating the need to repeat identical declarations across every unit. Per-robot overrides are always possible: any field declared directly on `Robot.spec` takes precedence over the inherited value, allowing individual units to diverge from the class template where hardware varies between units (a slightly different camera SKU, a load cell recalibrated to a lower payload limit, a missing optional component). Use `RobotClass` whenever two or more robots share the same physical configuration; a fleet of one does not benefit from it.
 
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. An implementation conforming to this RFC provides the `RobotClass` type and its controller: the declarative `hardware[]`, `defaultModels[]`, `baseCapabilities[]`, `defaultConstraints`, `defaultChargingConfig` and `defaultTelemetry` blocks, and the admission-time merge onto `Robot` ([§9.1.1.5](#robotclass-relationship-to-discoveredrobot)) that gives a newly admitted robot its class defaults. **`defaultConstraints.minBatteryPctForAction` is schema-only at v0.3:** it is validated, merged onto the `Robot` at admission, and read by nothing. The Scheduler ([§9.3.2](#control-plane-scheduler)) applies no battery filter at all — it only ranks already-eligible robots battery-descending as a tiebreaker — so a class declaring a floor of 20 will still have its robots assigned actions at 5% ([§4](#non-goals) item 16). **Three merge behaviours specified below are not implemented at v0.3, and the first is admission-breaking:**
+> `manufacturer` and `model` are class-inherited: the merge assigns each where the `Robot` leaves it empty,
+> so a `Robot` relying on its class for identity is admitted rather than rejected on `MinLength`.
+> `constraints.*` and `charging.*` are per-field scalar merges, as are `adapter.*` and `defaultTelemetry`;
+> a `Robot` that sets one sub-field (a per-unit `charging.dockName`, say) keeps every other class-supplied
+> value in that block. One consequence to expect from per-field charging inheritance: a `Robot`-set
+> `minBatteryPctToCharge` combined with a class-supplied `targetBatteryPct` can fail the
+> `RobotChargingConfig` CEL rule (`targetBatteryPct` must exceed `minBatteryPctToCharge`) at admission. That
+> is an inconsistent declaration failing closed, where whole-block inheritance discarded the class value
+> silently. **One merge gap remains:** on the `swarmctl admit` path only, the three
+> `defaultTelemetry` scalars are overwritten from the class unconditionally rather than filled where unset.
+> **`status.conditions[]`** with a `Ready` type and `ClassResolved` reason is specified below and written by
+> no v0.3 controller; the controller writes only `status.referencingRobots` and `status.observedGeneration`.
+> The **protocol profile** declared beside `spec.baseAdapter` is **not** specified at v0.3 and is a
+> deliberate reserved surface (ADR-0037); the axes table below describes where it will sit, and no field
+> carries it today.
+
+<a id="robotclass-axes-of-declaration"></a>
+##### 9.1.1.1 Axes of declaration
+
+A `RobotClass` carries five distinct kinds of statement about a robot model, and a field belongs to exactly one of them. The axes differ in the only property a controller acts on — what states each can be in — so placing a field on the wrong axis gives it activation semantics it cannot honour.
+
+| Axis | Where it is declared | States | Answers |
+| :--- | :------------------- | :----- | :------ |
+| Hardware component | `spec.hardware[]` | present or absent | What is bolted to it? |
+| Capability | `spec.baseCapabilities[]` | active, degraded or inactive, derived from hardware health and model state | What can it be asked to do? |
+| Inference model | `spec.defaultModels[]` | deployed or not deployed | What grants an ability hardware alone does not? |
+| Adapter binding | `spec.baseAdapter` | connected or not connected | Which running process talks to it? |
+| Protocol profile | reserved — see below | declared or undeclared | What language is it addressed in on the wire? |
+
+`spec.manufacturer` and `spec.model` are identity rather than declaration, and `defaultTelemetry`, `defaultConstraints` and `defaultChargingConfig` are operational defaults; neither group is an axis.
+
+Applied to the four cases that are actually conflated:
+
+- **A gripper is hardware; picking is a capability.** A `Gripper` entry in `spec.hardware[]` is a part. `item-pick.collaborative` in `spec.baseCapabilities[]` is an ability that *lists* that part in its `requiredHardware`. Removing the part does not delete the capability; it makes it inactive. The schedulable surface is capabilities, never `hardware[]`.
+- **A model grants capabilities and is not one.** `item-recognition-v3` is an artefact; `item-pick.ai-guided` is the ability it grants. A task requests the capability, and the model is one possible source of it, so a scheduling predicate written over model names breaks the moment the same capability is served by a different model version.
+- **An adapter binding is not a protocol profile.** `spec.baseAdapter` names a running process; a protocol profile names the standard that process translates. The cardinality differs in both directions: one adapter build may translate several protocol profiles, and one protocol profile may be translated by several adapter builds.
+- **A protocol profile is not a capability, and is not declared in `spec.baseCapabilities[]`.** Every field of a class capability is inapplicable to a wire protocol: `type` admits only `hardware-native`, `model-driven` or `manual`; `pauseable`, `requiredHardware` and `providingModel` have no meaning for a protocol; and a capability's defining property is that it is active or inactive as a function of hardware health ([§6.10.1](#design-details-hardware-native-capabilities)), which a protocol never is. Capabilities state what a robot can do; a protocol profile states what language it is addressed in.
+
+> **Future seam.** A protocol-profile declaration on `RobotClass` — recording, beside `spec.baseAdapter`, the external standard robots of this class speak — is **not** specified at v0.3 and is a deliberate future seam, as is its counterpart on `FleetAdapter` ([§9.1.13](#fleetadapter)). A protocol profile is recorded and never enforced: nothing in the control plane compares a class's declaration with the serving adapter's, and a mismatch raises no condition, no event, and no status message. Whether a class may declare more than one is left open.
+
 <a id="robotclass-schema"></a>
-##### 9.1.1.1 Schema
+##### 9.1.1.2 Schema
 
 ```yaml
 # +kubebuilder:object:root=true
@@ -856,7 +1090,7 @@ spec:
   # +kubebuilder:validation:Required
   # +kubebuilder:validation:MinLength=1
   model: acme-picker       # manufacturer's model name; informational but indexed
-                               # for filtering (swarmctl get robot --model acme-picker)
+                               # for filtering (`kubectl get robots -l swarmada.io/model=acme-picker`)
   # ---------------------------------------------------------------------------
   # Fleet Adapter that manages all robots of this class by default.
   # A Robot referencing this class inherits this adapter configuration.
@@ -883,7 +1117,9 @@ spec:
   # +kubebuilder:validation:Required
   # +kubebuilder:validation:MinItems=1
   hardware:
-    - name: lidar-360
+    - # +kubebuilder:validation:MinLength=1
+      # +kubebuilder:validation:MaxLength=128
+      name: lidar-360
       # +kubebuilder:validation:Enum=Lidar;Camera;Gripper;LoadPlatform;Arm;Thermal;Microphone;Display;Custom
       type: Lidar
       model: "SICK TIM551"
@@ -917,20 +1153,29 @@ spec:
       # Robot resources after the ModelRollout completes.
       # +kubebuilder:validation:Required
       # +kubebuilder:validation:MinLength=1
+      # +kubebuilder:validation:MaxLength=128
       name: item-recognition-v3
       # +kubebuilder:validation:Required
       # +kubebuilder:validation:Pattern=`^\d+\.\d+\.\d+$`
       version: "3.2.1"
       # URI from which the Robot Agent fetches the model artifact.
+      # Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
+      # validated identically wherever it is declared (RFC-0001 D3).
       # +kubebuilder:validation:Required
+      # +kubebuilder:validation:MinLength=1
+      # +kubebuilder:validation:Pattern=`^(oci|s3|https)://`
       modelUri: "oci://registry.swarmada.io/models/item-recognition:3.2.1"
       # Hardware components that must be Healthy for this model to run.
+      # MaxItems bounds CEL evaluation cost.
       # +kubebuilder:validation:Optional
+      # +kubebuilder:validation:MaxItems=32
       requiredHardware:
         - camera-front
       # Capabilities unlocked when this model is Active.
       # These are merged into the admitted Robot's spec.capabilities[].
+      # MaxItems bounds CEL evaluation cost.
       # +kubebuilder:validation:Optional
+      # +kubebuilder:validation:MaxItems=32
       grantsCapabilities:
         - item-pick.ai-guided
   # ---------------------------------------------------------------------------
@@ -941,11 +1186,15 @@ spec:
   # +kubebuilder:validation:Optional
   baseCapabilities:
     - # +kubebuilder:validation:Required
+      # +kubebuilder:validation:MinLength=1
+      # +kubebuilder:validation:MaxLength=128
       name: navigation.2d
       # +kubebuilder:validation:Enum=hardware-native;model-driven;manual
       type: hardware-native
       # +kubebuilder:default=true
       pauseable: true
+      # MaxItems bounds CEL evaluation cost.
+      # +kubebuilder:validation:MaxItems=32
       requiredHardware:
         - lidar-360
     - name: transport.payload
@@ -972,6 +1221,7 @@ spec:
       pauseable: true
       requiredHardware:
         - camera-front
+      # +kubebuilder:validation:MaxLength=128
       providingModel: item-recognition-v3
     - name: item-pick.collaborative
       type: hardware-native
@@ -1014,7 +1264,9 @@ spec:
   defaultConstraints:
     # +kubebuilder:validation:Minimum=0
     maxPayloadKg: 45.0
-    # Robot will not accept task assignments below this battery threshold.
+    # SPECIFIED: the battery floor below which the robot is not given new task
+    # assignments. SCHEMA-ONLY at v0.3 -- no controller reads it and the Scheduler
+    # does not filter on battery at all, so setting it changes nothing.
     # +kubebuilder:validation:Minimum=0
     # +kubebuilder:validation:Maximum=100
     minBatteryPctForAction: 20
@@ -1051,7 +1303,7 @@ status:
 ```
 
 <a id="robotclass-inheritance-and-merge-behavior"></a>
-##### 9.1.1.2 Inheritance and Merge Behavior
+##### 9.1.1.3 Inheritance and Merge Behavior
 
 When a `Robot` resource declares `spec.robotClass`, the admission controller resolves the named `RobotClass` in the same namespace and merges its fields into the `Robot` spec before the object is persisted. The merge follows these rules:
 
@@ -1142,7 +1394,7 @@ spec:
 ```
 
 <a id="robotclass-robotclass-update-behavior"></a>
-##### 9.1.1.3 RobotClass Update Behavior
+##### 9.1.1.4 RobotClass Update Behavior
 
 Updating a `RobotClass` resource **does not automatically update existing `Robot` resources** that reference it. The merge is performed once, at admission time, and the resolved spec is persisted on the `Robot` object. After that point the `Robot` is self-contained; it does not track its class for ongoing reconciliation.
 
@@ -1152,29 +1404,30 @@ This is intentional. Silently propagating a class change to dozens or hundreds o
 # To apply a class update to existing robots, re-admit them one at a time
 # (or in a batch) using swarmctl. Each re-admission triggers a fresh merge.
 swarmctl admit robot amr-acme-007 --class acme-picker-v2 --force
-# To roll out a class change to all robots of this class in a controlled way:
-swarmctl robotclass rollout acme-picker-v2 --strategy RollingUpdate   --max-concurrent 5
+# Controlled, batched roll-out of a class change is NOT specified at v0.3: the
+# `RobotClassRollout` resource below is the future vehicle, and no strategy or
+# concurrency control exists today. Re-admission is one robot at a time.
 ```
 
 A `RobotClassRollout` resource (planned for a future RFC; out of scope for RFC-0001) will re-admit robots in batches, respecting zone maintenance windows and in-progress task drains. Until that RFC is accepted, operators should re-admit robots individually or use a scripted loop over `swarmctl admit robot --force`. This is the recommended interim path for class-wide configuration changes.
 
 <a id="robotclass-relationship-to-discoveredrobot"></a>
-##### 9.1.1.4 Relationship to DiscoveredRobot
+##### 9.1.1.5 Relationship to DiscoveredRobot
 
 When the Fleet Adapter detects a new physical robot on the network, it creates a `DiscoveredRobot` resource containing the hardware inventory and capabilities reported by the robot's onboard software. This is a staging object — it is not schedulable. An operator promotes a `DiscoveredRobot` to a full `Robot` using `swarmctl admit robot`:
 
 ```bash
-swarmctl admit robot amr-acme-042   --from-discovered discovered-acme-a3f9   --robot-class acme-picker-v2   --zone zone-aisle-c1   --dock dock-42
+swarmctl admit robot discovered-acme-a3f9   --name amr-acme-042   --class acme-picker-v2   --zone zone-aisle-c1   --dock dock-42
 ```
 
 At admission, the controller performs the following merge resolution in order:
 
 1. **Start with the `DiscoveredRobot` hardware report** as the base. The Fleet Adapter's reported hardware is the ground truth for what is physically present.
-2. **Merge `RobotClass` fields** using the union-by-name rules in [§9.1.1.2](#robotclass-inheritance-and-merge-behavior). Class entries whose names do not appear in the `DiscoveredRobot` report are added; class entries whose names do appear are overridden by the discovered values (the real hardware wins over the class template).
+2. **Merge `RobotClass` fields** using the union-by-name rules in [§9.1.1.3](#robotclass-inheritance-and-merge-behavior). Class entries whose names do not appear in the `DiscoveredRobot` report are added; class entries whose names do appear are overridden by the discovered values (the real hardware wins over the class template).
 3. **Apply any explicit operator overrides** passed as flags to `swarmctl admit robot`. These take final precedence over both the discovered values and the class template.
-4. **Apply `--zone` and `--dock`** from the admit command — these are always required at admission and are never inherited from the class.
+4. **Apply `--zone` and, if given, `--dock`** from the admit command — `--zone` is required at admission; `--dock` is optional and, like `--zone`, is never inherited from the class. When `--dock` is omitted, `spec.charging.dockName` is left unset and must be assigned post-admit ([§9.1.2.5](#discoveredrobot-controller-behavior-on-admit)).
 
-The result is a `Robot` spec that reflects real hardware (not just the class template), enriched with the class's model and capability declarations, and pinned to a specific zone and dock by the operator.
+The result is a `Robot` spec that reflects real hardware (not only the class template), enriched with the class's model and capability declarations, and pinned to a specific zone and dock by the operator.
 
 **Example — DiscoveredRobot with a hardware discrepancy:**
 
@@ -1209,7 +1462,7 @@ hardware:
 ```
 
 <a id="robotclass-worked-example-warehouse-picker-robotclass"></a>
-##### 9.1.1.5 Worked Example — Warehouse Picker RobotClass
+##### 9.1.1.6 Worked Example — Warehouse Picker RobotClass
 
 A complete, production-ready `RobotClass` for the Acme acme-picker picker, with all four hardware components, one default object-detection model, and the full capability set derived from that hardware and model combination.
 
@@ -1309,7 +1562,8 @@ spec:
       requiredHardware: []     # heartbeat is network-layer; not tied to a single component
   defaultConstraints:
     maxPayloadKg: 45.0
-    minBatteryPctForAction: 20   # refuse task assignment below 20% battery
+    minBatteryPctForAction: 20   # SPECIFIED to refuse task assignment below 20%
+                                 # battery; not enforced at v0.3 (see Maturity)
     maxSpeedMs: 1.8            # maximum commanded speed; Fleet Adapter enforces this
   defaultChargingConfig:
     minBatteryPctToCharge: 15  # initiate autonomous docking below 15%
@@ -1321,6 +1575,28 @@ spec:
 
 <a id="discoveredrobot"></a>
 #### 9.1.2 DiscoveredRobot
+
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. The Discover/Register
+> handler, the two-phase state machine, `swarmctl admit`/`swarmctl delete robot --reason`, and the admission
+> merge order below are implemented as specified. **Five behaviours described in this chapter are specified,
+> not implemented at v0.3, and an implementer should read the naming and TTL sections against this list:**
+> (1) the `dr-`-prefixed name derivation below — lowercasing, invalid-character replacement, 63-character
+> truncation and the `-<hash8>` collision suffix — does not run. The registrar requires `robot_id` to
+> **already be a DNS-1123 subdomain**, rejects anything else with `INVALID_ROBOT_ID`, and uses the value
+> verbatim as the object name, so a colon-bearing vendor serial is not discoverable at v0.3.
+> (2) `status.lastAnnouncedAt` is never written. The TTL is anchored on `connectedAt`, which is **rewritten
+> on every announce**, so the liveness-lease framing below describes the target and not the shipped
+> behaviour. (3) `DiscoverAck.ttl_seconds` is never populated, so an adapter reads `0`, treats the TTL as
+> disabled and re-announces on its 60-second fallback regardless of `discoveredRobotTTLMinutes`; setting
+> that field to `0` restores the 30-minute default rather than disabling the TTL. (4) The Case 1b
+> adapter-ownership conflict check does not run: a same-`robot_id` announce from a **different** adapter is
+> accepted and overwrites the record's adapter address, version and suggested class, rather than being
+> refused `ALREADY_EXISTS`. Operators running more than one adapter in a namespace should treat `robot_id`
+> uniqueness as their own invariant at v0.3. (5) `Register` validation steps 2–5 do not run: `adapter_version`,
+> `firmware_version` and `reported_hardware` are ignored, so the major-version rejection **fails open** and
+> the `FirmwareVersionMismatch`, `HardwareDiscrepancy` and `HardwareUnknown` events are not emitted.
+> (Contract-version gating does happen, one layer up, on the `ControlStream` handshake — that is a different
+> check from the per-`Register` one specified here.) **One gap is a wire-protocol limitation, not a controller gap:** eleven `HardwareComponent` attributes have no field on the wire's `HardwareComponent` message — `maxGripForceN`, `strokeMm`, `reachMm`, `degreesOfFreedom`, `resolutionH`, `resolutionV`, `tempRangeMinC`, `tempRangeMaxC`, `channels`, `sampleRateHz`, `touchCapable` — so a Fleet Adapter cannot report them at discovery time even though the eight numeric attributes it can carry (`maxPayloadKg`, `resolutionMp`, `rangeM`, `horizontalFovDeg`, `depthCapable`, `frameRateFps`, `platformLengthMm`, `platformWidthMm`) are carried on the wire with explicit presence. **Five of those eight round-trip losslessly into `Robot.spec.hardware[]`; three do not.** The wire types `frameRateFps`, `platformLengthMm` and `platformWidthMm` as `double`, and `status.reportedHardware[]` stores them as such, but `Robot.spec.hardware[]` types them as 32-bit integers — so admission NARROWS them: the value is rounded (a camera reporting `29.97` fps is admitted as `30`), and a NaN or out-of-range reading is dropped to unset rather than admitted wrong, making the attribute vanish silently. Explicit presence is preserved in both directions; the precision is not. An operator who needs the fractional value must read `status.reportedHardware[]` on the `DiscoveredRobot` rather than the admitted `Robot`. Widening the three `Robot.spec.hardware[]` fields to match the wire is tracked as a follow-up; the CRDs are `alpha` and the change is additive for stored objects. A robot with a gripper, an articulated arm, or a component whose relevant attribute is one of the eleven will show that component in `status.reportedHardware[]` with the attribute unset, and an operator declaring it in `Robot.spec.hardware[]` post-admit must supply the value manually. This is an additive proto change, not something the controller needs to change to close.
 
 <a id="discoveredrobot-the-two-phase-discovery-model"></a>
 ##### 9.1.2.1 The Two-Phase Discovery Model
@@ -1351,6 +1627,9 @@ kind: DiscoveredRobot
 metadata:
   # Auto-generated by the API Server from robot_id ONLY. MAC is never
   # used for naming or identity. Format: dr-<sanitised-robot-id>.
+  # SPECIFIED, NOT IMPLEMENTED at v0.3: no sanitisation runs. robot_id must
+  # ALREADY be a DNS-1123 subdomain and is used verbatim as metadata.name;
+  # anything else is rejected INVALID_ROBOT_ID. See the Maturity note.
   # Sanitisation: lowercased; characters invalid in a Kubernetes name are
   # replaced with hyphens; the result is truncated to 63 characters.
   # If the sanitised name collides with an existing DiscoveredRobot whose
@@ -1525,14 +1804,14 @@ status:
 | :---- | :---- | :---- |
 | *(first discover (announce) received)* | Discovered | API Server creates DiscoveredRobot |
 | Discovered | *(Robot CRD created; DiscoveredRobot deleted)* | Operator runs `swarmctl admit` |
-| Discovered | *(DiscoveredRobot deleted)* | Operator runs `swarmctl reject` |
+| Discovered | *(DiscoveredRobot deleted)* | Operator runs `swarmctl delete robot <name> --reason` |
 | Discovered | Stale | TTL timestamp passes with no operator action |
 | Stale | *(DiscoveredRobot deleted)* | Zone Controller runs TTL deletion |
 | Stale | *(Robot CRD created; DiscoveredRobot deleted)* | Operator admits before deletion runs |
 | Discovered | Discovered *(refresh)* | Owning adapter re-announces (idempotent discover, [§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1a): `lastAnnouncedAt` and `ttlExpiresAt` updated; no new object created |
 | Stale | Discovered | Owning adapter re-announces before the TTL deletion runs: lease renewed, scheduled deletion cancelled |
 
-**TTL is a liveness lease.** `ttlExpiresAt` is measured from `lastAnnouncedAt`, not from `connectedAt`. The owning Fleet Adapter re-announces every unadmitted robot at an interval ≤ TTL/2 as part of its provisioning loop ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)), so a robot that is still connected and reachable never expires — the operator's DiscoveredRobot list is exactly the set of currently-reachable, unadmitted robots. Expiry therefore means the adapter stopped vouching for the robot (robot disconnected, or adapter dead), and the Stale→deletion path is garbage collection, not a review deadline. Re-announces are idempotent upserts keyed on `robotId` ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1a); they never create a second object and never reset `connectedAt`.
+**TTL is a liveness lease.** `ttlExpiresAt` is measured from `lastAnnouncedAt`, not from `connectedAt`. The owning Fleet Adapter re-announces every unadmitted robot at an interval ≤ TTL/2 as part of its provisioning loop ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)), so a robot that is still connected and reachable never expires — the operator's DiscoveredRobot list is exactly the set of reachable, unadmitted robots. Expiry therefore means the adapter stopped vouching for the robot (robot disconnected, or adapter dead), and the Stale→deletion path is garbage collection, not a review deadline. Re-announces are idempotent upserts keyed on `robotId` ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1a); they never create a second object and never reset `connectedAt`.
 
 There is no `Rejected` phase object — rejection immediately deletes the `DiscoveredRobot`. The rejection reason is recorded as a Kubernetes Event on the namespace, not persisted in the object (which no longer exists).
 
@@ -1575,9 +1854,9 @@ swarmctl describe robot dr-acme-amr-sn-00291847 -n warehouse-a
 #   item-pick.collaborative, inspection.visual, estop.receive
 # Admit a DiscoveredRobot, creating a Robot CRD.
 # --zone is required (must be a leaf FleetZone in the same namespace).
-# --robot-class is optional; if provided, the Robot inherits class fields.
+# --class is optional; if provided, the Robot inherits class fields.
 # --name overrides the auto-generated Robot name (default: strip "dr-" prefix).
-swarmctl admit robot dr-acme-amr-sn-00291847   --zone zone-aisle-b3   --robot-class acme-picker-v2   --name amr-acme-007   -n warehouse-a
+swarmctl admit robot dr-acme-amr-sn-00291847   --zone zone-aisle-b3   --class acme-picker-v2   --name amr-acme-007   -n warehouse-a
 # OUTPUT:
 # Robot 'amr-acme-007' created in namespace warehouse-a.
 # Zone: zone-aisle-b3
@@ -1586,7 +1865,7 @@ swarmctl admit robot dr-acme-amr-sn-00291847   --zone zone-aisle-b3   --robot-cl
 #
 # Next steps:
 #   kubectl get robot amr-acme-007 -n warehouse-a   # verify Robot CRD
-#   swarmctl set charging amr-acme-007 --dock dock-07  # assign charging dock
+#   kubectl patch robot amr-acme-007 --type merge -p '{"spec":{"charging":{"dockName":"dock-07"}}}'
 # Reject a DiscoveredRobot, deleting it without creating a Robot CRD.
 # --reason is optional but strongly recommended for audit trail.
 swarmctl delete robot dr-acme-amr-sn-00291901   --reason "Stale entry from yesterday's test run. Not a production robot."   -n warehouse-a
@@ -1598,11 +1877,11 @@ swarmctl delete robot dr-acme-amr-sn-00291901   --reason "Stale entry from yeste
 <a id="discoveredrobot-controller-behavior-on-admit"></a>
 ##### 9.1.2.5 Controller Behavior on Admit
 
-When `swarmctl admit` is invoked, the admission controller constructs the new `Robot` CRD spec using the following merge order (same as [§9.1.1.4](#robotclass-relationship-to-discoveredrobot), repeated here for completeness):
+When `swarmctl admit` is invoked, the admission controller constructs the new `Robot` CRD spec using the following merge order (same as [§9.1.1.5](#robotclass-relationship-to-discoveredrobot), repeated here for completeness):
 
 **Step 1 — Base: DiscoveredRobot reported hardware** `status.reportedHardware[]` from the `DiscoveredRobot` is the ground truth for what is physically present. It becomes the starting point for `Robot.spec.hardware[]`.
 
-**Step 2 — Merge: RobotClass fields (if `--robot-class` is provided)** `RobotClass.spec.hardware[]` entries are merged with the reported hardware using union-by-name. For any component name that appears in both:
+**Step 2 — Merge: RobotClass fields (if `--class` is provided)** `RobotClass.spec.hardware[]` entries are merged with the reported hardware using union-by-name. For any component name that appears in both:
 
 - the `DiscoveredRobot`'s reported entry wins (real hardware over class template)
 
@@ -1612,7 +1891,8 @@ RobotClass `defaultModels[]`, `baseCapabilities[]`, `defaultConstraints`, and `d
 
 - `--zone` → `Robot.spec.zone` (required)
 - `--name` → `Robot.metadata.name` (optional; default: strip `dr-` prefix from DiscoveredRobot name)
-- `--robot-class` → `Robot.spec.robotClass` (optional)
+- `--class` → `Robot.spec.robotClass` (optional)
+- `--dock` → `Robot.spec.charging.dockName` (optional; if given, sets the dock at admission — see Step 4 for the case where it is omitted)
 
 **Step 3a — Resolve `constraints.maxPayloadKg` against the merged hardware** The payload cap is the number the Scheduler consults at dispatch, so it is reconciled with the hardware resolved in Steps 1-2 rather than taken from the class unexamined:
 
@@ -1623,13 +1903,13 @@ RobotClass `defaultModels[]`, `baseCapabilities[]`, `defaultConstraints`, and `d
 
 Capacity is the largest single rated component, never the sum: two 40 kg platforms are not an 80 kg robot unless a load can be split across both, which this specification does not establish.
 
-**Step 4 — Fields requiring post-admit operator action** These fields are NOT populated at admit time and must be set before the robot is fully operational:
+**Step 4 — Fields left for post-admit operator action when not supplied at admit time**
 
-| Field | Why not set at admit | How to set |
+| Field | Why not always set at admit | How to set |
 | :---- | :---- | :---- |
-| `spec.charging.dockName` | Docks are physical assignments; unknown at admit | `swarmctl set charging <robot> --dock <dock>` |
-| `spec.maintenanceWindow` | Schedule is facility-specific; no default | `kubectl patch robot <name> --patch ...` |
-| `spec.constraints.maxSpeedMs` | May differ from class default for this unit | Direct `Robot` spec edit if needed |
+| `spec.charging.dockName` | Set at admission only if `--dock` is given ([§9.1.2.4](#discoveredrobot-the-swarmctl-commands)); docks are physical assignments, often unknown at admit | `swarmctl admit ... --dock <dock>`, or `kubectl patch robot <name> … "dockName"` afterward |
+| `spec.maintenanceWindow` | Schedule is facility-specific; no default; no admit-time flag | `kubectl patch robot <name> --patch ...` |
+| `spec.constraints.maxSpeedMs` | May differ from class default for this unit; no admit-time flag | Direct `Robot` spec edit if needed |
 
 **Fields copied automatically:**
 
@@ -1642,7 +1922,8 @@ Capacity is the largest single rated component, never the sum: two 40 kg platfor
 | `status.reportedHardware[]` | `spec.hardware[]` (base, before class merge) |
 | `status.reportedModels[]` | `spec.installedModels[]` (for models not in RobotClass.defaultModels) |
 | `--zone` flag | `spec.zone` |
-| `--robot-class` flag | `spec.robotClass` |
+| `--class` flag | `spec.robotClass` |
+| `--dock` flag, when given | `spec.charging.dockName` |
 
 **What is NOT copied:** `status.reportedCapabilities[]` from the `DiscoveredRobot` are informational only. The new `Robot.spec.capabilities[]` is derived from the `RobotClass.baseCapabilities[]` (if a class is provided) or must be declared explicitly by the operator. The Fleet Adapter's self-reported capability list is advisory — Swarmada's capability model (hardware-native / model-driven / manual, with `pauseable` and `requiredHardware`) has more structure than the flat list the Fleet Adapter reports.
 
@@ -1653,7 +1934,7 @@ T+0        swarmctl admit: Robot CRD created; DiscoveredRobot deleted.
 T+≤I       Adapter's provisioning loop retries register.
            RegisterAck.accepted = true → Robot.status.phase → Discovered.
 T+≤I+10s   First TelemetryPayload — FULL snapshot ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)).
-           Health Monitor populates status.hardware[]; Capability Controller
+           Telemetry populates status.hardware[]; the Robot reconciler
            derives status.capabilities[].
            Robot.status.phase → Idle after the first successful telemetry/
            heartbeat (same trigger as the [§9.1.2.7](#discoveredrobot-re-connection-flow-registerrobot) reconnect path), provided
@@ -1661,15 +1942,15 @@ T+≤I+10s   First TelemetryPayload — FULL snapshot ([§9.2.8](#fleet-adapter-
            Scheduler eligibility begins here, subject to the full filter
            phase ([§9.3.2](#control-plane-scheduler)), including adapter Connected/Conformant.
 Post-admit operator actions (Step 4 above) complete the setup:
-           swarmctl set charging <robot> --dock <dock>
+           kubectl patch robot <robot> --type merge -p '{"spec":{"charging":{"dockName":"<dock>"}}}'
            maintenance window / per-unit constraints as needed.
 ```
 
 Worst-case admit-to-registered latency is one provisioning-loop interval ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)); operators who need faster pickup tighten it via `discoveredRobotTTLMinutes`.
 
-**`swarmctl set charging` semantics.** The command is sugar for a spec patch — `kubectl patch robot <name> --type merge -p '{"spec":{"charging":{"dockName":"<dock>"}}}'` — and carries no special privileges. Validation happens at write time: the admission webhook ([§9.1.3.3](#robot-field-validation-rules) rule 6) rejects a `dockName` that does not reference a `ChargingDock` shared resource declared in the robot's `spec.zone` FleetZone or any ancestor; the CLI surfaces the rejection message verbatim.
+**Charging-dock assignment semantics.** Assigning a dock is a spec patch — `kubectl patch robot <name> --type merge -p '{"spec":{"charging":{"dockName":"<dock>"}}}'` — and carries no special privileges. Validation happens at write time: the admission webhook ([§9.1.3.4](#robot-field-validation-rules) rule 6) rejects a `dockName` that does not reference a `ChargingDock` shared resource declared in the robot's `spec.zone` FleetZone or any ancestor; the CLI surfaces the rejection message verbatim.
 
-**Behaviour with no charging dock assigned.** A Robot with empty `spec.charging.dockName` does NOT auto-dock — there is no dock target. When a battery reading crosses `spec.charging.minBatteryPctToCharge` while `dockName` is empty, the Health Monitor emits a `ChargingDockUnassigned` Warning event on the Robot ([§9.3.3](#control-plane-health-monitor)), and the Robot reconciler maintains a `ChargingConfigured` condition (`False`, reason `NoDockAssigned`, while `dockName` is empty — [§9.1.3.1](#robot-schema)). The Scheduler's behaviour is unchanged: the `minBatteryPctForAction` filter ([§9.3.2](#control-plane-scheduler)) is the only automatic guard, so an undocked, draining robot stops receiving tasks and then sits idle until an operator assigns a dock or charges it manually. This state is deliberate and visible, not undefined.
+**Behaviour with no charging dock assigned.** A Robot with empty `spec.charging.dockName` does NOT auto-dock — there is no dock target. When a battery reading crosses `spec.charging.minBatteryPctToCharge` while `dockName` is empty, a `ChargingDockUnassigned` Warning event is specified on the Robot — **not emitted at v0.3** ([§9.3.3](#control-plane-robot-health-and-connectivity)), and a `ChargingConfigured` condition (`False`, reason `NoDockAssigned`, while `dockName` is empty) is specified on the Robot — also **written by no v0.3 controller** ([§9.1.3.1](#robot-schema)). The Scheduler's behaviour is unchanged, and **there is no automatic guard at v0.3**: `minBatteryPctForAction` ([§9.3.2](#control-plane-scheduler)) is specified but not read by any controller, so an undocked, draining robot keeps receiving tasks until its battery is exhausted or an operator intervenes — it does not stop receiving tasks or sit idle on its own. This gap is deliberate to disclose, not deliberate behaviour: see [§4](#non-goals) item 16.
 
 <a id="discoveredrobot-conflict-handling-duplicate-robot-id"></a>
 ##### 9.1.2.6 Conflict Handling: Duplicate robot_id
@@ -1678,7 +1959,7 @@ Worst-case admit-to-registered latency is one provisioning-loop interval ([§9.2
 
 When a Fleet Adapter sends a `discover` message, the API Server checks for an existing resource with the same `robot_id` in the same namespace:
 
-**Case 1a: Same adapter re-announces the same `robot_id`.** Idempotent upsert — the normal provisioning-loop path, not an error. The API Server matches the caller's stream identity ([§9.2.7](#fleet-adapter-protocol-transport-security)) against the existing object's owning adapter, then: updates `lastAnnouncedAt`, extends `ttlExpiresAt`, updates reported hardware/model/capability fields if they changed, cancels any pending Stale deletion (phase Stale → Discovered), and returns an accepted `DiscoverAck` carrying the effective `ttl_seconds`. `connectedAt` is never reset. No second object is created.
+**Case 1a: Same adapter re-announces the same `robot_id`.** Idempotent upsert — the normal provisioning-loop path, not an error. The API Server matches the caller's stream identity ([§9.2.7](#fleet-adapter-protocol-transport-security)) against the existing object's owning adapter, then: updates `lastAnnouncedAt`, extends `ttlExpiresAt`, updates reported hardware/model/capability fields if they changed, cancels any pending Stale deletion (phase Stale → Discovered), and returns an accepted `DiscoverAck` carrying the effective `ttl_seconds`. `connectedAt` is never reset. No second object is created. **Four details of this paragraph are specified, not implemented at v0.3** (see the Maturity note): the owning-adapter match does not run, `lastAnnouncedAt` is not written, `connectedAt` **is** reset on every announce and is what the TTL is anchored on, and `ttl_seconds` is not populated on the ack. The upsert, the TTL extension, the inventory refresh and the Stale cancellation all work as described.
 
 **Case 1b: A *different* adapter announces the same `robot_id`.** Conflict — the API Server returns an error:
 
@@ -1687,25 +1968,34 @@ ALREADY_EXISTS: DiscoveredRobot 'dr-acme-amr-sn-00291847' already exists
 in namespace 'warehouse-a' for robot_id 'LOCUS:AMR:SN-00291847' and is owned
 by adapter 'acme-fleet-adapter'.
 Reject the existing DiscoveredRobot if this adapter is the legitimate owner.
+# SPECIFIED, NOT IMPLEMENTED at v0.3: no adapter-ownership comparison runs, so
+# the refusal above does not happen. The second adapter's announce is ACCEPTED
+# and silently overwrites the record's adapter address, adapter version and
+# suggested class. Treat robot_id uniqueness across adapters as your own
+# invariant until this lands. See the Maturity note.
 ```
 
 This is the Case 4 misconfiguration; the operator must resolve which adapter legitimately controls the robot.
 
-**Case 2: A `Robot` CRD with the same `robot_id` already exists (`metadata.annotations[swarmada.io/robot-id]` matches).** This is a re-connection of an already-admitted robot. The API Server returns an error instructing the Fleet Adapter to use `RegisterRobot` instead of `Discover`:
+**Case 2: A `Robot` CRD with the same `robot_id` already exists.** This is a re-connection of an already-admitted robot. The refusal is **in band** — gRPC status codes are reserved for connection-level faults ([§9.2.4](#fleet-adapter-protocol-in-band-error-model)) — so the API Server answers a `DiscoverAck` instructing the Fleet Adapter to use `RegisterRobot` instead:
 
 ```text
-FAILED_PRECONDITION: Robot 'amr-acme-007' in namespace 'warehouse-a' already
-exists for robot_id 'LOCUS:AMR:SN-00291847'. Use a register (RegisterRobot) message to reconnect
-an already-admitted robot, not discover.
+DiscoverAck{
+  accepted:  false,
+  rejection: ALREADY_EXISTS,
+  message:   "robot is already admitted; reconnect via Register",
+}
 ```
+
+The match is on the Robot object's **name** at v0.3, not on `metadata.annotations[swarmada.io/robot-id]` as this section previously stated — so a Robot renamed at admission with `swarmctl admit --name` is not found here, and a duplicate `DiscoveredRobot` is created instead. The duplicate-chassis guard in [§9.1.3.4](#robot-field-validation-rules) rule 7 is what catches that case.
 
 See [§9.1.2.7](#discoveredrobot-re-connection-flow-registerrobot) for the `RegisterRobot` flow.
 
 **Case 3: Same `robot_id`, different namespace.** No conflict. `DiscoveredRobot` and `Robot` resources are namespace-scoped; the same physical robot may legitimately appear in a staging namespace and a production namespace during migration. The Swarmada API Server does not enforce cross-namespace robot_id uniqueness.
 
-**Case 4: Two Fleet Adapters in the same namespace claim the same `robot_id`.** This is a misconfiguration. The first `discover` succeeds; the second returns `ALREADY_EXISTS` (Case 1b). The operator must investigate which Fleet Adapter has legitimate control of the robot and reject the spurious `DiscoveredRobot` if the first call was from the wrong adapter.
+**Case 4: Two Fleet Adapters in the same namespace claim the same `robot_id`.** This is a misconfiguration. The first `discover` succeeds; the second is specified to return `ALREADY_EXISTS` (Case 1b). The operator must investigate which Fleet Adapter has legitimate control of the robot and reject the spurious `DiscoveredRobot` if the first call was from the wrong adapter. **Specified, not implemented at v0.3, and this one does not fail safe:** the second announce is accepted and the record's adapter binding flips to the second adapter, silently. The misconfiguration is therefore **not** self-detecting at v0.3 — it surfaces only as a `DiscoveredRobot` whose `status.adapterAddress` changes, and an auto-admit configuration will admit the robot against whichever adapter announced last. See the Maturity note.
 
-**Robot-level uniqueness.** The discover-path checks above are not the only guard: the admission webhook ([§9.1.3.3](#robot-field-validation-rules) rule 7, [§9.3.1](#control-plane-swarmada-api-server)) rejects creating or updating a `Robot` whose `swarmada.io/robot-id` annotation duplicates another `Robot` in the namespace — closing the path where an operator hand-creates a second Robot CRD for the same chassis, which would otherwise let the Scheduler dispatch two tasks to one physical robot.
+**Robot-level uniqueness.** The discover-path checks above are not the only guard: the admission webhook ([§9.1.3.4](#robot-field-validation-rules) rule 7, [§9.3.1](#control-plane-swarmada-api-server)) rejects creating or updating a `Robot` whose `swarmada.io/robot-id` annotation duplicates another `Robot` in the namespace — closing the path where an operator hand-creates a second Robot CRD for the same chassis, which would otherwise let the Scheduler dispatch two tasks to one physical robot.
 
 <a id="discoveredrobot-re-connection-flow-registerrobot"></a>
 ##### 9.1.2.7 Re-Connection Flow: RegisterRobot
@@ -1749,18 +2039,20 @@ message RegisterAck {
 
 1. Look up `Robot` by `robot_id` annotation in the adapter's namespace. If not found: return `RegisterAck.accepted = false` with `rejection = NOT_ADMITTED` -- the Fleet Adapter sends `discover` (announce) and continues its provisioning loop ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)), retrying `register` each interval.
 
-2. Verify `adapter_version` is compatible with the Robot's `spec.adapter.version`. Major version mismatch: return `Rejected` with reason `AdapterVersionMismatch`. Minor version mismatch: return `Accepted` with a `Warning` in the response.
+**Steps 2–5 are specified, not implemented at v0.3.** The reference registrar performs step 1 only: `adapter_version`, `firmware_version` and `reported_hardware` are ignored, so the major-version rejection **fails open**, none of the three events is emitted, and this path never writes `Robot.status`. Contract-version gating does happen, one layer up on the `ControlStream` handshake — a different check from the per-`Register` one specified here. See the Maturity note.
 
-3. Compare `firmware_version` against `Robot.status.firmwareVersion`. If they differ: emit a `FirmwareVersionMismatch` Warning event on the Robot object; do NOT reject. The firmware may have changed during the disconnect (e.g. a manual update). The Health Monitor will reconcile.
+2. Verify `adapter_version` — the adapter *build* version ([terminology](#terminology)), not the contract version — is compatible with the Robot's `spec.adapter.version`. Major version mismatch: return `RegisterAck.accepted = false` with `rejection = VERSION_MISMATCH` and a `message` naming the build versions compared, so it is distinguishable from a contract-version refusal ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)), which carries the same enum value. Minor version mismatch: return `Accepted` with a `Warning` in the response. An absent or unparseable `adapter_version` is treated as a major mismatch and rejected, never as an implicit pass.
 
-4. Compare `reported_hardware` against `Robot.spec.hardware[]`. For each component name present in both: if type or key spec fields differ, emit a `HardwareDiscrepancy` Warning event. Do NOT auto-update `spec.hardware[]` (spec is operator-owned; the Fleet Adapter cannot overwrite it on reconnect). For components in `reported_hardware` but not in `spec.hardware[]`: emit `HardwareUnknown` Warning event (unexpected component).
+3. Compare `firmware_version` against `Robot.status.firmwareVersion`. If they differ: emit a `FirmwareVersionMismatch` Warning event on the Robot object — **specified, not emitted at v0.3** (see the note above) — and do NOT reject. The firmware may have changed during the disconnect (e.g. a manual update). The Robot reconciler will reconcile it.
+
+4. Compare `reported_hardware` against `Robot.spec.hardware[]`. For each component name present in both: if type or key spec fields differ, emit a `HardwareDiscrepancy` Warning event — **specified, not emitted at v0.3**. Do NOT auto-update `spec.hardware[]` (spec is operator-owned; the Fleet Adapter cannot overwrite it on reconnect). For components in `reported_hardware` but not in `spec.hardware[]`: emit a `HardwareUnknown` Warning event (unexpected component) — **specified, not emitted at v0.3**.
 
 5. On `Accepted`: transition `Robot.status.phase` from `Offline` back to `Discovered` briefly, then to `Idle` after the first successful telemetry heartbeat. Clear `status.connectivity.lastSeenAt` staleness.
 
 **Reconnect sequence (timeline):**
 
 ```text
-T+0:00  Robot loses Wi-Fi. Last telemetry received by Health Monitor.
+T+0:00  Robot loses Wi-Fi. Last telemetry received by the control plane.
 T+0:30  connectivityOfflineThresholdSeconds (30s) elapsed.
         Robot.status.phase → Offline.
         Scheduler: no new FleetActions assigned to this robot.
@@ -1774,17 +2066,22 @@ T+?     LEASE EXPIRY HORIZON (task-specific; computed from last renewal receipt)
           Revoking → Pending. retryCount NOT incremented (connectivity ≠ failure).
         The task is now eligible for reassignment to any available robot.
 T+2:00  connectivityCriticalThresholdSeconds (120s) elapsed.
-        Kubernetes Warning event: RobotCritical.
+        Kubernetes Warning event: RobotCritical.   [NOT emitted at v0.3 -- the
+          Robot reconciler holds no event recorder; watch the
+          ConnectivityCritical condition instead. See [§9.6.3.2](#safety-control-plane-response).]
         Operator alert emitted. NO additional automatic action at this boundary —
         requeue was already gated on lease expiry above, not on T2 wall-clock.
         If the lease has not yet expired, the task remains in Revoking at T2.
 T+5:00  Wi-Fi restored. Fleet Adapter detects reconnection.
         Fleet Adapter sends a register message (not discover — Robot CRD exists).
-T+5:01  API Server validates the register message (steps 1–4 above).
+T+5:01  API Server validates the register message (step 1 above; steps 2-5 are
+        specified and not run at v0.3 -- see the numbered list).
         Response: Accepted.
         Robot.status.phase → Idle (after first heartbeat).
         Scheduler: robot eligible for new task assignments.
-        Health Monitor: connectivity.lastSeenAt updated; latency measured.
+        FleetAdapter controller: connectivity.lastSeenAt updated.
+          (connectivity.latencyMs is specified and written by no v0.3
+           controller -- see [§9.1.3](#robot).)
 
 Task fate on reconnect is determined by the robot's REPORTED TASK STATE,
 not by the mere fact of reconnection (safe-reassignment invariant, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)):
@@ -1806,7 +2103,27 @@ not by the mere fact of reconnection (safe-reassignment invariant, [§9.6.3.5](#
 
 A `Robot` resource is the Swarmada representation of a single physical robot unit — its declared hardware inventory, installed inference models, advertised capabilities, and operational constraints all live in `spec`. Everything Swarmada learns about the robot at runtime — component health, active capability set, battery level, position, and current task — lives exclusively in `status`, which is written by controllers and never by operators. When a `Robot` references a `RobotClass`, it inherits the class's `hardware`, `defaultModels`, and `baseCapabilities`; any field declared directly on the `Robot` spec overrides the inherited value for that robot only.
 
-> **Implementation status (v0.2):** stage: alpha · impl: implemented. A conformant implementation provides the `Robot` type and its controller: the declarative `spec.hardware`/`installedModels`/`capabilities`/`constraints`/`charging` fields, the structured `status.hardware[]`/`capabilities[]`/`installedModels[]`/`modelGrantedCapabilities[]` objects, and `status.currentZone`/`connectivity`/`health`. The Robot reconciler drives capability derivation (hardware-native and model-driven, with `paused`/`degraded` states), heartbeat-timeout offline detection, and the prolonged-offline `ConnectivityCritical` condition; the Zone Controller derives `status.currentZone` from live position. The robot phase and hardware-status enums match the sets used above (`Discovered`/`Idle`/`Assigned`/`InProgress`/`Charging`/`Error`/`Offline`/`Maintenance` and `Healthy`/`Degraded`/`Failed`). See the [§9.1](#crds) status table.
+> **Implementation status (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps:** the `swarmada.io/robot-source` annotation (ADR-0038) is not yet stamped by
+> `RobotDefaulter`; capability derivation does not write `Failed` or `Unavailable` (it writes `Inactive` in
+> those cases); a degraded-hardware/active-model capability resolves `Degraded` where the truth table below
+> specifies `Inactive`; and model-granted capabilities are unioned into `status.capabilities[]` as `Active`
+> without running the truth table. **Four of the five `status.conditions` documented below are specified and
+> written by no v0.3 controller** — `HardwareHealthy`, `CapabilitiesFullyActive`, `InConfiguredZone` and
+> `ChargingConfigured`, along with their reasons. The one that *is* written, `Ready`, does not use the
+> predicate documented below: the reference reconciler sets it from adapter liveness alone, with reason
+> `AdapterLive`, so a robot in phase `Error` or with health `Critical` can still read `Ready=True`. A
+> sixth condition the chapter does not document, `ConnectivityCritical`, is also written. **Three status
+> fields are specified and written by nothing:** `status.position` (pose reaches the TSDB sink and the Zone
+> Controller's live derivation and never etcd), `status.connectivity.latencyMs`, and
+> `status.hardware[].degradedMetrics` on the probe path — the
+> telemetry sink does write `degradedMetrics`, and `lastHealthyAt`/`degradationReason` are written by the
+> `RobotProbe` controller rather than the status sink. An implementation conforming to this RFC provides the `Robot` type and its controller: the declarative `spec.hardware`/`installedModels`/`capabilities`/`constraints`/`charging` fields, the structured `status.hardware[]`/`capabilities[]`/`installedModels[]`/`modelGrantedCapabilities[]` objects, and `status.currentZone`/`connectivity`/`health`. The Robot reconciler drives capability derivation (hardware-native and model-driven, with `paused`/`degraded` states), the aggregate `status.health` summary derived from them ([§9.3.1](#control-plane-swarmada-api-server)), heartbeat-timeout offline detection, and the prolonged-offline `ConnectivityCritical` condition; the Zone Controller derives `status.currentZone` from live position. The robot phase and hardware-status enums match the sets used above (`Discovered`/`Idle`/`Assigned`/`InProgress`/`Charging`/`Error`/`Offline`/`Maintenance` and `Healthy`/`Degraded`/`Failed`). **`status.phase` has exactly one writer per edge, and it is the control plane.** An earlier revision of
+> this chapter described `Idle` and `Assigned` as reaching `status.phase` through the adapter telemetry
+> projection; that is not the case and an implementer MUST NOT build on it. The telemetry status sink
+> explicitly refuses to write `Phase`, and the Robot reconciler authors the liveness-owned phases —
+> including the initial `Discovered` and the `Discovered|Offline → Idle|InProgress` advance on a live
+> adapter. The phase table below names a writer per edge on that basis; a second writer of this field
+> would break the single-executor guarantee the assignment lease rests on. See the [§9.1](#crds) status table.
 
 <a id="robot-schema"></a>
 ##### 9.1.3.1 Schema
@@ -1847,8 +2164,11 @@ spec:
   # ---------------------------------------------------------------------------
   # Fleet Adapter that manages this robot.
   # name must match an installed Fleet Adapter deployment in this namespace.
-  # version is used by the OTA/Model Update Manager to validate compatibility
-  # before pushing firmware; admission rejects mismatched major versions.
+  # version is the adapter BUILD version ([terminology](#terminology)), not the contract
+  # version: it is compared against the adapter's reported adapter_version at
+  # reconnect ([§9.1.2](#discoveredrobot)), and used by the OTA/Model Update Manager
+  # before pushing firmware. Admission does not compare it — no FleetAdapter field
+  # records a running build to compare it against.
   # +kubebuilder:validation:Required
   adapter:
     # +kubebuilder:validation:Required
@@ -1863,7 +2183,9 @@ spec:
   # Presence here does not imply the component is healthy; health is in status.
   # Fields are type-discriminated; only fields valid for the given type
   # are permitted (admission webhook enforces this).
+  # MaxItems bounds the CEL cost of this spec's cross-field validation.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=64
   hardware:
     - name: lidar-360          # unique identifier within this robot's hardware list
       # +kubebuilder:validation:Enum=Lidar;Camera;Gripper;LoadPlatform;Arm;Thermal;Microphone;Display;Custom
@@ -1909,6 +2231,8 @@ spec:
     - name: mic-array
       type: Microphone
       # Microphone-specific fields:
+      # channels is the audio input count, not a sensor data channel. Filed for
+      # rename to audioInputChannels; channels remains the shipped name.
       channels: 4
       sampleRateHz: 48000
     - name: display-front
@@ -1928,7 +2252,9 @@ spec:
   # compute. The Robot Agent manages the actual install/update lifecycle;
   # status is the Agent's report back, not an operator-settable field.
   # installedModels[] here overrides any defaultModels[] from the RobotClass.
+  # MaxItems bounds CEL cost — see the hardware[] field comment above.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=64
   installedModels:
     - # +kubebuilder:validation:Required
       # +kubebuilder:validation:MinLength=1
@@ -1937,7 +2263,9 @@ spec:
       # +kubebuilder:validation:Pattern=`^\d+\.\d+\.\d+$`
       version: "3.2.1"
       # URI from which the Robot Agent fetches the model artifact.
-      # Recommended schemes (not schema-enforced): oci://, s3://, https://
+      # Supported schemes, enforced at admission: oci://, s3://, https://
+      # Matches the constraint on ModelRollout.spec.modelUri, so a model URI is
+      # validated identically wherever it is declared.
       # +kubebuilder:validation:Required
       modelUri: "oci://registry.swarmada.io/models/item-recognition:3.2.1"
       # Hardware components that must be Healthy for this model to run.
@@ -1967,8 +2295,10 @@ spec:
   # Capabilities granted by inference model rollouts (ModelRollout.spec.grantsCapabilities)
   # are NEVER added here; they are recorded in status.modelGrantedCapabilities[] by the
   # OTA/Model Update Manager and folded into the computed status.capabilities[] union by the
-  # Capability Controller. See [§9.1.3.2](#robot-capability-derivation-truth-table) for the two-source resolution rules.
+  # Capability Controller. See [§9.1.3.3](#robot-capability-derivation-truth-table) for the two-source resolution rules.
+  # MaxItems bounds CEL cost — see the hardware[] field comment above.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=64
   capabilities:
     - # +kubebuilder:validation:Required
       name: navigation.2d
@@ -2024,7 +2354,10 @@ spec:
   constraints:
     # +kubebuilder:validation:Minimum=0
     maxPayloadKg: 45.0
-    # Robot will not accept task assignments below this battery threshold.
+    # SPECIFIED: the Robot will not accept task assignments below this battery
+    # threshold. NOT IMPLEMENTED at v0.3: no controller reads this field and the
+    # Scheduler applies no battery filter at all -- it only ranks already-eligible
+    # robots battery-descending as a tiebreak. See [§4](#non-goals) item 16.
     # +kubebuilder:validation:Minimum=0
     # +kubebuilder:validation:Maximum=100
     minBatteryPctForAction: 20
@@ -2131,15 +2464,19 @@ status:
   # ---------------------------------------------------------------------------
   # Per-component runtime health.
   # One entry per hardware component declared in spec.hardware[].
-  # Written by the Health Monitor from Fleet Adapter telemetry.
+  # Written from Fleet Adapter telemetry by the Robot status sink.
   hardware:
     - name: lidar-360
-      # +kubebuilder:validation:Enum=Healthy;Degraded;Failed
+      # +kubebuilder:validation:Enum=Healthy;Degraded;Failed;Disabled
       # Mirrors the fleet_adapter.v1 HardwareStatus wire enum (HEALTHY;DEGRADED;
-      # FAILED), the authoritative schema per [§9.2.3](#fleet-adapter-protocol-the-controlstream-service). A component that has not yet
-      # reported has no status entry — the wire UNSPECIFIED / unset state, shown as
-      # "Unknown" in the [§9.1.3.2](#robot-capability-derivation-truth-table) derivation table and treated conservatively; it is
-      # not a fourth stored enum value.
+      # FAILED;DISABLED), the authoritative schema per [§9.2.3](#fleet-adapter-protocol-the-controlstream-service).
+      # Disabled means the component is intentionally out of service (an operator
+      # or the adapter has taken it offline); it is a declared state, not a fault,
+      # and it deactivates the capabilities that require the component exactly as
+      # Failed does. A component that has not yet reported has no status entry —
+      # the wire UNSPECIFIED / unset state, shown as "Unknown" in the
+      # [§9.1.3.3](#robot-capability-derivation-truth-table) derivation table and treated
+      # conservatively; Unknown is an absence, not a stored enum value.
       status: Healthy
       # RFC3339 timestamp of the last Healthy report for this component.
       lastHealthyAt: "2026-06-23T08:14:03Z"
@@ -2282,6 +2619,28 @@ status:
     altitude: 25.0
     yaw: 4.712        # radians, preferred heading (matches proto RobotPosition.yaw)
   # ---------------------------------------------------------------------------
+  # Firmware state. Written by the install-state projection from the robot's own
+  # report ([§9.1.8](#firmwarerollout)), not by the adapter telemetry path.
+  # firmwareVersion is the version the robot most recently reported as running;
+  # previousFirmwareVersion retains the version it was on before the last completed
+  # update, and is the target a Manual rollback returns to.
+  firmwareVersion: "2.5.0"
+  previousFirmwareVersion: "2.4.1"
+  # firmwareInstall carries the adapter-reported install state, if any.
+  # Projected on change only (RA-1); absent for an adapter that does not
+  # implement push_firmware.
+  firmwareInstall:
+    # +kubebuilder:validation:Enum=Running;Updating;Failed
+    status: Running
+    # What the robot says it is running NOW. On a failed install this is the
+    # version it fell back to, which is not attemptedVersion.
+    runningVersion: "2.5.0"
+    # The version an in-flight or failed install targeted.
+    attemptedVersion: "2.5.0"
+    # Set only when status is Failed.
+    failureReason: ""
+    reportedAt: "2026-06-23T08:20:11Z"
+  # ---------------------------------------------------------------------------
   # Zone tracking.
   # currentZone is derived by the Zone Controller from position telemetry.
   # It may differ from spec.zone if the robot has physically crossed a zone
@@ -2317,8 +2676,13 @@ status:
   # Standard Kubernetes conditions for use with kubectl wait and tooling.
   conditions:
     - type: Ready
-      # True when phase is Idle, Assigned, or InProgress and health is
-      # Healthy or Degraded (robot is operational, even if not fully capable).
+      # SPECIFIED: True when phase is Idle, Assigned, or InProgress and health
+      # is Healthy or Degraded (robot is operational, even if not fully capable),
+      # with reason RobotOperational.
+      # v0.3: the reference reconciler sets Ready from adapter liveness ALONE,
+      # with reason AdapterLive -- so a robot in phase Error, or with health
+      # Critical, can still read Ready=True. Do not gate scheduling decisions on
+      # this condition at v0.3; read status.phase and status.health directly.
       status: "True"
       reason: RobotOperational
       message: "Robot is operational with degraded camera-front."
@@ -2344,7 +2708,7 @@ status:
     - type: ChargingConfigured
       # True when spec.charging.dockName is set. False with reason
       # NoDockAssigned while empty; the robot cannot auto-dock in that state
-      # ([§9.1.2.5](#discoveredrobot-controller-behavior-on-admit)) and the Health Monitor emits ChargingDockUnassigned when
+      # ([§9.1.2.5](#discoveredrobot-controller-behavior-on-admit)) and ChargingDockUnassigned is specified (not emitted at v0.3) when
       # battery crosses minBatteryPctToCharge.
       status: "True"
       reason: DockAssigned
@@ -2352,8 +2716,55 @@ status:
       lastTransitionTime: "2026-06-23T06:00:00Z"
 ```
 
+<a id="robot-phase-transition-table"></a>
+##### 9.1.3.2 Phase Transition Table
+
+`status.phase` is a closed enumeration of eight values. This table enumerates every transition
+the specification defines, its trigger, and **the component that writes it**. A phase value is
+written by exactly one component; where two could write the same value the table names which
+one wins.
+
+The table is *descriptive of what this document specifies* — it is not a claim that every edge
+is implemented. Where the specification defines a transition but assigns it to no component,
+the table says so rather than leaving the reader to infer an owner.
+
+| From | To | Trigger | Writer |
+| :--- | :- | :------ | :----- |
+| *(none)* | `Discovered` | The `Robot` object is created on admission of a `DiscoveredRobot` ([§9.1.2](#discoveredrobot)) and the Robot reconciler writes the initial phase | Robot reconciler |
+| `Discovered` | `Idle` | The first successful telemetry frame or heartbeat after admission ([§9.1.2](#discoveredrobot)) | **Unassigned — see the note below** |
+| `Idle` | `Assigned` | The Scheduler commits an assignment and writes `FleetAction.status.assignedRobot` ([§9.3.2](#control-plane-scheduler)) | **Unassigned — see the note below** |
+| `Assigned` | `InProgress` | The adapter reports execution started, projected from telemetry as a material transition ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)) | Material-transition projector |
+| `InProgress` | `Idle` | The action reaches a terminal phase and the robot binding is released ([§9.1.4](#fleetaction)) | FleetAction controller |
+| `Assigned` | `Idle` | The assignment is released without execution — refused, cancelled, or preempted while the reservation was `Reserved` | FleetAction controller |
+| `Idle` / `Assigned` / `InProgress` | `Charging` | The robot reports docking and charging, projected from telemetry | Material-transition projector |
+| `Charging` | `Idle` | The robot reports charging complete or undocked, projected from telemetry | Material-transition projector |
+| *any* | `Offline` | The T1 offline threshold elapses with no heartbeat ([§9.3.3](#control-plane-robot-health-and-connectivity)) | Robot reconciler — and **only** the Robot reconciler writes `Offline` |
+| `Offline` | `Idle` or `InProgress` | The adapter is live again. The Robot reconciler advances the robot directly to its steady-state phase; there is no intermediate `Discovered` hop on reconnect | Robot reconciler |
+| *any* | `Maintenance` | A `ZoneMaintenance` window activates for the robot's zone ([§9.1.11](#zonemaintenance)) | Zone Controller — and **only** the Zone Controller writes `Maintenance` |
+| `Maintenance` | `Idle` | The window closes and no estop is outstanding. When an estop clears while a window is still active the robot returns to `Maintenance`, not `Idle` ([§9.1.11](#zonemaintenance)) | Zone Controller |
+| *any* | `Error` | A non-recoverable fault is reported; requires operator attention | Material-transition projector |
+
+**`estopState` is independent of `phase`.** A robot may be in any phase and `Stopped`
+simultaneously; the estop state is set from a confirmed `EstopAck` and never inferred, and it
+is not a phase transition ([§9.6.2.3](#safety-estop-state-machine)).
+
+**Both of the transitions an earlier revision of this chapter recorded as having no named
+writer do have one, and it is the Robot reconciler.** The correction matters, because building
+on the earlier text would produce a second writer of a single-writer field.
+
+- **`Discovered → Idle`.** The Robot reconciler owns it. It classifies the liveness-owned phases
+  and advances a robot with a live adapter binding to its steady-state phase; the telemetry
+  status sink explicitly refuses to write `status.phase` at all.
+- **`Idle → Assigned`.** The Robot reconciler mirrors the assignment recorded on the
+  `FleetAction` onto `Robot.status.phase`, under the same liveness classification. The Scheduler
+  writes the `FleetAction`, never the `Robot`.
+
+Both are recorded rather than silently assigned an owner, because guessing an owner in a
+specification is how an unimplementable requirement becomes a conformance claim. Assigning them
+is a change to the control-plane chapter's ownership tables, not to this one.
+
 <a id="robot-capability-derivation-truth-table"></a>
-##### 9.1.3.2 Capability Derivation Truth Table
+##### 9.1.3.3 Capability Derivation Truth Table
 
 `status.capabilities[]` is the computed union of two sources, both evaluated on every Capability Controller reconciliation:
 
@@ -2383,38 +2794,42 @@ The Capability Controller applies the following rules on every reconciliation to
 | Failed | Inactive | model-driven | **Failed** | Hardware failure overrides |
 | Unknown | — | hardware-native | **Inactive** | No telemetry yet; treated conservatively |
 | Unknown | * | model-driven | **Inactive** | No telemetry; any model state is unsafe |
-| — (any) | — | manual | **Active** | Manual capabilities are always Active unless |
-|  |  |  |  | explicitly set Inactive by an operator patch |
+| — (any) | — | manual | **Active** | Manual capabilities are operator-asserted: no hardware or model gate applies, and `status.capabilities[*].status` is a controller-written field operators MUST NOT patch ([§9.1.3.1](#robot-schema)). At v0.3 a `manual` capability is unconditionally `Active`; there is no mechanism, patch or otherwise, to set one `Inactive`. |
+
+**`Disabled` components.** A component reporting `Disabled` is intentionally out of service rather than faulted. For capability derivation it behaves as `Failed` does — every capability requiring that component resolves to `Inactive` — but the entry's `reason` distinguishes the two (`disabled: <name>` against `required hardware failed: <name>`), so an operator can tell a deliberate withdrawal from a fault. The table above lists the fault path; read a `Disabled` component as taking the `Failed` row with the benign reason.
 
 **Precedence rule:** when a capability has multiple `requiredHardware` entries, the worst status across all components is used as the single "Hardware Status" input to the table above. A capability with three Healthy components and one Failed component is treated as if Hardware Status = Failed.
 
 **ZoneMaintenance override:** when the robot's zone has an active `ZoneMaintenance` resource, all capabilities where `pauseable: true` are forced to `Paused` regardless of the truth table above. Capabilities where `pauseable: false` are not affected. `Paused` is not a truth-table output — it is a maintenance-layer override applied after truth-table evaluation.
 
-**ModelRollout suspension override:** while a `ModelRollout` is updating a model on the robot, the capabilities that model grants are forced to `Unavailable` by the OTA/Model Update Manager ([§9.1.9.2](#modelrollout-capability-suspension-state-machine), [§9.3.6](#control-plane-ota-model-update-manager)), regardless of the truth table. Like `Paused`, `Unavailable` is not a truth-table output — it is a rollout-layer override applied after truth-table evaluation, and the Scheduler treats it as not-`Active`. It is distinct from `Inactive`: `Inactive` means a hardware or model condition is unmet, whereas `Unavailable` specifically signals "temporarily suspended by a rollout" for operator observability.
+**ModelRollout suspension override:** while a `ModelRollout` is updating a model on the robot, the capabilities that model grants are forced to `Unavailable` — **the specified value; the reference control plane writes `Inactive` instead at v0.3, so a client MUST NOT wait for `Unavailable` to appear** (see the Implementation status block above and [§9.1.9](#modelrollout)) — by the OTA/Model Update Manager ([§9.1.9.2](#modelrollout-capability-suspension-state-machine), [§9.3.6](#control-plane-ota-model-update-manager)), regardless of the truth table. Like `Paused`, `Unavailable` is not a truth-table output — it is a rollout-layer override applied after truth-table evaluation, and the Scheduler treats it as not-`Active`. It is distinct from `Inactive`: `Inactive` means a hardware or model condition is unmet, whereas `Unavailable` specifically signals "temporarily suspended by a rollout" for operator observability.
 
 <a id="robot-field-validation-rules"></a>
-##### 9.1.3.3 Field Validation Rules
+##### 9.1.3.4 Field Validation Rules
 
 | Field | Required | Type | Constraints |
 | :---- | :---- | :---- | :---- |
 | `spec.adapter.name` | Yes | string | MinLength: 1 |
-| `spec.adapter.version` | Yes | string | Pattern: `^\d+.\d+.\d+$` |
+| `spec.adapter.version` | Yes | string | Pattern: `^\d+\.\d+\.\d+$` |
+| `spec.hardware[]` | No | array | `MaxItems=64` (bounds CEL cost) |
 | `spec.hardware[*].name` | Yes | string | Unique within `spec.hardware[]` |
 | `spec.hardware[*].type` | Yes | enum | `Lidar│Camera│Gripper│LoadPlatform│Arm│Thermal│Microphone│Display│Custom` |
 | `spec.hardware[*].customType` | Conditional | string | Required when `type: Custom`; MinLength: 1 |
+| `spec.installedModels[]` | No | array | `MaxItems=64` (bounds CEL cost) |
 | `spec.installedModels[*].name` | Yes | string | Unique within `spec.installedModels[]` |
-| `spec.installedModels[*].version` | Yes | string | Pattern: `^\d+.\d+.\d+$` |
-| `spec.installedModels[*].modelUri` | Yes | string | Pattern: `^(oci│s3│https)://` |
+| `spec.installedModels[*].version` | Yes | string | Pattern: `^\d+\.\d+\.\d+$` |
+| `spec.installedModels[*].modelUri` | Yes | string | `MinLength=1`, Pattern: `^(oci\|s3\|https)://` |
 | `status.installedModels[*].status` | — | enum | Controller-written. `Active│Updating│Failed│Inactive`. Never set by operator |
-| `status.installedModels[*].runningVersion` | — | string | Controller-written. Version currently loaded on robot |
+| `status.installedModels[*].runningVersion` | — | string | Controller-written. Version loaded on robot |
 | `status.installedModels[*].failureReason` | — | string | Controller-written. Empty when status is Active |
 | `status.modelGrantedCapabilities[*].modelName` | — | string | Controller-written. Matches `spec.installedModels[*].name`. Key for the model-grant lookup; one entry per model that has completed a `ModelRollout` on this robot |
 | `status.modelGrantedCapabilities[*].grantedBy` | — | string | Controller-written. Name of the `ModelRollout` resource that last wrote this entry |
-| `status.modelGrantedCapabilities[*].capabilities[]` | — | array of strings | Controller-written. Capability names currently granted by this model version. Revoked names are absent; the Capability Controller drops them from the computed `status.capabilities[]` on its next reconciliation |
+| `status.modelGrantedCapabilities[*].capabilities[]` | — | array of strings | Controller-written. Capability names granted by this model version. Revoked names are absent; the Capability Controller drops them from the computed `status.capabilities[]` on its next reconciliation |
+| `spec.capabilities[]` | No | array | `MaxItems=64` (bounds CEL cost) |
 | `spec.capabilities[*].name` | Yes | string | Unique within `spec.capabilities[]` |
 | `spec.capabilities[*].type` | Yes | enum | `hardware-native│model-driven│manual` |
 | `spec.capabilities[*].pauseable` | No | bool | Default: `true` |
-| `spec.capabilities[*].providingModel` | Conditional | string | Required when `type: model-driven`; must match an `installedModels[*].name` |
+| `spec.capabilities[*].providingModel` | **Partially enforced** | string | Two distinct constraints, enforced differently. If `providingModel` is *present*, it MUST match an `installedModels[*].name` — this half **is enforced**, by a `+kubebuilder:validation:XValidation` (CEL) rule compiled into the CRD schema, evaluated by the API server at admission (not a webhook): `self.capabilities.all(c, !has(c.providingModel) \|\| self.installedModels.exists(m, m.name == c.providingModel))`. Separately, `providingModel` is specified as *required* when `type: model-driven` — this half is **not enforced at v0.3**: no rule requires the field's presence, only its match-if-present ([§9.1.3.4](#robot-field-validation-rules) rule 4 below). An omitted `providingModel` on a `model-driven` capability is accepted at admission and resolves the capability to `Inactive` ("providing model not installed") at evaluation time rather than being rejected. |
 | `spec.constraints.minBatteryPctForAction` | No | integer | Min: 0, Max: 100 |
 | `spec.constraints.maxPayloadKg` | No | float | Min: 0 |
 | `spec.constraints.maxSpeedMs` | No | float | Min: 0 |
@@ -2436,16 +2851,18 @@ The Capability Controller applies the following rules on every reconciliation to
 
 3. Every `spec.capabilities[*].requiredHardware[]` entry MUST match a `name` in `spec.hardware[]` (after RobotClass inheritance is resolved). Violation message: `"capability '<cap>' references unknown hardware component '<hw>'"`.
 
-4. Every `spec.capabilities[*].providingModel` MUST match a `name` in `spec.installedModels[]`. Violation message: `"capability '<cap>' references unknown model '<model>'"`.
+4. Every `spec.capabilities[*].providingModel` that is *present* MUST match a `name` in `spec.installedModels[]`. **Enforced** — not by an admission webhook, but by a CEL (`XValidation`) rule compiled into the `Robot` CRD's OpenAPI schema (`api/v1/robot_types.go`), evaluated by the API server itself at admission; violation message: `"a capability's providingModel must reference a model declared in spec.installedModels"`. **Specified, not implemented at v0.3:** *requiring* `providingModel` to be present at all when `type: model-driven` — no rule enforces presence, only the match-if-present rule above. An omitted `providingModel` on a `model-driven` capability is admitted, and the capability resolves to `Inactive` at evaluation time instead of being rejected up front ([§9.1.3.4](#robot-field-validation-rules)).
 
-5. If `spec.capabilities[*].pauseable` is `false`, the capability name MUST be in the `safety.*` or `health.*` namespace OR be `estop.receive`. Any other `pauseable: false` declaration generates an admission warning (not a rejection), prompting the operator to confirm the intent explicitly via an annotation: `swarmada.io/non-pauseable-confirmed: "true"`.
+5. If `spec.capabilities[*].pauseable` is `false`, the capability name MUST be in the `safety.*` or `health.*` namespace OR be `estop.receive`. **Specified, not implemented at v0.3:** no admission-time check enforces this restriction, and no admission warning is generated for an out-of-namespace `pauseable: false` declaration; the `swarmada.io/non-pauseable-confirmed: "true"` annotation described here is not read or written anywhere in the codebase. At v0.3, any capability may declare `pauseable: false` without confirmation.
 
 6. `spec.charging.dockName`, when set, MUST reference a `ChargingDock` shared resource declared in the robot's `spec.zone` FleetZone or any ancestor zone's `sharedResources[]`. Violation message: `"charging.dockName '<dock>' is not a ChargingDock in zone '<zone>' or its ancestors"`.
 
 7. The `swarmada.io/robot-id` annotation MUST be unique across `Robot` resources in the namespace. Creating or updating a `Robot` whose annotation duplicates another Robot's is rejected. Violation message: `"robot-id '<id>' is already bound to Robot '<name>'"`. This closes the duplicate-chassis path that the [§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) discover-time checks alone cannot: two Robot CRDs for one physical robot would let the Scheduler dispatch two tasks to a single chassis.
 
+**`swarmada.io/robot-source` annotation (ADR-0038).** The `RobotDefaulter` admission webhook resolves `spec.adapter.name` to its `FleetAdapter` and stamps `swarmada.io/robot-source: Simulated|Physical` onto the `Robot`, read from `FleetAdapter.spec.simulated` ([§9.1.13](#fleetadapter)). Purely informational — mirrors the coordinate-system annotation stamp (ADR-0017) — never used to gate admission or dispatch. An unresolvable adapter (unset name, not-found, read error) leaves the annotation unset rather than guessed; absent means "unknown", not "assumed physical". **NOT IMPLEMENTED at v0.3** — see the Maturity note above.
+
 <a id="robot-worked-example-acme-robot-with-degraded-camera"></a>
-##### 9.1.3.4 Worked Example — Acme Robot with Degraded Camera
+##### 9.1.3.5 Worked Example — Acme Robot with Degraded Camera
 
 The following pair shows the same robot at a moment when its `camera-front` depth channel has stalled. The `spec` is unchanged — operators do not modify spec to reflect faults. The `status` reflects everything the controllers have computed from the Fleet Adapter telemetry received since the fault began at `07:52:11Z`.
 
@@ -2644,7 +3061,7 @@ status:
       lastTransitionTime: "2026-06-23T06:00:00Z"
 ```
 
-**What the Scheduler does with this state:** the current task (`fleetaction-pick-order-8821`) requires only `transport.payload`, which is Active. The Scheduler does not reassign it. Any new tasks requiring `item-pick.ai-guided` or `inspection.visual` (depth) will be matched to other robots. The Health Monitor will emit a `HardwareHealthy=False` event that an operator can observe with `kubectl get robot amr-acme-007 -o wide` or via the dashboard alert feed. If the camera-front degrades further to `Failed`, the health aggregate transitions to `Critical` and an operator acknowledgement is required before new tasks are assigned.
+**What the Scheduler does with this state:** the current task (`fleetaction-pick-order-8821`) requires only `transport.payload`, which is Active. The Scheduler does not reassign it. Any new tasks requiring `item-pick.ai-guided` or `inspection.visual` (depth) will be matched to other robots. A `HardwareHealthy=False` event is specified for this transition but is **not emitted at v0.3** ([§9.3.3](#control-plane-robot-health-and-connectivity)); an operator observes the degradation in `status.hardware[]` and `status.health` via `kubectl get robot amr-acme-007 -o wide`. If the camera-front degrades further to `Failed`, the health aggregate transitions to `Critical` and an operator acknowledgement is required before new tasks are assigned.
 
 ---
 
@@ -2653,9 +3070,35 @@ status:
 
 A `FleetAction` is the Swarmada representation of a single, discrete unit of work to be executed by one robot: picking a line item from a shelf, transporting a supply cart between hospital wards, inspecting a row of inventory for label compliance. It is not a business-level work order — a work order in a WMS may decompose into many `FleetAction` resources, each representing one atomic robot action. The WMS or operator tooling creates `FleetAction` resources; Swarmada is responsible for scheduling each one to a capable robot, tracking its execution, and handling failures according to the declared retry and failure policy. A `FleetAction` is always scoped to a single namespace and, once assigned, to a single robot. Multi-step and multi-robot work is expressed by composing `FleetAction`s inside a `FleetTask` ([§9.1.5](#fleettask)); see [§9.1.4.4](#fleetaction-multi-robot-tasks) for how the single-robot boundary composes upward.
 
-**Task-source submission conventions (reserved).** A task source SHOULD name each `FleetAction` deterministically from its upstream work item so resubmission is idempotent (a duplicate `create` returns `AlreadyExists`, not a second action); the recommended derivation is `fa-<stable-hash(work-item-id)>`. Two labels are reserved for source selection and back-reference: `swarmada.io/source-id` (submitting source identity, used to select a source's own actions on watch) and `swarmada.io/source-order` (upstream work-order reference). The full normative task-source contract — idempotent submission, the outcome read surface, and admission-time backpressure — is deferred to a future north task-source-surface RFC (ADR-0006). This note reserves the naming and label conventions so early integrations are forward-compatible.
+**Task-source submission conventions (reserved).** A task source SHOULD name each `FleetAction` deterministically from its upstream work item so resubmission is idempotent (a duplicate `create` returns `AlreadyExists`, not a second action); the recommended derivation is `fa-<stable-hash(work-item-id)>`. Two labels are reserved for source selection and back-reference: `swarmada.io/source-id` (submitting source identity, used to select a source's own actions on watch) and `swarmada.io/source-order` (upstream work-order reference). The full normative action-source contract — idempotent submission, the outcome read surface, and admission-time backpressure — is deferred to a future north action-source-surface RFC (ADR-0006). This note reserves the naming and label conventions so early integrations are forward-compatible.
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. The full type, phase set, and controller are defined. Controllers drive `Pending`→`Assigned`→`InProgress`→terminal, plus `Paused` (estop-pause, [§9.6.2.4](#safety-fleetaction-behaviour-during-estop)), `Revoking` (lease-revocation under the single-executor guarantee, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)), and `Preempted` (preemptor-band Critical/High preemption, [§9.4.6](#tde-preemption-algorithm)). Task-cancellation-on-disconnect is consumed for all three `Never`/`AfterTimeout`/`WhenActionExpired` dispositions, with the assignment-lease horizon as the single-executor safety floor. The `priority` named-band enum (`Critical`/`High`/`Normal`/`Low`) and `spec.estimatedDurationSeconds` feed preemption and the [§9.3.8](#control-plane-observability-prometheus-metrics-contract) metrics. **Capability-loss reassignment** ([§9.3.2](#control-plane-scheduler)) — reassigning or recovering an in-flight task when its reachable robot's required capability degrades, via an adapter-confirmed safe stop — is **impl: planned**.
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps:** **`spec.timeoutSeconds` enforcement does not function at v0.3.** The mechanism is specified to fail an action once `timeoutSeconds` have elapsed since `status.startTime` (Robot Agent-confirmed execution start), but `status.startTime` is never written by any controller — it stays unset for the life of every action — so the one function that reads it (`actionCompletionExpired`, gated on `status.startTime != nil`) always returns false, and the `InProgress`/`Paused` → `Failed` transitions on timeout never fire; the `TimedOut` condition is defined in the schema and never transitions to `True`. Set a timeout today and it is silently unenforced. `status.startedAt` (a separate, correctly-written field — see below) carries the same instant and is a candidate source for a future fix, but no controller derives the timeout deadline from it. **`status.conditions[]` is specified but not written by any v0.3 controller**: all four condition types below (`Scheduled`, `Started`, `DeadlineExceeded`, `TimedOut`) are defined in the schema, but neither the FleetAction controller nor the ActionStatus ingestor calls a condition-setting helper for any of them — `status.phase`, `status.failedAt`/`failureReason`, and the other typed status fields carry the real lifecycle signal instead. A client reading `FleetAction.status.conditions` for scheduling or health decisions will see an empty or stale list; use `status.phase` and the dedicated timestamp/reason fields. The full type, phase set, and controller are otherwise defined. Controllers drive `Pending`→`Assigned`→`InProgress`→terminal, plus `Paused` (estop-pause, [§9.6.2.4](#safety-fleetaction-behaviour-during-estop)), `Revoking` (lease-revocation under the single-executor guarantee, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)), and `Preempted` (preemptor-band Critical/High preemption, [§9.4.6](#tde-preemption-algorithm)). `SwarmadaConfig.spec.actionCancellation.onDisconnect` is consumed for all three `Never`/`AfterTimeout`/`WhenActionExpired` dispositions, with the assignment-lease horizon as the single-executor safety floor. The `priority` named-band enum (`Critical`/`High`/`Normal`/`Low`) and `spec.estimatedDurationSeconds` feed preemption and the [§9.3.8](#control-plane-observability-prometheus-metrics-contract) metrics. **Capability-loss reassignment** ([§9.3.2](#control-plane-scheduler)) — reassigning or recovering an in-flight action when its reachable robot's required capability degrades, via an adapter-confirmed safe stop — is **impl: implemented**. **`spec.minBatteryPct` is schema-only at v0.3:** the field is validated and documented, and the reference
+> implementation's candidate filter does not read it (candidate filter 4, [§9.3.2](#control-plane-scheduler)).
+> An action that sets it will be dispatched to a robot below the stated threshold. **`spec.desiredState` is
+> enacted.** Writing `Cancelled` onto a live action routes it into the same
+> confirmed-cancel path as the `swarmada.io/cancel-requested` annotation, so a declarative cancel carries
+> the identical single-executor guarantee — the robot is freed only once it provably stopped, never on the
+> write alone. That annotation, gated on the `cancel` verb, remains the operator intake and carries the
+> operator's reason ([§9.1.4.2](#fleetaction-state-machine)). `Paused` enacts a safe hold taking the same
+> transitions [§9.6.2.4](#safety-fleetaction-behaviour-during-estop) specifies for the estop path — an
+> `Assigned` action releases its robot binding and its zone slot, an `InProgress` action keeps both,
+> because that robot is physically committed and no other robot may take the action
+> ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)); a `Pending` action is not
+> executing and, per that same table, is unchanged. `Returning` enacts an adapter-confirmed recovery over
+> the existing `cancel_action` path and then holds in the same `Paused` phase, carrying the adapter's
+> disposition into `status.message`; an unconfirmed stop holds the action WITHOUT freeing the robot.
+> **Writing `Running` back does not resume a held action** — a hold is lifted only by an operator,
+> whatever stopped the robot. The field is therefore level-triggered
+> in one direction, and a client MUST NOT infer symmetry from the word declarative (ADR-0045). `status.message`
+> names which intake produced a hold, because the phase alone cannot: an estop hold and a `desiredState`
+> hold are the same `Paused`, and they call for different investigation before a human resumes. When both
+> are live the estop names the hold, and neither intake re-enters once the phase is `Paused`, so they
+> cannot contend on successive reconciles.
+> `FleetTask` fans its own `spec.desiredState` onto each child's copy of this field, which is how the
+> composite's FailFast, cancel and compensate paths reach the robot ([§9.1.5](#fleettask)). **One filter interaction is worth stating plainly:** `spec.robotSelector` short-circuits
+> the candidate filter, and it skips not only the zone and capability predicates but the **parametric
+> constraint** predicate too — so a pinned action can be dispatched to a robot whose resolved
+> `maxPayloadKg` is below the action's `spec.constraints.maxPayloadKg`.
 
 <a id="fleetaction-schema"></a>
 ##### 9.1.4.1 Schema
@@ -2689,7 +3132,7 @@ spec:
   # +kubebuilder:validation:Enum=Navigate;PickUp;DropOff;Patrol;Charge;Custom
   type: PickUp
   # ---------------------------------------------------------------------------
-  # Required capabilities: the robot assigned to this task MUST have all
+  # Required capabilities: the robot assigned to this action MUST have all
   # listed capabilities in Active status at the time of assignment.
   # Capability names are dot-namespaced strings (e.g. navigation.2d, transport.payload).
   # See [§6.8](#design-details-why-is-the-capability-taxonomy-flat-string-names-rather-than-structured) for the flat-string capability naming rationale.
@@ -2701,10 +3144,14 @@ spec:
     - navigation.2d
     - item-pick.ai-guided      # requires camera-front Healthy + model Active
   # ---------------------------------------------------------------------------
-  # Target zone: the FleetZone in which the task is to be executed.
-  # May be any level in the zone hierarchy — parent zones resolve to the
-  # set of all descendant leaf zones. The Scheduler will only assign this
-  # task to robots whose status.currentZone is one of the resolved leaf zones.
+  # Target zone: the FleetZone in which the action is to be executed.
+  # SPECIFIED: may be any level in the zone hierarchy -- parent zones resolve
+  # to the set of all descendant leaf zones.
+  # NOT IMPLEMENTED at v0.3: the Scheduler matches this field against
+  # Robot.spec.zone by exact string equality and resolves no leaf set, so an
+  # action naming a parent zone matches NO robot. Target a leaf zone.
+  # (It also does not read status.currentZone.) See candidate filter 2 in
+  # [§9.3.2](#control-plane-scheduler).
   # If empty, the scheduler may assign any robot regardless of zone.
   # +optional
   zone: zone-aisle-b3          # leaf zone; resolves to itself
@@ -2713,38 +3160,41 @@ spec:
   # +kubebuilder:validation:Enum=Critical;High;Normal;Low
   # +kubebuilder:default=Normal
   #
-  # Critical (1): reserved for time-sensitive or safety-adjacent tasks.
-  #   The Scheduler MAY preempt a Normal or Low task currently InProgress
-  #   on the only capable robot available — the preempted task is requeued
+  # Critical (1): reserved for time-sensitive or safety-adjacent actions.
+  #   The Scheduler MAY preempt a Normal or Low action currently InProgress
+  #   on the only capable robot available — the preempted action is requeued
   #   to Pending with its retryCount unchanged. Operators should use
   #   Critical sparingly; overuse degrades overall throughput.
   #
-  # High (2): scheduled ahead of Normal and Low tasks in the pending queue.
-  #   MAY also preempt a Normal or Low task currently InProgress on the only
+  # High (2): scheduled ahead of Normal and Low actions in the pending queue.
+  #   MAY also preempt a Normal or Low action currently InProgress on the only
   #   capable robot available, with the same eviction semantics as Critical.
-  #   Never preempts a Critical or High task. Use for SLA-bound orders.
+  #   Never preempts a Critical or High action. Use for SLA-bound orders.
   #
   # Normal (3): default. FIFO within the same priority band.
   #
-  # Low (4): scheduled only when no Normal or higher tasks are pending.
+  # Low (4): scheduled only when no Normal or higher actions are pending.
   #   Suitable for background work (cycle counts, opportunistic inspection).
   priority: Normal
   # ---------------------------------------------------------------------------
   # Accept degraded capabilities: when true, the Scheduler will assign this
-  # task to a robot whose required capabilities are in Degraded status,
+  # action to a robot whose required capabilities are in Degraded status,
   # not only Active. Set to true only when partial capability is acceptable
-  # (e.g. a visual inspection task that can proceed with RGB-only camera).
+  # (e.g. a visual inspection action that can proceed with RGB-only camera).
   # Optional and unset by default: when omitted, the namespace default
-  # scheduling.defaultAcceptDegradedCapabilities applies; a per-task value
+  # scheduling.defaultAcceptDegradedCapabilities applies; a per-action value
   # overrides it. The field therefore carries no static CRD default — a
   # defaulted bool could not distinguish "unset" from an explicit false.
   # +optional
   acceptDegradedCapabilities: false
   # ---------------------------------------------------------------------------
   # DesiredState: declarative control intent, reconciled to the safe-hold / cancel /
-  # recover paths. Operator- and trigger-settable on a standalone action; for an
+  # recover paths. Paused and Returning ENTER a hold; writing Running back does NOT
+  # lift one -- a held action is resumed only by an operator through the verb-gated
+  # requeue/cancel intake (ADR-0045). Cancelled is level-triggered in both directions,
+  # because cancellation is terminal. Operator- and trigger-settable on a standalone action; for an
   # action owned by a FleetTask the composite is authoritative and reconciles it to
-  # the task's desiredState ([§9.1.5](#fleettask)). Level-triggered — nothing commands
+  # the owning `FleetTask`'s desiredState ([§9.1.5](#fleettask)). Level-triggered — nothing commands
   # a robot on an event edge.
   # +kubebuilder:validation:Enum=Running;Paused;Returning;Cancelled
   # +kubebuilder:default=Running
@@ -2791,10 +3241,10 @@ spec:
   # +optional
   preferredRobot: ""           # empty = no preference
   # ---------------------------------------------------------------------------
-  # RobotSelector pins the task to one robot by name (the former
+  # RobotSelector pins the action to one robot by name (the former
   # constraints.preferredRobot; see preferredRobot above, which is the SOFT
   # counterpart and a different field). When set, the Scheduler considers only
-  # that robot; if it is ineligible the task stays Pending until it becomes
+  # that robot; if it is ineligible the action stays Pending until it becomes
   # eligible or the deadline passes.
   #
   # NOTE — specification conflict, tracked separately. The reference
@@ -2808,64 +3258,65 @@ spec:
   # +optional
   robotSelector: ""            # empty = no hard pin
   # ---------------------------------------------------------------------------
-  # Estimated duration: operator's estimate of how long this task will take,
+  # Estimated duration: operator's estimate of how long this action will take,
   # in seconds. Used by the TDE when a shared resource declares
-  # reservationPolicy.mode: PriorityWithDuration — shorter tasks within the
+  # reservationPolicy.mode: PriorityWithDuration — shorter actions within the
   # same priority band are served first (SJF within band, priority never
   # inverts between bands). Not used for scheduling or timeout decisions.
   # Swarmada does not validate this value against actual execution time.
   # +kubebuilder:validation:Minimum=0
   # +kubebuilder:validation:Optional
-  estimatedDurationSeconds: 0          # 0 = not set; TDE applies durationFallback
+  estimatedDurationSeconds: 0          # explicit 0, not "unset": the field is a pointer,
+                                       # and an explicit 0 sorts FIRST under the TDE's
+                                       # shortest-job-first ordering. Omit the field
+                                       # entirely to get durationFallback treatment.
   # ---------------------------------------------------------------------------
-  # Deadline: the task MUST be started (transitioned to InProgress) by this
-  # RFC3339 timestamp. If the deadline passes while the task is still Pending
-  # or Assigned, the task transitions to Failed with reason DeadlineExceeded,
+  # Deadline: the action MUST be started (transitioned to InProgress) by this
+  # RFC3339 timestamp. If the deadline passes while the action is still Pending
+  # or Assigned, the action transitions to Failed with reason DeadlineExceeded,
   # and the onFailure policy is applied.
   # Absent = no deadline.
   # +kubebuilder:validation:Optional
   # +kubebuilder:validation:Format=date-time
   deadline: "2026-06-23T10:00:00Z"
   # ---------------------------------------------------------------------------
-  # Timeout: the task MUST be completed (transitioned to Succeeded) within
+  # Timeout: the action MUST be completed (transitioned to Succeeded) within
   # this many seconds after transitioning to InProgress. If the timeout
-  # elapses while InProgress, the task transitions to Failed with reason
+  # elapses while InProgress, the action transitions to Failed with reason
   # TimeoutExceeded, and the onFailure policy is applied.
   # Absent = no timeout.
   # +kubebuilder:validation:Minimum=1
   # +kubebuilder:validation:Optional
   timeoutSeconds: 300          # 5 minutes to complete once started
   # ---------------------------------------------------------------------------
-  # Payload: opaque, task-specific data delivered to the robot via the
-  # Fleet Adapter. Swarmada does not interpret or validate payload contents.
-  # Encoded as a JSON object; the Fleet Adapter passes it verbatim to the
-  # robot's onboard task executor.
-  # See [§9.1.4.5](#fleetaction-the-payload-field) for the payload design rationale.
+  # Payload: opaque, action-specific data. The object has exactly one defined
+  # property, `raw`, holding the payload's JSON bytes (base64-encoded in YAML).
+  # Swarmada does not parse, validate, or interpret the bytes.
+  # See [§9.1.4.5](#fleetaction-the-payload-field) for the payload contract and its
+  # delivery boundary.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:pruning:PreserveUnknownFields
   payload:
-    pickLocation: "A-03-B-07"       # aisle A, rack 03, bin B, position 07
-    skuId: "SKU-00291847"
-    quantity: 2
-    destinationBin: "OUTBOUND-12"
-    orderLineId: "OL-8821-01"
+    # Decoded: {"pickLocation":"A-03-B-07","skuId":"SKU-00291847","quantity":2,"destinationBin":"OUTBOUND-12","orderLineId":"OL-8821-01"}
+    raw: eyJwaWNrTG9jYXRpb24iOiJBLTAzLUItMDciLCJza3VJZCI6IlNLVS0wMDI5MTg0NyIsInF1YW50aXR5IjoyLCJkZXN0aW5hdGlvbkJpbiI6Ik9VVEJPVU5ELTEyIiwib3JkZXJMaW5lSWQiOiJPTC04ODIxLTAxIn0=
   # ---------------------------------------------------------------------------
-  # Failure behaviour: what to do if the task reaches the Failed phase.
+  # Failure behaviour: what to do if the action reaches the Failed phase.
   # +kubebuilder:validation:Enum=Requeue;Alert;Abandon
   # +kubebuilder:default=Requeue
   #
   # Requeue:  reset to Pending and apply retryPolicy. If maxRetries is
   #           exhausted, fall through to Alert then stop.
   # Alert:    emit a FleetActionFailed event and set a Kubernetes Event;
-  #           leave the task in Failed phase for operator review.
+  #           leave the action in Failed phase for operator review.
   # Abandon:  mark as Failed permanently; no retry, no alert.
-  #           Use for fire-and-forget background tasks.
+  #           Use for fire-and-forget background actions.
   onFailure: Requeue
   # ---------------------------------------------------------------------------
   # Retry policy — only relevant when onFailure is Requeue.
   # +kubebuilder:validation:Optional
   retryPolicy:
-    # Maximum number of times the task may be requeued after failure.
-    # When retryCount reaches maxRetries the task remains in Failed phase
+    # Maximum number of times the action may be requeued after failure.
+    # When retryCount reaches maxRetries the action remains in Failed phase
     # and onFailure: Alert behaviour is applied (emit event, do not requeue).
     # +kubebuilder:validation:Minimum=0
     # +kubebuilder:default=3
@@ -2880,16 +3331,20 @@ spec:
 # Operators MUST NOT write to status fields directly.
 # =============================================================================
 status:
-  # Current lifecycle phase of the task.
+  # Current lifecycle phase of the action.
   # See [§9.1.4.2](#fleetaction-state-machine) for the full state machine and all valid transitions.
   # +kubebuilder:validation:Enum=Pending;Assigned;InProgress;Succeeded;Failed;Cancelled;Paused;Revoking;Preempted
   phase: InProgress
+  # Phase-enum extension policy: this enumeration is CLOSED and the transition
+  # table below is exhaustive. New observable state is a condition plus, where
+  # a value is needed, a status field — never a new phase value. See the
+  # Phase Transitions section.
   # ---------------------------------------------------------------------------
-  # The NAME of the robot currently assigned to execute this task (a plain string;
+  # The NAME of the robot currently assigned to execute this action (a plain string;
   # the robot is always in this FleetAction's own namespace — cross-namespace
   # assignment is a Non-Goal, [§4](#non-goals)).
-  # Set by the Scheduler when the task transitions Pending → Assigned.
-  # Cleared if the task returns to Pending (robot went Offline, preempted, etc.).
+  # Set by the Scheduler when the action transitions Pending → Assigned.
+  # Cleared if the action returns to Pending (robot went Offline, preempted, etc.).
   assignedRobot: amr-acme-007
   # ---------------------------------------------------------------------------
   # Lifecycle timestamps (RFC3339). Each is set once when the corresponding
@@ -2906,23 +3361,45 @@ status:
   scheduledAt: "2026-06-23T08:00:14Z"
   # When the Robot Agent reported execution began (Assigned → InProgress).
   startedAt: "2026-06-23T08:00:31Z"
-  # Set when the task reaches Succeeded.
+  # Set when the action reaches Succeeded.
   completedAt: ""
-  # Set when the task reaches Failed.
+  # Set when the action reaches Failed.
   failedAt: ""
+  # ---------------------------------------------------------------------------
+  # Two further timestamps exist on the type and are written by controllers, but
+  # are not part of the documented lifecycle-timestamp set above and are not
+  # rendered in the worked examples below:
+  # startTime: intended as the timeout-enforcement anchor (spec.timeoutSeconds is
+  #   measured from it, per the doc comment on the Go type) but is NEVER WRITTEN by
+  #   any controller at v0.3 — see the Maturity note above. Present in the schema,
+  #   permanently unset.
+  # completionTime: set whenever the action reaches ANY terminal phase (Succeeded,
+  #   Failed, or Cancelled), distinct from completedAt/failedAt which are
+  #   phase-specific. Correctly written by the FleetAction controller and the
+  #   ActionStatus ingestor; cleared (nil) if a terminal action is ever reopened.
+  # Three further fields exist on the type, are correctly written, and are also
+  # not rendered below:
+  # message: a free-text, human-readable status summary, updated by controllers
+  #   especially on failure. No fixed vocabulary; not machine-parsed.
+  # disconnectedAt: set when the assigned robot is lost and the action enters
+  #   Revoking; the wall-clock anchor for the actionCancellation.onDisconnect=
+  #   AfterTimeout ceiling ([§9.1.12](#swarmadaconfig)). Cleared on re-adoption or
+  #   reassignment; unset under onDisconnect=Never.
+  # observedGeneration: the .metadata.generation this status was computed from,
+  #   the standard Kubernetes staleness signal.
   # ---------------------------------------------------------------------------
   # Human-readable failure reason — set when phase transitions to Failed.
   # Empty when phase is not Failed.
   failureReason: ""
   # ---------------------------------------------------------------------------
-  # Advisory task progress (0-100), surfaced from the robot's
+  # Advisory action progress (0-100), surfaced from the robot's
   # ActionStatusUpdate.progress_pct (§9.2.3). Clamped to [0,100]; 100 on Succeeded;
   # absent/0 when the adapter reports no progress.
   # +kubebuilder:validation:Minimum=0
   # +kubebuilder:validation:Maximum=100
   progressPct: 0
   # ---------------------------------------------------------------------------
-  # Number of times this task has been requeued after failure.
+  # Number of times this action has been requeued after failure.
   # Incremented by the controller each time onFailure: Requeue is applied.
   # When retryCount == retryPolicy.maxRetries, no further requeue occurs.
   retryCount: 0
@@ -2944,10 +3421,13 @@ status:
   # +kubebuilder:validation:Format=date-time
   leaseExpiresAt: ""
   # ---------------------------------------------------------------------------
-  # Standard Kubernetes conditions.
+  # Standard Kubernetes conditions. SPECIFIED, NOT WRITTEN AT V0.3 (Maturity note
+  # above): no controller sets any of these four condition types. The example
+  # values below show the intended semantics, not observed behavior — a real
+  # v0.3 FleetAction's conditions[] is empty or stale.
   conditions:
     - type: Scheduled
-      # True when the task has been assigned to a robot (phase >= Assigned).
+      # True when the action has been assigned to a robot (phase >= Assigned).
       status: "True"
       reason: RobotAssigned
       message: "Assigned to amr-acme-007 in zone zone-aisle-b3."
@@ -2956,18 +3436,22 @@ status:
       # True when the Robot Agent has confirmed execution began (phase >= InProgress).
       status: "True"
       reason: ExecutionStarted
-      message: "Robot Agent confirmed task start at 08:00:31Z."
+      message: "Robot Agent confirmed action start at 08:00:31Z."
       lastTransitionTime: "2026-06-23T08:00:31Z"
     - type: DeadlineExceeded
-      # True when the current time has passed spec.deadline without the task
+      # True when the current time has passed spec.deadline without the action
       # having reached InProgress. Triggers Failed transition.
       status: "False"
       reason: WithinDeadline
       message: ""
       lastTransitionTime: "2026-06-23T08:00:14Z"
     - type: TimedOut
-      # True when timeoutSeconds has elapsed since startedAt without
-      # the task reaching Succeeded. Triggers Failed transition.
+      # Specified to go True when timeoutSeconds has elapsed since startedAt
+      # without the action reaching Succeeded, triggering a Failed transition.
+      # NOT IMPLEMENTED at v0.3 (see the Maturity note above): the underlying
+      # check is gated on status.startTime, which no controller ever writes, so
+      # this condition never transitions to True today regardless of how long
+      # an action runs.
       status: "False"
       reason: WithinTimeout
       message: ""
@@ -2994,9 +3478,9 @@ The following diagram shows all valid `FleetAction` phase transitions and the co
       │  (robot reserved; awaiting exec start)  │◀──────────────────────────┐
       └───────────────┬─────────────────────────┘                           │
                       │                                                     │
-     Robot Agent ACKs task AND      Robot Offline:                          │
-     begins execution               • no lease → immediate PENDING          │
-                      │             • lease held → REVOKING ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee))      │
+     Robot Agent ACKs action AND      Robot Offline:                        │
+     begins execution                • no lease → immediate PENDING         │
+                      │              • lease held → REVOKING (§9.6.3.5)     │
       ┌───────────────▼─────────────────────────┐                           │
       │             IN PROGRESS                 │                           │
       │  (Robot Agent executing)                │                           │
@@ -3005,7 +3489,7 @@ The following diagram shows all valid `FleetAction` phase transitions and the co
      Robot Agent      ZoneMaintenance   E-stop                 onFailure:   │
      reports         activates OR       received               Requeue AND  │
      success         estop received     by robot               retryCount < │
-         │           AND task is        AND task               maxRetries   │
+         │           AND action is        AND action           maxRetries   │
          │           pauseable          is pauseable               │        │
          │                │               │                        │        │
 ┌────────▼───┐    ┌───────▼──────┐        │            ┌───────────▼───┐    │
@@ -3021,9 +3505,9 @@ The following diagram shows all valid `FleetAction` phase transitions and the co
                           └───────────────┘     │(terminal)│   │      │
                          → returns to           └──────────┘   │      │
                            IN PROGRESS                         │      │
-                           if task can                  Event  │      │
+                           if action can                  Event  │      │
                            resume, OR                  emitted │      │
-                           FAILED if                   task    │      │
+                           FAILED if                   action    │      │
                            timeout                     stays   │      │
                            exceeded                    Failed  │      │
                            during pause                        │      │
@@ -3031,7 +3515,7 @@ The following diagram shows all valid `FleetAction` phase transitions and the co
                                                             FAILED (terminal)
   REVOKING: robot offline, lease outstanding; control plane stops renewing;
             awaits a provably dead lease before reassigning. → InProgress
-            (robot reconnects still running the task under a live lease —
+            (robot reconnects still running the action under a live lease —
             re-adopted), Pending (dead lease; retryCount NOT incremented),
             Failed (timeout exceeded), or Cancelled (operator action).
             See [§9.6.3.4](#safety-reconnection-flow)–[§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee).
@@ -3047,10 +3531,14 @@ The following diagram shows all valid `FleetAction` phase transitions and the co
              robot was physically in the zone, the zone transiently holds
              maxConcurrentRobots+1 robots until its slot is released
              ([§9.4.10](#tde-normative-invariants) TDE invariant TDE-3).
-  CANCELLED: reachable from ANY non-terminal phase via operator patch
-             (kubectl patch fleetaction ... --patch '{"status":{"phase":"Cancelled"}}')
-             or swarmctl cancel task <name>. Terminal. Robot Agent is notified
-             to abort execution if the task was InProgress or Revoking.
+  CANCELLED: reachable from ANY non-terminal phase via `swarmctl cancel <fleetaction>`,
+             which writes the swarmada.io/cancel-requested annotation, gated on the
+             `cancel` verb. The controller then finalizes to Cancelled under the
+             confirmed-cancel discipline. Terminal. Robot Agent is notified to abort
+             execution if the action was InProgress or Revoking.
+             Do NOT patch status.phase directly: status is controller-owned
+             (see the STATUS banner above), a raw status patch bypasses the `cancel`
+             authorization, and nothing reconciles it back onto the robot.
 ```
 
 **All transitions in tabular form:**
@@ -3061,74 +3549,82 @@ The following diagram shows all valid `FleetAction` phase transitions and the co
 | Pending | Assigned | Scheduler finds an eligible robot; robot.phase = Idle; robot in spec.zone |
 | Pending | Failed | `spec.deadline` passes before assignment |
 | Pending | Cancelled | Operator cancels via `swarmctl` or direct patch |
-| Assigned | InProgress | Robot Agent ACKs task and reports execution started |
+| Assigned | InProgress | Robot Agent ACKs action and reports execution started |
 | Assigned | Pending | Assigned robot transitions to Offline AND assignment was **not yet accepted** (no `AssignActionResult.accepted` received — no lease outstanding); robot cleared from `status.assignedRobot`; `retryCount` not incremented |
 | Assigned | Revoking | Assigned robot transitions to Offline AND assignment **was accepted** (lease outstanding); control plane stops renewing; queues `cancel_action` for next reconnect; see [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) |
+| Assigned | Paused | E-stop received at robot, zone, or namespace scope while `Assigned`; the robot is cleared from `status.assignedRobot` and the action is operator-gated on clear ([§9.6.2.4](#safety-fleetaction-behaviour-during-estop)) |
 | Assigned | Failed | `spec.deadline` passes while Assigned (robot never started) |
 | Assigned | Cancelled | Operator cancels |
-| InProgress | Succeeded | Robot Agent reports successful task completion |
-| InProgress | Failed | Robot Agent reports failure; OR `timeoutSeconds` elapses; OR robot transitions to Error phase |
+| InProgress | Succeeded | Robot Agent reports successful action completion |
+| InProgress | Failed | Robot Agent reports failure; OR robot transitions to Error phase; OR (**specified, not implemented at v0.3** — see the Maturity note above) `timeoutSeconds` elapses |
 | InProgress | Paused | Active `ZoneMaintenance` on robot's zone AND capability is `pauseable: true`; OR e-stop received |
 | InProgress | Revoking | Robot transitions to Offline while InProgress (T1 connectivity threshold); lease was outstanding; control plane stops renewing; see [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) |
 | Assigned / InProgress | Pending | Assigned robot's `status.capabilities` cease to satisfy `spec.requiredCapabilities` (filter 3) AND the adapter confirms a safe stop / hand-off; `retryCount` NOT incremented (*Capability-loss reassignment*, [§9.3.2](#control-plane-scheduler)) |
 | InProgress | Failed | Capability lost mid-commitment and the robot cannot safely complete or hand off; adapter recovers (returns load / to base) and reports `failureReason: CapabilityLostDuringExecution`; `onFailure` applies ([§9.3.2](#control-plane-scheduler)) |
+| Assigned / InProgress | Preempted | The Traffic Deconfliction Engine evicts this action to grant its slot to a higher-priority (Critical or High) action ([§9.4](#tde)). Reachable from `Assigned` when the evicted reservation was `Reserved` — no lease outstanding, so the eviction is clean — and from `InProgress` when it was `Occupied`, which leaves the zone transiently at `maxConcurrentRobots + 1` until the stop is confirmed |
 | Preempted | Revoking / Pending | TDE evicted this action (a Critical or High action needed the slot). Occupied eviction → Revoking, then Pending after a provably-dead lease ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)); a Reserved eviction with no accepted lease → Pending immediately. retryCount NOT incremented |
-| Revoking | Pending | Prior lease is provably dead (one of: expiry confirmed; `cancel_action` acknowledged; adapter reconnects and reports task not running); `retryCount` NOT incremented |
-| Revoking | InProgress | Robot reconnects still executing the task under a not-yet-expired lease; control plane resumes `renew_lease` at the same `assignmentGeneration` (re-adoption); no reassignment ([§9.6.3.4](#safety-reconnection-flow)) |
-| Revoking | Failed | `timeoutSeconds` exceeded while in Revoking phase |
+| Revoking | Pending | Prior lease is provably dead (one of: expiry confirmed; `cancel_action` acknowledged; adapter reconnects and reports the action not running); `retryCount` NOT incremented |
+| Revoking | InProgress | Robot reconnects still executing the action under a not-yet-expired lease; control plane resumes `renew_lease` at the same `assignmentGeneration` (re-adoption); no reassignment ([§9.6.3.4](#safety-reconnection-flow)) |
+| Revoking | Failed | `timeoutSeconds` exceeded while in Revoking phase — **specified, not reachable at v0.3**: the expiry check reads `status.startTime`, which no controller writes (see the Maturity note) |
 | Revoking | Cancelled | Operator action |
 | Failed | Pending | `onFailure: Requeue` AND `retryCount < maxRetries` (after `backoffSeconds` delay) |
 | Failed | Failed *(terminal)* | `onFailure: Alert` OR `onFailure: Abandon` OR `retryCount == maxRetries` |
-| Paused | InProgress | `ZoneMaintenance` window closes AND robot ready to resume; OR e-stop cleared AND task timeout not exceeded |
-| Paused | Failed | `timeoutSeconds` exceeded while in Paused phase (timeout clock does NOT pause) |
+| Paused | InProgress | `ZoneMaintenance` window closes AND robot ready to resume; OR e-stop cleared AND `spec.timeoutSeconds` not exceeded |
+| Paused | Failed | **Specified, not implemented at v0.3** (see the Maturity note above) — `timeoutSeconds` exceeded while in Paused phase (timeout clock does NOT pause) |
 | Any non-terminal | Cancelled | Operator action |
 
-**ZoneMaintenance behaviour:** when a `ZoneMaintenance` resource activates for the robot's zone, the robot transitions to Maintenance phase. Any `InProgress` task on that robot transitions to Paused. The timeout clock continues to run during Paused — if the maintenance window is longer than the remaining timeout budget, the task will transition to Failed when the timeout elapses, even while Paused. Operators scheduling maintenance windows must account for in-flight task timeout budgets.
+**Phase-enum extension policy.** `status.phase` is a closed enumeration and the transition table above is exhaustive. A downstream RFC MUST NOT add a phase value; new observable state is expressed as a `status` condition and, where a value is required, a dedicated `status` field. A controller-owned condition MAY suppress a transition the table permits — holding an action at its current phase — without constituting a new phase, provided the condition is written only by a controller and never by an operator, and the suppression is released deterministically: a suppression with no bounded release is a deadlock, not a gate. Adding a phase value is a breaking change to a validated enum on the most widely consumed resource in this specification, and is available only at a major revision.
 
-**E-stop behaviour:** an e-stop signal received by the robot causes all `InProgress` tasks with `pauseable: true` capabilities to transition to Paused. Non-pauseable capabilities (`estop.receive`, `health.heartbeat`) continue operating. When the e-stop is cleared, Paused tasks return to InProgress if the robot is still capable and the timeout has not elapsed.
+**ZoneMaintenance behaviour:** when a `ZoneMaintenance` resource activates for the robot's zone, the robot transitions to Maintenance phase. Any `InProgress` action on that robot transitions to Paused. The specification's intent is for the timeout clock to keep running during Paused — a maintenance window longer than the remaining timeout budget transitioning the action to Failed even while Paused — but at v0.3 this transition is specified, not implemented (Maturity note above): with `status.timeoutSeconds` enforcement non-functional, a Paused action does not fail on timeout regardless of how long the pause lasts. Operators should not rely on a maintenance-window pause to bound how long an action stays outstanding.
+
+**E-stop behaviour:** an e-stop signal received by the robot causes all `InProgress` actions with `pauseable: true` capabilities to transition to Paused. Non-pauseable capabilities (`estop.receive`, `health.heartbeat`) continue operating. When the e-stop is cleared, Paused actions return to InProgress if the robot is still capable and the timeout has not elapsed.
 
 **Assigned robot goes Offline:** the Scheduler applies the lease-aware rule:
 
-- **No lease outstanding** (the adapter has not yet sent `AssignActionResult.accepted = true`): the Scheduler clears `status.assignedRobot` and returns the task to `Pending` immediately — no retry increment, no backoff. This is a scheduling miss; the robot never held the task.
-- **Lease outstanding** (the adapter already accepted the assignment and holds a live lease): the task transitions to `Revoking`. The control plane stops renewing the lease and queues a `cancel_action` Command for the next time the adapter reconnects. The task moves to `Pending` only after the lease is provably dead per [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) — preventing a second robot from physically executing the same task while the offline robot may still be executing it under the accepted lease.
+- **No lease outstanding** (the adapter has not yet sent `AssignActionResult.accepted = true`): the Scheduler clears `status.assignedRobot` and returns the action to `Pending` immediately — no retry increment, no backoff. This is a scheduling miss; the robot never held the action.
+- **Lease outstanding** (the adapter already accepted the assignment and holds a live lease): the action transitions to `Revoking`. The control plane stops renewing the lease and queues a `cancel_action` Command for the next time the adapter reconnects. The action moves to `Pending` only after the lease is provably dead per [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) — preventing a second robot from physically executing the same action while the offline robot may still be executing it under the accepted lease.
 
-**Assigned robot loses a required capability (reachable):** distinct from going Offline. When the assigned robot's `status.capabilities` cease to satisfy `spec.requiredCapabilities` (filter 3, on debounced status), the Scheduler reassigns via *Capability-loss reassignment* ([§9.3.2](#control-plane-scheduler)). Because the robot is reachable, the stop is **confirmed** through the Fleet Adapter at a safe stopping point (never mid-motion): a clean stop/hand-off returns the task to `Pending` (no retry increment); a robot mid-commitment that can still finish safely completes normally; and a robot that cannot safely complete or hand off is recovered by the adapter and the task is `Failed` with `CapabilityLostDuringExecution`. This is automatic (unlike operator-gated estop-pause) yet preserves the single-executor guarantee.
+**Assigned robot loses a required capability (reachable):** distinct from going Offline. When the assigned robot's `status.capabilities` cease to satisfy `spec.requiredCapabilities` (filter 3, on debounced status), the Scheduler reassigns via *Capability-loss reassignment* ([§9.3.2](#control-plane-scheduler)). Because the robot is reachable, the stop is **confirmed** through the Fleet Adapter at a safe stopping point (never mid-motion): a clean stop/hand-off returns the action to `Pending` (no retry increment); a robot mid-commitment that can still finish safely completes normally; and a robot that cannot safely complete or hand off is recovered by the adapter and the action is `Failed` with `CapabilityLostDuringExecution`. This is automatic (unlike operator-gated estop-pause) yet preserves the single-executor guarantee.
 
 In both cases `retryCount` is not incremented.
 
 <a id="fleetaction-priority-semantics"></a>
 ##### 9.1.4.3 Priority Semantics
 
-Priority controls two orthogonal behaviours: **queue order** (which Pending task the Scheduler selects next when a robot becomes available) and **preemption** (whether a Pending task may interrupt an InProgress task on the only eligible robot).
+Priority controls two orthogonal behaviours: **queue order** (which Pending action the Scheduler selects next when a robot becomes available) and **preemption** (whether a Pending action may interrupt an InProgress action on the only eligible robot).
 
 | Priority | Value | Queue order | Preempts InProgress? | Typical use |
 | :---- | :---- | :---- | :---- | :---- |
 | Critical | 1 | First | Yes — preempts Normal (3) and Low (4) | Safety-adjacent work; SLA breach imminent |
 | High | 2 | Before Normal and Low | Yes — preempts Normal and Low | SLA-bound orders; time-sensitive but not safety-critical |
 | Normal | 3 | FIFO within band | No | Standard throughput work |
-| Low | 4 | After all higher bands | No | Background work; opportunistic tasks |
+| Low | 4 | After all higher bands | No | Background work; opportunistic actions |
 
-**Preemption rule:** a Critical or High task may preempt a robot that is InProgress on a Normal or Low task. The InProgress task transitions to `Preempted` → `Revoking` and returns to `Pending` only after its stop is provably confirmed ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)): the Fleet Adapter brings the robot to a safe stopping point (never mid-motion) and the control plane confirms it before any reassignment, so the action is never run by two robots. Its `retryCount` is unchanged. A preemptor never evicts another Critical or High task — those two bands are served FIFO among themselves and are never preemption victims.
+**Preemption rule:** a Critical or High action may preempt a robot that is `Assigned` or `InProgress` on a Normal or Low action. The evicted action transitions to `Preempted`, then to `Pending` when the evicted reservation was `Reserved` (no lease outstanding), or to `Revoking` and returns to `Pending` only after its stop is provably confirmed ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)): the Fleet Adapter brings the robot to a safe stopping point (never mid-motion) and the control plane confirms it before any reassignment, so the action is never run by two robots. Its `retryCount` is unchanged. A preemptor never evicts another Critical or High action: those two values are never preemption victims. Queue order is by priority **value** — Critical precedes High, which precedes Normal, which precedes Low — and FIFO applies within one value. Priority and preemption are per-`FleetAction`; a `FleetTask` carries no priority and is never itself preempted.
 
 <a id="fleetaction-multi-robot-tasks"></a>
 ##### 9.1.4.4 Multi-Robot Tasks
 
-RFC-0001 defines a strict **one action, one robot** model: a `FleetAction` is assigned to exactly one robot, and its `status.assignedRobot` is a single reference. Multi-*step* coordination — running several actions in sequence, in parallel, or across robots, with dependency ordering and completion/failure/compensation policy — is provided by the composite `FleetTask` resource ([§9.1.5](#fleettask)), which owns one or more `FleetAction`s and never itself crosses the fleet-adapter boundary. Coordinated multi-*robot* start — synchronized simultaneous engagement across robots — is not part of RFC-0001 and is specified additively in RFC-0007 (Multi-Robot Task Coordination). Keeping the atomic action single-robot is what lets that composition layer stay clean: the partial-success and coordination semantics that vary by domain live in the `FleetTask`, not in optional multi-robot fields bolted onto every action. An upstream system may still fan a work order into independent `FleetAction`s or `FleetTask`s and coordinate above Swarmada; the composite simply makes the common cases first-class.
+RFC-0001 defines a strict **one action, one robot** model: a `FleetAction` is assigned to exactly one robot, and its `status.assignedRobot` is a single reference. Multi-*step* coordination — running several actions in sequence, in parallel, or across robots, with dependency ordering and completion/failure/compensation policy — is provided by the composite `FleetTask` resource ([§9.1.5](#fleettask)), which owns one or more `FleetAction`s and never itself crosses the fleet-adapter boundary. Coordinated multi-*robot* start — synchronized simultaneous engagement across robots — is not part of RFC-0001 and is specified additively in RFC-0007 (Multi-Robot Task Coordination). Keeping the atomic action single-robot is what lets that composition layer stay clean: the partial-success and coordination semantics that vary by domain live in the `FleetTask`, not in optional multi-robot fields bolted onto every action. An upstream system may still fan a work order into independent `FleetAction`s or `FleetTask`s and coordinate above Swarmada; the composite makes the common cases first-class.
 
 <a id="fleetaction-the-payload-field"></a>
 ##### 9.1.4.5 The Payload Field
 
-The `spec.payload` field is intentionally opaque. Swarmada does not parse, validate, or act on its contents — it passes the payload verbatim to the robot via the Fleet Adapter's task dispatch message. This design allows a single `FleetAction` schema to serve fundamentally different industries without requiring industry-specific CRD extensions.
+The `spec.payload` field is intentionally opaque. Swarmada does not parse, validate, or act on its contents. This design allows a single `FleetAction` schema to serve fundamentally different industries without requiring industry-specific CRD extensions.
 
-`spec.type` is a coarse classifier for the kind of work; `spec.payload` conveys the robot-native ("Robot OS") commands understood by the target robot. Each Fleet Adapter provider decides which Robot-OS commands it supports and at what granularity; Swarmada mandates no fixed decomposition. A `FleetAction` remains exactly one dispatch to one robot; multi-step or multi-robot work is expressed by the composite `FleetTask` ([§9.1.5](#fleettask)).
+**Shape.** `spec.payload` is an object with exactly one defined property, `raw`, carrying the payload's JSON bytes. Because the property is a byte string, YAML and JSON representations base64-encode it, and `kubectl get fleetaction -o yaml` renders `payload.raw` as base64 rather than as readable keys. The field additionally carries `PreserveUnknownFields`, so sibling keys written alongside `raw` are persisted on the resource but are **not** decoded into `raw` and are never read by the control plane. A client that writes domain keys directly under `payload` — rather than into `payload.raw` — produces an action whose payload the control plane treats as empty.
 
-When a `FleetAction` is accepted, its declared `spec.type`/`spec.payload` is confirmed for validity against the advertised command set of the target namespace's connected Fleet Adapters — via the adapter validation RPC ([§9.2](#fleet-adapter-protocol)) — before it becomes schedulable, with final per-robot confirmation at assignment. A `FleetAction` that no connected adapter can serve is rejected at admission.
+`spec.type` is a coarse classifier for the type of work; `spec.payload` conveys the robot-native ("Robot OS") commands understood by the target robot. Each Fleet Adapter provider decides which Robot-OS commands it supports and at what granularity; Swarmada mandates no fixed decomposition. A `FleetAction` remains exactly one dispatch to one robot; multi-step or multi-robot work is expressed by the composite `FleetTask` ([§9.1.5](#fleettask)).
 
-The payload is a free-form JSON object. Operators and upstream-system integrations are responsible for defining the payload schema for their domain; robot onboard software and the Fleet Adapter implementation are responsible for interpreting it.
+When a `FleetAction` is accepted, its declared `spec.type` is confirmed against the advertised command set of the target namespace's connected Fleet Adapters before it becomes schedulable, and `spec.type` together with `spec.payload.raw` is re-confirmed for the chosen robot at assignment via the `validate_action` command ([§9.2](#fleet-adapter-protocol)). An adapter that replies `unsupported`, or that cannot be reached, leaves the action unconfirmed rather than servable.
+
+**Delivery.** `spec.payload.raw` reaches the adapter twice. It rides `validate_action`, which is how an adapter judges servability for a concrete robot; and it rides the assignment itself as `AssignAction.payload_json`, which is how the robot receives the work to execute. `destination` is deprecated on the wire precisely because the destination now travels inside the payload. An adapter MUST read the payload from `payload_json` on assignment rather than relying on what it retained at validation.
+
+Operators and upstream-system integrations are responsible for defining the payload schema for their domain; robot onboard software and the Fleet Adapter implementation are responsible for interpreting it.
 
 **Why not a typed schema?** A typed payload schema would require Swarmada to define and maintain domain-specific task formats for every industry vertical — `WarehousePickPayload`, `HospitalDeliveryPayload`, `InspectionPayload`, etc. This creates coupling between the core spec and downstream domains. The opaque approach keeps the core spec stable; domain schemas evolve independently.
 
-**Why JSON and not arbitrary bytes?** JSON is human-readable (operators can inspect tasks with `kubectl get fleetaction -o yaml`), widely supported across all Fleet Adapter implementation languages, and sufficient for all known task payload schemas. Base64-encoded binary is supported within a JSON string field for adapters that require binary payloads.
+**Why JSON inside an opaque byte field?** JSON is widely supported across every Fleet Adapter implementation language and is sufficient for all known action payload schemas, so the bytes are JSON by convention and the wire field is named `payload_json`. Carrying it as bytes rather than as a structured object keeps the CRD schema free of domain types and lets an adapter that requires binary payloads carry them without a second encoding. The cost is operator legibility: the payload does not render as readable keys in `kubectl` output, and an operator inspecting one must decode `payload.raw`.
 
 **Industry examples:**
 
@@ -3143,9 +3639,16 @@ The payload is a free-form JSON object. Operators and upstream-system integratio
 <a id="fleetaction-worked-examples"></a>
 ##### 9.1.4.6 Worked Examples
 
+Both examples show a complete object as this chapter specifies it, including fields the reference
+implementation does not yet produce. In particular the `status.conditions[]` arrays below are
+**specified, written by no v0.3 controller** — `status.phase` and the typed timestamp/reason fields carry
+the lifecycle signal instead — and `status.startTime` is never set, so the `TimedOut` condition shown as
+`False` never transitions to `True` (see the Maturity note at the top of this chapter). Read the examples
+as the target shape, not as output to write a monitoring query against.
+
 **Example 1 — Warehouse Pick Task**
 
-A WMS creates this task when order line OL-8821-01 is released for picking. The task requires AI-guided picking (camera + model) and a robot with at least 10 kg payload capacity. The deadline reflects the ship-by time for the order.
+A WMS creates this action when order line OL-8821-01 is released for picking. The action requires AI-guided picking (camera + model) and a robot with at least 10 kg payload capacity. The deadline reflects the ship-by time for the order.
 
 ```yaml
 apiVersion: swarmada.io/v1
@@ -3161,7 +3664,7 @@ spec:
     - navigation.2d
     - item-pick.ai-guided      # requires camera-front Healthy AND item-recognition model Active
   zone: zone-aisle-b3          # robot must be in aisle B3 at assignment time
-  priority: High               # SLA-bound; scheduled ahead of Normal tasks
+  priority: High               # SLA-bound; scheduled ahead of Normal actions
   acceptDegradedCapabilities: false
   constraints:
     maxPayloadKg: 10.0
@@ -3170,11 +3673,8 @@ spec:
   deadline: "2026-06-23T10:00:00Z"
   timeoutSeconds: 300
   payload:
-    pickLocation: "A-03-B-07"
-    skuId: "SKU-00291847"
-    quantity: 2
-    destinationBin: "OUTBOUND-12"
-    orderLineId: "OL-8821-01"
+    # Decoded: {"pickLocation":"A-03-B-07","skuId":"SKU-00291847","quantity":2,"destinationBin":"OUTBOUND-12","orderLineId":"OL-8821-01"}
+    raw: eyJwaWNrTG9jYXRpb24iOiJBLTAzLUItMDciLCJza3VJZCI6IlNLVS0wMDI5MTg0NyIsInF1YW50aXR5IjoyLCJkZXN0aW5hdGlvbkJpbiI6Ik9VVEJPVU5ELTEyIiwib3JkZXJMaW5lSWQiOiJPTC04ODIxLTAxIn0=
   onFailure: Requeue
   retryPolicy:
     maxRetries: 3
@@ -3198,7 +3698,7 @@ status:
     - type: Started
       status: "True"
       reason: ExecutionStarted
-      message: "Robot Agent confirmed task start at 08:00:31Z."
+      message: "Robot Agent confirmed action start at 08:00:31Z."
       lastTransitionTime: "2026-06-23T08:00:31Z"
     - type: DeadlineExceeded
       status: "False"
@@ -3216,7 +3716,7 @@ status:
 
 **Example 2 — Hospital Supply Delivery Task**
 
-A hospital logistics system creates this task when ward 4B requests surgical supplies from the central store. The task uses collaborative transport (no AI model required — the robot just needs a functional load platform). The priority is Critical because surgical supplies are time-sensitive. No deadline is set — the task stays Pending until a capable robot is available. The payload carries a pseudonymised patient reference for audit purposes.
+A hospital logistics system creates this action when ward 4B requests surgical supplies from the central store. The action uses collaborative transport (no AI model required — the robot only needs a functional load platform). The priority is Critical because surgical supplies are time-sensitive. No deadline is set — the action stays Pending until a capable robot is available. The payload carries a pseudonymised patient reference for audit purposes.
 
 ```yaml
 apiVersion: swarmada.io/v1
@@ -3232,28 +3732,23 @@ spec:
     - navigation.2d
     - transport.payload        # load platform must be Healthy; minPayloadKg enforced below
   zone: zone-central-store     # robot must be in the central store zone at assignment
-  priority: Critical           # surgical supplies; may preempt Normal tasks
+  priority: Critical           # surgical supplies; may preempt Normal actions
   acceptDegradedCapabilities: false
   constraints:
     maxPayloadKg: 5.0
   minBatteryPct: 40            # higher threshold — multi-floor delivery
   # robotSelector omitted — best available robot
-  # No deadline — the task waits until a capable robot is free.
+  # No deadline — the action waits until a capable robot is free.
   timeoutSeconds: 600          # 10 minutes to complete once started (long — multi-floor route)
   payload:
-    fromLocation: "STORE-ROOM-A"
-    toLocation: "WARD-4B-NURSES-STATION"
-    supplyType: "surgical-kit-general"
-    urgency: "stat"
-    quantity: 1
-    requestId: "REQ-4B-0042"
-    patientRef: "PT-ANON-8821"   # pseudonymised; no PII in task payload
-    floorRoute: [0, 2]           # ground floor → lift → floor 2
+    # Decoded (pseudonymised patientRef; no PII in an action payload):
+    # {"fromLocation":"STORE-ROOM-A","toLocation":"WARD-4B-NURSES-STATION","supplyType":"surgical-kit-general","urgency":"stat","quantity":1,"requestId":"REQ-4B-0042","patientRef":"PT-ANON-8821","floorRoute":[0,2]}
+    raw: eyJmcm9tTG9jYXRpb24iOiJTVE9SRS1ST09NLUEiLCJ0b0xvY2F0aW9uIjoiV0FSRC00Qi1OVVJTRVMtU1RBVElPTiIsInN1cHBseVR5cGUiOiJzdXJnaWNhbC1raXQtZ2VuZXJhbCIsInVyZ2VuY3kiOiJzdGF0IiwicXVhbnRpdHkiOjEsInJlcXVlc3RJZCI6IlJFUS00Qi0wMDQyIiwicGF0aWVudFJlZiI6IlBULUFOT04tODgyMSIsImZsb29yUm91dGUiOlswLDJdfQ==
   onFailure: Alert               # if delivery fails, alert operator immediately; do not requeue
   retryPolicy:
     maxRetries: 0              # no automatic retry for Critical deliveries — alert and investigate
     backoffSeconds: 0
-# Status while the task is pending (no eligible robot available yet in central store):
+# Status while the action is pending (no eligible robot available yet in central store):
 status:
   phase: Pending
   assignedRobot: ""
@@ -3286,16 +3781,32 @@ status:
       lastTransitionTime: "2026-06-23T09:15:00Z"
 ```
 
-The two examples use an identical schema. The differences are entirely in field values: the warehouse task is High priority with a deadline and AI-guided picking; the hospital task is Critical with a longer timeout, no deadline, no AI model requirement, and a strict no-retry policy. The `payload` structure is domain-specific in both cases and completely opaque to Swarmada — the warehouse Fleet Adapter interprets bin locations; the hospital Fleet Adapter interprets ward routing and floor maps. Neither requires a schema change to the `FleetAction` CRD.
+The two examples use an identical schema. The differences are entirely in field values: the warehouse action is High priority with a deadline and AI-guided picking; the hospital action is Critical with a longer timeout, no deadline, no AI model requirement, and a strict no-retry policy. The `payload` structure is domain-specific in both cases and completely opaque to Swarmada — the warehouse Fleet Adapter interprets bin locations; the hospital Fleet Adapter interprets ward routing and floor maps. Neither requires a schema change to the `FleetAction` CRD.
 
 ---
 
 <a id="fleettask"></a>
 #### 9.1.5 FleetTask
 
-A `FleetTask` is the composite, operator- and upstream-facing unit of work: one logical objective that Swarmada accomplishes by scheduling one or more `FleetAction`s ([§9.1.4](#fleetaction)) — the atomic, single-robot units of dispatch. Where a `FleetAction` is "navigate to gate 3" or "pick line item 8821", a `FleetTask` is "fetch the pallet from the dock, stage it, and inspect it" — a graph of actions that may run in sequence, in parallel, or across several robots. The `FleetTask` never crosses the fleet-adapter boundary itself; the control plane decomposes it into `FleetAction`s, each dispatched to one robot exactly as a standalone action ([§9.2](#fleet-adapter-protocol)). A WMS or operator tooling that previously created one `FleetAction` per step now names the objective once as a `FleetTask`; a `FleetTask` with a single action is the exact equivalent of a standalone `FleetAction`, so simple work needs no graph.
+A `FleetTask` is the composite, operator- and upstream-facing unit of work: one logical objective that Swarmada accomplishes by scheduling one or more `FleetAction`s ([§9.1.4](#fleetaction)) — the atomic, single-robot units of dispatch. Where a `FleetAction` is "navigate to dock 3" or "pick line item 8821", a `FleetTask` is "fetch the pallet from the dock, buffer it, and inspect it" — a graph of actions that may run in sequence, in parallel, or across several robots. The `FleetTask` never crosses the fleet-adapter boundary itself; the control plane decomposes it into `FleetAction`s, each dispatched to one robot exactly as a standalone action ([§9.2](#fleet-adapter-protocol)). A WMS or operator tooling that previously created one `FleetAction` per step now names the objective once as a `FleetTask`; a `FleetTask` with a single action is the exact equivalent of a standalone `FleetAction`, so simple work needs no graph.
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. The type and this schema are normative; the composite controller (ownership of child `FleetAction`s, dependency-graph evaluation, phase aggregation, the completion/failure/compensation saga, and the append-only reconcile path) is implemented. RFC-0001 composition sequences a task's actions and fans them out to independently-scheduled `FleetAction`s; it makes no cross-robot start-synchronization guarantee. Coordinated multi-robot start — the synchronized-start barrier and the start-gate primitive it rests on — is specified separately in RFC-0007 (Multi-Robot Task Coordination) and layered additively on this resource.
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. The type and this
+> schema are normative; the composite controller (ownership of child `FleetAction`s, dependency-graph
+> evaluation, phase aggregation, the completion/failure/compensation saga, and the append-only reconcile
+> path) is implemented. The cancellation half of that saga reaches the robot:
+> FailFast, `spec.desiredState: Cancelled` and the Compensate policy are all implemented as a write of
+> `Cancelled` onto each non-terminal child's `FleetAction.spec.desiredState`, which the FleetAction
+> controller reads and routes into its confirmed-cancel path ([§9.1.4](#fleetaction)) — so a child stops only
+> once its robot provably stopped, and phase aggregation then sees the terminal `Cancelled` it waits on.
+> The composite's other two `desiredState` values, `Paused` and `Returning`, are enacted by the FleetAction
+> controller as well: each fans out onto the children and enters the operator-gated `Paused` phase, taking
+> the same transitions the estop path uses ([§9.1.4](#fleetaction)). A hold is lifted only by an operator
+> (ADR-0045), so a composite cannot un-pause its children by writing `Running` at the task level, and a
+> task holding any child reports `Running` until each is resolved individually (below). **Two smaller items:** the per-child adapter validation described below as running "before any child is generated or
+> scheduled" in fact runs when each child is created, and fails the child rather than the task; and
+> `status.conditions[Ready]`, `status.conditions[BarrierSatisfied]` and `status.actions[].attempt` are
+> specified and written by no v0.3 controller (`DependencyGraphValid` and `CompensationComplete` are the
+> two that are). RFC-0001 composition sequences a task's actions and fans them out to independently-scheduled `FleetAction`s; it makes no cross-robot start-synchronization guarantee. Coordinated multi-robot start — the synchronized-start barrier and the start-gate primitive it rests on — is specified separately in RFC-0007 (Multi-Robot Task Coordination) and layered additively on this resource. **`dependsOn` acyclicity and existence are specified to be checked at admission but are not at v0.3:** the admission webhook does not validate the graph (`ValidateCreate` performs no such check); the same validation (`validateGraph`) instead runs on every reconcile while the task is non-terminal — not restricted to the first — as the leading step of `Reconcile`. A cyclic or dangling-reference `dependsOn` graph is accepted at admission and is only caught on the next reconcile, surfacing as `status.phase: Failed` (which is itself terminal, so in practice a graph that is invalid from creation is caught once, on the task's first reconcile after admission; a graph that becomes invalid later, via a `spec.actions` mutation on an otherwise-valid non-terminal task, is caught on the reconcile that follows that mutation). Because every `dependsOn` entry names another action within the *same* `FleetTask` (cross-task dependencies are out of scope for v0.3), the graph is fully self-contained in the object being admitted and an admission-time check is feasible without any cross-object lookup — implementing it is tracked as a follow-up, not done in this pass.
 
 <a id="fleettask-schema"></a>
 ##### 9.1.5.1 Schema
@@ -3367,8 +3878,11 @@ spec:
       # +kubebuilder:default=Succeeded
       startCondition: Succeeded
       # trigger — Auto (default): eligible when dependsOn is satisfied.
-      # OnEvent: dormant; becomes eligible only when an authorized append/patch
-      # activates it (the declarative form of "start this only if needed").
+      # OnEvent: dormant; SPECIFIED to become eligible when an authorized
+      # append/patch activates it (the declarative form of "start this only if
+      # needed"). NOT ACTIVATABLE at v0.3: ValidateUpdate's append-only check
+      # rejects any change to an existing action, including a Trigger-only flip,
+      # so an OnEvent action created today is permanently dead. See below.
       # +kubebuilder:validation:Enum=Auto;OnEvent
       # +kubebuilder:default=Auto
       trigger: Auto
@@ -3378,14 +3892,14 @@ spec:
     - name: haul
       action:
         type: DropOff
-        zone: warehouse-a/staging
+        zone: warehouse-a/buffer
         requiredCapabilities: ["transport.payload"]
       dependsOn: ["fetch"]
       startCondition: InProgress     # relay: begin hauling once fetch is underway
     - name: inspect
       action:
         type: Custom
-        zone: warehouse-a/staging
+        zone: warehouse-a/buffer
         requiredCapabilities: ["inspection.visual"]
       dependsOn: ["haul"]
       startCondition: Succeeded
@@ -3423,7 +3937,7 @@ status:
 <a id="fleettask-composition-dependency-graph"></a>
 ##### 9.1.5.2 Composition — Dependency Graph
 
-`spec.actions[].dependsOn` defines a directed graph over action names; an edge `B → A` means B is not eligible until A has reached B's `startCondition`. The graph MUST be acyclic and every `dependsOn` entry MUST name an existing action — both checked at admission. Sequence is a chain; parallelism is independent actions; the diamond `A → {B, C} → D` is `D.dependsOn: [B, C]`, an AND-join that waits for both. An action whose predecessor reaches a terminal phase that can never satisfy its `startCondition` becomes permanently ineligible, which the task resolves through `failurePolicy` rather than by waiting.
+`spec.actions[].dependsOn` defines a directed graph over action names; a dependency arc `B → A` means B is not eligible until A has reached B's `startCondition`. The graph MUST be acyclic and every `dependsOn` entry MUST name an existing action. **Specified to be checked at admission; at v0.3 it is checked on every non-terminal reconcile instead** (see the Maturity note above) — a cyclic or dangling-reference graph is admitted and fails on the controller's next pass rather than being rejected up front. Sequence is a chain; parallelism is independent actions; the diamond `A → {B, C} → D` is `D.dependsOn: [B, C]`, an AND-join that waits for both. An action whose predecessor reaches a terminal phase that can never satisfy its `startCondition` becomes permanently ineligible, which the task resolves through `failurePolicy` rather than by waiting.
 
 <a id="fleettask-multi-robot-start-coordination"></a>
 ##### 9.1.5.3 Multi-Robot Start Coordination
@@ -3438,32 +3952,62 @@ RFC-0001 schedules each of a task's actions independently and makes no guarantee
 <a id="fleettask-declarative-desired-state"></a>
 ##### 9.1.5.5 Declarative Desired State
 
-Reactivity in Swarmada is **declarative and level-triggered**: nothing commands a robot on an event edge. `spec.desiredState` (Running / Paused / Returning / Cancelled) is the operator- and trigger-facing intent, reconciled by the controller onto the child actions (e.g. `Returning` sets each non-terminal action returning; `Paused` uses the estop-pause path). A `desiredState` write persists and re-converges after a disconnect, and re-writing the same value is idempotent — a dropped edge is not a lost command. This is the mechanism an external actor (an operator, a coordination planner, or a detection→response gateway) uses to *react* to observed state: it writes desired state, and Swarmada reconciles. Runtime signals fire reactions within human-authored bounds; they never author or widen those bounds, and never speak a robot's native API. The trigger-binding surface itself (a source→condition→response object) and robot-emitted semantic events are specified in a later RFC (see Deferred Capabilities).
+Reactivity in Swarmada is **declarative and level-triggered**: nothing commands a robot on an event edge. `spec.desiredState` (Running / Paused / Returning / Cancelled) is the operator- and trigger-facing intent, reconciled by the controller onto the child actions (e.g. `Returning` sets each non-terminal action returning; `Paused` uses the estop-pause path). **A `desiredState: Cancelled` write is the only path into `status.phase: Cancelled`**: the controller marks every non-terminal child, and once no child is non-terminal the task is `Cancelled` rather than `Failed`. An operator cancellation is an intent that was honoured, not a fault, and a composite that reported `Failed` for it would be indistinguishable from one whose work went wrong. The single exception is `failurePolicy: Compensate`, which is unchanged: cancelling a partly-completed saga MUST still roll back its succeeded members, so that path runs `Compensating` → `Compensated` as it does for any other unmet policy. A `desiredState` write persists and re-converges after a disconnect, and re-writing the same value is idempotent — a dropped edge is not a lost command. This is the mechanism an external actor (an operator, a coordination planner, or a detection→response gateway) uses to *react* to observed state: it writes desired state, and Swarmada reconciles. Runtime signals fire reactions within human-authored bounds; they never author or widen those bounds, and never speak a robot's native API. The trigger-binding surface itself (a source→condition→response object) and robot-emitted semantic events are specified in a later RFC (see Deferred features).
+
+**A composite whose children are held reports `Running`, and waits.** `Paused` is not a terminal action
+phase — held work is neither done nor abandoned — so a task with any held child cannot satisfy its
+completion policy and cannot be declared unmeetable either. It stays `Running` with
+`status.actionSummary` counting honestly, which is what lets an operator see WHICH member is holding.
+This is a wait, not a wedge: nothing drives the task to `Failed` on account of the hold, and the task
+settles once every held child is resolved through the verb-gated per-child intake. Two
+consequences an operator must plan around. First, resuming a held composite is a **per-child** action:
+writing `Running` at the task level stops the fan-out from re-asserting the hold, but does not itself
+lift one ([§9.1.4](#fleetaction), ADR-0045), so each child is resumed, requeued or cancelled individually.
+Second, cancelling one held child of a task that is only `Paused` leaves the completion policy
+unmeetable, and the task then reports `Failed`, not `Cancelled` — `Cancelled` is reserved for a task the
+operator cancelled AS A TASK, because reporting it otherwise would claim an intent nobody expressed.
 
 <a id="fleettask-append-only-plan-growth"></a>
 ##### 9.1.5.6 Append-Only Plan Growth
 
 `spec.actions` may only ever **grow** after creation. Existing entries — their spec *and* their recorded status — are permanently immutable once created; the plan extends forward and nothing already run is ever rewritten. An authorized client — holding a dedicated, scoped RBAC verb, not blanket write access — may append new actions at any time before the task reaches a terminal phase, with `dependsOn` referencing existing actions (including `Failed` ones) to build a live contingency chain. Every appended action passes the same per-action admission gate as any other; the audit trail is complete and never rewritten; and because this is a client-driven spec append rather than a controller status write, the RA-1 status-write discipline is unaffected. This is the mechanism for adaptive replanning — an external planner watches `status`, observes an action fail, computes a corrective action, and appends it — while keeping the "one task, adaptively completed" identity that a fresh object per replan would lose. The intelligence that decides *what* to append lives outside the core; Swarmada provides only the safe, audited, admission-gated way to extend a plan.
 
+One field is excepted from this immutability, narrowly and in one direction. An existing entry's `trigger` MAY be changed from `OnEvent` to `Auto` by a client holding the same scoped verb that permits appending; this is how a dormant action is activated. The reverse transition is forbidden — an activated action MUST NOT be returned to dormancy — and no other field of an existing entry may be modified by any client at any time. Activation is admission-gated and recorded in the audit trail exactly as an append is, so the guarantee that nothing already run is ever rewritten is unaffected: activation changes only whether an action that has never run becomes eligible.
+
+**Specified, not implemented at v0.3.** The validating webhook's `ValidateUpdate` path (`internal/webhook/fleettask_webhook.go`) has no carve-out for a `Trigger`-only change: its append-only/immutability check compares every existing action verbatim and rejects *any* difference, including a lone `OnEvent` → `Auto` flip. At v0.3 there is consequently no supported way to activate a dormant `OnEvent` action after creation — the activation path described above does not yet exist in code. Implementing it is tracked as follow-on work.
+
 <a id="fleettask-ownership-status-aggregation-and-ra-1"></a>
 ##### 9.1.5.7 Ownership, Status Aggregation, and RA-1
 
 When a `FleetTask` is accepted, each of its child actions is confirmed for validity with the adapter — the same acceptance-time adapter validation a standalone `FleetAction` undergoes ([§9.2](#fleet-adapter-protocol)) — before any child is generated or scheduled; an action the target adapter rejects fails the task at admission rather than surfacing only after fan-out. On create, the controller generates one child `FleetAction` per `spec.actions[]` entry — named `<task-name>-<action-name>`, with a controller `ownerReference` — once that entry's dependencies are met; deterministic naming makes generation idempotent under controller restart (a re-reconcile adopts an existing child rather than duplicating it). Each child is an ordinary `FleetAction`, scheduled, leased, preempted, and paused exactly as a standalone action; deleting the `FleetTask` garbage-collects its children through ownership. The controller is the **only** writer of the actions it owns and of `FleetTask.status`, and it **never** patches a child's status — it reads child status and projects the aggregate. `status.phase` is a pure function of the member phases and the task's policies, recomputed on any member phase transition and **never** on a member telemetry tick (RA-1); it is monotonic toward a terminal value. `status.actions[]` is the throttled per-action projection tooling reads for "where is this logical job," carrying no high-cadence field.
 
-<a id="fleettask-deferred-capabilities-a-later-rfc"></a>
-##### 9.1.5.8 Deferred Capabilities (a later RFC)
+<a id="fleettask-deferred-features-a-later-rfc"></a>
+##### 9.1.5.8 Deferred features (a later RFC)
 
-Four capabilities are deliberately out of scope for this chapter and specified in RFC-0003 (event-driven flows), the later "event-driven and time-synchronized flows" RFC, so the core composite stays minimal and every reference adapter can implement it unchanged: (1) robot-emitted **semantic events** and the additive fleet-adapter event channel that carries them (for a robot's *onboard* capability to raise a domain event — external detectors do not need it and already act through `desiredState`); (2) the standardized **trigger-binding** object (source → condition → target → response); (3) **`completionMode: Continuous`** for watch/sensor actions with no natural success; and (4) **time-synchronized co-completion** (a grace window across a set of actions). Until they ship, each is already expressible by an external actor through `desiredState` and append-only growth — e.g. co-completion by cancelling a straggler via `desiredState: Cancelled` at a timer's expiry — so no core change is required to use these patterns today. In that future model, action sequencing and control loops remain scoped to the actions *within a single* `FleetTask`: RFC-0003 introduces no cross-task control loop, and one task never drives another's actions.
+Four features are deliberately out of scope for this chapter and are not specified by any published document — the RFC-0003 number is reserved for them and no chapter tree for it is published with this draft — so the core composite stays minimal and every reference adapter can implement it unchanged: (1) robot-emitted **semantic events** and the additive fleet-adapter event channel that carries them (for a robot's *onboard* capability to raise a domain event — external detectors do not need it and already act through `desiredState`); (2) the standardized **trigger-binding** object (source → condition → target → response); (3) **`completionMode: Continuous`** for watch/sensor actions with no natural success; and (4) **time-synchronized co-completion** (a grace window across a set of actions). Until they ship, each is already expressible by an external actor through `desiredState` and append-only growth — e.g. co-completion by cancelling a straggler at a timer's expiry (through the `swarmada.io/cancel-requested` path at v0.3, since `desiredState` is not yet read) — so no core change is required to use these patterns today. In that future model, action sequencing and control loops remain scoped to the actions *within a single* `FleetTask`: RFC-0003 introduces no cross-task control loop, and one task never drives another's actions.
 <a id="fleetzone"></a>
 #### 9.1.6 FleetZone
 
 A `FleetZone` is a named spatial region within a physical facility, represented as a Kubernetes custom resource. It serves two distinct purposes that must not be conflated with the Kubernetes namespace it lives in. A Kubernetes namespace is an administrative boundary -- access control, resource quotas, name uniqueness. A `FleetZone` is a physical boundary: a polygon on a floor plan, at a specific floor level, with rules governing how many robots may operate in it simultaneously and how emergency stop signals propagate through it. One namespace typically maps to one facility (a warehouse, a hospital floor-group, a factory building), and `FleetZone` resources within it carve that facility into schedulable regions.
 
-`FleetZone` resources form a tree via the `spec.parentZone` field. A zone with no parent is a root zone (typically an entire floor or building wing). A zone whose parent is another zone is a child zone. The tree depth is unrestricted, but the leaf-zone invariant is enforced: every `Robot` resource must reference a leaf zone -- a zone with no children -- in its `spec.zone` field. This ensures that robot assignment is always to the most specific physical region available. `FleetAction` resources may target any zone level: a task targeting a parent zone is eligible for assignment to any robot in any of the parent's descendant leaf zones.
+`FleetZone` resources form a tree via the `spec.parentZone` field. A zone with no parent is a root zone (typically an entire floor or building wing). A zone whose parent is another zone is a child zone. The tree depth is unrestricted, but the leaf-zone invariant is enforced: every `Robot` resource must reference a leaf zone -- a zone with no children -- in its `spec.zone` field. This ensures that robot assignment is always to the most specific physical region available. `FleetAction` resources may target any zone level: a task targeting a parent zone is specified to be eligible for assignment to any robot in any of the parent's descendant leaf zones. **Specified, not implemented at v0.3** — the reference Scheduler matches `FleetAction.spec.zone` against `Robot.spec.zone` by exact string equality and resolves no leaf set, so an action naming a parent zone matches no robot ([§9.3.2](#control-plane-scheduler), candidate filter 2). Target a leaf zone until this lands.
 
 Emergency stop signals propagate through the zone tree according to `spec.estopPolicy`. A triggered estop at any zone level can propagate upward to the parent (alerting the wider area) and downward to all children (stopping robots in all sub-zones). `SharedResource` entries declared at a parent zone are accessible to robots in all descendant zones, allowing a single lift or corridor declaration to be referenced across the entire floor.
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. A conformant implementation supports `spec.parentZone`, `spec.displayName`, `waypoints`, `spec.physicalBounds`, `spec.edgeNode`, `spec.maxConcurrentRobots`, `spec.sharedResources`, `spec.estopPolicy`, `spec.provisioningPolicy`, and the `status` topology/estop/reservation fields (`isLeaf`, `childZones`, `estopStatus`, `lastEstopAt`, `reservations`, `sharedResourceQueues`). The Zone Controller derives topology and `status.currentZone` from live position via polygon containment; zone-level emergency stop propagates down the tree with confirmed estop and operator-gated clear; the reservation/capacity fields drive the Traffic Deconfliction Engine ([§9.4](#tde)); and the FleetZone admission webhook enforces the geometric and hierarchy invariants and authorizes the estop verbs via SubjectAccessReview. For fleet adapters, the `zone_admission` *accepting* path is optional; declining is always available via the optional-command rule.
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps.** `spec.sharedResources[].reservationPolicy: Manual` selects no queue
+> discipline in the reference TDE — a Manual resource is granted, queued and backfilled exactly as
+> `Priority`. **Five spec fields below are specified and read by no controller at v0.3:**
+> `spec.provisioningPolicy` (so a zone-level `TwoPhase` override does **not** suppress a namespace-wide
+> auto-admit — the namespace `SwarmadaConfig` alone governs provisioning); `spec.sharedResources[].durationFallback`
+> (both enum values behave alike); `spec.physicalBounds.minAltitude` and `maxAltitude` (never transmitted to
+> an adapter or edge node, so the ceiling this chapter attributes to them is enforced nowhere); and
+> `spec.edgeNode.tlsSecretRef` (the edge server certificate is not wired from it). **`status.activeActions`
+> is specified, is a print column, and is written by nothing** — it reads 0 permanently. Three further
+> behaviours described below are specified, not implemented: the `ZoneStatusChanged` notification has no
+> message on the wire; the `status.reservations` operator-edit rejection (TDE-4) is not enforced by the
+> admission webhook, which validates hierarchy and geometry only; and the Scheduler filters candidates on
+> `Robot.spec.zone` rather than `status.currentZone`, so a robot whose live position matches no polygon
+> keeps receiving work rather than being withheld. An implementation conforming to this RFC supports `spec.parentZone`, `spec.displayName`, `waypoints`, `spec.physicalBounds`, `spec.edgeNode`, `spec.maxConcurrentRobots`, `spec.sharedResources`, `spec.estopPolicy`, and the `status` topology/estop/reservation fields (`isLeaf`, `childZones`, `estopStatus`, `lastEstopAt`, `reservations`, `sharedResourceQueues`). The Zone Controller derives this zone's topology fields, and derives each robot's `Robot.status.currentZone` from live position via polygon containment; zone-level emergency stop propagates down the tree with confirmed estop and operator-gated clear; the reservation/capacity fields drive the Traffic Deconfliction Engine ([§9.4](#tde)); and the FleetZone admission webhook enforces the geometric and hierarchy invariants and authorizes the estop verbs via SubjectAccessReview. For fleet adapters, the `zone_admission` *accepting* path is optional; declining is always available via the optional-command rule.
 
 <a id="fleetzone-schema-root-zone"></a>
 ##### 9.1.6.1 Schema -- Root Zone
@@ -3540,7 +4084,7 @@ spec:
     # for aerial/Geodetic namespaces. Metres per
     # SwarmadaConfig.spec.coordinateSystem.geodetic.altitudeReference (AGL/MSL).
     # Unset for indoor/Local zones (bounded by floor + polygon only). The
-    # adapter/edge enforces the ceiling; v0.2 currentZone membership stays 2-D
+    # adapter/edge enforces the ceiling; v0.3 currentZone membership stays 2-D
     # (polygon + floor), so this is a declared geofence bound, not a containment test.
     # +optional
     minAltitude: 0.0
@@ -3575,9 +4119,14 @@ spec:
     #     altitude: 25.0
   # ---------------------------------------------------------------------------
   # Maximum number of robots allowed in this zone simultaneously.
-  # The Zone Controller enforces this limit: a robot attempting to enter a
-  # zone at capacity is held at the zone boundary (Fleet Adapter is notified
-  # via a ZoneCapacityReached event; the robot waits for a slot to open).
+  # Enforced at two points by two different components:
+  #   - The TDE ([§9.4](#tde)) enforces it first, at reservation time: a FleetAction
+  #     targeting a zone at capacity is Denied (DeniedZoneCapacity) or, for a
+  #     Critical/High action, may preempt a lower-priority occupant instead.
+  #   - The Zone Controller enforces it second, at physical entry: a robot that
+  #     already holds a reservation but would exceed the boundary rank is held at
+  #     the zone boundary (a ZoneCapacityReached Warning event is emitted and the
+  #     Fleet Adapter is notified; the robot waits for a slot to open).
   # 0 = no limit (default for root zones that aggregate child zones).
   # For leaf zones, set a non-zero limit based on aisle width and robot size.
   # +kubebuilder:validation:Minimum=0
@@ -3607,7 +4156,11 @@ spec:
       #                       band (Shortest Job First). Priority NEVER inverts between bands
       #                       regardless of duration. When estimatedDurationSeconds is absent
       #                       on a request, durationFallback applies.
-      # Manual:               no automatic reservation; operator manages access explicitly.
+      # Manual:               SPECIFIED as no automatic reservation, with the operator
+      #                       managing access explicitly. NOT IMPLEMENTED at v0.3: the
+      #                       reference TDE grants, queues and backfills a Manual
+      #                       resource exactly as it does a Priority one, so selecting
+      #                       Manual changes nothing today.
       reservationPolicy: Priority
       # Used only when reservationPolicy: PriorityWithDuration.
       # Behaviour when a request arrives without estimatedDurationSeconds set:
@@ -3655,7 +4208,10 @@ spec:
     autoAdmitRobotClass: ""
     autoAdmitZone: ""
 # =============================================================================
-# STATUS -- written exclusively by the Zone Controller.
+# STATUS -- written by the Zone Controller, EXCEPT: reservations and
+# sharedResourceQueues are written by the Traffic Deconfliction Engine
+# ([§9.4](#tde)), estopStatus/lastEstopAt by the zone estop controller, and
+# edgeFeedUnavailable by the edge reporter. Operators never write status.
 # =============================================================================
 status:
   # Whether this zone is a leaf zone (no children).
@@ -3671,6 +4227,8 @@ status:
   # is this zone OR any descendant zone).
   robotCount: 7
   # Number of FleetActions currently running in this zone.
+  # SPECIFIED, NOT WRITTEN at v0.3 -- reads 0 permanently, including in the
+  # print column. See the Maturity note.
   activeActions: 3
   # Emergency stop status for this zone.
   # +kubebuilder:validation:Enum=Clear;Triggered;ChildTriggered
@@ -3728,8 +4286,8 @@ status:
           priority:                 Normal
           requestedAt:              ""   # RFC3339
           estimatedDurationSeconds: 0    # 0 = not provided; durationFallback applies
-  # status.conditions is populated by the Zone Controller (a Ready condition and a
-  # CapacityAvailable condition).
+  # status.conditions is populated by the Zone Controller (a ZoneReady condition
+  # and a CapacityAvailable condition).
   conditions:
     - type: ZoneReady
       # True when the Zone Controller has successfully loaded this zone's
@@ -3850,7 +4408,7 @@ The following rules are enforced by the admission webhook at create/update time 
 3. The Fleet Adapter releases the reservation via `ReleaseResource` when the robot exits or finishes using the resource.
 4. The Zone Controller grants the next queued reservation on release.
 
-**Parent-zone resource inheritance:** resources declared at a parent zone are directly addressable by robots in any descendant zone. A robot in `floor-2-left` can reserve `lift-east-a` declared at `floor-2` without any re-declaration in the child zone. The Zone Controller resolves resource names by walking up the zone tree until a matching name is found or the root is reached.
+**Parent-zone resource inheritance:** resources declared at a parent zone are directly addressable by robots in any descendant zone. A robot in `floor-2-left` can reserve `lift-east-a` declared at `floor-2` without any re-declaration in the child zone. The Traffic Deconfliction Engine resolves resource names by walking up the zone tree until a matching name is found or the root is reached ([§9.4](#tde)); the Zone Controller owns the zone topology those lookups walk.
 
 <a id="fleetzone-zone-controller-current-zone-derivation"></a>
 ##### 9.1.6.5 Zone Controller: Current Zone Derivation
@@ -3874,7 +4432,10 @@ def derive_current_zone(robot_position, all_zones_in_namespace):
         # Robot position matches no zone polygon.
         # Status: currentZone = "" (empty); specZoneMatchesCurrent = false.
         # Zone Controller emits ZonePositionUnmatched Warning event.
-        # The Scheduler does NOT assign new tasks until zone is resolved.
+        # SPECIFIED: the Scheduler does not assign new tasks until zone is
+        # resolved. NOT IMPLEMENTED at v0.3 -- the Scheduler filters on
+        # Robot.spec.zone, never status.currentZone, so an unmatched robot
+        # keeps receiving work. See the Maturity note.
         return ""
     if len(candidates) == 1:
         return candidates[0].name
@@ -3896,9 +4457,9 @@ When a robot's position falls outside all defined zone polygons -- for example, 
 In this state:
 
 - `status.specZoneMatchesCurrent = false`
-- The Scheduler does not assign new tasks to this robot (cannot confirm zone)
+- The Scheduler is specified to withhold new tasks from this robot (it cannot confirm the zone) — **specified, not implemented at v0.3**: candidate filtering reads `Robot.spec.zone` and never `status.currentZone`, so a robot whose position matches no polygon remains fully eligible. See the Maturity note above.
 - In-progress tasks continue (already assigned and started; zone loss mid-task does not abort execution)
-- The robot's Fleet Adapter is notified via a `ZoneStatusChanged` RPC
+- The robot's Fleet Adapter is specified to be notified via a `ZoneStatusChanged` RPC — **specified, not implemented at v0.3**: no such message exists in `fleet_adapter.v1`, so the adapter learns nothing from this transition
 - When the robot's next position telemetry resolves to a valid zone, `currentZone` is restored and normal scheduling resumes
 
 Operators should review `ZonePositionUnmatched` events to identify gaps in their zone polygon definitions. Persistent unmatched positions typically indicate a zone polygon that does not fully cover the physical space robots traverse.
@@ -3998,7 +4559,10 @@ spec:
 ```text
 Scenario 1: Task targets parent zone
   FleetAction.spec.zone: floor-2
-  -> Scheduler resolves to all leaf zones: floor-2-left, floor-2-center, floor-2-right
+  -> Scheduler is SPECIFIED to resolve to all leaf zones: floor-2-left,
+     floor-2-center, floor-2-right.
+     NOT IMPLEMENTED at v0.3: spec.zone is matched by exact string equality,
+     so this action matches NO robot. Target a leaf zone. See the Maturity note.
   -> Eligible robots: any robot in any of the three leaves whose capabilities match
   -> Assigned to: delivery-bot-01 (floor-2-right, Idle, highest battery)
 Scenario 2: Task targets leaf zone directly
@@ -4039,7 +4603,18 @@ The analogy to Kubernetes is direct. Kubernetes liveness probes ask "is the cont
 
 `RobotProbe` is namespace-scoped and uses a label selector to target robots, so a single probe definition covers an entire class of robots without per-unit configuration.
 
-> **Maturity (v0.2):** stage: alpha. All three probe types are implemented end to end. **Hardware** probes (`probeType: hardware`, `targetComponent`), **capability** probes (`targetCapability`) and **model** probes (`targetModel`, with `syntheticInput` attached for model probes only) each resolve their target, push the matching `verify_*` `Command` over the robot's live ControlStream, and bind the returned `CommandResult` fail-safe to the proto `ProbeStatus` ([§9.1.7.3](#robotprobe-the-verify-probe-commands)). The pointer-typed thresholds and their three-level resolution (ADR-0012) are implemented. Every `spec` field is consumed by the controller. The remaining gap (why the maturity table lists this CRD `partial`) is §9.1.6.5 propagation: a probe result is recorded in `status.robotResults[]` only, and a sustained failure does not degrade the corresponding component in `Robot.status.hardware`.
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. All three probe types are built in the reference control plane. **Hardware** probes (`probeType: hardware`, `targetComponent`), **capability** probes (`targetCapability`) and **model** probes (`targetModel`, with `syntheticInput` attached for model probes only) each resolve their target, push the matching `verify_*` `Command` over the robot's live ControlStream, and bind the returned `CommandResult` fail-safe to the proto `ProbeStatus` ([§9.1.7.3](#robotprobe-the-verify-probe-commands)). The pointer-typed thresholds and their three-level resolution (ADR-0012) are implemented. Every `spec` field is consumed by the controller, and downstream propagation ([§9.1.7.5](#robotprobe-probe-failure-effect-what-happens-downstream)) works: a sustained failure does degrade the corresponding component in `Robot.status.hardware[]`, which the capability derivation and the aggregate `status.health` then pick up. **Two limits on that propagation are worth knowing.** It applies to **hardware probes only** — a capability or model probe records its outcome in `status.robotResults[]` and returns without touching `Robot.status.hardware[]`, because neither names a component to degrade. And a hardware probe whose `targetComponent` does not appear in `Robot.status.hardware[]` is a **silent no-op**: nothing is appended, no warning is raised, and the probe continues to report its own `robotResults[]` outcome — so a probe pointed at a mistyped or undeclared component looks healthy from the probe's side while
+> degrading nothing. **Four items below are specified, not implemented at v0.3.** (1) The
+> `SwarmadaConfig.spec.health.defaultHardwareProbeIntervalSeconds` / `defaultProbeTimeoutSeconds`
+> inheritance described for `spec.intervalSeconds` and `spec.timeoutSeconds` is unreachable: both fields
+> carry a CRD-level default that the API server always applies, and the namespace fallback fires only on a
+> non-positive value — so a namespace setting 30 still yields 60. The pointer-typed *threshold* fields have
+> no schema default for exactly this reason and do resolve correctly. (2) The `ProbeFailure` Kubernetes
+> Warning event shown in the downstream sequence is not emitted; the controller writes a `PROBE_FAILURE`
+> audit seal instead, which is not visible to `kubectl describe`. (3) The probe path does not write
+> `Robot.status.hardware[].degradedMetrics` — it writes `status`, `degradationReason` and `lastHealthyAt`
+> only. (4) The "exactly one target must be set" rule is not enforced by any schema rule or webhook, so a
+> probe whose `probeType` and target field disagree is admitted and is a silent no-op.
 
 <a id="robotprobe-schema"></a>
 ##### 9.1.7.1 Schema
@@ -4106,7 +4681,7 @@ spec:
   # ---------------------------------------------------------------------------
   # Probe frequency: how often the control plane issues the probe RPC to each
   # targeted robot, in seconds.
-  # Default comes from SwarmadaConfig.probeDefaults.intervalSeconds (see [§9.1.7.4](#robotprobe-relationship-to-swarmadaconfig)).
+  # Default comes from SwarmadaConfig.spec.health.defaultHardwareProbeIntervalSeconds (see [§9.1.7.4](#robotprobe-relationship-to-swarmadaconfig)).
   # Per-probe values override the SwarmadaConfig default.
   # +kubebuilder:validation:Minimum=10
   # +kubebuilder:validation:Maximum=3600
@@ -4249,7 +4824,7 @@ The key principle: **passive telemetry tells you what the robot reports about it
 <a id="robotprobe-the-verify-probe-commands"></a>
 ##### 9.1.7.3 The Verify Probe Commands
 
-The probe operations are three optional commands on the [§9.2](#fleet-adapter-protocol) `ControlStream` — the `verify_hardware`, `verify_capability`, and `verify_model` arms of `Command` ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)), each answered by a `VerifyResult` in `CommandResult`. Implementing them is optional ([§9.2.7](#fleet-adapter-protocol-transport-security)); an adapter declines by returning `CommandResult.unsupported = true` (the in-band equivalent of gRPC `UNIMPLEMENTED`), which causes all probes targeting that adapter to report `Unknown` status permanently. Robot selection is carried by `Command.robot_id`, so the per-robot fields below describe the command payload, not separate addressing.
+The probe operations are three optional commands on the [§9.2](#fleet-adapter-protocol) `ControlStream` — the `verify_hardware`, `verify_capability`, and `verify_model` arms of `Command` ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)), each answered by a `VerifyResult` in `CommandResult`. Implementing them is optional ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)); an adapter declines by returning `CommandResult.unsupported = true` (the in-band equivalent of gRPC `UNIMPLEMENTED`), which causes all probes targeting that adapter to report `Unknown` status permanently. Robot selection is carried by `Command.robot_id`, so the per-robot fields below describe the command payload, not separate addressing.
 
 **`verify_hardware` (`Command`) → `VerifyResult` (`CommandResult`)**
 
@@ -4356,14 +4931,14 @@ When a probe for robot `amr-acme-007`'s `camera-front` component accumulates `co
 
 2. **Write `status.hardware[camera-front].status = Degraded`** on the `Robot` object, setting `degradationReason` to the Fleet Adapter's probe response `message` and `lastHealthyAt` to the timestamp of the last successful probe. This write goes through the `/status` subresource, triggering a watch event on the `Robot` object.
 
-3. **Capability Controller reconciles** in response to the `Robot` status watch event. It re-derives all capabilities that list `camera-front` in `requiredHardware` using the truth table in [§9.1.3.2](#robot-capability-derivation-truth-table). For this robot:
+3. **Capability Controller reconciles** in response to the `Robot` status watch event. It re-derives all capabilities that list `camera-front` in `requiredHardware` using the truth table in [§9.1.3.3](#robot-capability-derivation-truth-table). For this robot:
 
    - `item-pick.ai-guided` → `Inactive` (camera-front Degraded + model-driven rule)
    - `inspection.visual` → `Degraded` (camera-front Degraded + hardware-native rule)
 
 4. **Scheduler is notified** via the same watch event. Any `Pending` tasks that require `item-pick.ai-guided: Active` on this robot will not be assigned to it until the probe recovers.
 
-5. **Health Monitor updates** `status.health.status = Degraded` and emits a Kubernetes `Event` of type `Warning` with reason `ProbeFailure`:
+5. **The Robot reconciler re-derives** `status.health.status`, which the degraded component resolves to `Degraded`. The Probe Controller is specified to emit a Kubernetes `Event` of type `Warning` with reason `ProbeFailure` — **specified, not implemented at v0.3**: the controller holds no event recorder and writes a `PROBE_FAILURE` entry to the safety audit log ([§9.6.5](#safety-safety-audit-log)) instead, which `kubectl describe` does not show. The event it would emit is:
 
 ```text
    Warning  ProbeFailure  RobotProbe/camera-liveness-acme
@@ -4379,7 +4954,7 @@ The recovery path is identical to the passive telemetry recovery path — from t
 <a id="robotprobe-worked-example-camera-liveness-probe"></a>
 ##### 9.1.7.6 Worked Example — Camera Liveness Probe
 
-This probe targets all Acme robots in `warehouse-a` and verifies that each robot's `camera-front` is genuinely delivering frames and valid depth data, not just reporting `Healthy` in passive telemetry.
+This probe targets all Acme robots in `warehouse-a` and verifies that each robot's `camera-front` is genuinely delivering frames and valid depth data, not only reporting `Healthy` in passive telemetry.
 
 ```yaml
 apiVersion: swarmada.io/v1
@@ -4460,6 +5035,10 @@ status:
       degradationReason: >
         RobotProbe/camera-liveness-acme: frame_rate_pct=48 (threshold 80);
         depth_valid_pct=0 (threshold 90). Depth pipeline stalled.
+      # degradedMetrics is SPECIFIED here and NOT WRITTEN by the probe path at
+      # v0.3 -- propagateHardwareStatus writes status, degradationReason and
+      # lastHealthyAt only. The telemetry status sink populates this field; a
+      # probe-driven degradation leaves it as the sink last set it.
       degradedMetrics:
         frame_rate_pct: 48
         depth_valid_pct: 0
@@ -4486,11 +5065,13 @@ Note that `amr-acme-007`'s passive telemetry was reporting `camera-front: Health
 <a id="firmwarerollout"></a>
 #### 9.1.8 FirmwareRollout
 
-A `FirmwareRollout` resource drives a controlled firmware update across a fleet of robots. It is the robot-fleet analogue of a Kubernetes `Deployment` rolling update: a new target version is declared, and the controller advances robots to that version in batches, respecting safety constraints and pausing on error.
+A `FirmwareRollout` resource drives a controlled firmware update across a fleet of robots. It is the robot-fleet analogue of a Kubernetes `Deployment` rolling update: a new target version is declared, and the controller advances robots to that version in batches, respecting safety constraints. Reverting a failed rollout is specified but not implemented at v0.3; pausing on error **is** implemented, as is the operator resume that releases it — see the Maturity note below.
 
 The critical difference from a Kubernetes rolling update is that robots have physical state that constrains when an update can safely happen. A Kubernetes Pod can be replaced at any time -- the old Pod is killed and a new one starts. A robot mid-task cannot be rebooted: it may be carrying a 40 kg payload in a narrow aisle, halfway through a pick sequence, or actively receiving an emergency stop signal. `FirmwareRollout` therefore gates every update attempt against the robot's live physical state -- battery level, current task status, and optionally the presence of an active maintenance window -- before signalling the Fleet Adapter to proceed. The controller does not update a robot; it waits until the robot is in a state where updating is safe, then instructs the Fleet Adapter.
 
 A `FirmwareRollout` tracks firmware version only. It does not change `spec.hardware[]` or `spec.capabilities[]` on the target robots. If a firmware update changes a robot's capability set (a new sensor driver unlocks a previously unavailable capability, or a deprecated capability is removed), those changes must be applied separately via a `RobotClass` update and re-admission, or a direct `Robot` spec edit. The separation is intentional: firmware version and capability declaration are independently versioned concerns.
+
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. The controller implements batching, per-robot dispatch eligibility (idle/battery/maintenance-window gating), `PullOnIdle` delivery (annotating the target robot and letting the Robot Agent pull on its next Idle transition), artifact signature and checksum verification against `SwarmadaConfig.spec.signing.trustRoots`, and per-robot status/failure tracking. **Named control-plane gaps.** The success edge closes through the robot's own report: the install-state projection promotes `status.firmwareInstall.runningVersion` into `Robot.status.firmwareVersion` once the robot reports `Running`, which is what the controller's updated-classifier compares against `spec.newVersion`, and it captures the version being replaced into `status.previousFirmwareVersion` on the same transition. The promotion is gated on `Running` deliberately: while an install is `Updating` the running version is still the old one, and a failed install may leave the robot on its previous version, on a recovery image, or elsewhere, so neither is promoted. Failures are detected on the same report (ADR-0033), so a failing rollout still pauses. First of what remains: the `swarmada.io/pending-firmware-signature-ref` annotation listed below is **not written**, so a Robot Agent following the `PullOnIdle` sequence cannot perform the signature verification step (3) describes — only version, URI and checksum are annotated. Then **two schema-only gaps:** (1) `spec.deliveryMechanism: PushImmediate` is validated and fully specified (including the `push_firmware` Command below) but never read — every rollout is dispatched `PullOnIdle` regardless of what is declared; (2) `spec.rollbackPolicy` (`Auto`/`Manual`) is never read by this controller — a robot whose firmware install fails is left in its failed state and reported in `status.failedRobots[]`, but nothing reverts it to `previousFirmwareVersion` under either policy value. An operator relying on `rollbackPolicy: Auto` to self-heal a bad rollout does not get it at v0.3. `spec.pauseOnError` **is** honoured: a failed install halts further dispatch and writes `status.phase: Paused` — and since firmware has no `Auto` rollback, it is the only automatic guard on this path. The operator releases the halt with `swarmctl rollout resume`, which excludes the robots that failed rather than retrying them (ADR-0041).
 
 <a id="firmwarerollout-schema"></a>
 ##### 9.1.8.1 Schema
@@ -4520,8 +5101,15 @@ spec:
       swarmada.io/manufacturer: acme
   # ---------------------------------------------------------------------------
   # Target firmware version. The Fleet Adapter is responsible for interpreting
-  # this string; Swarmada treats it as opaque. Semantic versioning is strongly
-  # recommended so that Fleet Adapter implementations can compare versions.
+  # this string; Swarmada treats it as opaque and does not parse, order or
+  # compare it. Vendor firmware strings are frequently not semantic versions
+  # ("2.5.0-rc1", "v2.5.0", "2026.06"), and the schema does not constrain the
+  # form beyond requiring a non-empty string. Semantic versioning is strongly
+  # recommended so that operators can reason about ordering, but nothing in the
+  # control plane depends on it: robot selection is by version EQUALITY against
+  # the target, never by ordering. (ModelRollout differs -- its newVersion IS
+  # constrained to major.minor.patch, because the ModelRollout controller
+  # refuses downgrades and needs a parseable order. See [§9.1.9](#modelrollout).)
   # Robots already running this version are counted in robotsUpdated immediately
   # and are not updated again.
   # +kubebuilder:validation:Required
@@ -4609,14 +5197,16 @@ spec:
   #
   # Manual (recommended): failed robots stay on their pre-update firmware.
   #   The operator inspects the failure, then runs:
-  #     swarmctl undo rollout acme-firmware-2-5-0 [--robot amr-acme-007]
-  #   to explicitly revert the failed robot to its previous version.
+  #     operator-initiated revert is not specified at v0.3 (see Operator Commands).
+  #   Set rollbackPolicy: Auto to revert automatically on failure.
   #   The rollout's status.failedRobots[] provides failure details.
   #
   # Auto: if the Fleet Adapter reports a failed update for a robot, the
   #   controller immediately signals the Fleet Adapter to revert to the
-  #   robot's previous firmware version (stored in status.previousVersion
-  #   on the Robot object). Auto rollback reduces the time a robot spends
+  #   robot's previous firmware version (specified to be stored in
+  #   status.previousFirmwareVersion on the Robot object -- which no v0.3
+  #   controller writes, so the revert target does not exist at runtime;
+  #   see the Maturity note). Auto rollback reduces the time a robot spends
   #   in a failed state but can cause version inconsistency across the fleet
   #   if the root cause is systemic (e.g. a corrupt firmware artifact).
   #   See the FirmwareRollout spec for the rationale for Manual as the recommended default.
@@ -4631,6 +5221,8 @@ spec:
   # SHA-256 checksum of the firmware artifact. The Robot Agent or Fleet Adapter
   # MUST verify this checksum after download and before install.
   # A checksum mismatch causes the robot to report UpdateFailed.
+  # Validated against ^sha256:[a-f0-9]{64}$ — the sha256: prefix is required and
+  # the hex digest is lowercase-only; an uppercase digest is rejected at admission.
   # +kubebuilder:validation:Required
   firmwareChecksum: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   # URI or reference to the detached signature or sigstore bundle for the
@@ -4656,8 +5248,11 @@ status:
   # Overall rollout phase.
   # Pending:    rollout created; controller has not yet started batch selection.
   # InProgress: at least one robot is in the current update batch.
-  # Paused:     pauseOnError triggered, or operator ran swarmctl pause rollout.
-  #             No new robots added to batch until resumed.
+  # Paused:     pauseOnError triggered. Written by the controller only -- an operator
+  #             never sets this phase directly. It is LEFT via `swarmctl rollout
+  #             resume` (the rollout-resume custom verb), which excludes the robots
+  #             that failed rather than retrying them (ADR-0041).
+  #             No new robots added to batch.
   # Succeeded:  all targeted robots are running newVersion (or were already).
   # Failed:     rollout ended with one or more robotsFailed AND
   #             (pauseOnError: false AND retries exhausted, or operator stopped).
@@ -4709,6 +5304,11 @@ status:
   startedAt: "2026-06-23T08:00:00Z"
   completedAt: ""
   pausedAt: ""
+  # SPECIFIED, NOT WRITTEN at v0.3: no controller writes Progressing, Complete,
+  # Paused or Failed onto a FirmwareRollout. status.phase and the aggregate
+  # counters carry the lifecycle signal instead. The one condition the shipped
+  # controller DOES write, SignatureVerified, is not documented here; treat it as
+  # an implementation detail rather than part of this contract.
   conditions:
     - type: Progressing
       status: "True"
@@ -4741,12 +5341,16 @@ status:
 # Addition to Robot.status (see the Robot CRD):
 status:
   # Firmware version currently running on the robot.
-  # Written by the Robot Agent after each successful firmware install and verify.
+  # SPECIFIED to be written by the FirmwareRollout controller from the adapter's
+  # reported install state after each successful install and verify -- not by the
+  # telemetry path. NOT WRITTEN by any v0.3 controller; see the Maturity note.
+  # The robot's own report does arrive, as status.firmwareInstall.runningVersion.
   # Initially set at robot admission from the Fleet Adapter's reported version.
   firmwareVersion: "2.4.1"
   # Previous firmware version -- retained to support Manual rollback.
-  # Set to the value of firmwareVersion immediately before an update begins.
-  # Cleared 48 hours after a successful update cycle if no rollback is issued.
+  # Set to the value of firmwareVersion immediately before an update begins, and
+  # retained as the target a Manual rollback returns to. It is not auto-cleared:
+  # the value persists until the next update cycle overwrites it.
   previousFirmwareVersion: "2.3.8"
 ```
 
@@ -4761,6 +5365,8 @@ The separation of firmware version, hardware declaration, and capability declara
 <a id="firmwarerollout-delivery-mechanisms"></a>
 ##### 9.1.8.3 Delivery Mechanisms
 
+**Specified, not implemented at v0.3** (Maturity note above): `spec.deliveryMechanism` is never read by the reference controller, which always dispatches `PullOnIdle` regardless of the declared value. The `PushImmediate` mechanism and its `push_firmware` Command below are fully specified for a future implementation.
+
 **PullOnIdle**
 
 The controller annotates each target robot with the target firmware version and artifact URI:
@@ -4774,11 +5380,11 @@ annotations:
   swarmada.io/pending-firmware-signature-ref: "oci://registry.swarmada.io/firmware/acme-origin:2.5.0.sig"
 ```
 
-The Robot Agent polls for these annotations on every Idle transition. When it detects a pending update, it: (1) verifies battery level meets `safetyConstraints.minBatteryPct`; (2) downloads the firmware artifact; (3) verifies the signature against trust roots in `SwarmadaConfig.spec.signing.trustRoots` — failure aborts the install, emits a `FIRMWARE_SIGNATURE_FAILED` audit event, and causes the robot to report `UpdateFailed`; (4) verifies the checksum; (5) installs the firmware via the Fleet Adapter; (6) reboots the robot; (7) after reboot, reports the new firmware version and the verified signer identity via telemetry, which triggers a `FIRMWARE_SIGNATURE_VERIFIED` audit event; (8) clears the pending annotations and sets `status.firmwareVersion` to the new version.
+The Robot Agent polls for these annotations on every Idle transition. When it detects a pending update, it: (1) verifies battery level meets `safetyConstraints.minBatteryPct`; (2) downloads the firmware artifact; (3) verifies the signature against trust roots in `SwarmadaConfig.spec.signing.trustRoots` — failure aborts the install, emits a `FIRMWARE_SIGNATURE_FAILED` audit event, and causes the robot to report `UpdateFailed`; (4) verifies the checksum; (5) installs the firmware via the Fleet Adapter; (6) reboots the robot; (7) after reboot, reports the new firmware version and the verified signer identity via telemetry, which triggers a `FIRMWARE_SIGNATURE_VERIFIED` audit event; (8) clears the pending annotations, after which the control plane is specified to set `status.firmwareVersion` to the new version. **Step (3) does not happen at v0.3:** the `swarmada.io/pending-firmware-signature-ref` annotation is not written, so the agent has no signature reference to verify against — see the Maturity note at the top of this chapter. Step (8) does: the robot's own report drives the install-state projection, which promotes `status.firmwareInstall.runningVersion` into `Robot.status.firmwareVersion` once the robot reports `Running`, and that is the field the controller's updated-classifier compares against `spec.newVersion`.
 
 **PushImmediate**
 
-The controller pushes a `push_firmware` `Command` (`PushFirmware`, [§9.2.3](#fleet-adapter-protocol-the-controlstream-service)) down the Fleet Adapter's `ControlStream` as soon as the robot satisfies safety constraints:
+The controller pushes a `push_firmware` `Command` (`PushFirmware`, [§9.2.3](#fleet-adapter-protocol-the-controlstream-service)) down the Fleet Adapter's `ControlStream` once the robot satisfies safety constraints:
 
 ```protobuf3
 // Pushed as Command.push_firmware; Command.robot_id selects the robot.
@@ -4816,6 +5422,8 @@ The Fleet Adapter MUST reject a `push_firmware` `Command` (`FirmwareResult.accep
 <a id="firmwarerollout-rollback-policy"></a>
 ##### 9.1.8.4 Rollback Policy
 
+**Partly implemented at v0.3** (Maturity note above): `spec.pauseOnError` IS read — a failed install halts further dispatch and the rollout moves to `Paused`. `spec.rollbackPolicy` is **not**: no robot is reverted to `previousFirmwareVersion` automatically under either policy value, so `Auto` behaves as `Manual` does. The rationale below explains the intended design of the rollback half; treat `rollbackPolicy` as documentation of the target behaviour rather than a description of v0.3.
+
 **Why Manual is the recommended default**
 
 `Auto` rollback sounds safer but creates a worse failure mode: version fragmentation. Consider a firmware artifact with a bug affecting only robots with a specific hardware revision. With `Auto` rollback, affected robots silently revert and the rollout completes with `Succeeded` -- the fleet is now split between versions with no visible indication. The split can persist undetected until a capability discrepancy surfaces at runtime.
@@ -4824,12 +5432,12 @@ With `Manual` rollback, failed robots stay in a clearly failed state, `pauseOnEr
 
 `Auto` rollback is appropriate when operator intervention latency is high (small teams, 24/7 operations without on-call cover) and version fragmentation risk is acceptable. It should always be combined with `pauseOnError: true` to prevent a systemic artifact failure from auto-reverting the entire fleet.
 
-<a id="firmwarerollout-the-swarmctl-rollout-commands"></a>
-##### 9.1.8.5 The swarmctl Rollout Commands
+<a id="firmwarerollout-operator-commands"></a>
+##### 9.1.8.5 Operator Commands
 
 ```bash
 # Show current rollout status
-swarmctl get rollout acme-firmware-2-5-0 [--namespace warehouse-a]
+swarmctl get firmwarerollout acme-firmware-2-5-0 [--namespace warehouse-a]
 # Output:
 # Phase:      InProgress
 # Progress:   32/50 robots updated (64%)
@@ -4837,20 +5445,21 @@ swarmctl get rollout acme-firmware-2-5-0 [--namespace warehouse-a]
 # Pending:    13 robots awaiting batch selection
 # Skipped:    5 robots failing safety constraints
 # Failed:     0
-# Pause: no new robots selected. In-progress batch completes (no mid-install abort).
-swarmctl pause rollout acme-firmware-2-5-0
-# Resume a paused rollout.
-swarmctl resume rollout acme-firmware-2-5-0
-# Revert all successfully updated robots to previousFirmwareVersion.
-# Creates a new FirmwareRollout in reverse. Original transitions to Failed.
-swarmctl undo rollout acme-firmware-2-5-0
-# Revert a single failed robot only.
-swarmctl undo rollout acme-firmware-2-5-0 --robot amr-acme-007
-# Stop: leave robots on current versions; transition FirmwareRollout to Failed (terminal, not resumable).
-swarmctl stop rollout acme-firmware-2-5-0
 # Per-robot update history.
-swarmctl describe rollout acme-firmware-2-5-0
+swarmctl describe firmwarerollout acme-firmware-2-5-0
 ```
+
+**Operator control of an in-flight rollout is partly specified at v0.3: resume ships, the rest
+does not.** Revert and abort are a deliberate future seam, and `FirmwareRollout` carries no
+operator intake for them;
+and `status.phase: Paused` is written by the controller alone, on `pauseOnError` — an operator
+never sets that phase directly. Leaving it IS an operator action, but an indirect one:
+`swarmctl rollout resume` writes the `swarmada.io/rollout-resume` annotation (gated on the
+`rollout-resume` custom verb, [§9.5.3](#security-authorization-swarmada-rbac-roles)) and the
+controller reconciles the phase out of `Paused`, excluding the robots that failed (ADR-0041).
+A rollout in
+flight runs to its configured failure handling; the intake — and any command over it — is out
+of scope for this revision.
 
 <a id="firmwarerollout-worked-example-rolling-update-of-50-acme-robots"></a>
 ##### 9.1.8.6 Worked Example -- Rolling Update of 50 Acme Robots
@@ -4900,14 +5509,31 @@ spec:
 04:50      amr-acme-038 reports ChecksumMismatch.
            pauseOnError: true -> rollout transitions to Paused.
            Warning Event emitted to cluster.
-04:51      Operator: swarmctl get rollout acme-firmware-2-5-0
+04:51      Operator: swarmctl get firmwarerollout acme-firmware-2-5-0
            Identifies: amr-acme-038 has flaky registry connectivity.
            Resolves network issue.
-           Operator: swarmctl resume rollout acme-firmware-2-5-0
            amr-acme-038 re-annotated; retries on next Idle.
 05:30      amr-acme-038 succeeds. robotsFailed returns to 0.
 06:15      All 50 robots on 2.5.0. phase -> Succeeded.
 ```
+
+**Resuming a paused rollout.** The timeline above shows the other exit: the operator repairs the
+robot, its failure clears, and the rollout un-pauses on its own — `paused` is re-derived each
+reconcile from the current failure set, not latched. When the robot CANNOT be repaired quickly,
+`swarmctl rollout resume <name> --kind firmware --reason <text>` releases the halt. It is gated on
+the `rollout-resume` custom verb ([§9.5.3](#security-authorization-swarmada-rbac-roles)) and writes
+the `swarmada.io/rollout-resume` annotation, which the controller consumes; `status` is never
+edited from a client.
+
+Resume **excludes, it does not retry** (ADR-0041). The robots that failed move to
+`status.excludedRobots` and this rollout never attempts them again — resuming into a retry would
+re-dispatch the artifact that already failed and re-pause on the same robots. To retry them, fix the
+artifact and create a fresh rollout. Excluding them is also what lets the rollout finish: they
+count as settled, so it can reach a terminal phase, and only a terminal record may be deleted
+([§9.1](#crds)). A rollout that reports `Succeeded` with a non-empty `status.excludedRobots` did
+not converge the whole fleet, exactly as a non-zero `robotsRolledBack` does not. Every resume is
+sealed as `ROLLOUT_RESUMED` ([§9.6.5.1](#safety-required-events)).
+
 
 **Status at the pause point (04:50 UTC):**
 
@@ -4931,11 +5557,14 @@ status:
   startedAt: "2026-06-23T02:00:00Z"
   completedAt: ""
   pausedAt: "2026-06-23T04:50:12Z"
+  # SPECIFIED, NOT WRITTEN at v0.3: no controller writes Progressing, Complete,
+  # Paused or Failed onto a FirmwareRollout. status.phase and the aggregate
+  # counters carry the lifecycle signal instead.
   conditions:
     - type: Progressing
       status: "False"
       reason: Paused
-      message: "Rollout paused after failure on amr-acme-038 (ChecksumMismatch). Resume with: swarmctl resume rollout acme-firmware-2-5-0"
+      message: "Rollout paused after failure on amr-acme-038 (ChecksumMismatch)."
       lastTransitionTime: "2026-06-23T04:50:12Z"
     - type: Complete
       status: "False"
@@ -4963,9 +5592,23 @@ A `ModelRollout` resource drives a controlled update of a named inference model 
 
 **Capability impact.** A firmware update requires a reboot but does not change a robot's declared capability set. A model update directly changes what a robot can do: the capabilities the model grants (`grantsCapabilities`) become `Unavailable` from the moment the update begins on a given robot until the new model is `Active` and passes its inference health check. The Scheduler must not assign tasks requiring those capabilities to robots mid-update. `ModelRollout` manages this suspension explicitly; `FirmwareRollout` does not need to.
 
-**Model size.** Production inference models range from tens of megabytes to multiple gigabytes. A download that takes 30 seconds for firmware may take 20 minutes for a large vision model over a warehouse Wi-Fi network. `ModelRollout` exposes `maxDownloadTimeMinutes` as a dedicated safety constraint: a download that exceeds this budget is treated as a failure, not left to run indefinitely while the robot sits with its capabilities suspended.
+**Model size.** Production inference models range from tens of megabytes to multiple gigabytes. A download that takes 30 seconds for firmware may take 20 minutes for a large vision model over a warehouse Wi-Fi network. `ModelRollout` specifies `maxDownloadTimeMinutes` as a dedicated safety constraint intended to treat an over-budget download as a failure rather than let it run indefinitely while the robot sits with its capabilities suspended. **This constraint is schema-only at v0.3** (Maturity note above): the field has no wire counterpart on the `model_update` Command proto, so a Fleet Adapter has no way to learn the configured budget, and no controller enforces it independently. A download can run indefinitely today.
 
 **Rollback semantics.** A firmware that fails to install leaves the robot on its previous firmware -- a known-good state. A model that fails its post-install inference health check leaves the robot without a working model -- its granted capabilities remain `Unavailable`. Silent auto-rollback to a stale model version is dangerous: a stale inspection model may produce incorrect detections without any visible error signal. `Manual` rollback is therefore the strongly recommended default, giving the operator a forced decision point before any model is restored to service.
+
+> **Implementation status (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps:** capabilities suspended by a `ModelRollout` in progress are specified to read `Unavailable` (see [§9.3](#control-plane)) but the reference control plane writes `Inactive` instead; a capability granted only by a prior rollout is also not withdrawn during a re-rollout. A client MUST NOT rely on `Unavailable` appearing in `status.capabilities[*].status` at v0.3 — see [§5.2](#resource-model). **`spec.maxDownloadTimeMinutes` is schema-only at v0.3:** the field is validated and documented as a
+> dedicated download-timeout safety constraint, but no controller reads it — a download that exceeds the
+> declared budget is not treated as a failure and the rollout is left to run for as long as the download
+> takes. **`spec.attestationRef` is schema-only on the same terms:** it is validated and documented below as
+> binding the quality-gate metrics to the shipped artifact, and no controller resolves or verifies it.
+> **Three status and validation behaviours below describe the target rather than v0.3.** (1)
+> `status.robotsIneligible` is documented as counting robots permanently ineligible for lacking required
+> hardware; the reference controller counts robots refused as a **downgrade** there instead, and a
+> hardware-short robot is counted in `status.robotsTotal` and appears in `status.robotsPending`. (2)
+> `status.rollbackVersions` is documented as keyed by model name; the controller keys it by **robot name**,
+> which is what makes it useful — a rollout targets a single `modelName`, so a model-keyed map would hold at
+> most one entry. (3) The downgrade refusal is documented as happening at admission; it happens at **rollout
+> start**, during batch selection. Admission validates format only ([§9.3.1](#control-plane-swarmada-api-server)).
 
 <a id="modelrollout-schema"></a>
 ##### 9.1.9.1 Schema
@@ -5030,7 +5673,8 @@ spec:
   # URI or reference to the detached signature or sigstore bundle for the
   # model artifact. The Fleet Adapter MUST verify this signature against the
   # trust roots in SwarmadaConfig.spec.signing.trustRoots before installation.
-  # Signature failure aborts the install, leaves granted capabilities Unavailable,
+  # Signature failure aborts the install, leaves granted capabilities
+  # Unavailable (v0.3 writes Inactive -- see the Implementation status note),
   # and records a MODEL_SIGNATURE_FAILED audit event (fails closed). When
   # SwarmadaConfig.spec.signing.requireSignatureVerification is true, this
   # field MUST be set; admission rejects ModelRollout resources that omit it
@@ -5133,7 +5777,7 @@ spec:
     # and reports DownloadTimeout to the control plane.
     # The capability suspension clock runs during the download -- a timed-out
     # download counts as one batch failure.
-    # +kubebuilder:validation:Minimum=1
+    # +kubebuilder:validation:Minimum=0     # 0 means no limit
     # +kubebuilder:validation:Maximum=480
   # +kubebuilder:default=30
   # NOTE: a sibling of safetyConstraints on the rollout spec, not a member of it.
@@ -5145,7 +5789,8 @@ spec:
   #
   # Manual (strongly recommended): failed robots retain the previous model
   #   version. Granted capabilities from the previous model remain Active;
-  #   grantsCapabilities from newVersion stay Unavailable. The operator
+  #   grantsCapabilities from newVersion stay Unavailable (v0.3: Inactive).
+  #   The operator
   #   inspects the failure and explicitly decides: retry, revert, or skip.
   #
   # Auto: on failure, the controller signals the Robot Agent to reinstall
@@ -5173,14 +5818,16 @@ status:
   # lack a required hardware type entirely (permanently ineligible; not retried
   # and not counted in robotsTotal).
   robotsIneligible: 5          # matched by selector but missing a required hardware type
-  # Robots whose grantsCapabilities are currently Unavailable (mid-update).
+  # Robots whose grantsCapabilities are currently suspended (mid-update). The
+  # specified suspended value is Unavailable; v0.3 writes Inactive (see above).
   # Operators can use this to estimate throughput impact: if capabilitiesSuspendedOn
   # is 9 and those robots normally handle 30% of pick volume, expect ~30% pick
   # throughput reduction until the current batch completes.
   capabilitiesSuspendedOn: 9   # current batch size (20% of 45 = 9)
   # ---------------------------------------------------------------------------
   # Robots in the active update batch. Each entry shows which update phase the
-  # robot is currently in. Capabilities are Unavailable for all entries here.
+  # robot is currently in. Capabilities are suspended for all entries here
+  # (specified Unavailable; v0.3 writes Inactive).
   # Each batch entry carries capabilitiesSuspendedAt (RFC3339, the moment the
   # controller suspended this robot's granted capabilities), stamped when a new
   # entrant's model is marked Updating and preserved for a continuing entrant
@@ -5222,6 +5869,9 @@ status:
   startedAt: "2026-06-23T08:00:00Z"
   completedAt: ""
   pausedAt: ""
+  # SPECIFIED, NOT WRITTEN at v0.3: no controller writes Progressing, Complete,
+  # Paused or Failed onto a ModelRollout. status.phase and the aggregate
+  # counters carry the lifecycle signal instead.
   conditions:
     - type: Progressing
       status: "True"
@@ -5257,6 +5907,8 @@ For each robot added to the active update batch, the ModelRollout controller exe
 (a) SUSPEND granted capabilities
     ModelRollout controller writes to Robot.status.capabilities[]:
       - each capability in spec.grantsCapabilities -> status: Unavailable
+        (SPECIFIED value; the reference control plane writes Inactive at v0.3 --
+         see the Implementation status block above)
       - reason: "ModelRollout/item-recognition-v3-to-v4: update in progress"
     Scheduler immediately stops assigning tasks requiring these capabilities
     to this robot. In-flight tasks already Assigned or InProgress are NOT
@@ -5284,12 +5936,16 @@ For each robot added to the active update batch, the ModelRollout controller exe
 (c) DOWNLOAD + VERIFY SIGNATURE + INSTALL (Fleet Adapter)
     Fleet Adapter downloads model artifact from modelUri.
     Robot Agent streams download progress to control plane via telemetry.
-    If maxDownloadTimeMinutes elapses without completion:
+    SPECIFIED, NOT IMPLEMENTED AT V0.3 (see Maturity note above): the design
+    intent is that if maxDownloadTimeMinutes elapses without completion:
       -> Fleet Adapter aborts, removes partial artifact
       -> Reports DownloadTimeout
       -> Robot.status.installedModels[item-recognition].status = Failed
       -> Capability stays Unavailable
       -> onFailure handling triggered (pauseOnError / failedRobots[])
+    maxDownloadTimeMinutes has no field on the model_update Command proto, so a
+    Fleet Adapter cannot learn the configured budget; at v0.3 a download simply
+    runs until it completes or the adapter's own transport fails.
     On download completion, Fleet Adapter MUST verify the artifact SIGNATURE
     against trust roots in SwarmadaConfig.spec.signing.trustRoots before install.
     Signature verification failure (fails closed):
@@ -5345,8 +6001,9 @@ For each robot added to the active update batch, the ModelRollout controller exe
         Robot retains previousVersion model (if it was installed).
         Previous model's capabilities (from v3.2.1) remain Active if the
         previous model binary is still present on the robot.
-        Operator must run: swarmctl undo rollout item-recognition-v3-to-v4
-          [--robot amr-acme-016]
+        Reverting a completed model rollout is not specified at v0.3. To revert
+        automatically on a failed update, set rollbackPolicy: Auto before the
+        rollout starts; there is no operator command to revert one afterwards.
     - If rollbackPolicy: Auto:
         Controller signals Fleet Adapter to reinstall previousVersion.
         On successful reinstall and health check:
@@ -5369,7 +6026,7 @@ For a robot to be eligible for a model rollout batch, it must have at least one 
 
 For requiredHardware: [Camera]:
 
-```yaml
+```text
   Robot A (amr-acme-007):
     status.hardware:
       - name: camera-front,  type: Camera,  status: Healthy   ✓ eligible
@@ -5408,11 +6065,11 @@ status:
 | **Capability impact** | None during update | grantsCapabilities suspended (Unavailable) during update |
 | **Requires reboot** | Yes (typically) | No -- model loaded into running inference runtime |
 | **Artifact size** | Small-medium (MBs to low hundreds of MBs) | Medium-large (hundreds of MBs to multiple GBs) |
-| **Download timeout** | Not a dedicated constraint | `maxDownloadTimeMinutes` (explicit; model download is the long pole) |
+| **Download timeout** | Not a dedicated constraint | `maxDownloadTimeMinutes` (explicit; model download is the long pole) — **specified, not implemented at v0.3**, see Maturity note above |
 | **Health check** | Version verified post-reboot | Inference health check with synthetic input |
 | **requiredHardware** | Not applicable | By TYPE (Camera, Lidar, etc.) -- robots lacking the type are ineligible |
 | **Rollback default** | Manual | Manual (stronger recommendation -- silent rollback of a failed model is dangerous) |
-| **swarmctl command** | `swarmctl rollout` (same verb family, dispatched by CRD kind) | `swarmctl rollout` |
+| **swarmctl command** | `swarmctl get\|describe modelrollout` | `swarmctl get\|describe firmwarerollout` |
 | **Fleet Adapter command** | `push_firmware` `Command` | `model_update` `Command` |
 | **Capability suspension** | No | Yes -- dedicated `capabilitiesSuspendedOn` counter in status |
 
@@ -5470,6 +6127,7 @@ spec:
        12 robots currently Idle with battery >= 40% and healthy Camera.
        First batch: 9 robots (20% of 45, rounded down).
 08:01  Capabilities suspended on batch robots:
+         (values below are the SPECIFIED ones; v0.3 writes Inactive)
          item-pick.ai-guided  -> Unavailable (9 robots)
          item-pick.ai-guided-v3 -> Unavailable (9 robots)
          item-pick.composite not yet granted (will be after v4.0.0 activates)
@@ -5505,15 +6163,32 @@ spec:
          inference_latency_ms=4800 exceeds threshold; confidence_pct=12.
          Possible GPU memory exhaustion. capabilities remain Unavailable."}]
        pauseOnError: true -> rollout transitions to Paused.
-14:23  Operator: swarmctl get rollout item-recognition-v3-to-v4
+14:23  Operator: swarmctl get modelrollout item-recognition-v3-to-v4
        Identifies: amr-acme-039 running a background RobotProbe that is
        consuming GPU memory. Probe suspended for this robot.
-       Operator: swarmctl resume rollout item-recognition-v3-to-v4
        amr-acme-039 retried. Health check passes (latency 91ms, confidence 96%).
 16:45  All 45 eligible robots updated. phase -> Succeeded.
        5 permanently ineligible robots (no Camera) unchanged.
-       Operator: swarmctl describe rollout item-recognition-v3-to-v4
+       Operator: swarmctl describe modelrollout item-recognition-v3-to-v4
 ```
+
+**Resuming a paused rollout.** The timeline above shows the other exit: the operator repairs the
+robot, its failure clears, and the rollout un-pauses on its own — `paused` is re-derived each
+reconcile from the current failure set, not latched. When the robot CANNOT be repaired quickly,
+`swarmctl rollout resume <name> --kind model --reason <text>` releases the halt. It is gated on
+the `rollout-resume` custom verb ([§9.5.3](#security-authorization-swarmada-rbac-roles)) and writes
+the `swarmada.io/rollout-resume` annotation, which the controller consumes; `status` is never
+edited from a client.
+
+Resume **excludes, it does not retry** (ADR-0041). The robots that failed move to
+`status.excludedRobots` and this rollout never attempts them again — resuming into a retry would
+re-dispatch the artifact that already failed and re-pause on the same robots. To retry them, fix the
+artifact and create a fresh rollout. Excluding them is also what lets the rollout finish: they
+count as settled, so it can reach a terminal phase, and only a terminal record may be deleted
+([§9.1](#crds)). A rollout that reports `Succeeded` with a non-empty `status.excludedRobots` did
+not converge the whole fleet, exactly as a non-zero `robotsRolledBack` does not. Every resume is
+sealed as `ROLLOUT_RESUMED` ([§9.6.5.1](#safety-required-events)).
+
 
 **Robot status during suspension (amr-acme-017 mid-download):**
 
@@ -5529,7 +6204,8 @@ status:
       failureReason: ""
   capabilities:
     - name: item-pick.ai-guided
-      status: Unavailable      # suspended by ModelRollout
+      status: Unavailable      # suspended by ModelRollout; SPECIFIED value --
+                               # v0.3 writes Inactive here (see Implementation status)
       paused: false
       reason: "ModelRollout/item-recognition-v3-to-v4: model update in progress (Downloading 1.1/2.3 GB)"
     - name: item-pick.ai-guided-v3
@@ -5581,6 +6257,20 @@ status:
 
 <a id="modelpolicy"></a>
 #### 9.1.10 ModelPolicy
+
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. An implementation conforming to this RFC provides the `ModelPolicy` type and its controller: all three trigger modes (the HMAC-verified webhook endpoint, the RegistryWatch OCI poller, and the manual `swarmada.io/model-trigger` annotation, which is the single evaluation path all three converge on), the quality gate, auto-creation of a `ModelRollout` on a pass, consecutive-rejection auto-suspend with the `FailedRepeatedly` condition, and the `policy-reset` operator override ([§9.5.3](#security-authorization-swarmada-rbac-roles)). **Named control-plane gaps.** **`spec.maxConcurrentRollouts` is specified, not implemented at v0.3:** the
+> controller admits one active rollout unconditionally, so any value behaves as `1` and further triggers
+> queue behind it. **`status.webhookEndpoint` is specified and written by nothing** — an operator following
+> the setup below will find it permanently empty and must construct the URL from the documented path.
+> **The webhook endpoint is asynchronous at v0.3, not synchronous as described below:** it verifies the
+> HMAC, writes the `swarmada.io/model-trigger` annotation and returns `202 Accepted` with a plain-text
+> body. It does not return the Deploy/Reject decision document, and a client that decodes the response as
+> JSON and reads `decision` — as the worked Isaac Lab example below does — will fail. Poll the `ModelPolicy`
+> resource for the outcome instead. On the same path, a suspended policy **drops the trigger silently**
+> rather than returning `409 Conflict`. **Three of the five `status.conditions` documented below are
+> written by no v0.3 controller:** `WebhookReady`, `QualityGateConfigured` and `RolloutActive`
+> (`FailedRepeatedly` and `MetricSchemaMismatch` are the two that are). **One further named limit, and it
+> is a property of tags rather than a controller gap:** a repository whose images are all epoch-pinned reproducible builds and versionlessly tagged cannot be ordered, so the poller does nothing rather than guess which artifact is newer — build-time ordering is applied only as a tie-break, because a time-first rule would let a rebuilt old release downgrade a fleet.
 
 A `ModelPolicy` resource is the declarative quality gate between an AI training pipeline and Swarmada's `ModelRollout` deployment mechanism. Training pipelines produce new model versions continuously; without a policy layer, deploying each version to robot hardware requires manual operator review — a bottleneck that defeats the purpose of continuous learning. ModelPolicy replaces that review with a machine-readable quality contract: a set of metric thresholds that a new model version must satisfy before Swarmada will deploy it. When a trigger fires (a webhook from the training pipeline, a registry poll detecting a new artifact, or a manual operator push), the ModelPolicy controller evaluates the reported metrics against the quality gate. A passing evaluation auto-creates a `ModelRollout`; a failing evaluation emits a Kubernetes event and increments a rejection counter with no deployment created.
 
@@ -5637,8 +6327,8 @@ spec:
     #                new model versions. When a new version is detected, it reads
     #                the version's metrics from the image label specified by
     #                metricsLabel and evaluates the quality gate.
-    # Manual:        operator pushes evaluation via swarmctl evaluate policy <name>
-    #                with a metrics JSON payload. No automated triggers.
+    # Manual:        operator writes the swarmada.io/model-trigger annotation with a
+    #                metrics JSON payload. No automated triggers.
     type: Webhook
     webhook:
       # When true, the controller provisions a webhook endpoint and writes
@@ -5741,7 +6431,7 @@ spec:
   #                  for production; intended for development pipelines where
   #                  every training output should be deployed immediately.
   # Manual:          never auto-create a ModelRollout. The operator must run
-  #                  swarmctl deploy policy <name> --version <ver> explicitly.
+  #                  write the swarmada.io/model-trigger annotation explicitly.
   #                  The quality gate is still evaluated; the result is advisory.
   autoDeployOn: QualityGatePass
   # ---------------------------------------------------------------------------
@@ -5992,7 +6682,7 @@ def evaluate_quality_gate(policy, trigger_payload):
             set_condition(FailedRepeatedly=True,
                           message=f"{status.consecutiveRejections} consecutive "
                                   f"rejections. Evaluation suspended. "
-                                  f"Reset with: swarmctl reset policy {policy.name}")
+                                  f"Reset with: swarmctl modelpolicy reset {policy.name}")
             emit_event(type=Warning, reason=PolicySuspended,
                        message=f"ModelPolicy suspended after "
                                f"{status.consecutiveRejections} consecutive rejections.")
@@ -6045,7 +6735,7 @@ X-Swarmada-Signature-256: sha256=<HMAC-SHA256 of body using hmac-secret>
 }
 ```
 
-**Webhook response (on Deploy):**
+**Webhook response (on Deploy).** **Specified, not implemented at v0.3** — see the Maturity note at the top of this chapter. The shipped endpoint verifies the HMAC, writes the trigger annotation and returns `202 Accepted` with the plain-text body `accepted`; it does not return a decision document. An integrator MUST NOT decode the response as JSON at v0.3, and should poll the `ModelPolicy` resource for the outcome. Both blocks below describe the target contract:
 
 ```json
 {
@@ -6057,7 +6747,7 @@ X-Swarmada-Signature-256: sha256=<HMAC-SHA256 of body using hmac-secret>
 }
 ```
 
-**Webhook response (on Reject):**
+**Webhook response (on Reject)** — likewise specified, not implemented at v0.3:
 
 ```json
 {
@@ -6109,6 +6799,10 @@ def push_to_swarmada(version, model_uri, checksum, metrics):
     )
     resp.raise_for_status()
     result = resp.json()
+    # v0.3: the endpoint returns 202 Accepted with the plain-text body
+    # "accepted", so resp.json() raises and there is no 'decision' key.
+    # Poll the ModelPolicy resource for the outcome instead. The two lines
+    # below show the target contract; see the Maturity note.
     print(f"Swarmada decision: {result['decision']} -- {result['message']}")
     return result
 ```
@@ -6118,14 +6812,14 @@ The training pipeline does not need Kubernetes credentials, Swarmada RBAC, or kn
 <a id="modelpolicy-repeated-failure-handling"></a>
 ##### 9.1.10.4 Repeated Failure Handling
 
-When `status.consecutiveRejections` reaches `spec.consecutiveRejectionLimit`, the ModelPolicy controller sets the `FailedRepeatedly` condition and suspends evaluation. All subsequent webhook POST requests receive an HTTP 409 Conflict response; registry watch triggers are silently dropped; manual triggers are rejected with an error message.
+When `status.consecutiveRejections` reaches `spec.consecutiveRejectionLimit`, the ModelPolicy controller sets the `FailedRepeatedly` condition and suspends evaluation. All subsequent webhook POST requests are specified to receive an HTTP 409 Conflict response; registry watch triggers are silently dropped; manual triggers are rejected with an error message. **The 409 is specified, not implemented at v0.3:** the endpoint has no conflict path, so a suspended policy accepts the POST with `202` and the reconciler drops the trigger silently — the response block below describes the target contract.
 
 ```http
 HTTP/1.1 409 Conflict
 Content-Type: application/json
 {
   "error": "PolicySuspended",
-  "message": "ModelPolicy 'item-recognition-policy' is suspended after 5 consecutive rejections. Reset with: swarmctl reset policy item-recognition-policy",
+  "message": "ModelPolicy 'item-recognition-policy' is suspended after 5 consecutive rejections. Reset with: swarmctl modelpolicy reset item-recognition-policy",
   "consecutive_rejections": 5,
   "last_rejection_reason": "maxSimToRealGap failed: gap=0.112 > threshold=0.08"
 }
@@ -6135,7 +6829,7 @@ Content-Type: application/json
 
 ```bash
 # Review rejection history before resetting:
-swarmctl describe policy item-recognition-policy
+swarmctl describe modelpolicy item-recognition-policy
 # OUTPUT:
 # VERSION   TRIGGERED AT          DECISION  REASON
 # 4.0.9     2026-06-22 14:30      Reject    maxSimToRealGap: gap=0.112
@@ -6145,15 +6839,15 @@ swarmctl describe policy item-recognition-policy
 # 4.0.5     2026-06-21 09:00      Reject    minEvalEpisodes: 312 < 500
 # Investigate root cause (in this case: real-hardware eval was not being run).
 # After fixing the training pipeline to include hardware validation:
-swarmctl reset policy item-recognition-policy
+swarmctl modelpolicy reset item-recognition-policy --reason "hardware eval restored"
 # OUTPUT:
 # ModelPolicy 'item-recognition-policy' reset.
 # consecutiveRejections cleared (was 5).
 # FailedRepeatedly condition removed.
 # Evaluation will resume on next trigger.
 # Optionally adjust the gate thresholds if they were misconfigured:
-swarmctl set policy item-recognition-policy \
-  --quality-gate.minEvalEpisodes 300    # relax from 500 for faster iteration
+kubectl patch modelpolicy item-recognition-policy --type merge \
+  -p '{"spec":{"qualityGate":{"minEvalEpisodes":300}}}'   # relax from 500
 ```
 
 The reset does not change `rejectionCount` (lifetime counter) or `history[]`. It clears only `consecutiveRejections` and the `FailedRepeatedly` condition.
@@ -6201,7 +6895,7 @@ Isaac Lab training job completes at 08:47 UTC. The script POSTs to the webhook.
 
 *Gate evaluation:*
 
-```yaml
+```text
 minPickSuccessRate:   0.961 >= 0.94          PASS
 maxFailureRate:       0.018 <= 0.03          PASS
 minEvalEpisodes:      800   >= 500           PASS
@@ -6312,7 +7006,7 @@ DECISION: Reject (1 condition failed)
 
 *Kubernetes events emitted:*
 
-```yaml
+```text
 LAST SEEN  TYPE     REASON          OBJECT                         MESSAGE
 14:30:03   Warning  QualityGateFail modelpolicy/item-recognition-policy
                                      Model 4.0.9 rejected: maxSimToRealGap
@@ -6329,6 +7023,27 @@ The training pipeline receives the 200 OK response with `"decision": "Reject"` a
 
 <a id="zonemaintenance"></a>
 #### 9.1.11 ZoneMaintenance
+
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. An implementation conforming to this RFC provides the `ZoneMaintenance` type and its controller: both scopes (`Zone`, resolving to the named zone and its descendants, and `Namespace`), both modes (`Graceful` wind-down with a drain timeout that force-pauses on expiry, and `Immediate`), scheduled activation, auto-resume after `autoResumeAfterMinutes`, resume via deletion through the finalizer, the `requireEstopClearBeforeResume` gate (namespace default from `SwarmadaConfig`, per-window override) that holds a resume while an estop is uncleared without ever gating deletion, per-robot `status.pausedRobots[]` with pause timestamps preserved across reconciles, and the admission check that `spec.scope.zoneName` names an existing `FleetZone` when `scope.type: Zone`. Every `spec` field is consumed. **Six named control-plane gaps, and the first two bear directly on
+> operator safety.** (1) **The `Command.pause` and `Command.resume` dispatch is specified, not issued at
+> v0.3.** Pausing a robot is a control-plane status change — `Robot.status.phase` is set to `Maintenance`
+> and its pauseable capabilities are marked `Paused` — and the robot itself is never told. No `PauseResult`
+> is requested, so nothing confirms that a robot has physically stopped, and a maintenance window does not
+> halt a robot moving under its own Robot Agent. (2) **All three `status.conditions` documented below are
+> written by no v0.3 controller** — `DrainComplete`, `AutoResumeScheduled` and `EstopInterference`. The
+> Graceful sequence below names `status.conditions[DrainComplete] -> True` as the operator's signal that a
+> zone is drained; **that condition never appears, and an operator MUST NOT wait on it before entering a
+> zone.** Use `status.pausedRobots[]` and `status.windingDownRobots[]` instead. The controller writes one
+> condition the chapter does not document, `ResumeBlockedByEstop`. (3) **`status.activatedBy` is specified
+> and written by nothing**, so a window carries no operator attribution. (4)
+> `SwarmadaConfig.spec.maintenance.defaultAutoResumeMinutes` is read by no controller — only the per-window
+> `spec.autoResumeAfterMinutes` is, so the namespace default documented in [§9.1.12](#swarmadaconfig) has no
+> effect. (5) Phase `Cancelled` is documented as reachable from `Scheduled` and is never assigned; deleting
+> a scheduled window removes it. (6) The six print columns shown below are four on the shipped CRD
+> (`Scope`, `Mode`, `Phase`, `Age`) — `Paused`, `Winding Down` and `Activated` are specified and not
+> generated, which is also why `status.pausedRobotsCount` and `status.windingDownRobotsCount`, described as
+> print-column conveniences, are maintained but not displayed. Note the boundary this chapter opens with:
+> maintenance is an operational mechanism, and none of the above is a safety guarantee.
 
 `ZoneMaintenance` is a planned, operator-initiated operational pause for a zone or namespace. It is not a safety mechanism. The distinction from emergency stop is absolute and must be understood before implementing either:
 
@@ -6372,9 +7087,13 @@ spec:
     # Namespace: applies to all robots in this namespace regardless of zone.
     #            Use sparingly -- this pauses the entire fleet.
     type: Zone
-    # Required when type is Zone. Must reference an existing FleetZone
-    # in the same namespace. May be a root zone (pauses all robots on that
-    # floor/wing) or a leaf zone (pauses only that specific area).
+    # Required when type is Zone; enforced by the ZoneMaintenance admission
+    # webhook (Optional at the CRD-schema level because the requirement is
+    # conditional on scope.type, which a static OpenAPI schema cannot express;
+    # the webhook rejects an empty zoneName with scope.type: Zone, and rejects
+    # a zoneName that does not resolve to an existing FleetZone in the same
+    # namespace). May be a root zone (pauses all robots on that floor/wing) or
+    # a leaf zone (pauses only that specific area).
     # +kubebuilder:validation:Optional
     zoneName: floor-2-left
   # ---------------------------------------------------------------------------
@@ -6430,8 +7149,9 @@ status:
   # Scheduled:  scheduledStart is in the future; not yet active.
   # Active:     maintenance window is open; in-scope robots are in Maintenance
   #             phase (or winding down in Graceful mode).
-  # Completed:  maintenance window closed (operator delete, swarmctl deactivate,
-  #             or autoResumeAfterMinutes elapsed). Robots returned to Idle.
+  # Completed:  the autoResumeAfterMinutes deadline was reached with every
+  #             in-scope estop clear. Robots returned to Idle. An operator
+  #             delete closes the window by removing the record instead.
   # Cancelled:  maintenance was cancelled before activation (only reachable
   #             from Scheduled phase).
   phase: Active
@@ -6503,6 +7223,15 @@ status:
 <a id="zonemaintenance-graceful-mode-step-by-step"></a>
 ##### 9.1.11.2 Graceful Mode: Step-by-Step
 
+> **Read the whole of this subsection against gap (1) in the Maturity note at the top of this chapter.**
+> Every reference below to a `pause` or `resume` `Command` reaching the Fleet Adapter, and to a
+> `PauseResult` coming back, describes the **specified** design. **No v0.3 controller constructs either
+> Command.** What actually happens is a control-plane status change: the robot's `status.phase` becomes
+> `Maintenance` and its pauseable capabilities are marked `Paused`, which withholds it from scheduling.
+> The robot is not told, no `PauseResult` is requested, and **nothing confirms that any robot has
+> physically stopped.** Treat the sequences below as the target contract, and do not derive an
+> operator-safety conclusion from them at v0.3.
+
 When a `ZoneMaintenance` resource with `mode: Graceful` is created (or its `scheduledStart` arrives), the Zone Controller executes the following sequence for every robot whose `status.currentZone` is in scope:
 
 ```text
@@ -6541,14 +7270,32 @@ Step (e) — Drain timeout
 Step (f) — Drain complete
   When windingDownRobots[] is empty:
     -> status.conditions[DrainComplete] -> True
+       (SPECIFIED, NOT WRITTEN at v0.3 -- this condition never appears; use
+        status.pausedRobots[] and status.windingDownRobots[] instead, and see
+        the Maturity note at the top of this chapter)
     -> Zone Controller emits Normal event: ZoneMaintenanceActive
-    -> Operators may now safely enter the zone
+       (SPECIFIED, NOT EMITTED at v0.3 -- no controller emits it)
+    -> The zone is drained as far as this mechanism drains it.
+       DO NOT treat this as a safety clearance. Maintenance is an operational
+       mechanism, not a safety guarantee (see the top of this chapter), and at
+       v0.3 no pause Command reaches the robot, so nothing has confirmed that
+       any robot is physically stopped. Follow the site's own lock-out /
+       tag-out procedure before entering.
 ```
 
 The `pause` Command (step b, d, e) sends a suspend signal to the Fleet Adapter only for capabilities where `pauseable: true`. The Fleet Adapter is responsible for ensuring the robot has physically stopped before returning the `PauseResult`. Capabilities where `pauseable: false` (`estop.receive`, `health.heartbeat`, `safety.*`) continue operating throughout without any command.
 
 <a id="zonemaintenance-immediate-mode-step-by-step"></a>
 ##### 9.1.11.3 Immediate Mode: Step-by-Step
+
+> **Read the whole of this subsection against gap (1) in the Maturity note at the top of this chapter.**
+> Every reference below to a `pause` or `resume` `Command` reaching the Fleet Adapter, and to a
+> `PauseResult` coming back, describes the **specified** design. **No v0.3 controller constructs either
+> Command.** What actually happens is a control-plane status change: the robot's `status.phase` becomes
+> `Maintenance` and its pauseable capabilities are marked `Paused`, which withholds it from scheduling.
+> The robot is not told, no `PauseResult` is requested, and **nothing confirms that any robot has
+> physically stopped.** Treat the sequences below as the target contract, and do not derive an
+> operator-safety conclusion from them at v0.3.
 
 When `mode: Immediate`, the Zone Controller skips the drain window entirely:
 
@@ -6569,7 +7316,8 @@ Step (c) — Requeue interrupted tasks
        task failure; it is an operational pause)
 Step (d) — Drain complete immediately
   status.windingDownRobots[] is always empty in Immediate mode.
-  status.conditions[DrainComplete] -> True at activation time.
+  status.conditions[DrainComplete] -> True at activation time (specified; not
+  written at v0.3 -- see the Maturity note).
 ```
 
 Immediate mode should be used only when the maintenance event cannot wait. The cost is interrupted tasks and potential throughput impact from sudden requeue cascades. For planned maintenance, Graceful mode with an appropriate `scheduledStart` is always preferable.
@@ -6625,18 +7373,17 @@ The Fleet Adapter MUST ensure the robot has reached a physically safe stopped st
 - The robot is not in a mid-pick or mid-grasp position with a payload at risk of falling
 - The robot's safety light signals indicate a stopped/maintenance state
 
-The Fleet Adapter MUST NOT return the result before these conditions are met. The Zone Controller does not independently verify physical stop state; it trusts the Fleet Adapter's result as the safety attestation.
+The Fleet Adapter MUST NOT return the result before these conditions are met. The Zone Controller does not independently verify physical stop state; it is specified to trust the Fleet Adapter's result as the safety attestation. **At v0.3 there is no attestation at all:** the `pause` Command is never sent, so no `PauseResult` is ever requested or received, and the robot's `Maintenance` phase reflects a control-plane decision rather than a confirmed physical stop. This obligation binds an adapter implementer for the version in which the Command ships; it is not a v0.3 safety property.
 
 <a id="zonemaintenance-resume-behavior"></a>
 ##### 9.1.11.5 Resume Behavior
 
-A `ZoneMaintenance` window closes through one of three paths:
+A `ZoneMaintenance` window closes through one of two paths:
 
 1. **Operator delete:** `kubectl delete zonemaintenance floor-2-weekly-inspection`
-2. **swarmctl deactivate:** `swarmctl deactivate maintenance floor-2-left`
-3. **Auto-resume:** `autoResumeAfterMinutes` elapsed since `activatedAt`
+2. **Auto-resume:** `autoResumeAfterMinutes` elapsed since `activatedAt`
 
-In all three cases the Zone Controller executes the same resume sequence:
+Path 2 executes the resume sequence below. **Path 1 does not.** Deleting the resource returns every paused robot to `Idle` without the estop precondition in step (a), so that a non-Clear estop can never prevent a `ZoneMaintenance` from being deleted. This is deliberate, and it is not a bypass of the estop: `Idle` records only that the robot is no longer inside a maintenance window. A robot under an active estop remains undispatchable because the Scheduler's candidate filter 10 ([§9.3.2](#control-plane-scheduler)) eliminates it independently of phase, and `status.estopState` is independent of `status.phase` ([§9.6.2.3](#safety-estop-state-machine)).
 
 ```text
 Step (a) — Check estop precondition
@@ -6644,6 +7391,8 @@ Step (a) — Check estop precondition
   non-Clear estop status:
     -> Resume is blocked.
     -> Zone Controller emits Warning: MaintenanceResumeBlocked
+       (SPECIFIED, NOT EMITTED at v0.3; the controller writes the
+        ResumeBlockedByEstop condition instead)
          "ZoneMaintenance floor-2-weekly-inspection: resume blocked.
           Estop active on: delivery-bot-04. Clear estop before resuming."
     -> status.phase remains Active (not Completed).
@@ -6663,8 +7412,11 @@ Step (d) — Close window
   status.completedAt -> now   (stamped once; never rewritten)
   Normal event emitted: ZoneMaintenanceCompleted
     "ZoneMaintenance floor-2-weekly-inspection completed. 2 robots resumed."
-  ZoneMaintenance object remains readable for 24 hours (audit retention),
-  then is garbage-collected by the controller.
+  A Completed ZoneMaintenance object is intended to remain readable for a
+  bounded audit-retention window and then be garbage-collected. SPECIFIED, NOT
+  IMPLEMENTED AT V0.3: no controller deletes a Completed ZoneMaintenance —
+  it remains indefinitely until an operator removes it by hand, same as a
+  window closed via the operator-delete path.
 ```
 
 <a id="zonemaintenance-interaction-with-estop"></a>
@@ -6683,19 +7435,22 @@ Estop and `ZoneMaintenance` are independent state machines that can be simultane
 
 **The critical row is "Active + Clearing":** when an estop clears while a `ZoneMaintenance` is still active, the robot's phase transitions to `Maintenance` (not `Idle`). The `ZoneMaintenance` window must be explicitly closed before robots can resume operation. This prevents the following failure mode: an emergency triggers estop, maintenance is already open, estop clears after the emergency is resolved — and robots resume into an area where maintenance staff are still present.
 
-The Zone Controller enforces this by checking for active `ZoneMaintenance` resources in scope before processing any estop-clear event. If a `ZoneMaintenance` is active, the post-estop-clear phase is `Maintenance`, not `Idle`. The robot's Fleet Adapter is notified via a `PhaseTransition` event that includes both the prior estop state and the current maintenance state, so the adapter can log the reason for the `Maintenance` phase without operator confusion.
+The Zone Controller enforces this by checking for active `ZoneMaintenance` resources in scope before processing any estop-clear event. If a `ZoneMaintenance` is active, the post-estop-clear phase is `Maintenance`, not `Idle`. The robot's Fleet Adapter is specified to be notified via a `PhaseTransition` event carrying both the prior estop state and the current maintenance state, so the adapter can log the reason for the `Maintenance` phase without operator confusion. This notification is **specified, not implemented at v0.3, and the Fleet Adapter contract carries no message for it**: `fleet_adapter.proto` has no phase-transition notification on any stream, so an adapter observes the `Maintenance` phase only in the `RobotState` it reports and in the control plane's response to it, without the prior-estop-state context. Adding the message is an additive change under the version policy ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)).
 
-<a id="zonemaintenance-the-swarmctl-commands"></a>
-##### 9.1.11.7 The swarmctl Commands
+<a id="zonemaintenance-operator-commands"></a>
+##### 9.1.11.7 Operator Commands
+
+`swarmctl` implements the read verbs for `ZoneMaintenance`; opening and closing a window are
+ordinary Kubernetes writes. The forms below are what the control plane implements at v0.3.
 
 ```bash
 # List all active ZoneMaintenance resources in a namespace.
-swarmctl get maintenance -n hospital-east
+swarmctl get zonemaintenance -n hospital-east
 # OUTPUT:
 # NAME                         SCOPE            MODE       PHASE    PAUSED  WINDING  ACTIVATED
 # floor-2-weekly-inspection    Zone/floor-2-left Graceful  Active   2       0        2026-06-23T22:00:00Z
 # Show full detail for a ZoneMaintenance resource.
-swarmctl describe maintenance floor-2-weekly-inspection -n hospital-east
+swarmctl describe zonemaintenance floor-2-weekly-inspection -n hospital-east
 # OUTPUT:
 # Name:           floor-2-weekly-inspection
 # Namespace:      hospital-east
@@ -6715,34 +7470,72 @@ swarmctl describe maintenance floor-2-weekly-inspection -n hospital-east
 # Continuous Capabilities (active throughout maintenance):
 #   estop.receive    pauseable: false
 #   health.heartbeat pauseable: false
-# Create a ZoneMaintenance immediately (Immediate mode).
-swarmctl activate maintenance zone floor-2-left   --mode Immediate   --reason "Spill in ward 2A -- immediate clearance required"   -n hospital-east
+# Open a maintenance window immediately (Immediate mode). Creation IS activation:
+# with no spec.scheduledStart the controller activates on first reconcile.
+kubectl apply -n hospital-east -f - <<'EOF'
+apiVersion: swarmada.io/v1
+kind: ZoneMaintenance
+metadata:
+  name: floor-2-left-maintenance-b7f2
+spec:
+  scope:
+    type: Zone
+    zoneName: floor-2-left
+  mode: Immediate
+  reason: "Spill in ward 2A -- immediate clearance required"
+EOF
 # OUTPUT:
 # ZoneMaintenance 'floor-2-left-maintenance-b7f2' created (Immediate mode).
 # 2 robots paused immediately. 1 in-progress task requeued.
-# Create a scheduled Graceful maintenance window.
-swarmctl activate maintenance zone floor-2-left   --mode Graceful   --scheduled-start "2026-06-23T22:00:00Z"   --auto-resume-after 120   --reason "Weekly inspection"   -n hospital-east
+# Schedule a Graceful maintenance window.
+kubectl apply -n hospital-east -f - <<'EOF'
+apiVersion: swarmada.io/v1
+kind: ZoneMaintenance
+metadata:
+  name: floor-2-weekly-inspection
+spec:
+  scope:
+    type: Zone
+    zoneName: floor-2-left
+  mode: Graceful
+  scheduledStart: "2026-06-23T22:00:00Z"
+  autoResumeAfterMinutes: 120
+  reason: "Weekly inspection"
+EOF
 # OUTPUT:
 # ZoneMaintenance 'floor-2-weekly-inspection' created (Graceful, scheduled).
 # Will activate at 2026-06-23T22:00:00Z. Auto-resume at 2026-06-24T00:00:00Z.
-# Close a maintenance window (resume robots).
-swarmctl deactivate maintenance floor-2-weekly-inspection -n hospital-east
+# Close a maintenance window (resume robots). Deleting the resource is the close: the
+# swarmada.io/zonemaintenance-resume finalizer resumes every paused robot before the
+# object goes.
+kubectl delete zonemaintenance floor-2-weekly-inspection -n hospital-east
 # OUTPUT (normal case):
-# ZoneMaintenance 'floor-2-weekly-inspection' deactivated.
+# zonemaintenance.swarmada.io "floor-2-weekly-inspection" deleted.
 # resume Commands sent to 2 robots.
 # Robots transitioning to Idle: delivery-bot-04, delivery-bot-07.
-# OUTPUT (estop-blocked case):
-# ERROR: Resume blocked. Estop active on delivery-bot-04 in zone floor-2-left.
-# Clear estop on all in-scope robots before deactivating maintenance.
-# To force-resume despite estop (NOT RECOMMENDED -- physical safety risk):
-#   swarmctl deactivate maintenance floor-2-weekly-inspection --ignore-estop
-# Cancel a scheduled (not yet active) maintenance window.
-swarmctl delete maintenance floor-2-weekly-inspection -n hospital-east
+# NOTE: deletion is NEVER estop-gated. requireEstopClearBeforeResume holds the
+# AUTO-resume path (the autoResumeAfterMinutes deadline) while an estop is
+# uncleared; it does not block delete. Deleting always completes and returns
+# robots to Idle, and the Scheduler's estop filter continues to withhold them
+# until the estop clears. There is no force-resume flag because none is needed.
+# Cancel a scheduled (not yet active) window, or close an active one.
+kubectl delete zonemaintenance floor-2-weekly-inspection -n hospital-east
 # OUTPUT:
 # ZoneMaintenance 'floor-2-weekly-inspection' cancelled (was Scheduled; never activated).
 # No robots were paused.
-# Create a namespace-wide maintenance window (pauses ALL robots in namespace).
-swarmctl activate maintenance namespace   --mode Graceful   --reason "Full facility power maintenance -- all robots must park"   --auto-resume-after 240   -n hospital-east
+# Open a namespace-wide maintenance window (pauses ALL robots in the namespace).
+kubectl apply -n hospital-east -f - <<'EOF'
+apiVersion: swarmada.io/v1
+kind: ZoneMaintenance
+metadata:
+  name: namespace-maintenance-c9a1
+spec:
+  scope:
+    type: Namespace
+  mode: Graceful
+  autoResumeAfterMinutes: 240
+  reason: "Full facility power maintenance -- all robots must park"
+EOF
 # OUTPUT:
 # WARNING: Namespace-scope maintenance will pause ALL robots in hospital-east.
 # Confirm? [y/N]: y
@@ -6750,15 +7543,22 @@ swarmctl activate maintenance namespace   --mode Graceful   --reason "Full facil
 # 7 robots entering drain sequence.
 ```
 
+<a id="zonemaintenance-recurrence"></a>
+##### 9.1.11.8 Recurrence
+
+A `ZoneMaintenance` resource represents one window. Recurrence is managed by an external scheduler, such as a Kubernetes `CronJob`, that creates the resource at each scheduled time. This is the sanctioned mechanism, and it remains so after any first-class recurrence primitive is adopted for fleet work.
+
+The distinction is deliberate rather than provisional. A maintenance window is an operator-scheduled facility event, not fleet work: it is authored by whoever owns the building's calendar, it pauses robots rather than tasking them, and its cadence is a property of the facility rather than of the fleet. A recurrence primitive that generates *work* addresses a different problem and is deferred to a future RFC; it does not supersede this section.
+
 <a id="zonemaintenance-worked-example"></a>
-##### 9.1.11.8 Worked Example
+##### 9.1.11.9 Worked Example
 
 A hospital maintenance team needs to inspect and mop the floor-2-left zone (wards 2A and 2B) every Monday at 22:00 UTC. Two delivery robots operate in this zone. The operator creates a recurring `ZoneMaintenance` (the recurrence is managed by an external scheduler, such as a Kubernetes `CronJob`, that creates the `ZoneMaintenance` resource at the scheduled time).
 
 **At 21:55 UTC — operator pre-checks:**
 
 ```bash
-swarmctl get robot -n hospital-east --zone floor-2-left
+kubectl get robots -n hospital-east --field-selector spec.zone=floor-2-left
 # NAME            PHASE        TASK                    BATTERY
 # delivery-bot-04 Idle         -                       87%
 # delivery-bot-07 InProgress   fa-supply-ward2b-0041   62%
@@ -6794,8 +7594,9 @@ Zone Controller detects completion:
   -> Fleet Adapter ACKs
   -> Robot.status.phase = Maintenance
   -> Moved from windingDownRobots[] to pausedRobots[]
-  -> status.conditions[DrainComplete] = True
-Kubernetes events emitted:
+  -> status.conditions[DrainComplete] = True   # specified, not written at v0.3
+Kubernetes events emitted (SPECIFIED; neither is emitted at v0.3 -- see the
+Maturity note at the top of this chapter):
   Normal  ZoneMaintenanceActive  zonemaintenance/floor-2-weekly-inspection
           "Maintenance window active. 2/2 robots in Maintenance phase.
            Drain complete. Zone floor-2-left ready for inspection."
@@ -6804,7 +7605,7 @@ Kubernetes events emitted:
 **At 23:45 UTC — maintenance team finishes early:**
 
 ```bash
-swarmctl deactivate maintenance floor-2-weekly-inspection -n hospital-east
+kubectl delete zonemaintenance floor-2-weekly-inspection -n hospital-east
 Zone Controller checks requireEstopClearBeforeResume: true
   -> floor-2-left estopStatus: Clear  ✓
 resume Command sent to delivery-bot-04:
@@ -6872,9 +7673,19 @@ status:
 
 `SwarmadaConfig` is the namespace-scoped singleton configuration resource for Swarmada. There is exactly one per namespace, always named `swarmada-config`. It is namespace-scoped (not cluster-scoped); each namespace has independent settings. It is the single authoritative source for all namespace-level tunables: passive telemetry rates, capability re-scan intervals, active probe defaults, scheduling policies, robot provisioning behaviour, and maintenance defaults. Operators configure Swarmada behaviour for a namespace by editing this one resource; they do not need to hunt across individual `RobotProbe`, `Robot`, or `FleetAction` resources to find where a default comes from.
 
-`swarmada-config` is auto-created with all defaults when a namespace is initialized (defined as: the moment the first `FleetZone` resource is created in that namespace). Operators can edit it at any time using `kubectl edit` or `swarmctl set config`. A namespace without `swarmada-config` is considered misconfigured; the Zone Controller will create it with defaults rather than refusing to operate.
+`swarmada-config` is auto-created with all defaults when a namespace is initialized (defined as: the moment the first `FleetZone` resource is created in that namespace). Operators can edit it at any time with `kubectl edit swarmadaconfig swarmada-config`. A namespace without `swarmada-config` is considered misconfigured; the Zone Controller will create it with defaults rather than refusing to operate.
 
-> **Implementation status (v0.2):** stage: alpha · impl: implemented. A conformant implementation provides the full `SwarmadaConfig` type and its controller: the `health`, `scheduling`, `provisioning`, `maintenance`, `telemetry` ([§9.1.12.7](#swarmadaconfig-telemetry-pipeline-and-status-projection)), `signing` ([§9.5.5](#security-secrets-management)), `trafficDeconfliction` ([§9.1.12.10](#swarmadaconfig-traffic-deconfliction-engine-configuration)), estop-delivery ([§9.1.12.8](#swarmadaconfig-estop-delivery-configuration)), task-cancellation ([§9.1.12.9](#swarmadaconfig-task-cancellation-on-disconnect)), and `coordinateSystem` ([§9.1.12.11](#swarmadaconfig-coordinate-system)) blocks, the auto-bootstrap that creates `swarmada-config` with schema defaults on the first `FleetZone` in a namespace, and the `status` subresource (`TelemetrySinkUnconfigured` condition, [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)).
+> **Implementation status (v0.3):** stage: alpha · control-plane: implemented · end-to-end: partial. An implementation conforming to this RFC provides the full `SwarmadaConfig` type and its controller: the `health`, `scheduling`, `provisioning`, `maintenance`, `telemetry` ([§9.1.12.8](#swarmadaconfig-telemetry-pipeline-and-status-projection)), `signing` ([§9.5.5](#security-secrets-management)), `trafficDeconfliction` ([§9.1.12.11](#swarmadaconfig-traffic-deconfliction-engine-configuration)), estop-delivery ([§9.1.12.9](#swarmadaconfig-estop-delivery-configuration)), `actionCancellation` ([§9.1.12.10](#swarmadaconfig-action-cancellation-on-disconnect)), and `coordinateSystem` ([§9.1.12.12](#swarmadaconfig-coordinate-system)) blocks, the auto-bootstrap that creates `swarmada-config` with schema defaults on the first `FleetZone` in a namespace, and the `status` subresource (`TelemetrySinkUnconfigured` condition, [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)). **Several fields are schema-only at v0.3 — validated and defaulted, but read by no controller, so setting them produces no observable change:** `spec.scheduling.actionRequeueBackoffSeconds` (the no-eligible-robot requeue interval is fixed in the reference implementation); `spec.estop.delivery.retryPolicy.{maxAttempts,retryIntervalMs}` and `spec.estop.delivery.partialDeliveryBehavior` (the shipped Estop Coordinator issues a single delivery attempt per robot with no retry loop and no partial-delivery aggregation — see [§7](#drawbacks) item 15); `spec.trafficDeconfliction.tdeCallTimeoutMs` (no TDE call site reads it); `spec.trafficDeconfliction.onReservationExpiry` (the `ReservationExpiryAction` values are declared but never compared against — and the reservation-expiry reconciler that would compare them does not exist at all, so an expired reservation stops counting against zone capacity but is never removed from `FleetZone.status`, see [§9.4.8](#tde-reservation-expiry-reconciler)); `spec.actionCancellation.onDisconnect: WhenActionExpired` is likewise inert — it depends on `FleetAction.status.startTime`, which no controller writes, so selecting it behaves as `Never` ([§9.1.4](#fleetaction)); `spec.health.capabilityRescanIntervalSeconds` (the periodic full-capability-rescan mechanism it is meant
+> to configure has no implementation at all — no controller constructs or sends the `ScanCapabilities`
+> command on any trigger — see [§7](#drawbacks) item 10); `spec.health.defaultHardwareProbeIntervalSeconds`
+> and `spec.health.defaultProbeTimeoutSeconds` (unreachable rather than unread — the `RobotProbe` fields
+> they default carry CRD-level defaults the API server always applies, so the namespace value is consulted
+> only for a non-positive field, see [§9.1.7](#robotprobe)); `spec.maintenance.defaultAutoResumeMinutes` (the
+> ZoneMaintenance controller reads only the per-window `spec.autoResumeAfterMinutes`); and
+> `spec.estop.requireExplicitClearAfterEstop` — a special case worth stating precisely, because the field
+> is inert while the rule it names is not. No controller reads the field, and no auto-clear path exists
+> anywhere in the control plane, so clearing an estop always requires the `estop-clear` verb whatever the
+> field says. Setting it to `false` does not enable automatic clearing; it does nothing. `spec.maintenance.requireEstopClearBeforeResume`, `spec.scheduling.maxPendingActionsPerZone`, `spec.scheduling.preferSameManufacturer`, and `spec.scheduling.{leaseDurationSeconds,clockSkewMarginSeconds}` (read by the FleetAction controller for every lease decision AND for the `lease_duration_ms` it sends the robot — ADR-0044) are, by contrast, all genuinely enforced at v0.3 despite having carried stale "not yet enforced" doc comments on the Go type in an earlier revision; those comments have been corrected and the fields function as specified below.
 
 <a id="swarmadaconfig-schema"></a>
 ##### 9.1.12.1 Schema
@@ -6916,6 +7727,10 @@ spec:
     # is the catch-all for silent failures that delta telemetry misses.
     # 0 disables periodic re-scanning (not recommended for production).
     # See the SwarmadaConfig scan Command definition.
+    # SPECIFIED, NOT IMPLEMENTED AT V0.3 (see Maturity note above and
+    # [§7](#drawbacks) item 10): no controller constructs or sends the
+    # ScanCapabilities command on any trigger, so this field has no effect
+    # regardless of value.
     # +kubebuilder:validation:Minimum=0
     # +kubebuilder:validation:Maximum=3600
     # +kubebuilder:default=300
@@ -6955,7 +7770,7 @@ spec:
     defaultProbeRecoveryThreshold: 2
     # -------------------------------------------------------------------------
     # Connectivity offline threshold.
-    # If the Health Monitor receives no TelemetryPayload from a robot within
+    # If the control plane receives no TelemetryPayload from a robot within
     # this many seconds, it transitions the robot's phase to Offline and
     # sets status.health.status to Critical.
     # Should be set to at least 3x telemetryIntervalSeconds to tolerate
@@ -7018,7 +7833,12 @@ spec:
       #   2. Emits a TelemetrySinkUnconfigured Kubernetes Warning event on
       #      SwarmadaConfig every reconciliation cycle until resolved.
       #   3. Increments swarmada_telemetry_dropped_frames_total (label: namespace)
-      #      for every frame that cannot be forwarded.
+      #      for every frame a CONFIGURED sink fails to accept. An UNSET
+      #      sink.type is served by the same no-op writer as Drop and returns
+      #      no error, so frames discarded for want of any sink are NOT
+      #      counted -- the condition and the event below are the only
+      #      signals for that case. See the metrics contract in
+      #      [§9.3.8](#control-plane-observability-prometheus-metrics-contract).
       # Operators MUST set a real sink or explicitly opt in to Drop.
       # +kubebuilder:validation:Enum="";Drop;PrometheusRemoteWrite;VictoriaMetrics;Mimir
       # +kubebuilder:default=""
@@ -7053,16 +7873,16 @@ spec:
     # +kubebuilder:default={15,30}
     materialBatteryThresholds: [15, 30]
   # ===========================================================================
-  # spec.scheduling: Scheduler defaults and task queue policies
+  # spec.scheduling: Scheduler defaults and action queue policies
   # ===========================================================================
   scheduling:
     # -------------------------------------------------------------------------
     # Default acceptDegradedCapabilities for FleetAction resources.
-    # When true, the Scheduler will match tasks to robots whose required
+    # When true, the Scheduler will match actions to robots whose required
     # capabilities are in Degraded status, not only Active.
     # Applied to FleetAction resources that do not set
     # spec.acceptDegradedCapabilities explicitly.
-    # Per-task values override this default.
+    # Per-action values override this default.
     # +kubebuilder:default=false
     defaultAcceptDegradedCapabilities: false
     # -------------------------------------------------------------------------
@@ -7093,7 +7913,7 @@ spec:
     # When true, the Scheduler breaks ties between otherwise equal candidates
     # by preferring robots from the same manufacturer as the FleetAction's
     # preferredManufacturer hint, if present. Has no effect when
-    # preferredManufacturer is absent from the task.
+    # preferredManufacturer is absent from the action.
     # +kubebuilder:default=true
     preferSameManufacturer: true
     # -------------------------------------------------------------------------
@@ -7110,6 +7930,52 @@ spec:
     # without editing the actions themselves.
     # +kubebuilder:default=true
     honorPreferredRobot: true
+    # -------------------------------------------------------------------------
+    # Task-lease horizon: how long a robot may execute an assigned FleetAction
+    # without a renewal before it MUST self-stop
+    # ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)).
+    #
+    # This is a SAFETY bound, not a tuning knob. The resolved value is used for
+    # BOTH halves of the single-executor guarantee: it sets
+    # FleetAction.status.leaseExpiresAt (the control plane's reassignment
+    # horizon) and is sent to the robot as the `lease_duration_ms` field of
+    # assign_action and renew_lease, which arms the Fleet Adapter's self-stop
+    # timer ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist),
+    # "Task-lease self-stop"). Raising it directly extends how long a robot that
+    # has lost its link keeps moving before halting itself — hence the 300s
+    # ceiling. The 10s floor keeps the horizon clear of the renewal interval.
+    #
+    # UNITS: this field is SECONDS; the wire field `lease_duration_ms` is
+    # milliseconds. The control plane converts (seconds x 1000) when it builds
+    # the Command. Prose in this RFC that names a lease horizon means this
+    # field; prose that names `lease_duration_ms` means the wire encoding of it.
+    #
+    # The renewal interval is ALWAYS leaseDurationSeconds / 3 and is NOT
+    # separately configurable: deriving it makes it impossible to widen the
+    # horizon without also renewing proportionally sooner (ADR-0044).
+    # +kubebuilder:validation:Minimum=10
+    # +kubebuilder:validation:Maximum=300
+    # +kubebuilder:default=30
+    leaseDurationSeconds: 30
+    # -------------------------------------------------------------------------
+    # Clock-skew margin added before an assignment lease is treated as PROVABLY
+    # expired: the control plane may reassign only once
+    # now >= leaseExpiresAt + clockSkewMarginSeconds (condition 3 of
+    # [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)).
+    #
+    # It absorbs clock disagreement between the control plane and the robot, and
+    # is also a safety bound: too small and the control plane may reassign an
+    # action while the robot still believes its lease is live — a
+    # double-execution window; too large and recovery after a disconnect is
+    # needlessly delayed.
+    #
+    # UNITS: seconds. Earlier revisions of this RFC named this quantity
+    # `clockSkewMarginMs`, which was never a field and had no defined value;
+    # `spec.scheduling.clockSkewMarginSeconds` is the sole spelling (ADR-0044).
+    # +kubebuilder:validation:Minimum=1
+    # +kubebuilder:validation:Maximum=60
+    # +kubebuilder:default=5
+    clockSkewMarginSeconds: 5
   # ===========================================================================
   # spec.provisioning: robot discovery and admission behaviour
   # ===========================================================================
@@ -7191,22 +8057,24 @@ spec:
     # -------------------------------------------------------------------------
     # Default graceful drain timeout.
     # When a ZoneMaintenance resource is created for a zone, the Zone Controller
-    # waits up to this many seconds for in-progress tasks in that zone to
+    # waits up to this many seconds for in-progress actions in that zone to
     # complete before declaring the zone drained and beginning maintenance.
     # Tasks that do not complete within the drain timeout are transitioned to
-    # Paused. 0 = no drain wait (enter maintenance immediately; not recommended
-    # unless the ZoneMaintenance resource sets requireIdleRobots: true).
+    # Paused. 0 = no drain wait (enter maintenance immediately). Not recommended
+    # for a zone with in-progress work: use mode: Immediate on the ZoneMaintenance
+    # instead, which requeues in-progress actions under the confirmed-stop
+    # discipline rather than dropping the drain window.
     # This is a namespace-wide setting: per-ZoneMaintenance override is not
-    # provided in v0.2 (ADR-0013 — the namespace default is the only knob).
+    # provided in v0.3 (ADR-0013 — the namespace default is the only knob).
     # +kubebuilder:validation:Minimum=0
     # +kubebuilder:validation:Maximum=3600
     # +kubebuilder:default=300
-    defaultGracefulDrainTimeoutSeconds: 300   # 5 minutes; allows most tasks to finish
+    defaultGracefulDrainTimeoutSeconds: 300   # 5 minutes; allows most actions to finish
     # -------------------------------------------------------------------------
     # Default auto-resume delay.
     # After a ZoneMaintenance window closes (endTime reached), wait this many
     # minutes before automatically transitioning the zone back to operational
-    # and resuming Paused tasks. Gives technicians time to clear the zone
+    # and resuming Paused actions. Gives technicians time to clear the zone
     # after maintenance work completes before robots resume.
     # 0 = no auto-resume (operator must manually close the maintenance window).
     # Per-ZoneMaintenance resources may override this default.
@@ -7254,27 +8122,60 @@ spec:
           name: swarmada-signing-trust-root
           key: cosign.pub                # PEM-encoded cosign public key or certificate
     # Optional Rekor (or Rekor-compatible) transparency log URL.
-    # When set, the Fleet Adapter MUST confirm that the artifact's signature
-    # entry appears in the transparency log before accepting the artifact.
-    # Provides an append-only, operator-independent audit trail of all signed
-    # artifact deployments. Leave empty to skip transparency-log checking.
+    # When set, the artifact's signature entry MUST appear in the transparency
+    # log before the artifact is accepted. Provides an append-only,
+    # operator-independent audit trail of all signed artifact deployments.
+    # Leave empty to skip transparency-log checking.
     # +kubebuilder:validation:Optional
     rekorUrl: ""                         # e.g. "https://rekor.sigstore.dev"
+
+    # Pins the transparency log's OWN public key. This is what makes the log
+    # check mean anything: without it the control plane can only ask the log
+    # whether it indexes a hash, and a hostile or impersonated endpoint answers
+    # yes to everything. Fetching the key from the endpoint being verified would
+    # be circular, so it MUST come from the operator.
+    # +kubebuilder:validation:Optional
+    rekorPublicKey:
+      name: swarmada-rekor-key
+      key: rekor.pub
 ```
+
+**Rekor verification degrades silently when `rekorPublicKey` is unset.** Setting `rekorUrl`
+alone does not give a verified transparency-log check. With a key pinned, the entry's RFC-6962
+inclusion proof and signed-entry-timestamp are verified cryptographically and a forged response
+fails closed. **Without one, the check degrades to index presence only** — the control plane asks
+the log whether it indexes the artifact hash, accepts a "yes", and dispatches. The inclusion
+proof and signed entry timestamp are not verified.
+
+The degradation is real but **not surfaced**: it is noted at debug verbosity in the controller
+log and appears in no condition, no Kubernetes Event and no status field. An operator reading a
+`Succeeded` rollout therefore cannot tell from the resource whether its transparency check was
+cryptographically verified or only indexed. An operator who requires the guarantee MUST set
+`rekorPublicKey`, and MUST NOT infer from a successful rollout that a pinned-key verification
+occurred. A future revision should surface the degraded mode on `status.conditions`.
 
 **Status conditions.** `SwarmadaConfig` surfaces pipeline health via `status.conditions`. The conditions set by the telemetry pipeline are:
 
 | Type | Status | Severity | Reason | Meaning |
 | :---- | :---- | :---- | :---- | :---- |
-| `TelemetrySinkUnconfigured` | `True` | `Warning` | `SinkNotConfigured` | `spec.telemetry.sink.type` is unset; high-cadence telemetry is not being forwarded. Dropped frames are counted in `swarmada_telemetry_dropped_frames_total`. |
+| `TelemetrySinkUnconfigured` | `True` | `Warning` | `SinkNotConfigured` | `spec.telemetry.sink.type` is unset; high-cadence telemetry is not being forwarded. This condition and its Warning event are the **only** signals for the unset case: `swarmada_telemetry_dropped_frames_total` counts frames a *configured* sink rejects, and an unset sink returns no error, so that counter stays at zero. |
 | `TelemetrySinkUnconfigured` | `False` | — | `SinkConfigured` | A valid sink is active (`type` is a real store) or `type: Drop` is explicitly set by the operator. |
 
 The `TelemetrySinkUnconfigured` condition is the operator's primary signal that telemetry history is absent. It is visible via `kubectl describe swarmadaconfig swarmada-config -n <namespace>` without requiring access to metrics infrastructure. A namespace freshly initialized with no `spec.telemetry.sink` will show this condition immediately; the operator MUST either configure a sink or explicitly set `type: Drop` to resolve it.
 
-<a id="swarmadaconfig-precedence-rules"></a>
-##### 9.1.12.2 Precedence Rules
+<a id="swarmadaconfig-status-fields"></a>
+##### 9.1.12.2 Status fields
 
-`SwarmadaConfig` provides namespace-level defaults. Every field in `SwarmadaConfig.spec` has a corresponding per-resource override available on the resource that uses it. The resolution order is always:
+`status` is control-plane-owned; `SwarmadaConfig` has no operator-writable status.
+
+- `supportedContractRange` — the fleet-adapter **contract-version** range this control plane accepts, as a semver range (e.g. `>=1.0.0 <1.1.0`): the implemented minor and its predecessor within the current major ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)). It is **advertised, not configured** — the controller computes it from the compiled-in contract version and restores it if edited — so an operator can answer "which adapters can this control plane drive?" without reading code. An adapter reporting a version outside it is refused `VERSION_MISMATCH` at the handshake. An empty value means the controller has not yet reconciled and MUST NOT be read as "any version is accepted"; a consumer that finds it empty falls back to refusing, consistent with the fail-closed gate ([§9.1.13.4](#fleetadapter-admission-gating)). Written transition-only under RA-1.
+- `conditions` — standard conditions list (`type`-keyed), including `TelemetrySinkUnconfigured` ([§9.1.12.8](#swarmadaconfig-telemetry-pipeline-and-status-projection)).
+- `observedGeneration` — the `.metadata.generation` this status was computed from.
+
+<a id="swarmadaconfig-precedence-rules"></a>
+##### 9.1.12.3 Precedence Rules
+
+`SwarmadaConfig` provides namespace-level defaults. Most fields in `SwarmadaConfig.spec` have a corresponding per-resource override on the resource that uses them; the exceptions are listed below the table. The resolution order is always:
 
 ```text
 per-resource spec field (highest precedence)
@@ -7289,24 +8190,28 @@ The full override map:
 | SwarmadaConfig field | Overridden per-resource by | Field |
 | :---- | :---- | :---- |
 | `health.telemetryIntervalSeconds` | `Robot` | `spec.telemetryIntervalSeconds` |
-| `health.defaultHardwareProbeIntervalSeconds` | `RobotProbe` | `spec.intervalSeconds` |
-| `health.defaultProbeTimeoutSeconds` | `RobotProbe` | `spec.timeoutSeconds` |
+| `health.defaultHardwareProbeIntervalSeconds` | `RobotProbe` | `spec.intervalSeconds` — **the namespace default is unreachable at v0.3**: `spec.intervalSeconds` carries a CRD-level default the API server always applies, so the fallback fires only on a non-positive value ([§9.1.7](#robotprobe)) |
+| `health.defaultProbeTimeoutSeconds` | `RobotProbe` | `spec.timeoutSeconds` — **unreachable at v0.3**, same cause |
 | `health.defaultProbeFailureThreshold` | `RobotProbe` | `spec.failureThreshold` |
 | `health.defaultProbeRecoveryThreshold` | `RobotProbe` | `spec.recoveryThreshold` |
 | `scheduling.defaultAcceptDegradedCapabilities` | `FleetAction` | `spec.acceptDegradedCapabilities` |
-| `scheduling.actionRequeueBackoffSeconds` | `FleetAction` | `spec.retryPolicy.backoffSeconds` |
-| `maintenance.defaultAutoResumeMinutes` | `ZoneMaintenance` | `spec.autoResumeAfterMinutes` |
+| `scheduling.actionRequeueBackoffSeconds` | `FleetAction` | `spec.retryPolicy.backoffSeconds` — **the SwarmadaConfig side is schema-only at v0.3** (see the Implementation status note above); the per-action `retryPolicy` is read |
+| `maintenance.defaultAutoResumeMinutes` | `ZoneMaintenance` | `spec.autoResumeAfterMinutes` — **the namespace default is read by no controller at v0.3**; only the per-window value applies ([§9.1.11](#zonemaintenance)) |
+| `maintenance.requireEstopClearBeforeResume` | `ZoneMaintenance` | `spec.requireEstopClearBeforeResume` |
+| `provisioning.mode` | `FleetZone` | `spec.provisioningPolicy.mode` — **the zone-level override is read by no controller at v0.3**; the namespace value alone governs ([§9.1.6](#fleetzone)) |
+| `provisioning.autoAdmitRobotClass` | `FleetZone` | `spec.provisioningPolicy.autoAdmitRobotClass` — **zone override unread at v0.3** |
+| `provisioning.autoAdmitZone` | `FleetZone` | `spec.provisioningPolicy.autoAdmitZone` — **zone override unread at v0.3** |
 
-Fields with no per-resource override (`connectivityOfflineThresholdSeconds`, `connectivityCriticalThresholdSeconds`, `maxPendingActionsPerZone`, `disableAllProbes`, `mode`, `discoveredRobotTTLMinutes`, `maintenance.defaultGracefulDrainTimeoutSeconds`, all of `telemetry.*`, and all of `signing.*`) are namespace-global and apply uniformly to all resources in the namespace.
+Fields with no per-resource override (`connectivityOfflineThresholdSeconds`, `connectivityCriticalThresholdSeconds`, `maxPendingActionsPerZone`, `preferSameManufacturer`, `honorPreferredRobot`, `leaseDurationSeconds`, `clockSkewMarginSeconds`, `disableAllProbes`, `discoveredRobotTTLMinutes`, `capabilityRescanIntervalSeconds`, `maintenance.defaultGracefulDrainTimeoutSeconds`, all of `telemetry.*`, all of `signing.*`, all of `estop.*`, all of `actionCancellation.*`, all of `trafficDeconfliction.*`, and all of `coordinateSystem.*`) are namespace-global and apply uniformly to all resources in the namespace. `provisioning.mode` **is** specified as overridable per zone, so a namespace-wide `TwoPhase` setting is specified not to guarantee the operator review gate on its own: a `FleetZone` carrying `spec.provisioningPolicy.mode: DirectRegister` would admit robots in that zone without review. **Specified, not implemented at v0.3 — and the v0.3 behaviour is the safer one in one direction and the less safe one in the other:** no controller reads `FleetZone.spec.provisioningPolicy`, so a zone-level `DirectRegister` does **not** widen a namespace-wide `TwoPhase`, and a zone-level `TwoPhase` does **not** narrow a namespace-wide auto-admit. Set provisioning at the namespace only until this lands.
 
 <a id="swarmadaconfig-auto-creation-on-namespace-initialization"></a>
-##### 9.1.12.3 Auto-Creation on Namespace Initialization
+##### 9.1.12.4 Auto-Creation on Namespace Initialization
 
 When the first `FleetZone` resource is created in a namespace, the Zone Controller checks for the presence of a `SwarmadaConfig` named `swarmada-config`. If absent, it creates one with all default values as specified in the kubebuilder annotations on the schema. This ensures every operational namespace always has a `SwarmadaConfig`, eliminating the need for controllers to implement fallback logic for the missing-config case.
 
 Operators who want non-default values from the start should create `swarmada-config` before creating any `FleetZone` in that namespace. The auto-creation will then find the existing resource and skip creation.
 
-```yaml
+```bash
 # Create a namespace with non-default config before the first FleetZone:
 kubectl apply -f - <<EOF
 apiVersion: swarmada.io/v1
@@ -7321,7 +8226,7 @@ spec:
     connectivityOfflineThresholdSeconds: 15
     connectivityCriticalThresholdSeconds: 60
   scheduling:
-    maxPendingActionsPerZone: 500        # bound the task queue
+    maxPendingActionsPerZone: 500        # bound the action queue
   provisioning:
     mode: TwoPhase
     discoveredRobotTTLMinutes: 30      # tighter TTL for a busy test environment
@@ -7333,7 +8238,9 @@ EOF
 ```
 
 <a id="swarmadaconfig-the-scan-command-and-capabilityrescaninterval-in-practice"></a>
-##### 9.1.12.4 The scan Command and capabilityRescanInterval in Practice
+##### 9.1.12.5 The scan Command and capabilityRescanInterval in Practice
+
+**Specified, not implemented at v0.3** (Maturity note above; [§7](#drawbacks) item 10). Everything in this section — the `scan` `Command`, the `ScanCapabilities`/`CapabilitiesSnapshot` messages, and the worked example below — describes the target design. No controller in the shipped codebase constructs or sends a `ScanCapabilities` command, on this interval or any other trigger, so the drift this section closes is not closed at v0.3: a silent degradation that delta telemetry never reports is caught only by an active `RobotProbe` configured for that specific component, if one exists, and otherwise persists undetected indefinitely.
 
 Passive telemetry (`TelemetryPayload`) is designed for efficiency: the Fleet Adapter sends only changed component statuses on each heartbeat. A camera that has been `Healthy` for six hours sends no camera entry in its telemetry payloads during those six hours. This efficiency is the right tradeoff for normal operation but creates a gap: if the camera silently degrades between telemetry cycles in a way that does not trigger a delta (e.g. the health register sticks at `Healthy` while actual performance degrades), the control plane never receives an update.
 
@@ -7379,7 +8286,7 @@ The Zone Controller reconciles the snapshot against the current `Robot.status` f
         -> Capability Controller re-derives:
              item-pick.ai-guided -> Inactive
              inspection.visual   -> Degraded
-        -> Scheduler stops assigning AI-guided tasks to this robot.
+        -> Scheduler stops assigning AI-guided actions to this robot.
 ```
 
 Maximum silent drift window = capabilityRescanIntervalSeconds = 5 minutes.
@@ -7387,7 +8294,7 @@ Maximum silent drift window = capabilityRescanIntervalSeconds = 5 minutes.
 The drift window is bounded by `capabilityRescanIntervalSeconds`. Operators in safety-critical environments can reduce this to 60 seconds at the cost of increased gRPC traffic (one full snapshot per Fleet Adapter per minute). Operators in development environments can set it to 0 to disable scanning and rely entirely on passive telemetry and active `RobotProbe` resources.
 
 <a id="swarmadaconfig-connectivity-fencing-offline-vs-critical"></a>
-##### 9.1.12.5 Connectivity Fencing: Offline vs Critical
+##### 9.1.12.6 Connectivity Fencing: Offline vs Critical
 
 The two connectivity thresholds create a two-stage response to robot silence:
 
@@ -7399,16 +8306,17 @@ Last telemetry received
         v
    Robot phase -> Offline
    status.health.status -> Critical
-   Scheduler: no new tasks assigned
+   Scheduler: no new actions assigned
    In-flight FleetAction: -> Revoking (control plane stops renewing the lease;
                         retryCount unchanged; NOT Failed, NOT requeued yet)
         |
-        | lease expiry horizon (last renewal + leaseDurationMs + skew)
-        | the offline robot self-stops the task; the lease is provably dead
+        | lease expiry horizon (last renewal + leaseDurationSeconds
+        |                       + clockSkewMarginSeconds)
+        | the offline robot self-stops the action; the lease is provably dead
         v
    Revoking FleetAction -> Pending (safe to reassign; retryCount NOT incremented)
-   ... OR, if the robot reconnects still running the task under a live lease,
-       the task is re-adopted: Revoking -> InProgress (no reassignment)
+   ... OR, if the robot reconnects still running the action under a live lease,
+       the action is re-adopted: Revoking -> InProgress (no reassignment)
         |
         | connectivityCriticalThresholdSeconds (default 120s) -- ALERT ONLY
         | (measured from last telemetry, not from the Offline transition)
@@ -7418,35 +8326,51 @@ Last telemetry received
    Robot remains Offline until Fleet Adapter reconnects
 ```
 
-The gap between the offline threshold and the critical-alert threshold (30s to 120s by default) is the window in which the operator or the Robot OS can recover connectivity. A brief Wi-Fi drop that resolves while the assignment lease is still live transitions the robot through `Offline` and back to `InProgress` — the task is re-adopted, not abandoned (safety.md [§9.6.3.4](#safety-reconnection-flow)). A drop long enough for the lease to expire causes the offline robot to self-stop the task; only then is the task reassigned to another robot. Reassignment is gated on lease expiry, never on the T2 wall-clock — the critical threshold raises the operator alert but does not itself requeue the task. This is the single-executor guarantee specified in safety.md [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee).
+The gap between the offline threshold and the critical-alert threshold (30s to 120s by default) is the window in which the operator or the Robot OS can recover connectivity. A brief Wi-Fi drop that resolves while the assignment lease is still live transitions the robot through `Offline` and back to `InProgress` — the action is re-adopted, not abandoned (safety.md [§9.6.3.4](#safety-reconnection-flow)). A drop long enough for the lease to expire causes the offline robot to self-stop the action; only then is the action reassigned to another robot. Reassignment is gated on lease expiry, never on the T2 wall-clock — the critical threshold raises the operator alert but does not itself requeue the action. This is the single-executor guarantee specified in safety.md [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee).
 
 ```text
-Worked connectivity sequence (leaseDurationMs = 90s):
+Worked connectivity sequence, at the schema defaults
+(leaseDurationSeconds = 30, clockSkewMarginSeconds = 5,
+ connectivityOfflineThresholdSeconds = 30, connectivityCriticalThresholdSeconds = 120).
+The lease horizon is measured from the LAST RENEWAL, not from the last telemetry:
+renewals run every leaseDurationSeconds / 3 = 10s, so the last one lands at 08:14:10.
+
 08:14:00  Last TelemetryPayload received.
+08:14:10  Last renew_lease acknowledged. Lease horizon is now
+          08:14:10 + 30s + 5s skew = 08:14:45.
 08:14:30  No payload for 30s -> robot.status.phase = Offline.
           FleetAction fleetaction-pick-001 -> Revoking; control plane stops
           renewing the lease. Robot keeps executing (lease still live).
-08:15:00  Wi-Fi reconnects. Robot still running fleetaction-pick-001 under a
-          live lease -> control plane RE-ADOPTS: resumes renew_lease,
-          fleetaction-pick-001 -> InProgress. No task loss, no reassignment.
-          Operator not alerted.
+08:14:40  Wi-Fi reconnects, still inside the horizon. Robot still running
+          fleetaction-pick-001 under a live lease -> control plane RE-ADOPTS:
+          resumes renew_lease, fleetaction-pick-001 -> InProgress. No action
+          loss, no reassignment. Operator not alerted.
 --- vs ---
 08:14:00  Last TelemetryPayload received.
+08:14:10  Last renew_lease acknowledged. Lease horizon: 08:14:45.
 08:14:30  No payload for 30s -> robot.status.phase = Offline.
           fleetaction-pick-001 -> Revoking; lease renewal stopped.
-08:15:30  Lease expiry horizon: the offline robot self-stops the task.
-          Lease provably dead -> fleetaction-pick-001 -> Pending; scheduler
-          reassigns to amr-acme-012. retryCount unchanged.
+08:14:40  The robot's own self-stop timer fires 30s after the last renewal it
+          received: it brings fleetaction-pick-001 to a safe stop autonomously.
+08:14:45  Lease expiry horizon reached (last renewal + 30s + 5s skew). Lease
+          provably dead -> fleetaction-pick-001 -> Pending; scheduler reassigns
+          to amr-acme-012. retryCount unchanged.
 08:16:00  No payload for 120s -> ConnectivityCritical event (operator alert).
-08:18:30  Wi-Fi reconnects. Robot re-registers; reports task not running.
+08:18:30  Wi-Fi reconnects. Robot re-registers; reports action not running.
           Robot re-enters Discovered -> Idle (health verification).
           -> Task already reassigned and completed by another robot.
+
+The 5s gap between the robot's self-stop (08:14:40) and the control plane's
+reassignment (08:14:45) is exactly clockSkewMarginSeconds. It exists so that the
+robot has provably halted BEFORE any second robot can be given the action, even
+if the two clocks disagree — which is why shrinking the margin is a safety
+change, not a latency optimisation.
 ```
 
 <a id="swarmadaconfig-worked-example-production-warehouse-configuration"></a>
-##### 9.1.12.6 Worked Example — Production Warehouse Configuration
+##### 9.1.12.7 Worked Example — Production Warehouse Configuration
 
-A production warehouse with 50 Acme AMRs, high task volume, and a strict 5-minute SLA on pick tasks. The operator tightens telemetry cadence, lowers the offline threshold, and sets a task queue bound to catch WMS runaway conditions early.
+A production warehouse with 50 Acme AMRs, high action volume, and a strict 5-minute SLA on pick actions. The operator tightens telemetry cadence, lowers the offline threshold, and sets a action queue bound to catch WMS runaway conditions early.
 
 ```yaml
 apiVersion: swarmada.io/v1
@@ -7458,17 +8382,24 @@ spec:
   health:
     telemetryIntervalSeconds: 5        # 5s cadence; faster health visibility
     capabilityRescanIntervalSeconds: 60  # full snapshot every 60s; tighter drift window
+                                          # — specified, not implemented at v0.3: no controller
+                                          # sends ScanCapabilities on this or any interval; see
+                                          # "The scan Command and capabilityRescanInterval in
+                                          # Practice" above
     defaultHardwareProbeIntervalSeconds: 30
     defaultProbeTimeoutSeconds: 5
     defaultProbeFailureThreshold: 3
     defaultProbeRecoveryThreshold: 2
     connectivityOfflineThresholdSeconds: 15  # 3x 5s telemetry; tight offline fence
-    connectivityCriticalThresholdSeconds: 60  # abandon task after 60s offline
+    connectivityCriticalThresholdSeconds: 60  # abandon action after 60s offline
     disableAllProbes: false
   scheduling:
     defaultAcceptDegradedCapabilities: false  # never schedule to degraded robots by default
     actionRequeueBackoffSeconds: 15        # fast requeue; 5-min SLA cannot absorb 30s waits
-    maxPendingActionsPerZone: 200          # alert if WMS floods queue beyond 200 tasks/zone
+                                            # — specified, not implemented at v0.3: no controller
+                                            # reads this field yet; requeue timing is not
+                                            # currently configurable
+    maxPendingActionsPerZone: 200          # alert if WMS floods queue beyond 200 actions/zone
     preferSameManufacturer: true
   provisioning:
     mode: TwoPhase                       # operator reviews every new robot
@@ -7476,7 +8407,7 @@ spec:
     autoAdmitRobotClass: ""              # no auto-admit; all robots need review
     autoAdmitZone: ""
   maintenance:
-    defaultGracefulDrainTimeoutSeconds: 180  # 3-min drain; balances speed vs task safety
+    defaultGracefulDrainTimeoutSeconds: 180  # 3-min drain; balances speed vs action safety
     defaultAutoResumeMinutes: 10             # auto-resume 10 min after window closes
     requireEstopClearBeforeResume: true      # technician must clear estop before robots move
 ```
@@ -7498,16 +8429,16 @@ spec:
 ---
 
 <a id="swarmadaconfig-telemetry-pipeline-and-status-projection"></a>
-##### 9.1.12.7 Telemetry Pipeline and Status Projection
+##### 9.1.12.8 Telemetry Pipeline and Status Projection
 
-`spec.telemetry` configures the two-data-plane split specified in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split), which enforces the rule that telemetry must not write to etcd at full cadence. High-cadence telemetry (sent every `health.telemetryIntervalSeconds`, [§9.1.12.1](#swarmadaconfig-schema)) is written to the time-series sink named in `spec.telemetry.sink`, never to etcd. `Robot.status` is a throttled projection, updated only on a *material transition* — a `phase` change, a battery reading crossing one of `materialBatteryThresholds`, a `hardware[component]` health change, or an `assignedAction` change — and is rate-capped per robot by `statusWriteMinIntervalSeconds` and `maxStatusWritesPerMinutePerRobot` (the more restrictive applies; safety-critical transitions bypass both). The projection is specified component-by-component in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split).
+`spec.telemetry` configures the two-data-plane split specified in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split), which enforces the rule that telemetry must not write to etcd at full cadence. High-cadence telemetry (sent every `health.telemetryIntervalSeconds`, [§9.1.12.1](#swarmadaconfig-schema)) is written to the time-series sink named in `spec.telemetry.sink`, never to etcd. `Robot.status` is a throttled projection, updated only on a *material transition* — a `phase` change, a battery reading crossing one of `materialBatteryThresholds`, a `hardware[component]` health change, an `assignedAction` change, or an `installedModels[*].status` change — and is rate-capped per robot by `statusWriteMinIntervalSeconds` and `maxStatusWritesPerMinutePerRobot` (the more restrictive applies; safety-critical transitions bypass both). The projection is specified component-by-component in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split).
 
-Because `sink.type` defaults to `""` (unset), a fresh namespace without a configured sink does **not** silently discard telemetry. Instead, the control plane immediately enters observed-degraded mode: it sets `SwarmadaConfig.status.conditions[TelemetrySinkUnconfigured]` (severity Warning), emits a `TelemetrySinkUnconfigured` Kubernetes Warning event on the `SwarmadaConfig` resource, and increments `swarmada_telemetry_dropped_frames_total` for each unforwardable frame. Operators enable telemetry history by setting `sink.type` to a real store value and pointing `sink.endpoint` at a Prometheus-remote-write-compatible endpoint. Operators who genuinely do not want TSDB history must explicitly set `sink.type: Drop`; only this explicit opt-in suppresses the observability signals. `materialBatteryThresholds` defaults to `[15, 30]`, and the rate cap defaults to disabled (every material change is written immediately), preserving current status fidelity until an operator opts into throttling. A direct consequence — that `Robot.status.position` and `status.batteryPercent` are coarse, served live from the TSDB rather than etcd — is recorded as a drawback in [§7](#drawbacks). Critically, this coarseness applies only to continuous readings; material and safety transitions always reach `Robot.status` regardless of sink configuration ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split), Invariant 2).
+Because `sink.type` defaults to `""` (unset), a fresh namespace without a configured sink does **not** silently discard telemetry. Instead, the control plane immediately enters observed-degraded mode: it sets `SwarmadaConfig.status.conditions[TelemetrySinkUnconfigured]` (severity Warning), and emits a `TelemetrySinkUnconfigured` Kubernetes Warning event on the `SwarmadaConfig` resource. Those two are the whole signal: `swarmada_telemetry_dropped_frames_total` is **not** incremented in this state, because an unset sink is served by the same no-op writer as `Drop` and returns no error for the counter to observe ([§9.3.8](#control-plane-observability-prometheus-metrics-contract)). Alert on the condition and the event, not on the counter, for a missing sink. Operators enable telemetry history by setting `sink.type` to a real store value and pointing `sink.endpoint` at a Prometheus-remote-write-compatible endpoint. Operators who genuinely do not want TSDB history must explicitly set `sink.type: Drop`; only this explicit opt-in suppresses the observability signals. `materialBatteryThresholds` defaults to `[15, 30]`, and the rate cap defaults to disabled (every material change is written immediately), preserving current status fidelity until an operator opts into throttling. A direct consequence — that `status.batteryPercent` is coarse and that position is served from the TSDB rather than from `Robot.status` at all — is recorded as a drawback in [§7](#drawbacks); note that `Robot.status.position` is not coarse but absent: no v0.3 controller writes it ([§9.1.3](#robot)). Critically, this coarseness applies only to continuous readings; material and safety transitions always reach `Robot.status` regardless of sink configuration ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split), Invariant 2).
 
 ---
 
 <a id="swarmadaconfig-estop-delivery-configuration"></a>
-##### 9.1.12.8 Estop Delivery Configuration
+##### 9.1.12.9 Estop Delivery Configuration
 
 `spec.estop` governs how the Zone Controller delivers emergency stop signals to Fleet Adapters, how long it retries on non-response, and what happens when delivery is only partially successful.
 
@@ -7535,14 +8466,18 @@ spec:
       # Behaviour when one or more Fleet Adapters have not ACKd after all
       # retry cycles while others have.
       #
-      # BlockNewActions (default): new task assignments to the zone are blocked;
+      # BlockNewActions (default): new action assignments to the zone are blocked;
+      #   SPECIFIED, NOT IMPLEMENTED at v0.3, and neither the status value
+      #   nor the event below exists: ZoneEstopStatus admits only
+      #   Clear|Triggered|ChildTriggered, and nothing emits
+      #   ZoneEstopPartialDelivery. See [§7](#drawbacks) item 15.
       #   zone transitions to status.estopStatus: PartialActive; a
       #   ZoneEstopPartialDelivery Warning event is emitted listing
       #   non-ACKing adapters. Robots that ACKd remain stopped; non-ACKing
       #   robots continue operating. When maxAttempts: 0, retries continue
       #   indefinitely.
       #
-      # Alert: emit Warning event only; do not block task assignments.
+      # Alert: emit Warning event only; do not block action assignments.
       #   Use only when software estop is advisory and physical hardware
       #   safety systems are the primary safeguard.
       #
@@ -7553,10 +8488,14 @@ spec:
     # Non-configurable: always true. Documented here for spec traceability.
     # Robots that ACKd MUST NOT resume until operator issues:
     #   swarmctl estop-clear <zone> [--namespace <ns>]
+    # SPECIFIED, NOT IMPLEMENTED at v0.3: there is no --force flag on
+    # `swarmctl estop-clear` and no EstopForceClear event.
     # Clearing while any adapter has not ACKd is blocked by default;
     # override with --force (emits EstopForceClear Warning event).
     requireExplicitClearAfterEstop: true
 ```
+
+**Specified, not implemented at v0.3.** Only `delivery.perAdapterTimeoutMs` is read by the reference dispatcher (`internal/safety/dispatcher.go`); `retryPolicy` (`maxAttempts`, `retryIntervalMs`) and `partialDeliveryBehavior` are schema fields with no reading controller — a configured `partialDeliveryBehavior: Alert` has no effect at v0.3. Separately, `SwarmadaConfig` has no `spec.audit` block or `archiveBucket` field at v0.3; see [§9.6.5.4](#safety-retention-policy) for the audit-log archival/retention gap this leaves open.
 
 **Retry loop (per adapter, in parallel across all adapters in zone):**
 
@@ -7572,40 +8511,43 @@ for each Fleet Adapter FA in zone:
         wait retryIntervalMs
 ```
 
-An ACK from adapter A does not stop retries to adapter B. Retry state is persisted in `FleetZone.status.estopDeliveryState` so a control-plane restart does not lose partial-delivery context.
+An ACK from adapter A does not stop retries to adapter B. Retry state is specified to persist in `FleetZone.status.estopDeliveryState` so a control-plane restart does not lose partial-delivery context. **Specified, not implemented at v0.3, and the field does not exist:** `FleetZone.status` has no `estopDeliveryState`, there is no retry loop to persist state for, and a restart mid-fan-out loses nothing because nothing is retried ([§7](#drawbacks) item 15).
 
 ---
 
-<a id="swarmadaconfig-task-cancellation-on-disconnect"></a>
-##### 9.1.12.9 Task Cancellation on Disconnect
+<a id="swarmadaconfig-action-cancellation-on-disconnect"></a>
+##### 9.1.12.10 Action Cancellation on Disconnect
 
-`spec.actionCancellation` controls what happens to a FleetAction when its assigned robot disconnects. The default is `Never` — no automatic action — which is the safest choice for non-idempotent tasks (tasks that have physically altered their environment and cannot be safely restarted by a second robot).
+`spec.actionCancellation` controls what happens to a FleetAction when its assigned robot disconnects. The default is `Never` — no automatic action — which is the safest choice for non-idempotent actions (actions that have physically altered their environment and cannot be safely restarted by a second robot).
 
 ```yaml
 spec:
   actionCancellation:
     # Policy governing FleetAction behaviour when assigned robot disconnects.
     #
-    # Never (default): task stays in Revoking phase; operator MUST cancel
+    # Never (default): action stays in Revoking phase; operator MUST cancel
     #   manually when the lease is confirmed dead. Safest for pick-and-place,
-    #   valve control, and any task with physical side effects.
+    #   valve control, and any action with physical side effects.
     #
     # AfterTimeout: auto-cancel and re-queue after disconnectTimeoutSeconds.
-    #   WARNING: only safe for idempotent tasks (delivery, inspection) that
+    #   WARNING: only safe for idempotent actions (delivery, inspection) that
     #   can be restarted by a second robot without physical conflict.
     #   The reconnect handshake ensures the original robot is notified on
-    #   reconnect that its task was cancelled before it can issue further RPCs.
+    #   reconnect that its action was cancelled before it can issue further RPCs.
     #
-    # WhenActionExpired: auto-cancel if FleetAction.spec.timeoutSeconds is
-    #   exceeded while in Revoking phase. Suitable for time-bound tasks where
-    #   expiry renders completion moot regardless of which robot holds the task.
+    # WhenActionExpired: SPECIFIED to auto-cancel if FleetAction.spec.timeoutSeconds
+    #   is exceeded while in Revoking phase -- suitable for time-bound actions where
+    #   expiry renders completion moot regardless of which robot holds the action.
+    #   INERT at v0.3: the expiry check reads FleetAction.status.startTime, which no
+    #   controller writes, so it can never fire and this disposition behaves exactly
+    #   as Never. See the FleetAction Maturity block.
     #
     # +kubebuilder:validation:Enum=Never;AfterTimeout;WhenActionExpired
     # +kubebuilder:default=Never
     onDisconnect: Never
 
     # Required when onDisconnect: AfterTimeout.
-    # Duration in seconds before a Revoking task is auto-cancelled.
+    # Duration in seconds before a Revoking action is auto-cancelled.
     # MUST be set when onDisconnect: AfterTimeout; admission webhook rejects
     # SwarmadaConfig with AfterTimeout and no disconnectTimeoutSeconds.
     # +optional
@@ -7618,17 +8560,20 @@ spec:
 ---
 
 <a id="swarmadaconfig-traffic-deconfliction-engine-configuration"></a>
-##### 9.1.12.10 Traffic Deconfliction Engine Configuration
+##### 9.1.12.11 Traffic Deconfliction Engine Configuration
 
 `spec.trafficDeconfliction` exposes the TDE tunables. All TDE semantics are specified in [§9.4](#tde); this section documents only the configuration surface.
 
 ```yaml
 spec:
   trafficDeconfliction:
-    # Maximum time the Scheduler waits for TDE.RequestReservation to return.
-    # Exceeded = Denied(tde_unavailable); task returned to Pending.
-    # MUST be significantly smaller than the Scheduler's reconciliation
-    # period. A slow TDE adds directly to task assignment latency.
+    # SCHEMA-ONLY at v0.3 -- no TDE call site reads this field, so setting it
+    # produces no observable change (see Implementation status above).
+    # SPECIFIED behaviour: the maximum time the Scheduler waits for
+    # TDE.RequestReservation to return; exceeded = Denied(tde_unavailable) and
+    # the action returns to Pending. When implemented it SHOULD be set well
+    # below the Scheduler's reconciliation period, since a slow TDE would add
+    # directly to action assignment latency.
     # +kubebuilder:validation:Minimum=50
     # +kubebuilder:default=200
     tdeCallTimeoutMs: 200
@@ -7678,7 +8623,7 @@ spec:
 
       # Recovery action when Zone Controller is not Ready within the timeout.
       # ReleaseAll: release all reservations (Reserved and Occupied).
-      #   Safe and disruptive. All tasks return to Pending. Recommended when
+      #   Safe and disruptive. All actions return to Pending. Recommended when
       #   Zone Controller health is uncertain (full node failure, etc.).
       # ReleaseReservedOnly: release Reserved only; assume Occupied are valid.
       #   Use only when Zone Controller state is known-good and only the TDE
@@ -7713,7 +8658,7 @@ spec:
 ```
 
 <a id="swarmadaconfig-coordinate-system"></a>
-##### 9.1.12.11 Coordinate System
+##### 9.1.12.12 Coordinate System
 
 `spec.coordinateSystem` declares the facility-wide spatial conventions in which every coordinate elsewhere in the API is *already* expressed: `FleetZone.spec.physicalBounds` and its waypoints, `Robot.status.position`, and the edge `PositionFrame` stream. It is **declarative and descriptive** — the control plane does not transform coordinates. It assumes all inputs already conform to the declared conventions, and uses this block only to validate, annotate, and inform consumers (the edge Zone Controller, `swarmctl`, and any visualization).
 
@@ -7768,7 +8713,7 @@ spec:
     # implies for Robot.status.position).
     # -------------------------------------------------------------------------
     geodetic:
-      # Horizontal datum. WGS84 only in v0.2 — the datum used by GPS, ADS-B,
+      # Horizontal datum. WGS84 only in v0.3 — the datum used by GPS, ADS-B,
       # and virtually all consumer/commercial drone autopilots.
       # +kubebuilder:validation:Enum=WGS84
       # +kubebuilder:default=WGS84
@@ -7783,7 +8728,7 @@ spec:
       altitudeReference: AGL
 ```
 
-**Semantics.** The block is a facility-level declaration, set once at namespace initialization and rarely changed. The control plane never re-projects coordinates: a value stored under one declaration is not re-interpreted if the declaration later changes, and switching `referenceFrame` on an existing namespace is a breaking change to every stored position value (operators should treat it as a one-time choice at namespace creation, not a runtime toggle). Consumers MUST honor the declared reference frame, units, ground floor/altitude reference, and origin when rendering, comparing, or exchanging spatial values; a robot's Fleet Adapter is responsible for reporting positions already in these conventions (the proto `RobotPosition` carries no units or frame — they are defined here, per site).
+**Semantics.** The block is a facility-level declaration, set once at namespace initialization and rarely changed. The control plane never re-projects coordinates: a value stored under one declaration is not re-interpreted if the declaration later changes, and switching `referenceFrame` on an existing namespace is a breaking change to every stored position value (operators should treat it as a one-time choice at namespace creation, not a runtime toggle). Consumers MUST honor the declared reference frame, units, ground floor/altitude reference, and origin when rendering, comparing, or exchanging spatial values; a robot's Fleet Adapter is responsible for reporting positions already in these conventions (the proto `RobotPosition` carries no units or frame — they are defined here, per site). **Which of these the reference control plane itself acts on, at v0.3:** `lengthUnit` and `angleUnit` are stamped onto every admitted `Robot` as the `swarmada.io/length-unit` and `swarmada.io/angle-unit` annotations, and `referenceFrame` is enforced against the presence of the `geodetic` block at admission. `geodetic.origin` and `geodetic.altitudeReference` are **validated and stored, read by no controller** — they are carried for the consumers named above, and no control-plane behaviour changes with their value.
 
 **Default.** If `spec.coordinateSystem` is unset, the defaults apply — `referenceFrame: Local`, `lengthUnit: Meters`, `angleUnit: Radians`, `groundFloor: 0` — matching the conventions used throughout this specification (metres from the site origin, radians for yaw, `0` = ground floor). The "if set" language in `FleetZone.spec.floor` and the per-site note on `Robot.status.position` refers to these defaults.
 
@@ -7796,7 +8741,24 @@ A `FleetAdapter` declares a vendor-specific Fleet Adapter — the per-manufactur
 
 `FleetAdapter` is the **admission keystone** for third-party robots. A `Robot` MUST NOT be admitted unless the `FleetAdapter` it names serves the robot's `RobotClass`, is `Connected`, is `Conformance: Passed`, and earned that result against a supported contract version. This closes a safety gap that would otherwise exist: without the gate, a `Robot` could be created — and tasks scheduled to it — with no verified adapter able to drive the hardware, or against an adapter that has never passed the [§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist) conformance suite. The gate ensures that every robot the control plane is willing to command is backed by a live, protocol-conformant translation layer.
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented — everything below is built, including `status.connectedRobots`, which the status controller now counts from the Robots bound to the adapter through `spec.adapter.name` (excluding `Offline`), transition-only. A conformant implementation provides the resource type; an admission-gating webhook that enforces the keystone above — a `Robot` is admitted only when a `FleetAdapter` serving its `RobotClass` is `Connected` with `Conformance: Passed`, and the gate is fail-closed; and a controller that drives the adapter's own `status` (connectivity/health phase and conformance state) from the live `ControlStream`. The conformance suite ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)) is an executable harness covering C1–C15 — including the contract-version negotiation, version-invariant estop, and version-bound conformance cases of ADR-0032 — with the ROS 2/Nav2, VDA5050, and MAVLink reference adapters conformant against a simulated binding. Contract versioning is implemented end to end: the handshake negotiates it, `status.conformanceContractVersion` records what a result was earned against, and both the admission gate and the dispatch re-check require a supported version.
+`FleetAdapter` is also where this specification ends. The adapter is a **translation boundary**, and its two faces are specified very differently. The north face is fully normative and identical for every adapter, whatever it drives: the gRPC contract of [§9.2](#fleet-adapter-protocol), the registration, fencing and lease discipline, the emergency-stop obligations of [§9.6.1](#safety-scope-and-responsibility-boundary), and the conformance suite that verifies them — identical as a contract, though an adapter MAY decline optional commands within it. No robot-side or fleet-side protocol is named, mandated, or excluded by this document, and supplying an adapter for a given manufacturer is an explicit non-goal ([§4](#non-goals) item 3). The layering follows from that asymmetry rather than from any assertion about it: a control plane that specifies only the north face can be driven against an external interoperability standard without that standard entering its contract, and a revision to such a standard reaches the adapter and stops there. An adapter MAY therefore be identified with the named **protocol profile** it translates, and that identification is descriptive. It is not a compliance statement, and it is not transitive: a `Conformance: Passed` result ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)) attests that an adapter satisfies the wire contract specified here and attests nothing about any standard on the far side of it; no procedure defined here validates conformance to such a standard; and where one operates a conformance regime of its own, an attestation under it is issued by that standard's own body. A protocol profile is therefore **recorded and never enforced** — enforcement is outside this specification's scope rather than deferred to a later revision: nothing gates admission or dispatch on it, and a mismatch between the protocol profile on a `FleetAdapter` and the one on the `RobotClass` it serves raises no condition, no event, and no status message. The protocol-profile fields themselves — on `FleetAdapter.spec` and `FleetAdapter.status`, and on `RobotClass` beside `spec.baseAdapter` — are **not** specified at v0.3 and are a deliberate reserved surface; no named protocol profile is defined, and `spec.vendor` records the adapter's provider, not the protocol it speaks. The southbound protocol profile is a different axis from the **capability sets** reserved as a future seam in [§9.2.2](#fleet-adapter-protocol-package-and-versioning), which divide this specification's own contract surface rather than naming anything outside it.
+
+> **Maturity (v0.3):** stage: alpha · control-plane: implemented · end-to-end: partial — everything below is built except the three items named in the next paragraph, including `status.connectedRobots`, which the status controller now counts from the Robots bound to the adapter through `spec.adapter.name` (excluding `Offline`), transition-only. An implementation conforming to this RFC provides the resource type; an admission-gating webhook that enforces the keystone above — a `Robot` is admitted only when a `FleetAdapter` serving its `RobotClass` is `Connected` with `Conformance: Passed`, and the gate is fail-closed; and a controller that drives the adapter's own `status` (connectivity/health phase and conformance state) from the live `ControlStream`. The conformance suite ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)) is an executable harness covering C0–C16 — including the contract-version negotiation, version-invariant estop, and version-bound conformance cases of ADR-0032 — and the in-tree reference simulation adapter is exercised against it. **The three exceptions.** (1)
+> **`spec.simulated` (ADR-0038) is specified and not present in the API at v0.3.** It has no field on the
+> Go type and no property in the generated CRD schema, so a `spec.simulated` key written by an operator is
+> **silently pruned by the API server** — not validated, not stored, not rejected. An adapter declaring
+> itself simulated is treated exactly as a real one, and no `swarmada.io/robot-source` annotation is
+> stamped on its robots. (2) **`spec.tlsSecretRef` is read by no controller.** Adapter identity is resolved
+> from the client certificate's SAN, on the `<adapter>.<namespace>.svc.cluster.local` convention described
+> in [§9.5.1](#security-authentication); nothing consults the referenced Secret, so the field does not pin a
+> transport identity to this adapter at v0.3. (3) **The `UnknownConformanceSuite` Warning described below
+> is not emitted**: an unrecognised `suiteVersion` is recorded and otherwise ignored rather than surfaced.
+> Separately, on the reference adapters: the ROS 2/Nav2, VDA5050 and MAVLink adapters live in their own
+> repositories and all three are graded `partial` in `adapters/REGISTRY.md`, which is the authoritative
+> record — this chapter makes no conformance claim for them ([§5.2](#resource-model)). Contract versioning
+> is complete across the control-plane path: the handshake negotiates it,
+> `status.conformanceContractVersion` records what a result was earned against, and both the admission gate
+> and the dispatch re-check require a supported version.
 
 <a id="fleetadapter-schema"></a>
 ##### 9.1.13.1 Schema
@@ -7827,6 +8789,7 @@ spec:
     configMapRef: <string>               # ConfigMap holding the signed report
     digest: <sha256>                     # integrity digest of the signed report
   heartbeatIntervalSeconds: <int>        # default 10, minimum 1
+  simulated: <bool>                      # default false; declares this adapter drives simulated, not physical, robots (ADR-0038). Purely informational, never gates admission or dispatch. NOT YET IMPLEMENTED at v0.3 — see the Maturity note above.
 status:
   # +kubebuilder:validation:Enum=Pending;Connected;Degraded;Disconnected;Rejected
   phase: Pending|Connected|Degraded|Disconnected|Rejected
@@ -7837,14 +8800,17 @@ status:
   negotiatedContractVersion: <string>
   connectedRobots: <int>
   # supportedActions: the adapter's advertised action catalog (ADR-0019), pulled from
-  # the CapabilitiesSnapshot at registration and each capability scan and projected
+  # every CapabilitiesSnapshot the adapter sends -- at registration, and thereafter on
+  # any unsolicited capabilities push. Refresh on a periodic capability SCAN is
+  # specified but not implemented at v0.3 (nothing issues the scan), so the catalog is
+  # only as current as the last snapshot the adapter chose to send. Projected
   # here READ-ONLY under the capability status-write discipline (written on change,
   # never on a telemetry tick). A cheap schedulability pre-filter; ValidateAction
   # ([§9.2](#fleet-adapter-protocol)) remains the authoritative per-instance check.
   supportedActions:
     - actionType: PickUp                 # a FleetAction.spec.type this adapter can serve
       requiredCapabilities: [transport.payload]
-      params:                            # coarse descriptors only (v0.2); rich schemas deferred to RFC-0003
+      params:                            # coarse descriptors only (v0.3); rich schemas not specified
         - {name: maxPayloadKg, unit: kg, kind: number}
   lastHeartbeat: <timestamp>
   message: <string>
@@ -7859,7 +8825,7 @@ status:
 - `endpoint` (optional) — the adapter's own advertised `host:port`, recorded for operator tooling and out-of-band liveness checks. Under the adapter-initiated `ControlStream` ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)) the control plane does **not** dial this address; the adapter dials the control plane at `SWARMADA_API_ENDPOINT` ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)). The field is informational and MAY be omitted.
 - `protocolVersion` — the Fleet Adapter protocol version the adapter implements (default `fleet_adapter.v1`). The control plane MUST refuse to drive robots through an adapter whose advertised version it does not support, moving the adapter to `Rejected`.
 - `servesRobotClasses` — the list of `RobotClass` names this adapter is permitted to drive. A `Robot` referencing one of these classes may be gated against this adapter. An empty list means the adapter serves *any* class; this is permitted only as a development convenience and SHOULD NOT be used in production, where every adapter SHOULD enumerate the classes it serves.
-- `tlsSecretRef` — names a `Secret` in the same namespace pinning the adapter's **expected client-certificate identity** (its SAN or issuing CA). When the adapter opens its `ControlStream`, the control plane authenticates the inbound client certificate ([§9.5.2](#security-transport-security)) and resolves it to this `FleetAdapter` ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)); this reference is what binds a specific transport identity to a specific adapter. The adapter holds its own client key in its own Secret ([§9.5.5.1](#security-fleet-adapter-credentials)); the control plane never holds the adapter's private key.
+- `tlsSecretRef` — names a `Secret` in the same namespace pinning the adapter's **expected client-certificate identity** (its SAN or issuing CA). When the adapter opens its `ControlStream`, the control plane authenticates the inbound client certificate ([§9.5.2](#security-transport-security)) and resolves it to this `FleetAdapter` ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)); this reference is specified to be what binds a specific transport identity to a specific adapter — **specified, not implemented at v0.3**: no controller reads `tlsSecretRef`, and identity is resolved from the certificate SAN alone on the `<adapter>.<namespace>.svc.cluster.local` convention, so the field pins nothing today. The adapter holds its own client key in its own Secret ([§9.5.5.1](#security-fleet-adapter-credentials)); the control plane never holds the adapter's private key.
 - `conformanceReport` — references the signed result proving this adapter passes the [§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist) conformance suite. The control plane MUST NOT advance the adapter to `Connected` without a verified, passing report whose `digest` matches the referenced `configMapRef` contents.
 - `heartbeatIntervalSeconds` — how often the control plane checks adapter liveness over the `ControlStream` (default `10`, minimum `1`). Missing the configured number of consecutive checks moves the adapter to `Disconnected`.
 
@@ -7881,10 +8847,10 @@ any ──(conformance reverified and fails)──▶ Rejected
 
 - `phase` — current connection/health state (`Pending`, `Connected`, `Degraded`, `Disconnected`, `Rejected`). `Rejected` is a *negotiation* verdict, not a liveness one: a heartbeat proves an adapter is alive, never that it became version-compatible, so a heartbeat MUST NOT clear it. Only a fresh, compatible handshake does. A `Rejected` adapter keeps its session and continues to stream telemetry and heartbeats, and always receives estop.
 - `conformance` — `Unknown`, `Passed`, or `Failed`. **Robots are admitted only against an adapter whose `conformance` is `Passed`.**
-- `negotiatedProtocolVersion` — the version actually agreed at connect time; it MAY be older than `spec.protocolVersion` if the adapter reports a lower version the control plane still supports.
+- `negotiatedProtocolVersion` — the wire package identity actually agreed at connect time. The package identity is an identity string, not an ordered version ([terminology](#terminology)), so agreement is set membership: it is set to `spec.protocolVersion` when the control plane serves that package, and MAY differ from it when the adapter reports a different package the control plane also serves during a parallel-service window ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)). An empty value means no package was agreed and the adapter is `Rejected`; it never means "agreed but unrecorded".
 - `negotiatedContractVersion` — the *contract* version agreed at the last handshake ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)), distinct from the package identity above. Set only when the version the adapter reported is inside the supported range; an adapter reporting an out-of-range, unparseable, or absent version leaves this empty and moves to `Rejected`. An empty value therefore always means no compatible contract was agreed, never "compatible but unrecorded".
 - `conformanceContractVersion` — the contract version the `conformance` result was earned against, taken **only** from the digest-verified report body. An unverifiable report clears it, so a stale version never outlives the result it belonged to; a report from a pre-versioning harness carries none, which is recorded as unknown rather than as a failure. Recording and enforcement are separate concerns: this field records what the report attests, and [§9.1.13.4](#fleetadapter-admission-gating) decides what that permits.
-- `connectedRobots` — the number of `Robot` objects currently driven through this adapter.
+- `connectedRobots` — the number of `Robot` objects driven through this adapter.
 - `lastHeartbeat` — when the control plane last confirmed adapter liveness.
 - `supportedActions` — the adapter's discoverable action catalog (ADR-0019): for each `FleetAction.spec.type` the adapter can serve, the capabilities a robot needs and coarse parameter descriptors. Projected read-only from the adapter's `CapabilitiesSnapshot` and, resolved per robot, onto `Robot.status`. Discovery/pre-filter only — it never replaces `ValidateAction`, which stays the authoritative per-instance check; a stale catalog degrades to at most one extra `ValidateAction` round-trip, never a wrong dispatch.
 - `message` — human-readable summary, populated especially on `Degraded` and `Rejected`.
@@ -7957,7 +8923,9 @@ With this adapter present, a `Robot` in `warehouse-east` whose class is `acmebot
 
 - `spec.vendor` is required and non-empty; `spec.endpoint` is optional (informational).
 - `spec.endpoint`, when set, SHOULD be a `host:port` authority (it is informational; the control plane does not dial it — [§9.1.13.2](#fleetadapter-spec-fields)).
-- When `spec.conformanceReport` is set, `suiteVersion` is required.
+- When `spec.conformanceReport` is set, `suiteVersion` is required. `suiteVersion` is the **conformance-suite version** — the revision of the harness that produced the result — recorded alongside, not folded into, the contract version the result was earned against ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)). It is filed for rename to `conformanceSuiteVersion`; `suiteVersion` remains the shipped name until that lands.
+- `suiteVersion` is **recorded, never gated on.** No admission or dispatch decision reads it: an unset, unparseable, or unrecognised value MUST NOT change `status.conformance`, MUST NOT move `status.phase`, and MUST NOT withhold a robot. This is the deliberate asymmetry with `status.conformanceContractVersion`, which is enforced ([§9.1.13.4](#fleetadapter-admission-gating)) — the contract version says whether a result still binds, the suite revision says only what produced it. A value the control plane does not recognise is surfaced as an `UnknownConformanceSuite` Warning event on the `FleetAdapter` and recorded in `status.message` — the event is **specified, not emitted at v0.3**, so an unrecognised revision is recorded and otherwise ignored with nothing surfaced to `kubectl describe`; it is never treated as a failure and never as an implicit pass at a newer revision.
+- `suiteVersion` is **operator-asserted and unverified.** Unlike `status.conformanceContractVersion`, which is taken only from the digest-verified report body, this value is copied from `spec` and is not cross-checked against the referenced report. It is an operator's record of provenance, and a consumer MUST NOT infer coverage from it.
 - `spec.heartbeatIntervalSeconds` MUST be `>= 1`.
 - Entries in `spec.servesRobotClasses` SHOULD be unique; duplicates are ignored.
 - The control plane MUST verify `conformanceReport.digest` against the referenced report before honouring a `Passed` conformance state.
@@ -8005,24 +8973,26 @@ option java_package = "io.swarmada.fleet.adapter.v1";
 **Version policy.** The package is `fleet_adapter.v1`. Within v1:
 
 - Field numbers in existing messages are **never reused** after removal.
-- New fields, new `oneof` arms in the `AdapterMessage` / `ControlPlaneMessage` envelopes, and new `Command` / `CommandResult` variants are all **additive**: an older peer that does not recognise an arm ignores it (proto3 unknown-field behaviour) and, for an unrecognised command, replies with `CommandResult.unsupported = true`. This is how the protocol grows without a version bump — ordinarily, new operations are new message arms within existing RPCs, not new RPCs. The sole exception is `SafetyStream`, which is a second RPC added explicitly for physical channel isolation of emergency-stop traffic ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)): the <500 ms estop SLA cannot be guaranteed within a single multiplexed stream.
+- New fields, new `oneof` arms in the `AdapterMessage` / `ControlPlaneMessage` envelopes, and new `Command` / `CommandResult` variants are all **additive**: an older peer that does not recognise an arm ignores it (proto3 unknown-field behaviour) and, for an unrecognised command, replies with `CommandResult.unsupported = true`. This is how the wire package grows without a *package* bump — ordinarily, new operations are new message arms within existing RPCs, not new RPCs; whether such growth moves the **contract version** is governed by the bump rules below, not by this bullet. The sole exception is `SafetyStream`, which is a second RPC added explicitly for physical channel isolation of emergency-stop traffic ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)): the <500 ms estop SLA cannot be guaranteed within a single multiplexed stream.
 - Breaking changes (removing a field, changing a type, changing the `ControlStream` request/response messages) require `fleet_adapter.v2`. v1 and v2 are served in parallel for no less than 12 months.
 
 A Fleet Adapter compiled against the v1 proto at release R interoperates with a control plane at release R+N, for any N, with no recompilation, provided no breaking change has been introduced.
 
-**Contract version.** The package identity (`fleet_adapter.v1`) states which wire package is in use; it cannot express compatibility, because every revision within v1 carries that same identity. The *contract version* is a separate semantic version over the proto surface, the `SupportedAction` schema (ADR-0019), and the conformance-suite revision taken together. It is also distinct from an adapter's own build version: two builds may implement one contract version, and one build may span several. At v0.2 the implemented contract version is `1.0.0`.
+**Contract version.** The package identity (`fleet_adapter.v1`) states which wire package is in use; it cannot express compatibility, because every revision within v1 carries that same identity. The *contract version* is a separate semantic version over the proto surface and the `SupportedAction` schema (ADR-0019) taken together, gating handshake compatibility, conformance validity, and task assignment as specified in ADR-0032. Per ADR-0032 the contract version covers the **conformance-suite revision** as well, and the reference implementation stamps the same value into a conformance report's `contract_version` — the two move together. What is recorded separately, on `FleetAdapter.spec.conformanceReport.suiteVersion` ([§9.1.13](#fleetadapter)), is which revision of the suite produced a given result, so that a result can be located in time even when the contract version has not moved. The contract version is also distinct from an adapter's own build version: two builds may implement one contract version, and one build may span several. At v0.3 the implemented contract version is `1.0.0`.
 
 `AdapterHello.contract_version` reports the version an adapter implements; `HelloAck.negotiated_contract_version` reports the version agreed for that connection. Both fields are additive within v1 under the policy above, so a peer that predates them ignores them.
 
 **Supported range.** A control plane supports minor **N and N-1** within the current major, and advertises the range it implements on `SwarmadaConfig.status.supportedContractRange` ([§9.1.12](#swarmadaconfig)); at contract `1.0.0` the range is `>=1.0.0 <1.1.0`. Two bounds are deliberate. At minor 0 there is no N-1, so the range narrows to that minor alone rather than reaching back into the previous major — a major bump is breaking by definition and can never sit inside a compatibility window. The upper bound is exclusive at N+1: an adapter built against a **newer** minor than the control plane implements is out of range, because skew is backwards compatibility for older adapters, not a commitment to a contract that does not yet exist. The patch component is not considered; a patch never breaks compatibility.
 
+**What forces a bump.** The contract version moves on changes to the surface it versions — the proto and the `SupportedAction` schema — and on nothing else. A **major** bump is any change that an existing conformant adapter cannot survive unmodified: removing a field, changing a type, or changing the `ControlStream` request/response messages. Such a change also requires `fleet_adapter.v2` under the policy above, so a major contract bump and a package-identity bump always occur together, and a contract major is never served on the preceding package. A **minor** bump is any addition to the versioned surface that an older peer can ignore — a new field, a new `AdapterMessage`/`ControlPlaneMessage` `oneof` arm, a new `Command`/`CommandResult` variant, or a new `SupportedAction` descriptor — and is what the N/N-1 skew window exists to absorb. A **patch** bump is a change that alters neither surface: a clarification, an errata fix, or a correction to normative prose that adds no field and removes none. Changes to the conformance suite move the **suite revision**. A suite change that alters what an adapter must do to pass — adding a check, or tightening one — is a change to the versioned surface and moves the contract version with it, per ADR-0032; a suite change that only reorganises or clarifies without changing the pass bar does not.
+
 **VERSION_MISMATCH.** A reported contract version that is absent, is not a plain numeric `major.minor.patch` (prerelease and build metadata are not accepted), or falls outside the supported range MUST be treated as **incompatible** — never as an implicit pass. The connection itself is accepted: `HelloAck.accepted` is true and `negotiated_contract_version` is left empty, so an empty value on that field always means no compatible contract was agreed, never "compatible but unrecorded". `RegisterRobot` and `DiscoverRobot` sent on such a connection MUST be rejected with `RegistrationRejection.VERSION_MISMATCH` ([§9.2.4](#fleet-adapter-protocol-in-band-error-model)). `TelemetryPayload`, heartbeat, and emergency stop are unaffected: an incompatible adapter remains observable and remains stoppable, which is what makes refusing it work acceptable.
 
 **Emergency stop is version-invariant.** `Estop` and `EstopAck` MUST be honoured irrespective of contract-version compatibility, and their schema MUST NOT change across the supported range: field numbers and names are fixed, so an adapter built against an older minor can always parse an estop issued by a newer control plane. This invariance is a property of the contract, not of any one implementation.
 
-> **Future seam.** Versioning is whole-contract: one version covers the entire surface. Per-capability profile granularity — an adapter declaring conformance to individual capability profiles at independent versions — is **not** specified at v0.2 and is a deliberate future seam. `status.supportedActions` ([§9.1.13](#fleetadapter)) is the discovery surface such a scheme would build on.
+> **Future seam.** Versioning is whole-contract: one version covers the entire surface. Capability-set granularity — an adapter declaring conformance to individual **capability sets**, each a named subset of this contract, at independent versions — is **not** specified at v0.3 and is a deliberate future seam. A capability set divides the contract surface, not a robot's capabilities. `status.supportedActions` ([§9.1.13](#fleetadapter)) is the discovery surface such a scheme would build on.
 
-> **Maturity (v0.2):** stage: alpha · impl: defined in the v1 proto. The v1 proto covers the full surface described here, including the `INVALID_ROBOT_ID` value of `RegistrationRejection`, the optional `mac` field on `DiscoverRobot` (feeding `DiscoveredRobot.status.macAddress`), and `EstopAck.stop_initiated_at` ([§9.6.2.2](#safety-timing-requirements)). The version policy above governs any future additions; none is outstanding at v0.2.
+> **Maturity (v0.3):** stage: alpha · control-plane: implemented · end-to-end: partial. The wire contract is defined in the v1 proto. The v1 proto covers the full surface described here, including the `INVALID_ROBOT_ID` value of `RegistrationRejection`, the optional `mac` field on `DiscoverRobot` (feeding `DiscoveredRobot.status.macAddress`), and `EstopAck.stop_initiated_at` ([§9.6.2.2](#safety-timing-requirements)). The version policy above governs any future additions; none is outstanding at v0.3.
 
 <a id="fleet-adapter-protocol-the-controlstream-service"></a>
 #### 9.2.3 The ControlStream service
@@ -8128,7 +9098,7 @@ The obligation is conditional on the capability, not universal. Declining `push_
 
 Where no outcome ever arrives, the control plane MAY abandon the robot's install on the rollout's own deadline and record it as **unconfirmed** — it MUST NOT record an install FAILURE. Never hearing is not evidence of failing, and the audit chain admits only confirmed facts ([§9.6.5.1](#safety-required-events)).
 
-**Action discovery — the supported-action catalog.** `validate_action` answers *"can this robot serve this concrete action now?"*; the catalog answers the complementary question *"what kinds of action can this adapter serve at all?"* Each adapter advertises a `SupportedAction` list inside the `CapabilitiesSnapshot` it returns to `Command.scan`: for every `FleetAction.spec.type` it can serve, the capabilities a robot needs, and a coarse parameter descriptor. The control plane pulls this catalog at registration and on each capability scan and projects it — read-only and under the same status-write discipline as capabilities (written on change, never on a telemetry tick) — onto `FleetAdapter.status` ([§9.1.13](#fleetadapter)). The per-robot resolution onto `Robot.status` (the adapter catalog filtered to a robot's active capabilities) is derived by the Scheduler on demand and is deferred to RFC-0003 (ADR-0019). It is a cheap local pre-filter: an action whose `type` no connected adapter advertises is rejected at admission with no round-trip, and the Scheduler never dispatches a `type` the candidate robot's adapter cannot serve. The catalog is declarative discovery, and it cannot express the contextual validity (live capability, robot state, payload specifics) that `validate_action` is designed to confirm per instance. The catalog is the only pre-dispatch gate at **acceptance** ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service) above), so a stale catalog can admit an action a robot cannot actually serve. It no longer produces a wrong *dispatch*: the per-instance check runs at assignment against the chosen robot, so a stale catalog now costs an extra `validate_action` round-trip and a scheduling miss instead of a task that fails at execution. For an adapter that declines the optional command, the catalog remains the only gate and the original hazard stands. Full payload schemas are out of scope for v0.2 (deferred to the event-driven-flows RFC, RFC-0003); the catalog carries action `type`, required capabilities, and coarse parameter descriptors only.
+**Action discovery — the supported-action catalog.** `validate_action` answers *"can this robot serve this concrete action now?"*; the catalog answers the complementary question *"what kinds of action can this adapter serve at all?"* Each adapter advertises a `SupportedAction` list inside the `CapabilitiesSnapshot` it returns to `Command.scan`: for every `FleetAction.spec.type` it can serve, the capabilities a robot needs, and a coarse parameter descriptor. The control plane pulls this catalog from every `CapabilitiesSnapshot` an adapter sends — at registration, and thereafter whenever the adapter pushes an unsolicited `capabilities` message — and projects it read-only, under the same status-write discipline as capabilities (written on change, never on a telemetry tick), onto `FleetAdapter.status` ([§9.1.13](#fleetadapter)). It is specified to be refreshed on each periodic capability **scan** as well; **no scan is issued at v0.3** ([§9.3.4](#control-plane-zone-controller)), so at v0.3 the catalog is only as current as the last snapshot the adapter chose to send. An adapter whose action catalog changes and that never re-sends one leaves a stale catalog on `FleetAdapter.status` indefinitely. The per-robot resolution onto `Robot.status` (the adapter catalog filtered to a robot's active capabilities) is derived by the Scheduler on demand and is not specified at v0.3 (ADR-0019). It is a cheap local pre-filter: an action whose `type` no connected adapter advertises is rejected at admission with no round-trip, and the Scheduler never dispatches a `type` the candidate robot's adapter cannot serve. The catalog is declarative discovery, and it cannot express the contextual validity (live capability, robot state, payload specifics) that `validate_action` is designed to confirm per instance. The catalog is the only pre-dispatch gate at **acceptance** ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service) above), so a stale catalog can admit an action a robot cannot actually serve. It no longer produces a wrong *dispatch*: the per-instance check runs at assignment against the chosen robot, so a stale catalog now costs an extra `validate_action` round-trip and a scheduling miss instead of a task that fails at execution. For an adapter that declines the optional command, the catalog remains the only gate and the original hazard stands. Full payload schemas are out of scope for v0.3 and are not specified elsewhere; the catalog carries action `type`, required capabilities, and coarse parameter descriptors only.
 
 ```protobuf3
 // Carried in CapabilitiesSnapshot (Command.scan): CapabilitiesSnapshot gains
@@ -8161,7 +9131,7 @@ message ZoneAdmission    { string zone_name = 1; bool admit = 2; string message 
 
 **Robot identity.** `robot_id` is REQUIRED and non-empty on every message arm that carries it; a `discover` with an empty `robot_id` is rejected `INVALID_ROBOT_ID` ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id)). `DiscoverRobot` MAY additionally carry an optional `mac` field, stored as `DiscoveredRobot.status.macAddress` for operator forensics — it is never an identity, naming, or dedupe key. Adapters for vendors without a stable identifier MUST synthesize a stable `robot_id` (MAY derive it from the MAC).
 
-**Fencing (anti double-execution).** A fencing token is a per-robot, strictly monotonic `uint64` minted by the control plane from a *persisted* lease generation — never in-memory state, so it survives a control-plane failover. It totally orders commands to a robot, so the adapter can reject a stale command that arrives after a connectivity gap or a failover.
+**Fencing (anti double-execution).** A fencing token is a per-robot, strictly monotonic `uint64` minted by the control plane from the *persisted* generation store ([§9.3.2](#control-plane-scheduler)) — never in-memory state, so it survives a control-plane failover. It is per-robot, and distinct from the per-action assignment generation carried below as `lease_generation`. It totally orders commands to a robot, so the adapter can reject a stale command that arrives after a connectivity gap or a failover. **The per-robot/per-action distinction is specified, not implemented at v0.3:** the reference control plane mints both from the same per-action `assignmentGeneration`, so `fencing_token` and `lease_generation` carry equal values on every message it sends, and two actions assigned to one robot can carry the same "per-robot" token. An adapter MUST still implement the fencing rule as specified — persist the highest accepted `fencing_token` per robot and reject any lower one — because that rule is correct under both the current and the target minting scheme.
 
 ```protobuf3
 message AssignAction {
@@ -8169,7 +9139,8 @@ message AssignAction {
   string destination = 3 [deprecated = true];  // DEPRECATED — travels in payload_json
   bytes payload_json = 4;
   optional uint64 fencing_token = 5;   // presence-trapped: "no token" (reject) != value 0
-  string assignment_id = 6; int32 priority = 7; optional int64 deadline_ms = 8;
+  string assignment_id = 6;   // NOT SET by the control plane at v0.3 (see below)
+  int32 priority = 7; optional int64 deadline_ms = 8;
   // lease_generation is the per-ACTION strictly-monotonic assignment generation
   // (distinct from fencing_token, which is per-ROBOT). The adapter holds a valid
   // execution lease only while the control plane renews this via renew_lease
@@ -8182,7 +9153,9 @@ message AssignActionResult {
 }
 ```
 
-The adapter MUST persist the highest accepted token per robot across reconnects and MUST reject (`rejection = ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN`) any `AssignAction`/`CancelAction` whose token is ≤ that high-water mark — *except* an identical re-delivery of the current assignment, which is acked idempotently without restarting work. An assignment carrying no token at all is rejected `MISSING_FENCING_TOKEN`. `Estop` is intentionally **not** fenced: a safe stop is always honoured.
+The adapter MUST persist the highest accepted token per robot across reconnects and MUST reject any `AssignAction`/`CancelAction` whose token is ≤ that high-water mark — *except* an identical re-delivery of the current assignment, which is acked idempotently without restarting work, **and except a `CancelAction` naming the `action_id` the adapter is executing, which is honoured at the token that assigned it**. The rejection surfaces differently on each message: an `AssignAction` rejection sets `AssignActionResult.rejection = ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN`; a `CancelAction` rejection sets `CancelActionResult.stale = true` — `CancelActionResult` carries no `rejection` enum field. The fencing rule exists to stop a *superseded* assigner displacing a current one; a cancellation of the action the current token assigned is issued by that same authority and cannot create a second executor, so what it must survive is identity with the current assignment rather than strict advancement beyond it. A `CancelAction` naming any other `action_id`, or carrying a token below the high-water mark, is still rejected (`CancelActionResult.stale = true`). An `AssignAction` carrying no token at all is rejected `MISSING_FENCING_TOKEN`. `Estop` is intentionally **not** fenced: a safe stop is always honoured.
+
+**`assignment_id` is specified, not populated at v0.3.** Field 6 is documented as a UUID for audit correlation. The reference control plane leaves it unset on every `AssignAction`, and nothing on either side of the wire reads it — the safety audit log has no assignment event to correlate against. An adapter MUST NOT use it to distinguish two assignments; `action_id` together with `lease_generation` is the pair that identifies a specific assignment attempt.
 
 **Cancellation for capability-loss reassignment.** A `cancel_action` issued because the assigned robot's required capability degraded ([§9.3.2](#control-plane-scheduler), *Capability-loss reassignment*) MUST be honoured at a **safe stopping point**, never as a mid-motion interrupt — the adapter, not the control plane, knows the robot's physical commitment. The `CancelActionResult` reports which of three dispositions occurred, so the control plane can requeue, do nothing, or apply `onFailure` accordingly: the task **stopped safely** and can be reassigned (control plane returns it to `Pending`); the robot **completed** the task because the lost capability was not needed to finish it (normal `ActionStatusUpdate` → `Succeeded`, the cancel is a no-op); or the robot **could not** safely complete or hand off and performed a **recovery** (returned its load, went to base), in which case the task is reported failed with reason `CapabilityLostDuringExecution`. Conveying the disposition is an additive `CancelActionResult` field per the version policy above; an adapter that does not populate it is treated as "stopped safely." Like `Estop`, this cancel is a safety-relevant stop — but unlike `Estop` it travels on `ControlStream` and is fenced by the assignment token.
 
@@ -8318,8 +9291,15 @@ loop every I seconds, per unadmitted robot:
                               → DiscoverAck accepted: DiscoveredRobot created or
                                 TTL-refreshed (idempotent upsert, [§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1a);
                                 ttl_seconds in the ack sets I = min(ttl_seconds/2, 300)
+                                (SPECIFIED; ttl_seconds is NOT populated at v0.3,
+                                 so every adapter reads 0 and uses I = 60s -- see
+                                 [§9.1.2](#discoveredrobot))
                                 (I = 60s when TTL is disabled, ttl_seconds = 0)
-                              → ALREADY_EXISTS (a different adapter owns the entry,
+                              → ALREADY_EXISTS (SPECIFIED; at v0.3 no ownership
+                                comparison runs, so a foreign adapter's announce
+                                is ACCEPTED and takes the entry over silently --
+                                see [§9.1.2](#discoveredrobot))
+                                (a different adapter owns the entry,
                                 [§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1b): log the conflict, keep looping —
                                 the server keeps rejecting until an operator resolves
                                 the Case 4 misconfiguration
@@ -8327,7 +9307,7 @@ loop every I seconds, per unadmitted robot:
 
 The DiscoveredRobot TTL is therefore a liveness lease: a connected adapter refreshes it every I ≤ TTL/2, so a reachable unadmitted robot never expires; expiry means the adapter stopped announcing. Admission is picked up within one interval — the `swarmctl admit` handoff needs no push notification ([§9.1.2.5](#discoveredrobot-controller-behavior-on-admit)).
 
-Heartbeat is an ordinary request/response that rides the stream: the control plane pushes `HeartbeatRequest`, the adapter replies `HeartbeatResponse` carrying the robot's phase and battery. The Health Monitor uses it when telemetry has gone quiet; three consecutive misses move the robot to Offline.
+Heartbeat is an ordinary request/response that rides the stream: the control plane pushes `HeartbeatRequest`, the adapter replies `HeartbeatResponse` carrying the robot's phase and battery. The Robot reconciler uses it when telemetry has gone quiet; three consecutive misses move the robot to Offline.
 
 <a id="fleet-adapter-protocol-reconnect-action-state-reconciliation"></a>
 #### 9.2.6 Reconnect Action State Reconciliation
@@ -8395,9 +9375,9 @@ The Fleet Adapter MUST NOT resume `ActionStatusUpdate` streaming or `ControlStre
 <a id="fleet-adapter-protocol-transport-security"></a>
 #### 9.2.7 Transport security
 
-**mTLS — mandatory on every connection.** The control plane presents its server certificate; the adapter presents its client certificate; each verifies the other against the namespace CA bundle. Certificates rotate automatically (cert-manager, or `swarmada-certsync` for air-gapped sites), with 90-day validity and rotation beginning at 75 days. Minimum TLS 1.3. The adapter's client certificate **is** its identity: its SAN (`<adapter-name>.<namespace>.svc.cluster.local`) binds the stream to exactly one `FleetAdapter` in one namespace, and every authorization decision below is made against that identity.
+**mTLS — mandatory on every connection.** The control plane presents its server certificate; the adapter presents its client certificate; each verifies the other against the namespace CA bundle. Certificates are expected to rotate automatically, with 90-day validity and rotation beginning at 75 days; Swarmada ships no certificate authority and no certificate manager, so provisioning and rotation are the operator's, using cert-manager or an equivalent ([§9.5.2.3](#security-certificate-management)). Minimum TLS 1.3. The adapter's client certificate **is** its identity: its SAN (`<adapter-name>.<namespace>.svc.cluster.local`) binds the stream to exactly one `FleetAdapter` in one namespace, and every authorization decision below is made against that identity.
 
-**Per-robot authorization is server-side — there is no per-robot token.** One `ControlStream` multiplexes every robot the adapter manages, so there is no separate per-robot connection to bind a bearer token to; and a per-robot token would add no containment, because an adapter that is compromised already controls every robot on its stream regardless. Swarmada therefore issues no per-robot JWT. Instead the control plane authorizes **every** `AdapterMessage` by checking its `robot_id` against the authenticated adapter identity: the robot's `Robot.spec.adapter` (or its `DiscoveredRobot`) must name this adapter, the robot must be in the adapter's namespace, and the robot's `RobotClass` must be one the adapter declares it serves (`FleetAdapter.spec.servesRobotClasses`). A message naming a robot the adapter does not serve is refused `PERMISSION_DENIED`; the stream itself is not torn down, since one stray `robot_id` is not a connection-level fault. To revoke an adapter's authority over a robot, an operator re-points `Robot.spec.adapter` (or revokes the adapter's client certificate, which removes its authority over all its robots at once).
+**Per-robot authorization is server-side — there is no per-robot credential.** One `ControlStream` multiplexes every robot the adapter manages, so there is no separate per-robot connection to bind a bearer token to; and a per-robot credential would add no containment, because an adapter that is compromised already controls every robot on its stream regardless. Swarmada therefore issues no per-robot JWT. This is distinct from the per-robot **fencing token** above, which is an ordering counter with no secret content and no authentication role. Instead the control plane authorizes **every** `AdapterMessage` by checking its `robot_id` against the authenticated adapter identity: the robot's `Robot.spec.adapter` (or its `DiscoveredRobot`) must name this adapter, the robot must be in the adapter's namespace, and the robot's `RobotClass` must be one the adapter declares it serves (`FleetAdapter.spec.servesRobotClasses`). A message naming a robot the adapter does not serve is refused `PERMISSION_DENIED`; the stream itself is not torn down, since one stray `robot_id` is not a connection-level fault. **Refusal is in-band for `register` and `discover` only at v0.3:** a denied `ResourceRequest`, telemetry frame or command result is dropped without a reply, so an adapter whose `ResourceRequest` is denied never receives a `ResourceResponse` for that `request_id` and MUST apply its own timeout rather than waiting indefinitely. Answering every arm in band is specified, not implemented. To revoke an adapter's authority over a robot, an operator re-points `Robot.spec.adapter` (or revokes the adapter's client certificate, which removes its authority over all its robots at once).
 
 **RBAC — namespace and robot-set isolation.** The adapter's service account holds the `swarmada:robot` role ([§9.5.3](#security-authorization-swarmada-rbac-roles)), scoped to its namespace; combined with the per-message `robot_id` check it may stream telemetry for, and receive commands for, only the robots it actually serves. Cross-namespace access is refused `PERMISSION_DENIED` at the mTLS layer — the namespace CA differs — so a compromised adapter in `warehouse-east` cannot reach robots in another namespace, and within its own namespace it cannot act on robots bound to a different adapter.
 
@@ -8410,18 +9390,18 @@ An adapter is Swarmada-compliant when it handles all **Required** messages and b
 
 | Message / command | Requirement |
 | :---- | :---- |
-| `AdapterHello` | MUST be the first message sent on the stream, and MUST report the `contract_version` the adapter implements ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)). |
+| `AdapterHello` | MUST be the first message sent on the stream, and MUST report the `contract_version` the adapter implements ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)). MUST also report `protocol_version` as the wire package identity it implements (`fleet_adapter.v1`), which `HelloAck.negotiated_protocol_version` confirms for the connection. |
 | `RegisterRobot` | MUST be the FIRST attempt for every managed robot on connect and reconnect; a `NOT_ADMITTED` rejection routes into the provisioning loop ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)). |
-| `DiscoverRobot` | MUST send (announce) after a `NOT_ADMITTED` register rejection, and MUST re-announce every provisioning-loop interval while unadmitted (idempotent upsert, [§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1a). MUST NOT be attempted before `register`; a `discover` for an already-admitted robot is answered `FAILED_PRECONDITION` ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 2). |
-| `TelemetryPayload` | MUST stream continuously; MUST send a full (non-delta) snapshot on first payload after connect/reconnect. |
+| `DiscoverRobot` | MUST send (announce) after a `NOT_ADMITTED` register rejection, and MUST re-announce every provisioning-loop interval while unadmitted (idempotent upsert, [§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1a). MUST NOT be attempted before `register`; a `discover` for an already-admitted robot is answered **in band**, with `DiscoverAck{accepted: false, rejection: ALREADY_EXISTS}` ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 2) — gRPC status codes are reserved for connection-level faults ([§9.2.4](#fleet-adapter-protocol-in-band-error-model)). |
+| `TelemetryPayload` | MUST stream continuously; MUST send a full (non-delta) snapshot on first payload after connect/reconnect. MUST report the robot's `phase` in every payload. `phase` is the field the Scheduler's first candidate filter reads ([§9.3.2](#control-plane-scheduler)), so an adapter that never reports it manages robots that are never dispatched to — an adapter can otherwise satisfy every other requirement in this table and still receive no work. |
 | `ActionStatusUpdate` | MUST send at task phase transitions, including the terminal state. |
 | `Command.assign_action` | MUST reply `AssignActionResult` within 5 s, honouring the fencing rule. This is the **adapter obligation**; it is a different quantity from the control plane's push bound ([§9.2.9](#fleet-adapter-protocol-performance-requirements)), and exceeding the push bound does not fail the assignment. |
 | `Command.cancel_action` | MUST reply `CancelActionResult`, honouring the fencing rule. |
-| `Command.renew_lease` | MUST reply `RenewActionLeaseResult`; if `lease_generation` matches current generation, reset self-stop timer and set `renewed = true`; set `running = false` if no longer executing `action_id`; reject stale generation with `renewed = false`. |
+| `Command.renew_lease` | MUST reply `RenewActionLeaseResult`; if `lease_generation` matches current generation, reset self-stop timer and set `renewed = true`; set `running = false` if no longer executing `action_id` and `running = true` while it is; reject stale generation with `renewed = false`. |
 | `HeartbeatRequest` | MUST reply `HeartbeatResponse` within 1 s. |
-| `Command.scan` | MUST reply `CapabilitiesSnapshot` with complete (non-delta) hardware and model status, including the adapter's `supported_actions` catalog (each served `FleetAction.spec.type` with its required capabilities and coarse parameter descriptors). |
-| `Command.pause` / `Command.resume` | MUST act only on the named capabilities; MUST reach physical stop before `PauseResult` when `require_stop_before_ack`. |
-| `SafetyStream` | MUST open it at startup alongside `ControlStream` (same dial step). MUST answer every `estop` Command received on `SafetyStream` with an `EstopAck` within 500 ms ([§9.6.2.2](#safety-timing-requirements) SLA is measured on this stream); MUST begin physical stop before the ack; MUST NOT return `FAILED` except in a severe fault. MUST send `EstopAck` on `SafetyStream`, never on `ControlStream`. |
+| `Command.scan` (**the obligation on the adapter stands; the control plane does not issue it at v0.3** — nothing constructs a `ScanCapabilities`, so an adapter MUST implement it and MUST NOT infer from its absence in a v0.3 deployment that it is optional) | MUST reply `CapabilitiesSnapshot` with complete (non-delta) hardware and model status, including the adapter's `supported_actions` catalog (each served `FleetAction.spec.type` with its required capabilities and coarse parameter descriptors). |
+| `Command.pause` / `Command.resume` | MUST act only on the named capabilities; MUST reach physical stop before `PauseResult` when `require_stop_before_ack`. **The obligation on the adapter stands; the control plane does not exercise it at v0.3** — no controller constructs either Command, so a maintenance window marks capabilities `Paused` in `Robot.status` without telling the robot ([§9.1.11](#zonemaintenance)). An adapter MUST implement both, and MUST NOT infer from their absence in a v0.3 deployment that they are optional. |
+| `SafetyStream` | MUST open it at startup alongside `ControlStream` (same dial step). MUST answer every `estop` Command received on `SafetyStream` with an `EstopAck` within 500 ms ([§9.6.2.2](#safety-timing-requirements) SLA is measured on this stream); MUST begin physical stop before the ack; MUST NOT return `FAILED` except in a severe fault. MUST send `EstopAck` on `SafetyStream`, never on `ControlStream`. An `EstopAck` reporting `ESTOP_STATE_STOPPED` MUST populate `stop_initiated_at` with the moment the adapter issued the stop to hardware: the field stays `optional` on the wire because it is meaningless for the other states, but for `STOPPED` it is the only artefact attesting that the stop was *commanded* rather than inferred from absent motion or an expired timer. |
 
 **Required behaviours (non-message):**
 
@@ -8433,12 +9413,12 @@ An adapter is Swarmada-compliant when it handles all **Required** messages and b
 | **Task-lease self-stop** | MUST bring the current task to a safe stop if the assignment lease is not renewed within `lease_duration_ms` (timed from the last received `renew_lease` Command); MUST emit a `action_status` update reflecting the stop. |
 | Delta telemetry | SHOULD send only changed hardware/model status (except the post-reconnect full snapshot). |
 | **Motion-gated position telemetry** | SHOULD skip a `TelemetryPayload` position frame on `ControlStream` if the robot has moved less than `motionThresholdMeters` since the last frame, MUST still send one at least every `maxIdleIntervalSeconds` regardless of movement, and MUST continue sending `HeartbeatResponse` at the unaffected cadence — Offline detection depends on heartbeat, not position frames, and is not gated by motion. This gating applies only to `ControlStream` telemetry; `EdgeStream` `PositionFrame`s (row below) remain full-cadence, since boundary-breach detection is safety-critical and must not miss a stationary-then-moving transition. |
-| **Install-outcome reporting** | An adapter that implements `push_firmware` or `model_update` MUST report a terminal `UpdateProgress` (`outcome` = `SUCCEEDED` or `FAILED`, with `failure_reason` on failure and the `resulting_version` the robot is left running) for every install it accepts, and SHOULD carry the same state in `CapabilitiesSnapshot` (`InstalledModel.failure_reason`, `FirmwareState`) so a control plane that missed the stream recovers it on the next scan ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)). Conditional on the optional command: declining `push_firmware`/`model_update` outright carries no obligation. |
+| **Install-outcome reporting** | An adapter that implements `push_firmware` or `model_update` MUST report a terminal `UpdateProgress` (`outcome` = `SUCCEEDED` or `FAILED`, with `failure_reason` on failure and the `resulting_version` the robot is left running) for every install it accepts, and SHOULD carry the same state in `CapabilitiesSnapshot` (`InstalledModel.failure_reason`, `FirmwareState`) so a control plane that missed the stream recovers it on the next scan ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)). Conditional on the optional command: declining `push_firmware`/`model_update` outright (`CommandResult.unsupported = true`) carries no obligation. **Accepting an install and then failing verification is not a decline**: it is an install the adapter accepted, it terminates as `INSTALL_OUTCOME_FAILED`, and it MUST be reported. |
 | Firmware/model signature and checksum | MUST verify the artifact SIGNATURE against trust roots in `SwarmadaConfig.spec.signing.trustRoots` AND the checksum before installing any firmware or model artifact (`push_firmware` or `model_update` commands). Fail closed on signature failure: return `FirmwareResult.accepted = false` or `ModelUpdateResult.acknowledged = false` with reason `SignatureVerificationFailed`. MUST NOT install if signature fails even when checksum passes. May skip signature verification only when `SwarmadaConfig.spec.signing.requireSignatureVerification = false`. |
 | `EdgeStream` ([§9.2.10](#fleet-adapter-protocol-the-edge-stream)) | MUST establish and maintain an `EdgeStream` to every endpoint in `RegisterAck.edge_endpoints`, tee a `PositionFrame` per managed robot per telemetry tick to each connected edge node, and honour an edge-issued `Estop` identically to a control-plane estop (confirmed `EstopAck`, [§9.6.2.5](#safety-edge-headless-emergency-stop)). Not applicable when `edge_endpoints` is empty. |
 | **Contract-version negotiation** | MUST report on `AdapterHello` a `contract_version` inside the range the control plane supports ([§9.2.2](#fleet-adapter-protocol-package-and-versioning)); an in-range adapter receives `HelloAck.negotiated_contract_version`. An adapter whose registration is refused `VERSION_MISMATCH` SHOULD NOT then accept an `AssignAction`; this is defence in depth rather than a MUST, because the control plane withholds the dispatch itself ([§9.1.13.4](#fleetadapter-admission-gating)). |
 | **Version-invariant estop** | MUST honour `Estop` with a confirmed `EstopAck` even when the contract-version gate has failed, and MUST NOT depend on any change to the `Estop`/`EstopAck` field numbers or names across the supported range. |
-| **Version-bound conformance report** | MUST carry, in the conformance report, the contract version the result was earned against. A report that omits it is not merely incomplete: the control plane treats an absent version as unsupported and the adapter becomes unassignable ([§9.1.13.4](#fleetadapter-admission-gating)). A non-conformant report MUST remain version-bound and fully itemised, so work can be withheld without costing an operator the ability to see why. |
+| **Version-bound conformance report** | MUST carry, in the conformance report, the contract version the result was earned against. A report that omits it is not only incomplete: the control plane treats an absent version as unsupported and the adapter becomes unassignable ([§9.1.13.4](#fleetadapter-admission-gating)). A non-conformant report MUST remain version-bound and fully itemised, so work can be withheld without costing an operator the ability to see why. |
 
 **Optional commands** (`CommandResult.unsupported = true` permitted): `validate_action` (declining leaves the supported-action catalog as the only pre-dispatch gate for that adapter's robots; it is issued at assignment, not at acceptance — [§9.2.3](#fleet-adapter-protocol-the-controlstream-service)), `verify_hardware`, `verify_capability`, `verify_model` (each disables the matching RobotProbe type), `push_firmware` (restricts FirmwareRollout to PullOnIdle), `model_update` (disables ModelRollout for the adapter's robots), `reservation_granted` and `zone_admission` (declining disables `SharedResource` reservations and zone-capacity holds for the adapter's robots; an adapter that issues `reserve` `ResourceRequest`s MUST handle `reservation_granted`).
 
@@ -8447,16 +9427,18 @@ An adapter is Swarmada-compliant when it handles all **Required** messages and b
 
 | Metric | Requirement | Notes |
 | :---- | :---- | :---- |
-| `Command.estop` → `EstopAck` | **< 500 ms** | Hard requirement; `estop` travels on `SafetyStream` ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)) so it is never queued behind bulk telemetry or stalled by `ControlStream` flow control. Every estop is logged with measured latency. > 500 ms raises an `EstopLatencyViolation` Warning. |
+| `Command.estop` → `EstopAck` | **< 500 ms** | Hard requirement; `estop` travels on `SafetyStream` ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)) so it is never queued behind bulk telemetry or stalled by `ControlStream` flow control. Every estop that reaches an adapter is logged with measured latency, and > 500 ms raises an `EstopLatencyViolation` Warning. The conformance suite measures this bound directly (check C5.5, which times the queue-to-ack interval against a 500 ms budget and fails an adapter that exceeds it). **One coverage gap on the control-plane side:** the estop metrics are recorded on the ack and explicit-timeout paths only, so an estop that could not be delivered at all — no `SafetyStream` registered for the adapter, or a send failure — increments neither the counter nor the latency histogram. Do not read a quiet `swarmada_estop_commands_total` as evidence that no estop failed; check `swarmada_fleet_adapter_connected` alongside it ([§9.3.8](#control-plane-observability-prometheus-metrics-contract)). |
 | Physical stop initiation | Before the `EstopAck` | The ack attests that the robot is decelerating or stopped — not that the stop is complete. |
 | `TelemetryPayload` latency | **< 2 s** | Wall-clock from a status change on the robot to its appearance in `Robot.status`. |
 | `HeartbeatRequest` → `HeartbeatResponse` | **< 1 s** | Three consecutive misses → robot Offline. |
 | `Command.assign_action` → `AssignActionResult` (adapter obligation) | **< 5 s** | The adapter MUST reply within this budget. Failing to do so is a conformance defect, not an assignment failure — see the row below. |
-| `assign_action` push bound (control plane) | **~2 s** | A *separate* quantity: how long the control plane waits on the push before moving on, so a silent adapter cannot stall the reconcile loop. Exceeding it is **not** a failure and does **not** requeue the task — the push is best-effort and non-gating, and the committed assignment stands. A lost acknowledgement is indistinguishable from a lost task, and freeing the robot on that ambiguity is the dual-execution hazard [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) exists to exclude (RA-4). An adapter that replies after the push bound but within its 5 s obligation is conformant; the control plane simply logs the push as undelivered and the assignment is unaffected. |
+| `assign_action` push bound (control plane) | **~2 s** | A *separate* quantity: how long the control plane waits on the push before moving on, so a silent adapter cannot stall the reconcile loop. Exceeding it is **not** a failure and does **not** requeue the task — the push is best-effort and non-gating, and the committed assignment stands. A lost acknowledgement is indistinguishable from a lost task, and freeing the robot on that ambiguity is the dual-execution hazard [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) exists to exclude (RA-4). An adapter that replies after the push bound but within its 5 s obligation is conformant; the control plane logs the push as undelivered and the assignment is unaffected. |
 | `Command.scan` → `CapabilitiesSnapshot` | **< 30 s** | For 50+ robots per adapter; on timeout the control plane uses the most recent telemetry state. |
 | Telemetry interval | 1–30 s | `SwarmadaConfig.spec.health.telemetryIntervalSeconds` (default 10 s) is the namespace default; `RobotClass.spec.defaultTelemetry` sets a class default; `Robot.spec` overrides per-robot (each bounded `Minimum=1, Maximum=30`, matching the CRD schema). This is a ceiling, not a fixed rate — see motion-gated position telemetry above. |
 | gRPC max message size | 4 MB | Sufficient for a `CapabilitiesSnapshot` of ~100 robots; larger adapters should paginate (future extension). |
 | First telemetry after reconnect | **< 10 s** after `RegisterAck` | MUST be a full snapshot. |
+
+> **Maturity (v0.3) — which of these the conformance suite verifies.** The suite checks *behaviour*, not *latency*. It confirms that an `estop` on `SafetyStream` is accepted and answered with a confirmed `EstopAck` (checks C5.1 and C5.2), but it does not time that exchange, and no check in the suite fails an adapter for exceeding the 500 ms bound. The requirement is normative and the control plane measures and alerts on it at run time ([§9.6](#safety)); a passing conformance report is therefore not evidence that an adapter meets it. The same holds for every other timing row in this table. Closing this gap is tracked as a conformance-suite change, not a specification change.
 
 <a id="fleet-adapter-protocol-the-edge-stream"></a>
 #### 9.2.10 The Edge Stream
@@ -8541,23 +9523,25 @@ This section defines the behavioural contract for each Swarmada control-plane co
 
 **Key behaviours.**
 
-*Admission webhook rules (enforced on every create and update):*
+*Admission webhook rules (enforced on every create and update, with the one scoped exception noted below the table):*
 
 | Resource | Rule | Enforced by | Rejection message |
 | :---- | :---- | :---- | :---- |
 | `Robot` | `spec.zone` must reference a `FleetZone` with no child zones (leaf) | Validating webhook | `"spec.zone '<name>' is not a leaf zone (has children: [...])"` |
 | `Robot` | `spec.adapter.version` must match `^\d+.\d+.\d+$` | CRD schema (`pattern`) | `"spec.adapter.version must be a valid semantic version string"` |
 | `Robot` | `spec.charging.targetBatteryPct` must be strictly greater than `spec.charging.minBatteryPctToCharge` | CRD schema (CEL) | `"targetBatteryPct must be greater than minBatteryPctToCharge"` |
-| `Robot` | Every `spec.capabilities[*].requiredHardware` entry must match a name in `spec.hardware[]` after RobotClass resolution | CRD schema (CEL) | `"capability '<cap>' references unknown hardware component '<hw>'"` |
-| `Robot` | Every `spec.capabilities[*].providingModel` must match a name in `spec.installedModels[]` | CRD schema (CEL) | `"capability '<cap>' references unknown model '<model>'"` |
+| `Robot` | Every `spec.capabilities[*].requiredHardware` entry must match a name in `spec.hardware[]` after RobotClass resolution | CRD schema (CEL) | `"a capability's requiredHardware must reference a component declared in spec.hardware"` — CEL cannot name the offending capability |
+| `Robot` | Every `spec.capabilities[*].providingModel` must match a name in `spec.installedModels[]` | CRD schema (CEL) | `"a capability's providingModel must reference a model declared in spec.installedModels"` — CEL cannot name the offending capability |
 | `Robot` | `spec.charging.dockName`, when set, must name a `spec.sharedResources[]` entry of type `ChargingDock` on the robot's zone or an ancestor zone ([§9.1.6](#fleetzone)) | Validating webhook | `"charging.dockName '<dock>' is not a ChargingDock in zone '<zone>' or its ancestors"` |
 | `Robot` | `swarmada.io/robot-id` annotation must be unique across `Robot` resources in the namespace | Validating webhook | `"robot-id '<id>' is already bound to Robot '<name>'"` |
 | `Robot` | The `FleetAdapter` named by `spec.adapter.name` must exist, serve the robot's `RobotClass`, be `Connected`, and carry `conformance: Passed` earned against a supported contract version ([§9.1.13.4](#fleetadapter-admission-gating)) | Validating webhook | `"adapter '<name>': <failing condition>"` |
 | `FleetZone` | `spec.parentZone` must reference an existing `FleetZone` in the same namespace (when set) | Validating webhook | `"spec.parentZone '<name>' does not exist in namespace '<ns>'"` |
 | `FleetZone` | `spec.parentZone` must not create a cycle in the zone tree | Validating webhook | `"spec.parentZone creates a cycle: <A> -> <B> -> <A>"` |
-| `FleetZone` | `spec.physicalBounds.polygon` must have at least 3 vertices and must not self-intersect | Validating webhook | `"spec.physicalBounds.polygon is self-intersecting"` |
+| `FleetZone` | `spec.physicalBounds.polygon` must have at least 3 vertices | CRD schema (`minItems`) | *(API server's own minItems message)* |
+| `FleetZone` | `spec.physicalBounds.polygon` must not self-intersect | Validating webhook | `"spec.physicalBounds.polygon is self-intersecting"` |
 | `FleetZone` | Deleting a `FleetZone` with child zones is rejected | Validating webhook | `"cannot delete FleetZone '<name>': has child zones [...]"` |
-| `FirmwareRollout` | `spec.newVersion` must match `^\d+.\d+.\d+$` | CRD schema (`pattern`) | `"spec.newVersion must be a valid semantic version string"` |
+| `FirmwareRollout` | `spec.newVersion` must be a non-empty string. **No format constraint is applied, by design** — Swarmada treats firmware versions as opaque and matches robots by equality, never by ordering ([§9.1.8](#firmwarerollout)) | CRD schema (`minLength`) | *(API server's own required/minLength message)* |
+| `ModelRollout` | `spec.newVersion` must match `^\d+\.\d+\.\d+$`. Unlike `FirmwareRollout`, this controller refuses downgrades and needs a parseable order ([§9.1.9](#modelrollout)) | CRD schema (`pattern`) | *(API server's own pattern message)* |
 | `FirmwareRollout` | `spec.firmwareChecksum` must match `^sha256:[a-f0-9]{64}$` | CRD schema (`pattern`) | `"spec.firmwareChecksum must be a valid sha256: checksum"` |
 | `ModelRollout` | `spec.newVersion` must be strictly greater than the installed version on each target robot (evaluated at rollout start, not admission) | Controller (batch selection) — a robot already on a newer version is excluded, counted in `status.robotsIneligible`, and reported by a `ModelDowngradeRefused` event. A running version that cannot be ordered is not treated as newer, so an unparseable vendor string never silently empties a batch | Checked at rollout start; admission validates format only |
 | `ModelRollout` | A capability name must not appear in both `spec.grantsCapabilities` and `spec.revokesCapabilities` | CRD schema (CEL) | `"capability '<cap>' appears in both grantsCapabilities and revokesCapabilities"` |
@@ -8570,17 +9554,35 @@ This section defines the behavioural contract for each Swarmada control-plane co
 | `SwarmadaConfig` | When `spec.coordinateSystem.referenceFrame: Geodetic`, the `geodetic` block must be present (and is mutually exclusive with the Local frame) | Validating webhook | `"geodetic is required when referenceFrame: Geodetic"` |
 | `ZoneMaintenance` | `spec.scope.zoneName` must reference an existing `FleetZone` in the same namespace (when `spec.scope.type: Zone`) | Validating webhook | `"spec.scope.zoneName '<name>' does not exist in namespace '<ns>'"` |
 
-The **Enforced by** column states where each rule is checked today. Every rule in this table is enforced at
-v0.2; a reader can rely on the control plane rejecting these inputs rather than treating the table as a
-statement of intent. Should a future rule be specified ahead of its enforcement, it is marked *specified,
-controller pending* — meaning the rule is normative but nothing currently checks it, and an implementation
-MUST NOT assume the control plane rejects that input.
+The **Rule** and **Enforced by** columns are normative: every rule in this table is enforced at v0.3, at
+the stated point, and a reader can rely on the control plane rejecting these inputs rather than treating
+the table as a statement of intent. Should a future rule be specified ahead of its enforcement, it is
+marked *specified, controller pending* — meaning the rule is normative but nothing checks it, and an
+implementation MUST NOT assume the control plane rejects that input.
+
+The **Rejection message** column is **indicative, not normative.** The exact wording a rejection carries is
+an implementation detail, it differs between the CEL and webhook paths, and CEL in particular cannot
+interpolate the offending element into its message. Clients MUST NOT match on these strings; match on the
+rejection itself and on the field path the API server reports.
+
+One rule is scoped on update rather than evaluated unconditionally: the `Robot` adapter-binding rule reads
+the **live status** of a different object, so it is evaluated on every create but re-evaluated on update only
+when `spec.robotClass` or `spec.adapter.name` changes ([§9.1.13.4](#fleetadapter-admission-gating)). Every other
+rule in the table — including the `Robot` leaf-zone, `charging.dockName` and `swarmada.io/robot-id`
+uniqueness rules — is evaluated on every create and every update. The split is deliberate rather than
+incidental: the invariants are properties of the object being admitted and hold whatever else is reachable,
+so a `kubectl patch` or `kubectl annotate` is checked against them exactly as a create is; the adapter gate
+depends on a `FleetAdapter` being Connected right now, and re-running it on every write would let a
+transient adapter outage block unrelated label and annotation writes on every `Robot` in the namespace —
+including the annotations an operator reaches for during that outage. Revocation still works as
+[§9.5.1.2](#security-fleet-adapter-authentication-robot-identity) specifies, because re-pointing `spec.adapter.name` is precisely the
+change that re-runs the gate.
 
 Charging docks are not a resource of their own. `spec.charging.dockName` names a typed entry in a
 `FleetZone`'s `spec.sharedResources[]` ([§9.1.6](#fleetzone)), which is why the rule resolves against the zone
 tree rather than looking up an object: the webhook walks the robot's zone and its ancestors for a
 `sharedResources[]` entry of type `ChargingDock`. A first-class `ChargingDock` resource — one that could
-carry dock status, occupancy, or a reservation queue of its own — is deferred beyond v0.2. The rule above is
+carry dock status, occupancy, or a reservation queue of its own — is deferred beyond v0.3. The rule above is
 enforced today; only the richer modelling is deferred.
 
 Rules marked *CRD schema* are enforced by the generated CustomResourceDefinition (a `pattern` constraint or
@@ -8591,9 +9593,9 @@ because the comparison is against per-robot state that does not exist on the obj
 
 *gRPC endpoint.* The API Server hosts the `FleetAdapterService` gRPC service defined in [§9.2.3](#fleet-adapter-protocol-the-controlstream-service) — a single bidirectional `ControlStream` RPC. Every adapter operation is an `AdapterMessage` or `Command` arm on that one stream, not a distinct RPC. Operations that create or modify Kubernetes resources do so through the standard Kubernetes API (not direct etcd access), ensuring RBAC and audit logging apply uniformly.
 
-*DiscoveredRobot lifecycle.* On a `discover` (`DiscoverRobot`) message, the API Server rejects an empty `robot_id` (`INVALID_ROBOT_ID`), then creates **or refreshes** the `DiscoveredRobot` keyed on `robot_id` (idempotent upsert): a repeat announce from the owning adapter updates `lastAnnouncedAt`, extends `ttlExpiresAt` (from `SwarmadaConfig.spec.provisioning.discoveredRobotTTLMinutes`), cancels any pending Stale deletion, and updates reported inventory; a same-`robot_id` announce from a *different* adapter is rejected `ALREADY_EXISTS` ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1b). The `DiscoverAck` carries the effective `ttl_seconds` so the adapter can derive its re-announce interval. On a `register` (`RegisterRobot`) message, it validates the robot exists and returns a `RegisterAck` spec summary without creating any resource.
+*DiscoveredRobot lifecycle.* On a `discover` (`DiscoverRobot`) message, the API Server rejects an empty `robot_id` (`INVALID_ROBOT_ID`), then creates **or refreshes** the `DiscoveredRobot` keyed on `robot_id` (idempotent upsert): a repeat announce from the owning adapter extends `ttlExpiresAt` (from `SwarmadaConfig.spec.provisioning.discoveredRobotTTLMinutes`), cancels any pending Stale deletion, and updates reported inventory. **Three details of this paragraph are specified, not implemented at v0.3** ([§9.1.2](#discoveredrobot)): `status.lastAnnouncedAt` is not written — the refresh rewrites `connectedAt` instead, and the TTL is anchored on that; a same-`robot_id` announce from a *different* adapter is **not** rejected `ALREADY_EXISTS` but silently takes over the record ([§9.1.2.6](#discoveredrobot-conflict-handling-duplicate-robot-id) Case 1b); and `DiscoverAck.ttl_seconds` is not populated, so an adapter cannot derive its re-announce interval from it and falls back to a fixed 60-second cadence. Note also that `robot_id` must be a DNS-1123 subdomain; non-empty is not sufficient. On a `register` (`RegisterRobot`) message, it validates the robot exists and returns a `RegisterAck` spec summary without creating any resource.
 
-*Safety audit log.* The API Server writes to the safety audit log for every event type listed in [§9.6.5.1](#safety-required-events) that originates from an admission webhook or gRPC RPC. Each entry includes the authenticated operator or service account identity.
+*Safety audit log.* The API Server is specified to write to the safety audit log for every event type listed in [§9.6.5.1](#safety-required-events) that originates from an admission webhook or gRPC RPC, each entry carrying the authenticated operator or service account identity. **Coverage is partial at v0.3.** The `SwarmadaConfig` webhook is the only admission webhook wired to the audit recorder, and it is the only one that stamps the real `user.Username` from the admission request; the estop, robot, zone, action and task webhooks write no audit entry, so an admission-time **denial** on a custom verb leaves no record. On the gRPC side, `ROBOT_AUTHZ_DENIED` is written. See [§9.5.4](#security-audit-logging) for the per-event status.
 
 **CRD ownership.**
 
@@ -8601,7 +9603,7 @@ because the comparison is against per-robot state that does not exist on the obj
 | :---- | :---- |
 | All Swarmada CRDs | Reads (for admission validation) |
 | `DiscoveredRobot` | Creates, updates (status) |
-| `Robot` | Reads; status updates via `/status` subresource on `RegisterRobot` |
+| `Robot` | Reads only. `RegisterRobot` is a pure read: it looks up the `Robot` and returns a `RegisterAck` spec summary and reconnect state without writing `status` or any other field (see "DiscoveredRobot lifecycle" above; confirmed via `internal/registrar/registrar.go`). |
 | `SwarmadaConfig` | Reads (for admission defaults and TTL values) |
 
 **Dependencies.** etcd (via Kubernetes API); TLS certificate store (for mTLS termination); the namespace CA bundle (for Fleet Adapter client cert validation).
@@ -8613,14 +9615,14 @@ because the comparison is against per-robot state that does not exist on the obj
 <a id="control-plane-scheduler"></a>
 #### 9.3.2 Scheduler
 
-**Responsibility.** Watches `FleetAction` resources in `Pending` phase, selects the best available robot for each task, and transitions the task to `Assigned` by writing `status.assignedRobot` and updating the phase.
+**Responsibility.** Watches `FleetAction` resources in `Pending` phase, selects the best available robot for each action, and transitions the action to `Assigned` by writing `status.assignedRobot` and updating the phase.
 
 **Inputs.**
 
 - Watch stream on `FleetAction` resources (phase: `Pending`).
 - Watch stream on `Robot` resources (for candidate pool updates when a robot's phase, battery, zone, or capability status changes).
 - `SwarmadaConfig.spec.scheduling` (for default policies).
-- `FleetZone` hierarchy (for zone-hierarchy task targeting resolution).
+- `FleetZone` hierarchy (for zone-hierarchy action targeting resolution).
 
 **Outputs.**
 
@@ -8633,11 +9635,11 @@ because the comparison is against per-robot state that does not exist on the obj
 - `FleetAction.status.phase` → `Pending` from `Revoking` once the lease is provably dead ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)).
 - `FleetAction.status.phase` → `Pending` (via a confirmed safe-stop on the current robot), or → `Failed` (reason `CapabilityLostDuringExecution`, via adapter recovery) when the assigned robot's `status.capabilities` cease to satisfy `spec.requiredCapabilities` (*Capability-loss reassignment* below).
 - `FleetAction.status.phase` → `Failed` (with reason `DeadlineExceeded`) when `spec.deadline` passes without assignment.
-- `renew_lease` `Command`s (`RenewActionLease`) to Fleet Adapters at interval ≪ `leaseDurationMs` while the assignment stands.
+- `renew_lease` `Command`s (`RenewActionLease`) to Fleet Adapters at interval ≪ `spec.scheduling.leaseDurationSeconds` while the assignment stands.
 
 **Key behaviours.**
 
-*Pluggable scheduler interface.* RFC-0001 does not mandate a specific scheduling algorithm. An implementation must provide a robot-selection contract that, for each `Pending` `FleetAction` and the current candidate set, either returns the name and namespace of the robot to assign, signals "retry later" when no robot is currently eligible (which MUST NOT transition the action to `Failed`), or returns an error. The following signature illustrates that contract:
+*Pluggable scheduler interface.* RFC-0001 does not mandate a specific scheduling algorithm. An implementation must provide a robot-selection contract that, for each `Pending` `FleetAction` and the current candidate set, either returns the name and namespace of the robot to assign, signals "retry later" when no robot is eligible (which MUST NOT transition the action to `Failed`), or returns an error. The following signature illustrates that contract:
 
 ```text
 // SelectRobot is called by the Scheduler controller for each Pending FleetAction.
@@ -8647,7 +9649,7 @@ because the comparison is against per-robot state that does not exist on the obj
 type RobotSelector interface {
     SelectRobot(
         ctx      context.Context,
-        task     *swarmadav1.FleetAction,
+        action     *swarmadav1.FleetAction,
         candidates []*swarmadav1.Robot,
     ) (robotName, namespace string, err error)
 }
@@ -8655,26 +9657,54 @@ type RobotSelector interface {
 
 *Default algorithm: two-phase filter then score.*
 
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Six of the ten candidate filters below
+> are implemented in the reference control plane; four are not.** This chapter had no maturity
+> statement before draft 3, which made it the only chapter whose implementation status a reader
+> could not determine — and the one where the gap is widest.
+>
+> | # | Filter | Reference implementation at v0.3 |
+> | :-- | :-- | :-- |
+> | 1 | `status.phase == Idle` | implemented |
+> | 2 | zone leaf-set containment | **not implemented.** The scheduler compares `Robot.spec.zone` to `FleetAction.spec.zone` for string equality. It reads neither `status.currentZone` nor the zone tree, so an action naming a parent zone matches no robot, and a robot that has physically left its declared zone remains a candidate for work there |
+> | 3 | required capabilities | implemented |
+> | 4 | `spec.minBatteryPct` | **not implemented.** The field is validated and unread ([§9.1.4](#fleetaction)) |
+> | 5 | parametric constraints | implemented |
+> | 6 | `spec.robotSelector` | implemented |
+> | 7 | model not `Updating` | **not implemented** |
+> | 8 | `ZoneMaintenance` exclusions | **not implemented** |
+> | 9 | adapter dispatch readiness | implemented |
+> | 10 | active emergency stop | implemented |
+>
+> An implementer MUST NOT infer from a `Pending` action that every filter was applied. The four
+> unimplemented filters fail **open** — they eliminate no candidate — so the reference
+> implementation dispatches in cases this specification forbids. Filter 2's use of `spec.zone`
+> makes it fail open and closed at once: it admits robots the specification excludes, and
+> excludes robots the specification admits.
+>
+> The filters that are implemented are enforced at a single choke point covering both the normal
+> selection and the preemption search, so an implementation cannot satisfy one path and not the
+> other.
+
 **Filter phase (hard constraints — any failing filter eliminates the candidate):**
 
 1. `Robot.status.phase` must be `Idle`.
 2. `Robot.status.currentZone` must be within the set of leaf zones resolved from `FleetAction.spec.zone` (by walking the zone tree downward).
 3. For each capability in `FleetAction.spec.requiredCapabilities`: `Robot.status.capabilities[name].status` must be `Active`, OR `Degraded` if `FleetAction.spec.acceptDegradedCapabilities: true`. The Scheduler reads `status.capabilities`, not `spec.capabilities`.
 4. `Robot.status.batteryPercent` must be ≥ `FleetAction.spec.minBatteryPct` (or `Robot.spec.constraints.minBatteryPctForAction`, whichever is higher).
-5. If `FleetAction.spec.constraints.maxPayloadKg` is set (a parametric constraint, [§6.10.3](#design-details-parametric-hardware-native-capabilities)): the robot's `transport.payload` capability must be `Active` and its `resolvedParameters.maxPayloadKg` must be ≥ the constraint.
-6. If `FleetAction.spec.robotSelector` is set: only that robot is a candidate (all others eliminated).
+5. If `FleetAction.spec.constraints.maxPayloadKg` is set (a parametric constraint, [§6.10.3](#design-details-parametric-hardware-native-capabilities)): the robot must hold a capability that resolves `maxPayloadKg` to at least the constraint and is itself schedulable — `Active`, or `Degraded` with `degradedSchedulable: true` ([§6.10](#design-details-capability-type-system)).
+6. If `FleetAction.spec.robotSelector` is set: only that robot is a candidate (all others eliminated). **This filter short-circuits the rest of the hard-constraint phase at v0.3.** A pinned robot is not tested against filter 2 (zone), filter 3 (required capabilities) or filter 5 (parametric constraints) — those three fail **open** on this path. Filters 1, 9 and 10 still apply, as do filters 4, 7 and 8 to the extent the maturity table above records them as implemented. Pinning a robot is therefore an assertion by the operator that the robot can do the work, not a request for the Scheduler to confirm it.
 7. `Robot.status.installedModels[*].status` must not be `Updating` for any model that grants a required capability. A robot mid-model-update is excluded.
 8. No active `ZoneMaintenance` resource must have the robot in `status.pausedRobots[]` or `status.windingDownRobots[]`.
 9. The robot's serving `FleetAdapter` (resolved via `Robot.spec.adapter`) MUST have `status.phase == Connected` AND `status.conformance == Passed` AND have earned that conformance result against a contract version inside the range this control plane supports (`status.conformanceContractVersion`, [§9.2.2](#fleet-adapter-protocol-package-and-versioning)). All three conditions are re-checked at scheduling time; the admission gate ([§9.1.13.4](#fleetadapter-admission-gating)) is necessary but not sufficient because adapter state can change after `Robot` admission. Evaluation is **fail-closed**: an unset `spec.adapter.name`, an absent adapter, an unreadable one, or a report naming no contract version all withhold the robot.
-10. The robot MUST NOT have an active estop at robot, zone, or namespace scope ([§9.6.2.3](#safety-estop-state-machine) estop states `Stopping` or `Stopped`). Dispatching a task to a robot under any active estop results in an immediate `Paused` transition ([§9.6.2.4](#safety-fleetaction-behaviour-during-estop)) with no useful work performed.
+10. The robot MUST NOT have an active estop at robot, zone, or namespace scope ([§9.6.2.3](#safety-estop-state-machine) estop states `Stopping`, `Stopped`, or `Failed`). Dispatching a action to a robot under any active estop results in an immediate `Paused` transition ([§9.6.2.4](#safety-fleetaction-behaviour-during-estop)) with no useful work performed. **`Failed` is included, and it is the most important of the three.** `Failed` does not mean the stop was refused; it means a stop was commanded and never confirmed — a dropped estop, silence, or `STOPPING` with no `STOPPED` — so the robot's physical state is unknown and it MUST NOT be treated as at rest ([§9.6.2.3](#safety-estop-state-machine)). It already carries an operator obligation to escalate to an edge or manual path; a robot awaiting that escalation is the last robot in the fleet that should receive new work. A specification that excluded only the robots whose stop succeeded would keep dispatching to the one robot whose stop did not.
 
-> **Note.** A robot whose prior `FleetAction` is in `Revoking` phase is already excluded by the filters above: it is either `Offline` (connectivity-loss revocation — excluded by filter 1, `phase == Idle`, and by filter 9, adapter not `Connected`) or still executing the prior task during a reachable revocation (non-`Idle`, filter 1). No dedicated `Revoking` filter is therefore required.
+> **Note.** A robot whose prior `FleetAction` is in `Revoking` phase is already excluded by the filters above: it is either `Offline` (connectivity-loss revocation — excluded by filter 1, `phase == Idle`, and by filter 9, adapter not `Connected`) or still executing the prior action during a reachable revocation (non-`Idle`, filter 1). No dedicated `Revoking` filter is therefore required.
 
-> **Note.** The capability predicate (filter 3) is additionally evaluated for a task's *already-assigned* robot, not only at assignment: the Scheduler watches `Robot`, and a robot that stops satisfying filter 3 for its in-flight task triggers *Capability-loss reassignment* (below).
+> **Note.** The capability predicate (filter 3) is additionally evaluated for a action's *already-assigned* robot, not only at assignment: the Scheduler watches `Robot`, and a robot that stops satisfying filter 3 for its in-flight action triggers *Capability-loss reassignment* (below).
 
 > **Assignment-time action validation ([§9.2](#fleet-adapter-protocol) `validate_action`).** The eligibility filters and the supported-action catalog ([§9.1.13](#fleetadapter)) are a *type-level* pre-filter: they answer whether an adapter serves actions of this kind at all, so a stale catalog can admit an action the chosen robot cannot actually perform. The per-instance confirmation closes that: at assignment the chosen robot's adapter is asked, by a `validate_action` `Command`, whether it can serve the *concrete* instance (type + opaque payload). If it returns `servable = false`, the Scheduler drops that candidate and tries the next eligible robot; if no eligible robot's adapter can serve the instance, the `FleetAction` stays `Pending` (awaiting a capable robot) and fails only on its deadline/timeout — a scheduling miss, so `retryCount` is not incremented. The same check is applied to a preemption candidate, so a victim is never displaced to hand the action to a robot that cannot serve it.
 >
-> Three replies, and only one withholds the robot. `validate_action` is an OPTIONAL command ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)): an adapter that does not implement it replies `CommandResult.unsupported = true`, and the control plane dispatches on the catalog gate alone — declining an optional command MUST NOT cost an adapter's robots their work. An **unreachable** adapter (no stream, send failure, or no reply in time) drops the candidate: `validate_action` is pure inspection, so dropping costs nothing and the action stays `Pending`, whereas dispatching to an adapter that has just failed to answer would commit the assignment and then push `assign_action` best-effort into the same silence — a bound robot that may never have received its task. With ControlStream disabled there is no one to ask and the catalog gate remains the only pre-dispatch gate.
+> Three replies, and only one withholds the robot. `validate_action` is an OPTIONAL command ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist)): an adapter that does not implement it replies `CommandResult.unsupported = true`, and the control plane dispatches on the catalog gate alone — declining an optional command MUST NOT cost an adapter's robots their work. An **unreachable** adapter (no stream, send failure, or no reply in time) drops the candidate: `validate_action` is pure inspection, so dropping costs nothing and the action stays `Pending`, whereas dispatching to an adapter that has already failed to answer would commit the assignment and then push `assign_action` best-effort into the same silence — a bound robot that may never have received its action. With ControlStream disabled there is no one to ask and the catalog gate remains the only pre-dispatch gate.
 
 **Rank phase (soft preferences — surviving candidates are ordered):**
 
@@ -8689,27 +9719,27 @@ The reference scheduler ranks the surviving candidates on three keys, in order:
 The first robot in the resulting order is selected. The sort is stable: candidates that tie on every key keep
 their prior relative order, and no further tiebreak is applied.
 
-> **Non-normative — a richer scoring model.** A weighted score over battery, proximity to the task zone
+> **Non-normative — a richer scoring model.** A weighted score over battery, proximity to the action zone
 > (by zone-depth distance), current load, and preference hints is a natural extension of the two-key ranking
 > above, and a conforming implementation MAY substitute one: [§4](#non-goals) item 4 leaves the algorithm
 > pluggable and this RFC standardises the `RobotSelector` contract, not the ranking inside it. Two of those
-> factors need inputs the contract does not currently carry — proximity requires the resolved zone tree and
+> factors need inputs the contract does not carry — proximity requires the resolved zone tree and
 > load requires per-robot queue depth — so adopting them means extending the selector's inputs, not only its
 > arithmetic.
 
-*Deadline enforcement.* The Scheduler runs a background loop that checks every `Pending` FleetAction's `spec.deadline` against the current time. When a deadline passes without assignment, the Scheduler transitions the task to `Failed` with `failureReason: "DeadlineExceeded"` and applies the `onFailure` policy.
+*Deadline enforcement.* The Scheduler runs a background loop that checks every `Pending` FleetAction's `spec.deadline` against the current time. When a deadline passes without assignment, the Scheduler transitions the action to `Failed` with `failureReason: "DeadlineExceeded"` and applies the `onFailure` policy.
 
 *Preemption.* When a `Critical` or `High` priority action is pending and the only eligible robot is `InProgress` on a `Normal` or `Low` action, the Scheduler may preempt the in-progress action per the rules in [§9.1.4.3](#fleetaction-priority-semantics). Only `Normal` and `Low` actions are eligible victims: a preemptor MUST NOT evict a robot executing a `Critical` or `High` action, regardless of the preemptor's own band.
 
-*Assignment lease.* When the Scheduler transitions a `FleetAction` to `Assigned`, it mints a new `assignmentGeneration` from the persisted generation store (a counter persisted in `FleetAction.status.assignmentGeneration` or an equivalent Kubernetes `Lease` record — never in-memory state). The Scheduler sends `renew_lease` `Command`s (`RenewActionLease`) to the assigned robot's adapter at a configurable interval (default: `leaseDurationMs / 3`) while the assignment stands, refreshing `FleetAction.status.leaseExpiresAt`. When the robot goes `Offline` and a lease is outstanding, the Scheduler transitions the task to `Revoking` and stops renewing. The offline robot self-stops the task at lease expiry; on reconnect the Scheduler re-adopts the task if the robot is still executing it under a live lease, or transitions it to `Pending` once the lease is provably dead per [§9.6.3.4](#safety-reconnection-flow)–[§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee). The Scheduler MUST NOT assign the task to a second robot before that condition is met.
+*Assignment lease.* When the Scheduler transitions a `FleetAction` to `Assigned`, it mints a new `assignmentGeneration` from the persisted generation store (a counter persisted in `FleetAction.status.assignmentGeneration` or an equivalent Kubernetes `Lease` record — never in-memory state). The Scheduler sends `renew_lease` `Command`s (`RenewActionLease`) to the assigned robot's adapter every `spec.scheduling.leaseDurationSeconds / 3` while the assignment stands, refreshing `FleetAction.status.leaseExpiresAt`. The lease horizon is configurable per namespace; the renewal interval is NOT separately configurable, but derived from it, so a longer horizon always brings proportionally later — never rarer relative to the horizon — renewals (ADR-0044). The same resolved horizon is sent to the adapter as `lease_duration_ms` (milliseconds; the control plane converts from the field's seconds), so the robot's self-stop timer and the control plane's reassignment horizon are always the same quantity. When the robot goes `Offline` and a lease is outstanding, the Scheduler transitions the action to `Revoking` and stops renewing. The offline robot self-stops the action at lease expiry; on reconnect the Scheduler re-adopts the action if the robot is still executing it under a live lease, or transitions it to `Pending` once the lease is provably dead per [§9.6.3.4](#safety-reconnection-flow)–[§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee). The Scheduler MUST NOT assign the action to a second robot before that condition is met.
 
-*Capability-loss reassignment.* When a robot holding an `Assigned` or `InProgress` `FleetAction` ceases to satisfy the task's `spec.requiredCapabilities` — the same predicate as filter 3, evaluated against the **debounced** `status.capabilities` (RA-1), so a capability flapping `Degraded`↔`Active` within the debounce window does not thrash the task — the Scheduler initiates reassignment by commanding the current robot to stop. Reassignment MUST NOT bare-transfer `status.assignedRobot`, and the stop is **not** a mid-motion interrupt: the Fleet Adapter is authoritative for bringing the robot to a **safe stopping point** ([§9.1.4.3](#fleetaction-priority-semantics)), and the outcome is exactly one of:
+*Capability-loss reassignment.* When a robot holding an `Assigned` or `InProgress` `FleetAction` ceases to satisfy the action's `spec.requiredCapabilities` — the same predicate as filter 3, evaluated against the **debounced** `status.capabilities` (RA-1), so a capability flapping `Degraded`↔`Active` within the debounce window does not thrash the action — the Scheduler initiates reassignment by commanding the current robot to stop. Reassignment MUST NOT bare-transfer `status.assignedRobot`, and the stop is **not** a mid-motion interrupt: the Fleet Adapter is authoritative for bringing the robot to a **safe stopping point** ([§9.1.4.3](#fleetaction-priority-semantics)), and the outcome is exactly one of:
 
-- **Safe hand-off.** If the robot is not mid-commitment (or can reach a safe idle state without the lost capability), the adapter confirms the task stopped and the Scheduler moves it to `Pending` for reassignment to a satisfying robot. The single-executor guarantee ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) holds — no two robots hold a live lease at once — and this reassignment does NOT consume `spec.retryPolicy.maxRetries`. Event: `ActionReassignedCapabilityLoss`.
-- **Complete-then-release.** If the robot is in a non-stoppable commitment (e.g. carrying a pallet) but the lost capability is NOT required to *finish that commitment* from its current state, the adapter completes the task normally; the degraded capability then affects only the *next* assignment via filter 3. The control plane MUST NOT force reassignment of a task the robot can still safely complete.
-- **Recovery.** If the robot is mid-commitment AND the lost capability prevents safely completing or handing off (e.g. it can no longer place its load), the adapter performs a recovery to a safe state (replace/return the load, return to base) and reports the task `Failed` with `failureReason: "CapabilityLostDuringExecution"`; `onFailure` applies. The task is NOT silently reassigned out from under a committed robot. Event: `ActionRecoveredCapabilityLoss`.
+- **Safe hand-off.** If the robot is not mid-commitment (or can reach a safe idle state without the lost capability), the adapter confirms the action stopped and the Scheduler moves it to `Pending` for reassignment to a satisfying robot. The single-executor guarantee ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) holds — no two robots hold a live lease at once — and this reassignment does NOT consume `spec.retryPolicy.maxRetries`. Event: `ActionReassignedCapabilityLoss`.
+- **Complete-then-release.** If the robot is in a non-stoppable commitment (e.g. carrying a pallet) but the lost capability is NOT required to *finish that commitment* from its current state, the adapter completes the action normally; the degraded capability then affects only the *next* assignment via filter 3. The control plane MUST NOT force reassignment of a action the robot can still safely complete.
+- **Recovery.** If the robot is mid-commitment AND the lost capability prevents safely completing or handing off (e.g. it can no longer place its load), the adapter performs a recovery to a safe state (replace/return the load, return to base) and reports the action `Failed` with `failureReason: "CapabilityLostDuringExecution"`; `onFailure` applies. The action is NOT silently reassigned out from under a committed robot. Event: `ActionRecoveredCapabilityLoss`.
 
-Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause) but always subject to the adapter's safe-stop authority above; it is distinct from connectivity-loss revocation (`Offline` → `Revoking` → `Pending`), which cannot confirm a stop and must wait for the lease to be provably dead. Determining which capabilities are still required to *finish* an in-flight commitment (as opposed to *start* the task) is delegated to the Fleet Adapter's safe-stop judgement; phase-scoped capability requirements in `FleetAction.spec` are an explicit non-goal for this revision.
+Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause) but always subject to the adapter's safe-stop authority above; it is distinct from connectivity-loss revocation (`Offline` → `Revoking` → `Pending`), which cannot confirm a stop and must wait for the lease to be provably dead. Determining which capabilities are still required to *finish* an in-flight commitment (as opposed to *start* the action) is delegated to the Fleet Adapter's safe-stop judgement; phase-scoped capability requirements in `FleetAction.spec` are an explicit non-goal for this revision.
 
 **CRD ownership.**
 
@@ -8717,23 +9747,34 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 | :---- | :---- |
 | `FleetAction` | Reads; writes `status.assignedRobot`, `status.phase`, `status.scheduledAt`, `status.failedAt`, `status.failureReason`, `status.assignmentGeneration`, `status.leaseExpiresAt` |
 | `Robot` | Reads `status.phase`, `status.capabilities`, `status.batteryPercent`, `status.currentZone`, `status.installedModels`, `status.estopState` (filter 10) |
-| `FleetZone` | Reads (for zone-tree resolution); reads `status.estopStatus` (zone- and namespace-scope estop check, filter 10) |
+| `FleetZone` | **No read at v0.3.** Zone-tree resolution is specified (filter 2) and not implemented, and filter 10 needs no `FleetZone` read: a zone- or namespace-scope estop fans out to a per-robot stop that writes `Robot.status.estopState`, which filter 10 reads instead |
 | `ZoneMaintenance` | Reads `status.pausedRobots`, `status.windingDownRobots` |
-| `FleetAdapter` | Reads `status.phase`, `status.conformance` (filter 9 — re-checked at scheduling time; admission gate alone is not sufficient) |
+| `FleetAdapter` | Reads `status.phase`, `status.conformance`, `status.conformanceContractVersion` (filter 9 — re-checked at scheduling time; admission gate alone is not sufficient) |
 | `SwarmadaConfig` | Reads `spec.scheduling` |
 
-**Dependencies.** API Server (for watch streams and status writes); Zone Controller (for current zone derivation, which the Scheduler reads from Robot status); `FleetAdapter` watch stream (so the Scheduler can re-check `status.phase` and `status.conformance` at assignment time without issuing a live read — filter 9).
+**Dependencies.** API Server (for watch streams and status writes); the Zone Controller's `status.currentZone` derivation — **specified, not consumed at v0.3**: candidate filtering reads `Robot.spec.zone`, so the Scheduler does not in fact depend on the Zone Controller today; `FleetAdapter` watch stream (so the Scheduler can re-check `status.phase` and `status.conformance` at assignment time without issuing a live read — filter 9).
 
 **Crash and restart behaviour.** The Scheduler re-lists all `Pending` and `Revoking` `FleetAction` resources on startup and rebuilds its candidate pool from `Robot` status. It does not store any in-memory state that is not recoverable from CRD status fields. Tasks that were mid-assignment when the Scheduler crashed (phase: `Pending` with no `assignedRobot`) are re-evaluated. Tasks that were `Assigned` but not yet `InProgress` are left in `Assigned` phase; if the assigned robot goes `Offline`, the Scheduler applies the lease-aware rule ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). Tasks in `Revoking` phase have their lease expiry re-evaluated from `status.leaseExpiresAt`; if the lease horizon has already passed they are immediately advanced to `Pending`.
 
-**Persisted generation store.** Both the per-action `assignmentGeneration` and the per-robot fencing token are drawn from a *persisted*, strictly-monotonic generation store, never from Scheduler in-memory state. The per-action `assignmentGeneration` is persisted in `FleetAction.status.assignmentGeneration`. The per-robot fencing-token high-water mark is persisted **adapter-side** — the adapter persists the highest accepted token per robot — and/or in an equivalent Kubernetes `Lease` record; it is **not** held on `Robot.status`, which carries no such field. On Scheduler crash and leader-election handoff, the incoming leader reads the persisted high-water marks before minting any new generation and resumes strictly *above* those values (read-before-issue). This guarantees that no two assignment attempts share an `assignmentGeneration` across a failover, preserving the safe-reassignment invariant ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) through control-plane restarts. All operations are idempotent under the assumption that a single Scheduler instance holds the scheduling lock (leader election via `coordinator.k8s.io` lease).
+**Persisted generation store.** Both the per-action `assignmentGeneration` and the per-robot fencing token are drawn from a *persisted*, strictly-monotonic generation store, never from Scheduler in-memory state. The per-action `assignmentGeneration` is persisted in `FleetAction.status.assignmentGeneration`. The per-robot fencing-token high-water mark is persisted **adapter-side** — the adapter persists the highest accepted token per robot — and/or in an equivalent Kubernetes `Lease` record; it is **not** held on `Robot.status`, which carries no such field. On Scheduler crash and leader-election handoff, the incoming leader reads the persisted high-water marks before minting any new generation and resumes strictly *above* those values (read-before-issue). This guarantees that no two assignment attempts share an `assignmentGeneration` across a failover, preserving the safe-reassignment invariant ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) through control-plane restarts. All operations are idempotent under the assumption that a single Scheduler instance holds the scheduling lock (leader election via `coordination.k8s.io` lease).
 
 ---
 
-<a id="control-plane-health-monitor"></a>
-#### 9.3.3 Health Monitor
+<a id="control-plane-robot-health-and-connectivity"></a>
+#### 9.3.3 Robot Health and Connectivity
 
-**Responsibility.** Consumes robot telemetry, evaluates `RobotProbe` outcomes, updates `Robot.status.hardware[]` and `Robot.status.health`, and emits Kubernetes Events for health-state transitions.
+**Responsibility.** Consumes robot telemetry, evaluates `RobotProbe` outcomes, updates `Robot.status.hardware[]` and `Robot.status.health`, and drives the connectivity lifecycle (`lastSeenAt`, the `Offline` transition, and the prolonged-offline escalation).
+
+> **This section describes a responsibility grouping, not a deployable component.** Earlier revisions named a single "Health Monitor" here. No such component exists in the reference implementation, and describing one obscured which controller an implementer should actually look at. The behaviours below are realised by four existing components:
+>
+> | Behaviour | Realised by |
+> | :---- | :---- |
+> | Hardware deltas from telemetry → `status.hardware[]`, `status.batteryPercent` | The telemetry Ingestor/Projector ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)) writing through the Robot status sink |
+> | `status.connectivity.lastSeenAt` | The FleetAdapter controller, on `ControlStream` liveness |
+> | Heartbeat-confirmed `Offline` transition, offline-duration accounting, the `ConnectivityCritical` escalation, and the aggregate `status.health` | The Robot reconciler |
+> | `RobotProbe.status.robotResults[]` and the probe-driven `status.hardware[*].status` write | The Probe Controller ([§9.1.7](#robotprobe)) |
+>
+> An implementer MAY consolidate these into one component; the specification constrains the observable behaviour and the field ownership, not the process boundary.
 
 **Inputs.**
 
@@ -8744,49 +9785,52 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 
 **Outputs.**
 
-- `Robot.status.hardware[*].status` and `Robot.status.hardware[*].degradationReason` (updated from telemetry delta and probe outcomes).
-- `Robot.status.health.status` (`Healthy`, `Degraded`, `Critical`).
-- `Robot.status.health.message`.
-- `Robot.status.connectivity.lastSeenAt` (transition-driven liveness only). Per-frame connectivity latency is a telemetry metric routed to the TSDB ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), never a `Robot.status` field.
-- `Robot.status.phase` → `Offline` when T1 threshold elapsed; no further phase transition. Any resulting `FleetAction` phase change — the move to `Revoking` and any later reassignment — is the Scheduler's responsibility, driven by this `Offline` transition and the assignment-lease lifecycle ([§9.3.2](#control-plane-scheduler)).
-- `RobotProbe.status.robotResults[*]` (probe outcomes per robot).
-- Kubernetes Events: `RobotOffline`, `RobotCritical`, `RobotReconnected`, `HardwareHealthy`, `HardwareDegraded`, `HardwareFailed`, `ProbeFailure`, `EstopLatencyViolation`, `ChargingDockUnassigned`.
-- Safety audit log entries for `ROBOT_OFFLINE`, `ROBOT_CRITICAL`, `ROBOT_RECONNECTED`, `PROBE_FAILURE`, `CAPABILITY_DEGRADED`.
+- `Robot.status.hardware[*].status` and `Robot.status.hardware[*].degradationReason` — from the telemetry delta (Robot status sink) and from probe outcomes (Probe Controller).
+- `Robot.status.health.status` (`Healthy`, `Degraded`, `Critical`) and `Robot.status.health.message` — **Robot reconciler**. The derivation is a pure summary of `status.hardware[]` and `status.capabilities[]`, so it is computed where those are resolved (immediately after capability derivation) and rides the same status write. See *Aggregate health derivation* below.
+- `Robot.status.connectivity.lastSeenAt` — **FleetAdapter controller** (transition-driven liveness only). Per-frame connectivity latency is a telemetry metric routed to the TSDB ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), never a `Robot.status` field.
+- `Robot.status.phase` → `Offline` when T1 threshold elapsed — **Robot reconciler**; no further phase transition. Any resulting `FleetAction` phase change — the move to `Revoking` and any later reassignment — is the Scheduler's responsibility, driven by this `Offline` transition and the assignment-lease lifecycle ([§9.3.2](#control-plane-scheduler)).
+- `RobotProbe.status.robotResults[*]` (probe outcomes per robot) — **Probe Controller**.
+- Safety audit log entries for `ROBOT_OFFLINE`, `ROBOT_CRITICAL`, `ROBOT_RECONNECTED` and `CAPABILITY_DEGRADED` (**Robot reconciler**) and `PROBE_FAILURE` (**Probe Controller**).
+- Kubernetes Events `RobotOffline`, `RobotCritical`, `RobotReconnected`, `HardwareHealthy`, `HardwareDegraded`, `HardwareFailed`, `ProbeFailure` and `ChargingDockUnassigned` — **specified, controller pending**. None is emitted at v0.3: the Robot reconciler holds an audit recorder but no Kubernetes event recorder, so these transitions are visible in the safety audit log and in `Robot.status`, and not in `kubectl describe robot`. An operator MUST NOT build alerting on these event reasons at v0.3. (`EstopLatencyViolation` is emitted, but by the estop dispatcher — [§9.6.2.3](#safety-estop-state-machine) — not from this grouping.)
 
 **Key behaviours.**
 
-*Telemetry processing.* On receipt of each `TelemetryPayload`, the Health Monitor applies hardware delta updates to `Robot.status.hardware[]` and model delta updates to `Robot.status.installedModels[]`. It then triggers the Capability Controller (notifies via a watch-event write to `Robot.status`) to re-derive affected capabilities. This notification is not a direct call — it is a status write that the Capability Controller watches. High-cadence fields (position, raw battery, latency) are NOT projected onto `Robot.status` on every frame; they are routed to the telemetry TSDB by the pipeline specified in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split), which writes status only on a *material transition*.
+*Telemetry processing.* On receipt of each `TelemetryPayload`, the telemetry Ingestor applies hardware delta updates to `Robot.status.hardware[]` through the Robot status sink. `TelemetryPayload` carries no model-install-state field ([§9.2](#fleet-adapter-protocol)) — `Robot.status.installedModels[]` is written by a separate, event/scan-driven path owned by the OTA/Model Update Manager ([§9.3.6](#control-plane-ota-model-update-manager)), not by the telemetry projection. That status write is itself the notification: the Robot reconciler watches `Robot`, and re-derives `status.capabilities[]` (and the aggregate `status.health`) on the resulting reconcile. There is no separate Capability Controller and no direct call — capability derivation runs inside the Robot reconciler. High-cadence fields (position, raw battery, latency) are NOT projected onto `Robot.status` on every frame; they are routed to the telemetry TSDB by the pipeline specified in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split), which writes status only on a *material transition*.
 
-*Probe outcome integration.* When a `RobotProbe.status.robotResults[*]` entry transitions to `Degraded` (consecutive failures ≥ `failureThreshold`), the Health Monitor writes `status.hardware[componentName].status = Degraded` on the corresponding Robot, sourcing the `degradationReason` from the probe's `actualMetrics` and `message`. This write is indistinguishable from a telemetry-reported degradation from the Capability Controller's perspective.
+*Probe outcome integration.* When a `RobotProbe.status.robotResults[*]` entry transitions to `Degraded` (consecutive failures ≥ `failureThreshold`), the Probe Controller writes `status.hardware[componentName].status = Degraded` on the corresponding Robot, sourcing the `degradationReason` from the probe's `actualMetrics` and `message`. The write is deliberately indistinguishable from a telemetry-reported degradation, so capability derivation and health aggregation need not know which source produced it.
 
-*Connectivity fencing.* The Health Monitor maintains a per-robot timer keyed to `Robot.status.connectivity.lastSeenAt`. When T1 (offline threshold) elapses it writes `Robot.status.phase = Offline` and `Robot.status.health.status = Critical`. Before that write it pushes up to three `HeartbeatRequest`s, five seconds apart, and declares Offline only if none is answered — so a robot whose telemetry stalls while its stream is still live is asked before it is written off. The attempts are spread across reconciles rather than slept through, so one unresponsive adapter cannot hold a worker for the full budget. A robot that answers keeps its phase and its `lastSeenAt` is deliberately **not** refreshed: it answered a liveness probe, it did not send telemetry, and conflating the two would hide a genuinely stalled telemetry stream behind a healthy-looking age. When no push path exists at all — ControlStream disabled, or no live stream to the robot's adapter — the transition falls back to elapsed time alone; being unable to ask is not a reason to leave a dead robot holding its assignment. This `Offline` transition is the single trigger for in-flight action revocation: the Scheduler observes it and, for any outstanding lease, stops lease renewal and moves the affected action to `Revoking` ([§9.3.2](#control-plane-scheduler)). Actual reassignment does not follow at this point — it waits until the lease is provably dead (the single-executor floor, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). At T2 (critical threshold) the Health Monitor emits a `RobotCritical` event as an escalation signal only; it does not itself modify `FleetAction` resources and does not drive reassignment timing.
+*Connectivity fencing.* The Robot reconciler evaluates each robot against `Robot.status.connectivity.lastSeenAt` on every reconcile. When T1 (offline threshold) elapses it writes `Robot.status.phase = Offline`. It does not write `status.health`: health is a hardware-and-capability aggregate and connectivity is signalled separately (see *Aggregate health derivation* below). Before that write it pushes up to three `HeartbeatRequest`s, five seconds apart, and declares Offline only if none is answered — so a robot whose telemetry stalls while its stream is still live is asked before it is written off. The attempts are spread across reconciles rather than slept through, so one unresponsive adapter cannot hold a worker for the full budget. A robot that answers keeps its phase and its `lastSeenAt` is deliberately **not** refreshed: it answered a liveness probe, it did not send telemetry, and conflating the two would hide a genuinely stalled telemetry stream behind a healthy-looking age. When no push path exists at all — ControlStream disabled, or no live stream to the robot's adapter — the transition falls back to elapsed time alone; being unable to ask is not a reason to leave a dead robot holding its assignment. This `Offline` transition is the single trigger for in-flight action revocation: the Scheduler observes it and, for any outstanding lease, stops lease renewal and moves the affected action to `Revoking` ([§9.3.2](#control-plane-scheduler)). Actual reassignment does not follow at this point — it waits until the lease is provably dead (the single-executor floor, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). At T2 (critical threshold) the Robot reconciler raises the `ConnectivityCritical` condition and seals a `ROBOT_CRITICAL` audit entry as an escalation signal only; it does not itself modify `FleetAction` resources and does not drive reassignment timing.
 
-*Aggregate health derivation.* After processing each telemetry batch, the Health Monitor recomputes `Robot.status.health.status`:
+*Aggregate health derivation.* The **Robot reconciler** recomputes `Robot.status.health` on every reconcile, immediately after it derives `status.capabilities[]`:
 
 - `Healthy`: all hardware components `Healthy`; all `pauseable: false` capabilities `Active`.
 - `Degraded`: at least one component `Degraded`; no component `Failed`; all `pauseable: false` capabilities `Active`.
 - `Critical`: any component `Failed`, OR any `pauseable: false` capability not `Active`.
 
-*Charging-dock gap detection.* When a battery reading crosses `Robot.spec.charging.minBatteryPctToCharge` while `spec.charging.dockName` is empty, the Health Monitor emits a `ChargingDockUnassigned` Warning event on the Robot. No automatic docking occurs (there is no dock target) and no phase transition is forced; the Scheduler's `minBatteryPctForAction` filter ([§9.3.2](#control-plane-scheduler)) remains the only automatic guard. The Robot reconciler maintains the corresponding `ChargingConfigured` condition ([§9.1.3.1](#robot-schema)).
+It is a pure function of `status.hardware[]` and `status.capabilities[]` — both already resolved at that point — so it performs no lookup and adds no status write of its own; the result rides the reconciler's existing material-change patch. A `Disabled` component is intentionally out of service rather than faulty and does not count against any of the three states. A capability with no `pauseable` declaration — a model-granted entry, which is synthetic and additive — is not a `pauseable: false` capability and does not gate health.
+
+`status.phase` is deliberately NOT an input: an `Offline` robot is not thereby `Critical`. Connectivity carries its own signal in the `ConnectivityCritical` condition ([§9.1.3.1](#robot-schema)), and folding it into a hardware-and-capability aggregate would make both harder to read — a robot with faultless hardware would report `Critical` hardware health only for having gone quiet.
+
+*Charging-dock gap detection* — **specified, controller pending.** When a battery reading crosses `Robot.spec.charging.minBatteryPctToCharge` while `spec.charging.dockName` is empty, a `ChargingDockUnassigned` Warning event is specified to be emitted on the Robot. No controller emits it at v0.3. No automatic docking occurs (there is no dock target) and no phase transition is forced; there is no automatic battery guard at v0.3 — the Scheduler's `minBatteryPctForAction` filter is specified but not implemented ([§9.3.2](#control-plane-scheduler) candidate filter 4, [§4](#non-goals) item 16), so an undocked draining robot keeps receiving actions until an operator intervenes. The Robot reconciler maintains the corresponding `ChargingConfigured` condition ([§9.1.3.1](#robot-schema)).
 
 **CRD ownership.**
 
 | CRD | Access |
 | :---- | :---- |
-| `Robot` | Reads `spec.*`; writes `status.hardware[]`, `status.installedModels[]`, `status.health`, `status.connectivity.lastSeenAt`, `status.phase` (Offline only) |
+| `Robot` | Reads `spec.*`; writes `status.hardware[]`, `status.connectivity.lastSeenAt`, `status.phase` (Offline only) — NOT `status.health`, which the Robot reconciler derives (see *Aggregate health derivation*), and NOT `status.installedModels[]`, see [§9.3.6](#control-plane-ota-model-update-manager) |
 | `RobotProbe` | Reads `spec.*`; writes `status.robotResults[]`, `status.lastProbeTime` |
 | `SwarmadaConfig` | Reads `spec.health` |
 
-**Dependencies.** API Server `ControlStream` endpoint (for telemetry receipt); Probe Controller (co-located; issues the `verify_*` probe `Command`s and feeds outcomes back to the Health Monitor via `RobotProbe.status`).
+**Dependencies.** API Server `ControlStream` endpoint (for telemetry receipt and heartbeat exchange); the Probe Controller, which issues the `verify_*` probe `Command`s and records outcomes on `RobotProbe.status` and on `Robot.status.hardware[]`.
 
-**Crash and restart behaviour.** On restart the Health Monitor re-reads all `Robot.status.connectivity.lastSeenAt` values and rebuilds its connectivity timers. Robots that were already past T1 when the monitor crashed transition to `Offline` on the first reconciliation after restart. No telemetry is buffered in the monitor; buffered telemetry from Fleet Adapters is replayed from the gRPC stream on reconnect. Restart is idempotent; status writes are conditioned on resource version to avoid lost-update conflicts.
+**Crash and restart behaviour.** These behaviours hold no in-memory timer state to lose: the `Offline` decision is recomputed from `Robot.status.connectivity.lastSeenAt` on each reconcile, so a robot already past T1 when the process restarted transitions to `Offline` on the first reconciliation afterwards. No telemetry is buffered in the control plane; buffered telemetry from Fleet Adapters is replayed from the gRPC stream on reconnect. Restart is idempotent; status writes are conditioned on resource version to avoid lost-update conflicts.
 
 ---
 
 <a id="control-plane-zone-controller"></a>
 #### 9.3.4 Zone Controller
 
-**Responsibility.** Manages the `FleetZone` hierarchy, derives `Robot.status.currentZone` from position telemetry using polygon containment checks, maintains `status.isLeaf` on each `FleetZone`, enforces zone capacity limits, and pushes the `scan` `Command` (`ScanCapabilities`) down each adapter's `ControlStream` at the configured interval.
+**Responsibility.** Manages the `FleetZone` hierarchy, derives `Robot.status.currentZone` from position telemetry using polygon containment checks, maintains `status.isLeaf` on each `FleetZone`, enforces zone capacity limits, and is specified to push the `scan` `Command` (`ScanCapabilities`) down each adapter's `ControlStream` at the configured interval — **specified, not implemented at v0.3**; see "Capability rescan" below.
 
 **Inputs.**
 
@@ -8803,12 +9847,12 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 - `FleetZone.status.isLeaf` (recomputed when any `FleetZone` is created or deleted).
 - `FleetZone.status.childZones[]` (list of direct children).
 - `FleetZone.status.robotCount` (current robots in zone and descendants).
-- `FleetZone.status.estopStatus` (updated when estop propagation events arrive).
-- `Robot.status.hardware[]` and `Robot.status.installedModels[]` (written from the `scan` `CommandResult`'s `CapabilitiesSnapshot` when it differs from stored state, using the same write path as telemetry-reported updates).
-- `pause` and `resume` `Command`s (`PauseCapabilities` / `ResumeCapabilities`) to Fleet Adapters when `ZoneMaintenance` activates and deactivates.
+- `FleetZone.status.estopStatus` (updated when estop propagation events arrive). **Attribution note:** like [§9.3.3](#control-plane-robot-health-and-connectivity), this subsection describes a responsibility rather than a single binary component — `estopStatus` and `lastEstopAt` are in practice written by the zone estop controller, not by the topology reconciler that writes `isLeaf`/`childZones`/`robotCount`.
+- `Robot.status.hardware[]` and `Robot.status.installedModels[]` from the `scan` `CommandResult`'s `CapabilitiesSnapshot` — **specified, not implemented at v0.3**, see "Capability rescan" below.
+- `pause` and `resume` `Command`s (`PauseCapabilities` / `ResumeCapabilities`) to Fleet Adapters when `ZoneMaintenance` activates and deactivates — **specified, not implemented at v0.3**: no controller constructs either Command. A maintenance pause is a control-plane status change only (`Robot.status.phase = Maintenance`, pauseable capabilities marked `Paused`); the robot is never told to stop and no `PauseResult` is requested, so nothing confirms a physical halt ([§9.1.11](#zonemaintenance)).
 - `ZoneMaintenance.status.pausedRobots[]`, `status.windingDownRobots[]`, `status.phase`, `status.conditions`.
-- `SwarmadaConfig` auto-creation (if absent when the first `FleetZone` is created in a namespace, [§9.1.12.3](#swarmadaconfig-auto-creation-on-namespace-initialization)).
-- Kubernetes Events: `ZonePositionUnmatched`, `ZoneCapacityReached`, `ZoneMaintenanceActive`, `ZoneMaintenanceCompleted`, `ScanCapabilitiesTimeout`.
+- `SwarmadaConfig` auto-creation (if absent when the first `FleetZone` is created in a namespace, [§9.1.12.4](#swarmadaconfig-auto-creation-on-namespace-initialization)).
+- Kubernetes Events: `ZonePositionUnmatched`, `ZoneCapacityReached`, `EdgeFeedUnavailable` and `EdgeFeedRestored` are emitted (the last two from the edge reporter under this same responsibility grouping). `ZoneMaintenanceActive`, `ZoneMaintenanceCompleted` and `ScanCapabilitiesTimeout` are **specified, controller pending** — none is emitted at v0.3; the last reports a scan that timed out, and no scan is issued at all (see *Capability rescan* below).
 
 **Key behaviours.**
 
@@ -8818,35 +9862,35 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 
 *Capacity enforcement.* The Zone Controller maintains a per-zone robot count derived from `Robot.status.currentZone`. When a robot's `currentZone` changes, the counts for the old and new zones are decremented and incremented respectively. When a zone would exceed `maxConcurrentRobots`, the Zone Controller emits a `ZoneCapacityReached` event and pushes a `zone_admission` `Command` (`admit: false`) to hold the robot at the boundary; it pushes `zone_admission` with `admit: true` when a slot frees ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)). It does not physically prevent robot entry; enforcement depends on the Fleet Adapter honouring the hold.
 
-*Capability rescan.* At every `capabilityRescanIntervalSeconds` interval, the Zone Controller pushes a `scan` `Command` to each Fleet Adapter's `ControlStream` in the namespace. Responses are compared field-by-field against stored `Robot.status.hardware[]` and `Robot.status.installedModels[]`. Discrepancies are written back via the same status path as telemetry updates. If a response does not arrive within 30 seconds, a `ScanCapabilitiesTimeout` Warning is emitted and the stored state is left unchanged.
+*Capability rescan.* **Specified, not implemented at v0.3** ([§7](#drawbacks) item 10; [§9.1.12.5](#swarmadaconfig-the-scan-command-and-capabilityrescaninterval-in-practice)). The design intent is that at every `capabilityRescanIntervalSeconds` interval, the Zone Controller pushes a `scan` `Command` to each Fleet Adapter's `ControlStream` in the namespace, compares responses field-by-field against stored `Robot.status.hardware[]` and `Robot.status.installedModels[]`, writes back any discrepancy via the same status path as telemetry updates, and emits a `ScanCapabilitiesTimeout` Warning if a response does not arrive within 30 seconds. No controller in the shipped codebase constructs or sends a `scan` `Command` on this or any trigger; the interval, the timeout, and the reconciliation described here do not run at v0.3.
 
-*ZoneMaintenance lifecycle.* On `ZoneMaintenance` activation (at `scheduledStart` or immediately if absent), the Zone Controller pushes a `pause` `Command` to each in-scope robot per the drain sequence defined in [§9.1.11.2](#zonemaintenance-graceful-mode-step-by-step) and [§9.1.11.3](#zonemaintenance-immediate-mode-step-by-step). On deactivation (operator delete, `swarmctl deactivate maintenance`, or `autoResumeAfterMinutes` elapsed), it pushes a `resume` `Command` and transitions robots from `Maintenance` to `Idle`. It enforces `requireEstopClearBeforeResume` before pushing `resume`.
+*ZoneMaintenance lifecycle.* On `ZoneMaintenance` activation (at `scheduledStart` or immediately if absent), the Zone Controller is specified to push a `pause` `Command` to each in-scope robot per the drain sequence defined in [§9.1.11.2](#zonemaintenance-graceful-mode-step-by-step) and [§9.1.11.3](#zonemaintenance-immediate-mode-step-by-step), and on deactivation (operator delete, or `autoResumeAfterMinutes` elapsed) to push a `resume` `Command` and transition robots from `Maintenance` to `Idle`, enforcing `requireEstopClearBeforeResume` before the resume. **The two Command pushes are specified, not implemented at v0.3** (see Outputs above): the phase transitions, the drain sequence and the `requireEstopClearBeforeResume` gate all run, and the robot is never sent either Command — so nothing confirms a physical halt and a moving robot is not stopped by a maintenance window.
 
 **CRD ownership.**
 
 | CRD | Access |
 | :---- | :---- |
-| `FleetZone` | Reads `spec.*`; writes `status.isLeaf`, `status.childZones`, `status.robotCount`, `status.estopStatus` |
-| `Robot` | Reads `status.currentZone`; writes `status.currentZone`, `status.specZoneMatchesCurrent`, `status.hardware[]` (from scan), `status.phase` (Maintenance transitions). Position is consumed from the telemetry stream ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), never from `Robot.status` |
+| `FleetZone` | Reads `spec.*`; writes `status.isLeaf`, `status.childZones`, `status.robotCount`; `status.estopStatus` and `status.lastEstopAt` are written by the zone estop controller under this same responsibility grouping |
+| `Robot` | Reads `status.currentZone`; writes `status.currentZone`, `status.specZoneMatchesCurrent`, `status.hardware[]` and `status.installedModels[]` (from scan — specified, not implemented at v0.3, see "Capability rescan" below), `status.phase` (Maintenance transitions). Position is consumed from the telemetry stream ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), never from `Robot.status` |
 | `ZoneMaintenance` | Reads `spec.*`; writes `status.phase`, `status.pausedRobots`, `status.windingDownRobots`, `status.activatedAt`, `status.conditions` |
-| `SwarmadaConfig` | Reads `spec.health.capabilityRescanIntervalSeconds`, `spec.maintenance.*`; creates if absent |
+| `SwarmadaConfig` | Reads `spec.maintenance.*`; creates if absent. `spec.health.capabilityRescanIntervalSeconds` is **specified, not read at v0.3** — nothing issues the scan it would schedule (see *Capability rescan* below) |
 
-**Dependencies.** API Server `ControlStream` endpoint (for the `scan`, `pause`, `resume` `Command`s); Telemetry Pipeline Ingestor ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split) — per-frame position subscription for zone derivation; the TSDB sink is NOT a dependency); Health Monitor (the zone controller's scan writes feed into the health monitor's downstream capability re-derivation path via Robot status watches).
+**Dependencies.** API Server `ControlStream` endpoint (for the `scan`, `pause`, `resume` `Command`s); Telemetry Pipeline Ingestor ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split) — per-frame position subscription for zone derivation; the TSDB sink is NOT a dependency); Robot reconciler (specified: the zone controller's scan writes would feed its downstream capability re-derivation via `Robot` status watches — **not implemented at v0.3**, since `ScanCapabilities` itself is not implemented; see "Capability rescan" above. At v0.3 this is not a live dependency).
 
-**Crash and restart behaviour.** On restart the Zone Controller re-reads all `FleetZone` resources and rebuilds the zone tree in memory. It re-reads all `Robot.status.currentZone` values to rebuild the capacity counters, then re-subscribes to the Ingestor position stream ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)); the first post-restart frame per robot re-derives `currentZone`, and an unchanged result produces no write. The `ScanCapabilities` timer restarts from zero on restart; the next scan occurs at `capabilityRescanIntervalSeconds` after the controller comes up, not at a fixed wall-clock interval. `ZoneMaintenance` resources in `Active` phase when the controller crashed are resumed: the controller re-pushes a `pause` `Command` to any robot not yet in `status.pausedRobots[]`. All operations are idempotent.
+**Crash and restart behaviour.** On restart the Zone Controller re-reads all `FleetZone` resources and rebuilds the zone tree in memory. It re-reads all `Robot.status.currentZone` values to rebuild the capacity counters, then re-subscribes to the Ingestor position stream ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)); the first post-restart frame per robot re-derives `currentZone`, and an unchanged result produces no write. The `ScanCapabilities` timer is specified to restart from zero on restart, with the next scan at `capabilityRescanIntervalSeconds` after the controller comes up rather than at a fixed wall-clock interval — but **no scan is issued at v0.3** (see *Capability rescan* above), so there is no such timer to restart. `ZoneMaintenance` resources in `Active` phase when the controller crashed are resumed: the controller re-pauses any robot not yet in `status.pausedRobots[]` (specified to re-push a `pause` `Command`, which is not issued at v0.3 — the robot's `status.phase` is set to `Maintenance` and it is added to the list). All operations are idempotent.
 
 ---
 
 <a id="control-plane-traffic-deconfliction-engine"></a>
 #### 9.3.5 Traffic Deconfliction Engine
 
-**Responsibility.** Operates as a **synchronous blocking gate** called by the Scheduler before every task assignment (zone capacity enforcement), AND as a reservation manager for shared physical resources that Fleet Adapters reserve at runtime during task execution. Both flows write their state to `FleetZone.status` (see [§9.4](#tde) for the full TDE specification).
+**Responsibility.** Operates as a **synchronous blocking gate** called by the Scheduler before every action assignment (zone capacity enforcement), AND as a reservation manager for shared physical resources that Fleet Adapters reserve at runtime during action execution. Both flows write their state to `FleetZone.status` (see [§9.4](#tde) for the full TDE specification).
 
 **Two entry points — same state store.**
 
 | Caller | When | What it checks/manages |
 | :---- | :---- | :---- |
-| **Scheduler** | Before committing every `FleetAction` assignment | Zone capacity (`FleetZone.spec.maxConcurrentRobots`). Writes `FleetZone.status.reservations[]`. Returns `Granted \| Denied \| PreemptedGranted`. The Scheduler MUST NOT write `FleetAction.status.assignedRobot` without a `Granted` or `PreemptedGranted` response. |
+| **Scheduler** | Before committing any `FleetAction` assignment that names a zone | Zone capacity (`FleetZone.spec.maxConcurrentRobots`). Writes `FleetZone.status.reservations[]`. Returns `Granted \| Denied \| PreemptedGranted`. The Scheduler MUST NOT write `FleetAction.status.assignedRobot` without a `Granted` or `PreemptedGranted` response. **`spec.zone` is optional on `FleetAction`, and an action that omits it does not reach the gate at v0.3** — it is assigned with no reservation entry. See [§9.4.10](#tde-normative-invariants) TDE-1. |
 | **Fleet Adapter** (via `ResourceRequest` on ControlStream) | At runtime, when the robot needs a physically constrained resource | Shared resource capacity (`FleetZone.spec.sharedResources[*]`). Writes `FleetZone.status.sharedResourceQueues[]`. Returns `GRANTED \| QUEUED \| DENIED` (async grant via `reservation_granted` Command). |
 
 **Protocol mapping ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)).** Adapter-initiated reservations ride the `ControlStream` as `ResourceRequest`s (`reserve` / `release`) answered by `ResourceResponse`; a `QUEUED` response is later resolved by a `reservation_granted` `Command`. Zone-capacity holds are managed by the Scheduler-gate path (no adapter RPC required); zone admission `Command`s (`zone_admission`) are used when a robot approaches a zone boundary to hold or release a physical slot.
@@ -8857,8 +9901,8 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 - `reserve` and `release` `ResourceRequest` messages from Fleet Adapters up the `ControlStream` (shared resource path).
 - `FleetZone` resource watch stream (for declared resources, capacities, and reservation policies).
 - `OnRobotEnteredZone` / `OnRobotExitedZone` events from the Zone Controller (to transition zone reservations from `Reserved` → `Occupied` and release Occupied reservations on exit).
-- `OnActionPhaseChanged` events from the FleetAction reconciler (to extend reservation TTLs on `Revoking`, and to release reservations on terminal task phases).
-- `SwarmadaConfig.spec.trafficDeconfliction` (all tunables: `tdeCallTimeoutMs`, `reservationTTLSeconds`, `disconnectedReservationTTLSeconds`, `onReservationExpiry`, `recovery.*`).
+- `OnActionPhaseChanged` events from the FleetAction reconciler (to extend reservation TTLs on `Revoking`, and to release reservations on terminal action phases).
+- `SwarmadaConfig.spec.trafficDeconfliction`: `reservationTTLSeconds`, `disconnectedReservationTTLSeconds` and `recovery.*` are read. `tdeCallTimeoutMs` and `onReservationExpiry` are **schema-only at v0.3** — validated and defaulted, read by nothing ([§9.1.12](#swarmadaconfig)).
 
 **Outputs.**
 
@@ -8866,16 +9910,16 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 - `ResourceResponse` (`ReserveResult`: `GRANTED \| QUEUED \| DENIED`) down the `ControlStream` to Fleet Adapters.
 - `reservation_granted` `Command`s when a queued shared-resource reservation is granted.
 - `zone_admission` `Command`s (`admit: false` to hold a robot at zone boundary; `admit: true` to release the hold) — used by Zone Controller capacity enforcement when a robot approaches a full zone.
-- `FleetZone.status.reservations[]` (zone capacity state: Reserved/Occupied entries per task).
+- `FleetZone.status.reservations[]` (zone capacity state: Reserved/Occupied entries per action).
 - `FleetZone.status.sharedResourceQueues[]` (shared resource queue state per resource).
 - `FleetZone.status.currentConcurrentRobots` (derived count of Occupied entries).
-- Kubernetes Events: `TDEReservationGranted`, `TDEPreemptedGranted`, `TDEReservationDenied`, `TDEReservationExpired`, `TDEPreemption`, `TDECallTimeout`, `TDEResourceQueued`, `TDEResourceGranted`, `TDEConservativeRecovery`, `TDEReservedReleasedOnRestart`, `TDEOccupiedReleasedOnRecovery`.
+- Kubernetes Events: `TDEReservationGranted`, `TDEPreemptedGranted`, `TDEReservationDenied`, `TDEReservationExpired`, `TDEPreemption`, `TDEResourceQueued`, `TDEResourceGranted`, `TDEConservativeRecovery`, `TDEReservedReleasedOnRestart`, `TDEOccupiedValidated`, `TDEOccupiedReleasedOnRecovery`, `TDECallTimeout`. **The whole set is specified, controller pending: the reference TDE emits no Kubernetes Events at all** — it holds no event recorder. Combined with the `swarmada_tde_*` metrics being unregistered ([§9.4.9](#tde-observability)), this leaves the TDE with no observability surface at v0.3, and an operator MUST NOT build alerting on either. `TDECallTimeout` is doubly pending: it reports the `tdeCallTimeoutMs` budget being exceeded, and no call site reads that budget.
 
 **Key behaviours.**
 
 *Scheduler gate (zone capacity).* On each `RequestReservation` call, the TDE counts active `Reserved` (not yet expired) and `Occupied` entries in `FleetZone.status.reservations[]` for the target zone. If their sum is less than `spec.maxConcurrentRobots` (or the zone has no limit), the TDE creates a `Reserved` entry with an expiry (`now + reservationTTLSeconds`) and returns `Granted`. If the zone is at capacity and the requesting action has `priority: Critical` or `High`, the TDE attempts preemption per [§9.4.6](#tde-preemption-algorithm); otherwise returns `Denied` with a `RetryAfter` hint equal to the earliest `expiresAt` in the zone.
 
-*Reservation TTL and expiry.* A `Reserved` entry that is not promoted to `Occupied` (because the robot never entered the zone) expires at its `expiresAt`. On expiry, the entry is deleted and, when `onReservationExpiry: ReleaseAndRequeue`, the FleetAction reconciler returns the task to `Pending`. The expiry reconciler runs every 10 seconds.
+*Reservation TTL and expiry.* A `Reserved` entry that is not promoted to `Occupied` (because the robot never entered the zone) expires at its `expiresAt`. It is specified to be deleted on expiry by a reconciler running every 10 seconds, and — when `onReservationExpiry: ReleaseAndRequeue` — for the FleetAction reconciler to return the action to `Pending`. **Both halves are specified, not implemented at v0.3** ([§9.4.8](#tde-reservation-expiry-reconciler)): no expiry reconciler exists, `onReservationExpiry` is read by nothing, and an expired `Reserved` entry stops counting against capacity while remaining in `FleetZone.status.reservations[]` indefinitely.
 
 *Reserved → Occupied promotion.* The Zone Controller fires `OnRobotEnteredZone` when a robot's derived `currentZone` changes to a zone where it holds a `Reserved` entry. The TDE transitions the entry to `Occupied` and clears `expiresAt` — Occupied entries have no expiry because physical presence is the ground truth.
 
@@ -8885,7 +9929,7 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 
 *Resource inheritance.* A resource declared at a parent `FleetZone` is addressable by robots in any descendant zone. The TDE resolves resource names by walking up the zone tree.
 
-*Restart recovery.* On TDE process start: wait for Zone Controller readiness (`zoneControllerWaitTimeoutSeconds`); validate all `Occupied` entries against `Robot.status.currentZone`; release all `Reserved` entries unconditionally (transit state cannot be safely reconstructed); return affected tasks to `Pending` via the FleetAction reconciler. If Zone Controller is not ready within the timeout: apply `conservativeRecoveryFallback` (release all). Full recovery algorithm in [§9.4.7](#tde-restart-recovery).
+*Restart recovery.* On TDE process start: wait for Zone Controller readiness (`zoneControllerWaitTimeoutSeconds`); validate all `Occupied` entries against `Robot.status.currentZone`; release all `Reserved` entries unconditionally (transit state cannot be safely reconstructed); return affected actions to `Pending` via the FleetAction reconciler. If Zone Controller is not ready within the timeout: apply `conservativeRecoveryFallback` (release all). Full recovery algorithm in [§9.4.7](#tde-restart-recovery).
 
 **CRD ownership.**
 
@@ -8894,11 +9938,11 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 | `FleetZone` | Reads `spec.sharedResources[]`, `spec.maxConcurrentRobots`; writes `status.reservations[]`, `status.sharedResourceQueues[]`, `status.currentConcurrentRobots` |
 | `Robot` | Reads `status.currentZone` (for Occupied validation on restart and zone-entry events) |
 | `FleetAction` | Reads `spec.priority`, `status.phase` (via `OnActionPhaseChanged` events) |
-| `SwarmadaConfig` | Reads `spec.trafficDeconfliction.*` |
+| `SwarmadaConfig` | Reads `spec.trafficDeconfliction.*` except `tdeCallTimeoutMs` and `onReservationExpiry`, which are schema-only at v0.3 ([§9.1.12](#swarmadaconfig)) |
 
 **Dependencies.** Scheduler (calls `RequestReservation`; receives `ReservationResult`); Zone Controller (fires `OnRobotEnteredZone` / `OnRobotExitedZone`; sends zone admission Commands); API Server `ControlStream` endpoint (for `ResourceRequest` / `ResourceResponse` and `reservation_granted` Commands).
 
-**Crash and restart behaviour.** See [§9.4.7](#tde-restart-recovery). Reservation state is durable in `FleetZone.status`; the TDE is stateless beyond what is in CRD status. Reserved entries are always released on restart (conservative); Occupied entries are validated against `Robot.status.currentZone` before being retained. The conservative fallback releases everything and returns all affected tasks to Pending. Restart is safe at the cost of one scheduling round-trip per affected task.
+**Crash and restart behaviour.** See [§9.4.7](#tde-restart-recovery). Reservation state is durable in `FleetZone.status`; the TDE is stateless beyond what is in CRD status. Reserved entries are always released on restart (conservative); Occupied entries are validated against `Robot.status.currentZone` before being retained. The conservative fallback releases everything and returns all affected actions to Pending. Restart is safe at the cost of one scheduling round-trip per affected action.
 
 ---
 
@@ -8913,7 +9957,9 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 - `ModelRollout` resource watch stream.
 - `Robot` resource watch stream (for phase, battery, current zone, and capability status — used to evaluate `safetyConstraints` before batch selection).
 - `SwarmadaConfig.spec.maintenance` and `spec.health.disableAllProbes` (for the `push_firmware` timing gate).
-- `push_firmware` and `model_update` `CommandResult`s (`FirmwareResult`, `ModelUpdateResult`) from Fleet Adapters over the `ControlStream`.
+- `push_firmware` and `model_update` `CommandResult`s (`FirmwareResult`, `ModelUpdateResult`) from Fleet Adapters over the `ControlStream` — accept/reject acknowledgements only, not terminal outcomes.
+- `UpdateProgress` messages from Fleet Adapters over the `ControlStream` — the terminal outcome carrier for an in-progress install (`Succeeded`/`Failed`, ADR-0033); this, not telemetry, is what drives `Robot.status.installedModels[*].status` and `status.firmwareVersion` below.
+- `CapabilitiesSnapshot` (the `scan` `CommandResult`) — the recovery-path carrier for the same install state, consumed when a stream dropped mid-install or the control plane restarted (ADR-0033).
 
 **Outputs.**
 
@@ -8921,12 +9967,12 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 - `push_firmware` `Command`s (`PushFirmware`) to Fleet Adapters for `PushImmediate` delivery.
 - `model_update` `Command`s (`ModelUpdate`) to Fleet Adapters when a robot enters the `ModelRollout` batch.
 - `Robot.metadata.annotations` (pending firmware version, URI, checksum).
-- `Robot.status.firmwareVersion` and `Robot.status.previousFirmwareVersion` (written after a confirmed successful firmware update).
-- `Robot.status.installedModels[*].status` transitions (`Updating`, `Active`, `Failed`) as the Fleet Adapter reports model update progress via telemetry.
-- `Robot.status.capabilities[*].status = Unavailable` for capabilities granted by a model under `ModelRollout` (written at batch entry; cleared at successful model activation).
+- `Robot.status.firmwareVersion` and `Robot.status.previousFirmwareVersion`, written after a confirmed successful firmware update: the install-state projection promotes `status.firmwareInstall.runningVersion` into `firmwareVersion` when the robot reports `Running`, capturing the version being replaced into `previousFirmwareVersion` on the same transition. Promotion is gated on `Running` because an `Updating` robot is still on the old version and a `Failed` one may be on any version. Before this the fields were unwritten, which is why a successful install was not recognised and a `PullOnIdle` rollout does not reach a terminal phase ([§9.1.8](#firmwarerollout)). The robot's own report arrives as `Robot.status.firmwareInstall`, which **is** written.
+- `Robot.status.installedModels[*].status` transitions (`Updating`, `Active`, `Failed`) as the Fleet Adapter reports model update progress via `UpdateProgress` (and, on recovery, `CapabilitiesSnapshot`) — not via telemetry; this write is event/scan-driven, never per telemetry tick (RA-1), and goes through its own `RetryOnConflict`-guarded patch, independent of the throttled telemetry-derived `Robot.status` pipeline described in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split).
+- `Robot.status.capabilities[*].status = Unavailable` for capabilities granted by a model under `ModelRollout` (written at batch entry; cleared at successful model activation). **Specified, not implemented at v0.3: the reference control plane writes `Inactive` instead** — see "Capability suspension for ModelRollout" below.
 - `Robot.status.modelGrantedCapabilities[]` upserted (keyed by `modelName`) after each successful ModelRollout install and health check: the entry's `capabilities[]` is set to `grantsCapabilities`; names in `revokesCapabilities` are absent from the new list and consequently absent from the Capability Controller's next `status.capabilities[]` union computation. No controller ever writes `Robot.spec`.
 - `FirmwareRollout.status.*` and `ModelRollout.status.*` (all aggregate counters, `currentBatch[]`, `failedRobots[]`, phase transitions).
-- Kubernetes Events: `FirmwareRolloutBatchStarted`, `FirmwareRolloutCompleted`, `FirmwareRolloutPaused`, `ModelRolloutBatchStarted`, `ModelRolloutCompleted`, `CapabilitiesSuspended`, `CapabilitiesRestored`.
+- Kubernetes Events: `FirmwareRolloutBatchStarted`, `ModelRolloutBatchStarted` and `CapabilitiesRestored` are emitted. `FirmwareRolloutCompleted`, `FirmwareRolloutPaused`, `ModelRolloutCompleted` and `CapabilitiesSuspended` are **specified, controller pending** — no controller emits them, so an operator MUST NOT alert on those four. (A `FIRMWARE_ROLLOUT_PAUSED` entry *is* written to the safety audit log, which is a different sink from a Kubernetes Event.)
 - Safety audit log entries for firmware and model update events ([§9.6.5.1](#safety-required-events)).
 
 **Key behaviours.**
@@ -8940,14 +9986,16 @@ Capability-loss reassignment is **automatic** (unlike operator-gated estop-pause
 
 Robots that fail safety constraints are skipped for this batch cycle and re-evaluated on the next reconciliation. The batch size is capped at `maxUnavailable` (absolute count or percentage). Robots already in the batch count against the limit.
 
-*Capability suspension for ModelRollout.* When a robot enters the `ModelRollout` batch, the manager writes `status: Unavailable` to every `Robot.status.capabilities` entry listed in `spec.grantsCapabilities`, before pushing the `model_update` `Command`. This ordering ensures the Scheduler stops assigning capability-requiring tasks before the Fleet Adapter is notified. The write and the RPC are not atomic; the write always occurs first.
+> **Rename pending.** `requireIdleState` tests `Robot.status.phase`, not a state: the two fields this specification calls states are `Robot.status.estopState` and `FleetAction`/`FleetTask` `spec.desiredState` — there is no `Robot.spec.desiredState` — and neither carries an `Idle` value. The field is filed for rename to `requireIdlePhase`; `requireIdleState` remains the shipped name until that lands.
+
+*Capability suspension for ModelRollout.* When a robot enters the `ModelRollout` batch, the manager is specified to write `status: Unavailable` to every `Robot.status.capabilities` entry listed in `spec.grantsCapabilities`, before pushing the `model_update` `Command`. This ordering is designed to ensure the Scheduler stops assigning capability-requiring actions before the Fleet Adapter is notified; the write and the RPC are specified as non-atomic, with the write always occurring first. **Not implemented at v0.3 in the reference control plane, which writes `status: Inactive` instead** (see [§5.2](#resource-model)).
 
 *Status projection for ModelRollout.* After a successful model install and inference health check, the manager writes to `Robot.status.modelGrantedCapabilities[]` via the `/status` subresource. It upserts the entry keyed by `modelName`:
 
 - Sets the entry's `capabilities[]` to the names listed in `ModelRollout.spec.grantsCapabilities`, atomically replacing any prior entry for that model (previous-version grants are superseded in one write).
 - Omits any names listed in `ModelRollout.spec.revokesCapabilities` from the new entry; absent-from-the-list means not-granted, so those names disappear from the computed `status.capabilities[]` union on the Capability Controller's next reconciliation.
 
-No controller ever writes `Robot.spec`. `spec.capabilities[]` is owned exclusively by operators. The Capability Controller ([§9.1.3.2](#robot-capability-derivation-truth-table)) computes the effective `status.capabilities[]` as the union of spec-declared capabilities (evaluated by the truth table) and model-granted projections from `status.modelGrantedCapabilities[]`. The write is idempotent: setting a model's grant entry to the same capability list is a no-op.
+No controller ever writes `Robot.spec`. `spec.capabilities[]` is owned exclusively by operators. The Capability Controller ([§9.1.3.3](#robot-capability-derivation-truth-table)) computes the effective `status.capabilities[]` as the union of spec-declared capabilities (evaluated by the truth table) and model-granted projections from `status.modelGrantedCapabilities[]`. The write is idempotent: setting a model's grant entry to the same capability list is a no-op.
 
 *pauseOnError.* When any robot in the current batch fails its update and `pauseOnError: true`, the manager transitions the rollout phase to `Paused` and stops selecting new robots for the batch. In-progress robots in the batch continue (they are not aborted); the pause applies to the next batch selection only.
 
@@ -8957,13 +10005,13 @@ No controller ever writes `Robot.spec`. `spec.capabilities[]` is owned exclusive
 | :---- | :---- |
 | `FirmwareRollout` | Reads `spec.*`; writes `status.*` |
 | `ModelRollout` | Reads `spec.*`; writes `status.*` |
-| `Robot` | Reads `spec.*`, `status.phase`, `status.battery`, `status.capabilities`; writes `metadata.annotations` (pending firmware), `status.firmwareVersion`, `status.previousFirmwareVersion`, `status.installedModels[*].status`, `status.capabilities[*].status` (Unavailable/Active), `status.modelGrantedCapabilities[]` (upserted per model on successful rollout — no writes to `spec.*`) |
+| `Robot` | Reads `spec.*`, `status.phase`, `status.battery`, `status.capabilities`; writes `metadata.annotations` (pending firmware); writes `status.firmwareVersion` and `status.previousFirmwareVersion` through the install-state projection; writes `status.installedModels[*].status`, `status.firmwareVersion`, `status.installedModels[*].status`, `status.capabilities[*].status` (specified as Unavailable/Active; v0.3 writes Inactive/Active — see "Capability suspension for ModelRollout" above), `status.modelGrantedCapabilities[]` (upserted per model on successful rollout — no writes to `spec.*`) |
 
-**Dependencies.** API Server `ControlStream` endpoint (for the `push_firmware` and `model_update` `Command`s); Health Monitor (the manager reads `Robot.status.installedModels[*].status` updates that the Health Monitor writes from telemetry, to know when a model has become `Active` after install).
+**Dependencies.** API Server `ControlStream` endpoint — for the `push_firmware`/`model_update` `Command`s the manager sends, and for the `UpdateProgress`/`CapabilitiesSnapshot` messages the manager itself consumes (see Inputs above) to write `Robot.status.installedModels[*].status`.
 
 **Crash and restart behaviour.** All rollout progress is persisted in `FirmwareRollout.status` and `ModelRollout.status`. On restart, the manager re-reads all rollout resources in non-terminal phase (`Pending`, `InProgress`, `Paused`) and reconstructs its batch state from `status.currentBatch[]`. For robots in `currentBatch[]` when the manager crashed:
 
-- If the robot's `status.firmwareVersion` now matches the rollout's `spec.newVersion`: the update succeeded while the manager was down; mark that robot `Updated`.
+- If the robot's `status.firmwareVersion` now matches the rollout's `spec.newVersion`: the update succeeded while the manager was down; mark that robot `Updated`. This branch is reachable: `status.firmwareVersion` is written by the install-state projection from the robot's own report, so a rollout does recover a completion that happened during a restart ([§9.1.8](#firmwarerollout)).
 - If the robot's `status.installedModels[*].status` is `Active` at the new version: same; mark `Updated`.
 - Otherwise: the update is in an indeterminate state; the manager re-issues the update signal (idempotent: firmware annotations are re-applied; the `model_update` `Command` is re-sent; the Fleet Adapter handles duplicate notification gracefully).
 
@@ -8982,9 +10030,9 @@ All status writes use optimistic concurrency (resource version checks) to preven
 
 1. **High-cadence plane → time-series database (TSDB), never etcd.** The ControlStream ingestion path MUST write position, battery, latency, and per-component metrics to a time-series store on every frame. The store is pluggable behind a writer interface and SHOULD default to a CNCF-idiomatic sink (Prometheus remote-write, VictoriaMetrics, or Mimir); RFC-0001 does not mandate a specific vendor. Live robot pose is served from this plane.
 
-2. **Material plane → `Robot.status`, throttled.** The ingestion path MUST write to `Robot.status` ONLY on a *material transition*, defined as: a change in `status.phase` (e.g. Idle → Assigned → InProgress, or a transition to Charging / Offline / Error / Maintenance); the battery reading crossing a configured bucket boundary (e.g. into a charging band or below a critical line) — NOT every reported percent; a change in any `status.hardware[component]` health value (Healthy ↔ Degraded ↔ Failed); a change in `status.assignedAction`; or a zone transition — a change in derived `status.currentZone`, written by the Zone Controller ([§9.3.4](#control-plane-zone-controller)) from its subscription to the same ingest stream. A frame carrying none of these MUST NOT produce a status write — position-only churn therefore never reaches etcd. Per-robot status writes MUST additionally be capped at no more than one per configured interval; a non-critical material change arriving inside that window is coalesced and emitted once the window elapses, while a safety-critical transition (into Offline or Error, a critical-battery crossing, or a hardware fault) bypasses the cap.
+2. **Material plane → `Robot.status`, throttled.** The ingestion path MUST write to `Robot.status` ONLY on a *material transition*, defined as: a change in `status.phase` (e.g. Idle → Assigned → InProgress, or a transition to Charging / Offline / Error / Maintenance); the battery reading crossing a configured bucket boundary (e.g. into a charging band or below a critical line) — NOT every reported percent; a change in any `status.hardware[component]` health value (Healthy ↔ Degraded ↔ Failed); or a change in `status.assignedAction`. A change in derived `status.currentZone` is **not** a material transition of this path: zone derivation is performed by the Zone Controller and is sink-independent in its own right (Invariant 2 below), which is why `transition_type` carries no zone value, written by the Zone Controller ([§9.3.4](#control-plane-zone-controller)) from its subscription to the same ingest stream. `status.installedModels[*].status` is likewise **not** a member of this list: `TelemetryPayload` carries no model-install-state field at all, so this pipeline never touches it — it is written by a wholly separate, event/scan-driven path owned by the OTA/Model Update Manager ([§9.3.6](#control-plane-ota-model-update-manager)), on its own always-synchronous, retry-guarded write, not subject to this pipeline's throttle or sink-drop behaviour by construction (dispatch filter 7 depends on it staying current, [§9.3.2](#control-plane-scheduler)). A frame carrying none of the four fields above MUST NOT produce a status write — position-only churn therefore never reaches etcd. Per-robot status writes MUST additionally be capped at no more than one per configured interval; a non-critical material change arriving inside that window is coalesced and emitted once the window elapses, while a safety-critical transition (into Offline or Error, a critical-battery crossing, or a hardware fault) bypasses the cap.
 
-3. **Liveness off the write path.** `status.lastHeartbeat` MUST NOT be written on every telemetry tick. Liveness is tracked in the ingestion pipeline; only the *loss* of liveness produces a status write (the Health Monitor's `phase → Offline` transition, [§9.3.3](#control-plane-health-monitor)). The Health Monitor derives connectivity from the pipeline, not from per-tick etcd timestamps.
+3. **Liveness off the write path.** `status.connectivity.lastSeenAt` MUST NOT be written on every telemetry tick. Liveness is tracked in the ingestion pipeline; only the *loss* of liveness produces a status write (the Robot reconciler's `phase → Offline` transition, [§9.3.3](#control-plane-robot-health-and-connectivity)). Connectivity is derived from the pipeline, not from per-tick etcd timestamps.
 
 **Components.** The pipeline is realised by: a `TSDBWriter` interface whose active implementation is selected by `SwarmadaConfig.spec.telemetry.sink.type`; a *material-transition projector* that holds each robot's last-written material state and applies the material-transition and throttle rules above; a `StatusSink` that the Robot controller implements as a throttled status patch; and an `Ingestor` that fans each frame out to the `TSDBWriter`, to the Zone Controller's position subscription ([§9.3.4](#control-plane-zone-controller) — zone derivation consumes the stream, never the sink), and, only on a material transition, to the `StatusSink`. A no-op (drop) `TSDBWriter` MUST be activated only when `sink.type == Drop` (explicit operator opt-in); when `sink.type` is unset the pipeline operates in *observed-degraded* mode (see "Telemetry sink observability and safety floor" below). The material-transition projector is the load-bearing element: it MUST uphold the invariant that *N* unchanged frames produce zero status writes while each material transition produces exactly one.
 
@@ -8992,17 +10040,17 @@ All status writes use optimistic concurrency (resource version checks) to preven
 
 *Invariant 1 — no silent telemetry loss.* A no-op (drop) `TSDBWriter` MUST be activated only when the operator has explicitly set `SwarmadaConfig.spec.telemetry.sink.type: Drop`. When `sink.type` is unset or empty (the default), the control plane MUST surface the absence of a sink loudly rather than discarding frames silently:
 
-- **Condition.** The `Ingestor` sets `SwarmadaConfig.status.conditions[TelemetrySinkUnconfigured]` with `type: TelemetrySinkUnconfigured`, `status: "True"`, `severity: Warning`, `reason: SinkNotConfigured`, and a human-readable message on every reconciliation cycle until a valid sink is configured or `Drop` is explicitly set.
+- **Condition.** The `SwarmadaConfig` reconciler — not the `Ingestor`, which writes no status at all, per RA-1 — sets `SwarmadaConfig.status.conditions[TelemetrySinkUnconfigured]` with `type: TelemetrySinkUnconfigured`, `status: "True"`, `reason: SinkNotConfigured`, and a human-readable message, until a valid sink is configured or `Drop` is explicitly set. (`metav1.Condition` carries no `severity` field; the Warning severity rides on the Event below.)
 - **Event.** A `TelemetrySinkUnconfigured` Kubernetes Warning event is emitted on the `SwarmadaConfig` resource every reconciliation cycle while the condition is active, so operators see the problem via `kubectl describe swarmadaconfig swarmada-config` without requiring access to metrics infrastructure.
-- **Metric.** `swarmada_telemetry_dropped_frames_total` (labels: `namespace`) is incremented for every frame that cannot be forwarded to a TSDB sink. The counter stops incrementing once a functional sink is configured or `Drop` is explicitly set. This metric name is fixed by the [§9.3.8](#control-plane-observability-prometheus-metrics-contract) observability contract.
+- **Metric.** `swarmada_telemetry_dropped_frames_total` (labels: `namespace`) is incremented for every frame a **configured** sink fails to accept. The counter stops incrementing once a functional sink is configured or `Drop` is explicitly set. It does **not** cover the unset-sink case at v0.3 — an unset `sink.type` discards frames through the same no-op writer as `Drop` and returns no error, so this counter stays at zero and the condition and event below are the only signals. Of the three signals in this invariant, two are implemented and this one has that gap. This metric name is fixed by the [§9.3.8](#control-plane-observability-prometheus-metrics-contract) observability contract.
 
-*Invariant 2 — material and safety transitions are sink-independent.* Dropping high-cadence telemetry MUST NEVER suppress a material or safety-critical `Robot.status` write. The material-transition projector evaluates every incoming frame for material transitions — `status.phase` changes, `status.hardware[*]` health-state changes, battery-threshold crossings, and `status.assignedAction` changes — **before** routing the frame to the `TSDBWriter`. Zone derivation is likewise sink-independent: the Zone Controller consumes position frames from the Ingestor fan-out and MUST NOT read the TSDB; sink state (live, observed-degraded, or `Drop`) has no effect on zone-transition detection or the resulting `status.currentZone` writes. These writes go directly to the `StatusSink` (the throttled Robot status patch) regardless of whether the `TSDBWriter` is a live store, in observed-degraded mode, or explicitly `Drop`. Safety-critical transitions (phase → Offline or → Error, critical-battery threshold crossing, hardware-fault state change) bypass all rate caps and the TSDB path entirely; they MUST reach `Robot.status` even if the entire telemetry sink infrastructure has failed. The `TSDBWriter` is downstream of, and architecturally irrelevant to, the material-transition path.
+*Invariant 2 — material and safety transitions are sink-independent.* Dropping high-cadence telemetry MUST NEVER suppress a material or safety-critical `Robot.status` write. The material-transition projector evaluates every incoming frame for material transitions — `status.phase` changes, `status.hardware[*]` health-state changes, battery-threshold crossings, and `status.assignedAction` changes — **before** routing the frame to the `TSDBWriter`. `status.installedModels[*].status` is sink-independent for a different reason than the fields above: it is not part of this telemetry pipeline at all (see Invariant 1), so no `TSDBWriter` state can affect it by construction — its own write path (OTA/Model Update Manager, [§9.3.6](#control-plane-ota-model-update-manager)) has no sink to drop. Zone derivation is likewise sink-independent: the Zone Controller consumes position frames from the Ingestor fan-out and MUST NOT read the TSDB; sink state (live, observed-degraded, or `Drop`) has no effect on zone-transition detection or the resulting `status.currentZone` writes. These writes go directly to the `StatusSink` (the throttled Robot status patch) regardless of whether the `TSDBWriter` is a live store, in observed-degraded mode, or explicitly `Drop`. Safety-critical transitions (phase → Offline or → Error, critical-battery threshold crossing, hardware-fault state change) bypass all rate caps and the TSDB path entirely; they MUST reach `Robot.status` even if the entire telemetry sink infrastructure has failed. The `TSDBWriter` is downstream of, and architecturally irrelevant to, the material-transition path.
 
 **`Robot.status` is coarse by design.** A direct consequence of this split is that `Robot.status.position` and `status.batteryPercent` are coarse, eventually-consistent projections, not live readings; continuous values are obtained from the TSDB. This trade-off is recorded in [§7](#drawbacks) (Drawbacks).
 
 **Crash and restart behaviour.** The pipeline holds only soft per-robot material state (the last-written snapshot and a throttle clock). On restart it MAY be primed from each robot's existing `Robot.status` so that an unchanged post-restart stream produces no writes; if not primed, the first frame per robot produces a single establishing write. No telemetry is durably buffered in the pipeline; the TSDB owns history.
 
-**Implementation status.** The ControlStream server that feeds this pipeline is specified in [§9.2](#fleet-adapter-protocol). The material-transition projector and the two-plane contract defined here are the normative target. What is verified today is per-component: the `TSDBWriter` selection and write-policy resolution (`sink.type`, the status-write cap, and the material-battery thresholds), the projector's material-transition and throttle rules, and the sink-independence of safety-critical writes. What is **not** yet verified end to end is a single traced path from a `TelemetryPayload` on the wire through the Ingestor fan-out to both a TSDB write and a throttled `Robot.status` patch. An implementer should treat the component contracts as normative and the end-to-end wiring as unproven at v0.2.
+**Implementation status.** The ControlStream server that feeds this pipeline is specified in [§9.2](#fleet-adapter-protocol). The material-transition projector and the two-plane contract defined here are the normative target. What is verified today is per-component: the `TSDBWriter` selection and write-policy resolution (`sink.type`, the status-write cap, and the material-battery thresholds), the projector's material-transition and throttle rules, and the sink-independence of safety-critical writes. What is **not** yet verified end to end is a single traced path from a `TelemetryPayload` on the wire through the Ingestor fan-out to both a TSDB write and a throttled `Robot.status` patch. An implementer should treat the component contracts as normative and the end-to-end wiring as unproven at v0.3.
 
 ---
 
@@ -9011,25 +10059,26 @@ All status writes use optimistic concurrency (resource version checks) to preven
 
 **Responsibility.** Without a specified metrics contract, operators cannot build SLOs or automated alerts for the safety- and liveness-critical behaviours defined in this spec. This subsection specifies the Prometheus metrics the Swarmada control plane MUST expose, each with a stable name, type, label set, and a cross-reference to the section(s) whose behaviour it surfaces.
 
-**Scrape surface.** Every control-plane component — API Server, Scheduler, Health Monitor, Zone Controller, Traffic Deconfliction Engine, OTA/Model Update Manager, Telemetry Pipeline Ingestor — MUST expose a `/metrics` endpoint in Prometheus text format on a configurable port (default: `9090`). The reference single-binary deployment exposes one combined endpoint. The endpoint MUST NOT require authentication by default; operators SHOULD apply network policy or an authenticating reverse proxy in production. Labels use `snake_case` throughout; `namespace` always refers to the Kubernetes namespace.
+**Scrape surface.** Every control-plane component — API Server, Scheduler, Robot reconciler, Probe Controller, Zone Controller, Traffic Deconfliction Engine, OTA/Model Update Manager, Telemetry Pipeline Ingestor — MUST expose a `/metrics` endpoint in Prometheus text format on a configurable port (default `8080`). The reference single-binary deployment exposes one combined endpoint. The endpoint MUST NOT require authentication by default; operators SHOULD apply network policy or an authenticating reverse proxy in production. Labels use `snake_case` throughout; `namespace` always refers to the Kubernetes namespace.
 
-**Metric registration requirement.** All Gauges MUST be initialised to `0` for each label combination known at startup — not on first observation — so that a missing label set cannot be mistaken for a zero-count state. Counters MUST be registered at startup and MUST NOT be reset between restarts. The Prometheus client library's `MustRegister` pattern with predefined label value sets satisfies this requirement for Gauges.
+**Metric registration requirement.** All Gauges MUST be initialised to `0` for each label combination known at startup — not on first observation — so that a missing label set cannot be mistaken for a zero-count state. Counters MUST be registered at startup and MUST NOT be reset between restarts. The Prometheus client library's `MustRegister` pattern with predefined label value sets satisfies this requirement for Gauges. **Specified, not implemented at v0.3:** the reference control plane defines per-namespace and per-adapter zero-seeding helpers and calls neither, so a Gauge series appears only once its label combination is first observed. A namespace with no `FleetAction` resources emits no `swarmada_fleetactions_by_phase` series at all rather than a set of zeroes — the exact confusion this requirement exists to prevent. Write alerting expressions that tolerate an absent series (`or vector(0)`, or `absent()`) until this lands.
 
 *Estop metrics ([§9.6.2.2](#safety-timing-requirements), [§9.6.5.1](#safety-required-events)).* Populated for every `estop` Command issued on the SafetyStream, regardless of outcome. These are the primary evidence source for post-incident estop timing review and tie the `EstopLatencyViolation` event and `ESTOP_LATENCY_VIOLATION` audit entry to an alertable signal.
 
 | Metric | Type | Labels | Description |
 | :---- | :---- | :---- | :---- |
 | `swarmada_estop_command_latency_seconds` | Histogram | `namespace`, `adapter`, `robot_name`, `scope` | Round-trip latency from `estop` Command send on SafetyStream to `EstopAck` receipt ([§9.6.2.2](#safety-timing-requirements)). `scope`: `robot`, `zone`, or `namespace`. Recommended buckets: `[0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.0, 5.0]`. The `0.5` bucket is the SLA boundary. |
+| `swarmada_estop_fanout_duration_seconds` | Histogram | `namespace`, `scope` | Wall-clock duration of ONE zone- or namespace-scoped estop episode, from the operator's trigger to the last robot in scope resolving ([§9.6.2.2](#safety-timing-requirements)). Observed once per episode by the fanning-out controller, NOT once per robot; a robot-scoped estop has no fan-out and is not observed here, so `scope` takes only `zone` or `namespace`. Recommended buckets: `[0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]` — deliberately extending far past the per-send 500ms SLA, so the series still resolves an episode that degrades badly rather than saturating its top bucket. This metric exists because `swarmada_estop_command_latency_seconds` structurally cannot bound an episode: it is stamped per robot immediately before THAT robot's send, so any serialisation in the dispatch shows up as delay *before* a send rather than inside a round trip, and every robot reports healthy while the last is stopped late. That is not hypothetical — it is what an earlier serialised fan-out did ([§9.6.2.2](#safety-timing-requirements), ADR-0042) — and this metric is what would catch a regression to it. |
 | `swarmada_estop_latency_violations_total` | Counter | `namespace`, `adapter`, `robot_name` | Incremented each time an `estop` Command ACK latency exceeds the 500ms SLA ([§9.6.2.2](#safety-timing-requirements)), co-incident with a `EstopLatencyViolation` Warning event and an `ESTOP_LATENCY_VIOLATION` audit log entry ([§9.6.5.1](#safety-required-events)). Any non-zero rate is an SLO breach and MUST trigger an alert. |
-| `swarmada_estop_commands_total` | Counter | `namespace`, `adapter`, `scope`, `result` | Total `estop` Commands issued. `result`: `ack_stopping`, `ack_stopped`, `ack_failed`, `timeout`. Provides the denominator for violation-rate calculations and detects Commands that never receive an `EstopAck`. |
+| `swarmada_estop_commands_total` | Counter | `namespace`, `adapter`, `scope`, `result` | `estop` Commands that reached an adapter, by terminal disposition. `result`: `ack_stopping`, `ack_stopped`, `ack_failed`, `timeout`. Provides the denominator for violation-rate calculations and detects Commands that never receive an `EstopAck`. **Coverage limit at v0.3:** an estop that could not be delivered at all — no `SafetyStream` registered for the adapter, or a send failure — increments neither this counter nor the latency histogram, so the worst case is silent here. Do not read a quiet counter as evidence that no estop failed; pair it with `swarmada_fleet_adapter_connected`. A first ack of `STOPPING` followed by no `STOPPED` inside the confirm window also resolves the robot to `Failed` while remaining counted as `ack_stopping`. |
 
 *Telemetry pipeline metrics ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)).* Surface the health of the two-data-plane split and detect silent telemetry loss per [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split) Invariant 1. The metric `swarmada_telemetry_dropped_frames_total` is first named in [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split) with label `namespace`; this subsection is the formal contract and extends the label set to `namespace, adapter` for per-adapter drill-down.
 
 | Metric | Type | Labels | Description |
 | :---- | :---- | :---- | :---- |
-| `swarmada_telemetry_dropped_frames_total` | Counter | `namespace`, `adapter` | Frames not forwardable to the configured TSDB sink ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split) Invariant 1). Increments only when the sink is in observed-degraded mode or misconfigured; never increments when `sink.type: Drop` is explicitly set. A sustained non-zero rate with `sink.type` not `Drop` indicates TSDB sink failure and MUST trigger an alert. |
+| `swarmada_telemetry_dropped_frames_total` | Counter | `namespace`, `adapter` | Frames not forwardable to the configured TSDB sink ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split) Invariant 1). Increments only on a write error returned by a configured sink; never increments when `sink.type: Drop` is explicitly set. A sustained non-zero rate with `sink.type` not `Drop` indicates TSDB sink failure and MUST trigger an alert. **Coverage limit at v0.3:** an **unset** `sink.type` is served by the same no-op writer as `Drop`, which never returns an error — so frames discarded because no sink was ever configured are not counted here and this metric stays at zero. The `TelemetrySinkUnconfigured` condition and event described in Invariant 1 are the signals that cover that case; alert on those, not on this counter, for a missing sink. |
 | `swarmada_telemetry_tsdb_write_errors_total` | Counter | `namespace`, `sink_type`, `error_class` | Errors returned by the `TSDBWriter` interface on write attempts ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)). `error_class`: `timeout`, `auth`, `schema`, `unknown`. A non-zero rate means frames are accumulating in `swarmada_telemetry_dropped_frames_total`. |
-| `swarmada_telemetry_status_writes_total` | Counter | `namespace`, `transition_type` | `Robot.status` writes emitted by the material-transition projector on material transitions ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)). `transition_type`: `phase_change`, `hardware_health_change`, `battery_threshold`, `assigned_action_change`, `safety_critical`. This counter growing at full telemetry cadence signals a violation of the zero-writes-on-unchanged-frame invariant. |
+| `swarmada_telemetry_status_writes_total` | Counter | `namespace`, `transition_type` | `Robot.status` writes emitted by the material-transition projector on material transitions ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)). `transition_type`: `phase_change`, `hardware_health_change`, `battery_threshold`, `assigned_action_change`, `safety_critical`. **Two notes, both consequences of label values being prose rather than a checked contract ([§1](#abstract)).** The reference implementation emits the assigned-action value under the legacy spelling `assigned_task_change`; the spelling above is the specified one and the implementation is expected to move to it. And there is no `installed_model_change`: `status.installedModels[*].status` is written by a separate event-driven projection and is not a member of this pipeline's material-transition set at all — an earlier revision of this row listed it in error. This counter growing at full telemetry cadence signals a violation of the zero-writes-on-unchanged-frame invariant. |
 | `swarmada_telemetry_frames_received_total` | Counter | `namespace`, `adapter` | Total `TelemetryPayload` frames received on ControlStream. The ratio `swarmada_telemetry_status_writes_total / swarmada_telemetry_frames_received_total` quantifies write-amplification suppression and confirms the material-transition invariant holds at scale. |
 
 *Scheduler and assignment-lease metrics ([§9.3.2](#control-plane-scheduler), [§9.6.3.2](#safety-control-plane-response), [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)).* Scheduling latency, assignment failures, and the lease lifecycle underpinning the safe-reassignment guarantee ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). The lease counters are the primary observability surface for the assignment-lease lifecycle.
@@ -9037,17 +10086,17 @@ All status writes use optimistic concurrency (resource version checks) to preven
 | Metric | Type | Labels | Description |
 | :---- | :---- | :---- | :---- |
 | `swarmada_scheduler_assignment_latency_seconds` | Histogram | `namespace`, `priority` | Time from `FleetAction` entering `Pending` phase (or re-entering from `Revoking`) to the `Assigned` transition ([§9.3.2](#control-plane-scheduler)). `priority`: `Critical`, `High`, `Normal`, `Low`. Recommended buckets: `[0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0]`. |
-| `swarmada_scheduler_assignment_failures_total` | Counter | `namespace`, `reason` | Assignments ending in `Failed` phase or abandoned without assignment. `reason`: `DeadlineExceeded`, `NoCandidates`, `AdapterDisconnected`, `AllCandidatesInEstop`, `AllCandidatesInMaintenance`. |
+| `swarmada_scheduler_assignment_failures_total` | Counter | `namespace`, `reason` | Assignments ending in `Failed` phase or abandoned without assignment. `reason`: `DeadlineExceeded`, `NoCandidates`, `AdapterDisconnected`, `AllCandidatesInEstop`, `AllCandidatesInMaintenance`. **Only `DeadlineExceeded` is emitted at v0.3**; the other four are specified, controller pending. In particular the no-eligible-robot path requeues the action to `Pending` without incrementing this counter under any reason, so a dashboard breaking assignment failures down by reason shows deadlines only, and the absence of a `NoCandidates` series is not evidence that candidates were found. |
 | `swarmada_scheduler_lease_renewals_total` | Counter | `namespace` | Successful `renew_lease` Commands issued to Fleet Adapters ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). A gap while assignments are active indicates robots will self-stop at lease expiry; monitor as rate per active assignment. |
-| `swarmada_scheduler_lease_expiries_total` | Counter | `namespace` | Leases that expired (`now ≥ last-ack'd-renewal + leaseDuration + skew`) without a prior confirmed cancellation ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). Each expiry means a robot self-stopped its task and the `FleetAction` transitions from `Revoking` to `Pending`. A sustained non-zero rate indicates network instability between the Scheduler and Fleet Adapters. |
+| `swarmada_scheduler_lease_expiries_total` | Counter | `namespace` | Leases that expired (`now ≥ last-ack'd-renewal + leaseDurationSeconds + clockSkewMarginSeconds`) without a prior confirmed cancellation ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). Each expiry means a robot self-stopped its action and the `FleetAction` transitions from `Revoking` to `Pending`. A sustained non-zero rate indicates network instability between the Scheduler and Fleet Adapters. |
 
-*FleetAction phase gauge ([§9.3.2](#control-plane-scheduler), [§9.6.2.4](#safety-fleetaction-behaviour-during-estop), [§9.6.3.2](#safety-control-plane-response)).* A single gauge covering the full task-phase distribution, including `Revoking` — the lease-revocation phase introduced in [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee), which is invisible without an explicit label value.
+*FleetAction phase gauge ([§9.3.2](#control-plane-scheduler), [§9.6.2.4](#safety-fleetaction-behaviour-during-estop), [§9.6.3.2](#safety-control-plane-response)).* A single gauge covering the full action-phase distribution, including `Revoking` — the lease-revocation phase introduced in [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee), which is invisible without an explicit label value.
 
 | Metric | Type | Labels | Description |
 | :---- | :---- | :---- | :---- |
-| `swarmada_fleetactions_by_phase` | Gauge | `namespace`, `phase` | Current count of `FleetAction` resources per `status.phase`. `phase` label values: `Pending`, `Assigned`, `InProgress`, `Revoking`, `Paused`, `Succeeded`, `Failed`, `Cancelled`. The `Revoking` label MUST be initialised to `0` at startup. A non-zero `Revoking` count persisting longer than `leaseDurationMs + clockSkewMarginMs` indicates a stuck revocation and MUST trigger an alert ([§9.6.3.2](#safety-control-plane-response)). A non-zero `Paused` count is expected after any estop event ([§9.6.2.4](#safety-fleetaction-behaviour-during-estop)). |
+| `swarmada_fleetactions_by_phase` | Gauge | `namespace`, `phase` | Current count of `FleetAction` resources per `status.phase`. `phase` label values: `Pending`, `Assigned`, `InProgress`, `Revoking`, `Paused`, `Preempted`, `Succeeded`, `Failed`, `Cancelled`. The `Revoking` label MUST be initialised to `0` at startup — **specified, not implemented at v0.3**, see the Metric registration requirement above; an alert on this label must tolerate an absent series. A non-zero `Revoking` count persisting longer than `spec.scheduling.leaseDurationSeconds + spec.scheduling.clockSkewMarginSeconds` (35s at the schema defaults) indicates a stuck revocation and MUST trigger an alert ([§9.6.3.2](#safety-control-plane-response)). A non-zero `Paused` count is expected after any estop event ([§9.6.2.4](#safety-fleetaction-behaviour-during-estop)). |
 
-*FleetAdapter connectivity metrics ([§9.3.1](#control-plane-swarmada-api-server), [§9.2.5](#fleet-adapter-protocol-connection-lifecycle), [§9.6.2](#safety-emergency-stop-protocol)).* Adapter disconnection removes the only path for `estop` Commands to reach that adapter's robots ([§9.6.2.5](#safety-edge-headless-emergency-stop)). Adapter connectivity is therefore a safety-critical observable, not merely an operational one.
+*FleetAdapter connectivity metrics ([§9.3.1](#control-plane-swarmada-api-server), [§9.2.5](#fleet-adapter-protocol-connection-lifecycle), [§9.6.2](#safety-emergency-stop-protocol)).* Adapter disconnection removes the only path for `estop` Commands to reach that adapter's robots ([§9.6.2.5](#safety-edge-headless-emergency-stop)). Adapter connectivity is therefore a safety-critical observable, not only an operational one.
 
 | Metric | Type | Labels | Description |
 | :---- | :---- | :---- | :---- |
@@ -9055,14 +10104,14 @@ All status writes use optimistic concurrency (resource version checks) to preven
 | `swarmada_fleet_adapter_phase` | Gauge | `namespace`, `adapter`, `phase` | `1` for the current `FleetAdapter.status.phase`, `0` for all others. `phase` label values: `Pending`, `Connected`, `Degraded`, `Disconnected`, `Rejected`. Exactly one value is `1` per adapter at any time. |
 | `swarmada_fleet_adapter_reconnects_total` | Counter | `namespace`, `adapter` | Times a FleetAdapter successfully re-established its ControlStream after `Disconnected` or `Degraded` phase ([§9.2.5](#fleet-adapter-protocol-connection-lifecycle)). A high rate indicates persistent network instability affecting estop-path reliability. |
 
-*Robot phase and estop-state gauges ([§9.6.2.3](#safety-estop-state-machine), [§9.6.3.2](#safety-control-plane-response), [§9.3.3](#control-plane-health-monitor)).* Fleet-level situational awareness of safety state; anchor for operational dashboards and fleet health SLOs.
+*Robot phase and estop-state gauges ([§9.6.2.3](#safety-estop-state-machine), [§9.6.3.2](#safety-control-plane-response), [§9.3.3](#control-plane-robot-health-and-connectivity)).* Fleet-level situational awareness of safety state; anchor for operational dashboards and fleet health SLOs.
 
 | Metric | Type | Labels | Description |
 | :---- | :---- | :---- | :---- |
-| `swarmada_robots_by_phase` | Gauge | `namespace`, `phase` | Current count of `Robot` resources per `status.phase`. `phase` label values match the `Robot.status.phase` enum ([§9.1.3](#robot)) and the `fleet_adapter.v1` `RobotPhase` wire enum: `Discovered`, `Idle`, `Assigned`, `InProgress`, `Charging`, `Error`, `Offline`, `Maintenance`. An `Offline` count above a configurable threshold is an early warning of fleet health degradation before tasks begin failing ([§9.6.3.2](#safety-control-plane-response)). |
-| `swarmada_robots_in_estop` | Gauge | `namespace`, `estop_state` | Current count of robots per active estop state per the [§9.6.2.3](#safety-estop-state-machine) state machine. `estop_state` label values: `Stopping`, `Stopped`. (`Normal` is excluded; its count is `total_robots − (Stopping + Stopped)`.) A non-zero `Stopped` count sustained beyond the configured alert window (suggested baseline: 15 minutes) indicates an uncleared estop requiring explicit operator action ([§9.6.2.3](#safety-estop-state-machine)). |
+| `swarmada_robots_by_phase` | Gauge | `namespace`, `phase` | Current count of `Robot` resources per `status.phase`. `phase` label values match the `Robot.status.phase` enum ([§9.1.3](#robot)) and the `fleet_adapter.v1` `RobotPhase` wire enum: `Discovered`, `Idle`, `Assigned`, `InProgress`, `Charging`, `Error`, `Offline`, `Maintenance`. An `Offline` count above a configurable threshold is an early warning of fleet health degradation before actions begin failing ([§9.6.3.2](#safety-control-plane-response)). |
+| `swarmada_robots_in_estop` | Gauge | `namespace`, `estop_state` | Current count of robots per active estop state per the [§9.6.2.3](#safety-estop-state-machine) state machine. `estop_state` label values: `Stopping`, `Stopped`, `Failed` — the same three states filter 10 excludes from dispatch, so an operator cannot see a robot withheld for an estop that this gauge does not count. (`Normal` and `Resuming` are excluded; the `Normal` count is `total_robots − (Stopping + Stopped + Failed + Resuming)`.) **A non-zero `Failed` count is an immediate escalation, not an alert-window condition**: it means a commanded stop was never confirmed. A non-zero `Stopped` count sustained beyond the configured alert window (suggested baseline: 15 minutes) indicates an uncleared estop requiring explicit operator action ([§9.6.2.3](#safety-estop-state-machine)). |
 | `swarmada_robot_offline_duration_seconds` | Histogram | `namespace` | Duration a robot remained in `Offline` phase before reconnecting ([§9.6.3.2](#safety-control-plane-response)). Observed only at reconnect (completion-time metric, not a live-staleness metric). Distinguishes transient Wi-Fi drops (sub-T1 values) from sustained outages (above-T2 values). Recommended buckets: `[5, 15, 30, 60, 120, 300, 600, 1800, 3600]`. |
-| `swarmada_robot_connectivity_critical_total` | Counter | `namespace` | Escalations to ConnectivityCritical — a robot `Offline` beyond `connectivityCriticalThresholdSeconds` — counted on the escalation edge (ADR-0011, [§9.6.3.2](#safety-control-plane-response)). A rising rate indicates sustained connectivity loss across the fleet, not transient drops. |
+| `swarmada_robot_connectivity_critical_total` | Counter | `namespace` | Escalations to ConnectivityCritical — a robot `Offline` beyond `connectivityCriticalThresholdSeconds` — counted on the escalation transition (ADR-0011, [§9.6.3.2](#safety-control-plane-response)). A rising rate indicates sustained connectivity loss across the fleet, not transient drops. |
 
 *Build info.*
 
@@ -9082,12 +10131,12 @@ increase(swarmada_telemetry_dropped_frames_total[5m]) > 0
 # TSDB write errors (underlying cause of drops) — [§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)
 increase(swarmada_telemetry_tsdb_write_errors_total[5m]) > 0
 
-# Scheduler P99 assignment latency > 60s for Normal-priority tasks — [§9.3.2](#control-plane-scheduler)
+# Scheduler P99 assignment latency > 60s for Normal-priority actions — [§9.3.2](#control-plane-scheduler)
 histogram_quantile(0.99,
   rate(swarmada_scheduler_assignment_latency_seconds_bucket{priority="Normal"}[10m])
 ) > 60
 
-# Stuck Revoking task — double-execution risk, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)
+# Stuck Revoking action — double-execution risk, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)
 swarmada_fleetactions_by_phase{phase="Revoking"} > 0
 
 # Estop-path outage: adapter disconnected — [§9.6.2](#safety-emergency-stop-protocol) / [§9.6.2.5](#safety-edge-headless-emergency-stop)
@@ -9103,9 +10152,26 @@ Operators building production SLOs should additionally alert on `swarmada_schedu
 <a id="tde"></a>
 ### 9.4 Traffic Deconfliction Engine
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. The TDE runs as a blocking gate the Scheduler must clear before every assignment: zone-capacity gating, shared-resource grant/queue (FIFO / Priority / PriorityWithDuration), preemptor-band preemption (`Critical` and `High`), and startup reservation recovery from `FleetZone.status`. It reads and writes the `FleetZone` capacity/reservation fields (`spec.maxConcurrentRobots`, `spec.sharedResources[]`, `status.reservations[]`, `status.sharedResourceQueues[]`) and is tuned by the `SwarmadaConfig.spec.trafficDeconfliction` block.
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. **Named control-plane gaps:** the `Manual` reservation policy takes no branch of its own and behaves as `Priority`. **`FleetZone.status` reservation writes are not a `resourceVersion`-guarded compare-and-swap at v0.3** — the reference implementation persists them with a plain merge patch (no optimistic-lock option) and instead serialises concurrent grants with an in-process mutex held for the duration of the TDE's evaluate-and-write step (see TDE-6 below). That mutex only protects a single active TDE instance: it does not extend across replicas, and it is the actual mechanism, not the `resourceVersion` CAS this chapter previously described. **Five further named gaps, all detailed at their point of use below.** (1) A `Granted` response
+> confirms **zone capacity only**: shared resources named on the same request are granted or queued, never
+> denied, so the `resource_ok` gate in the RequestReservation algorithm is specified and not implemented,
+> and `DeniedResourceUnavailable` is never returned. (2) The Scheduler does not populate
+> `ReservationRequest.Resources` at v0.3, so the queue disciplines below are reachable only from the
+> adapter-initiated `ReserveResource` path — which requests at `Normal` priority with no duration, meaning
+> neither row of the policy comparison table can occur from an assignment. (3) The reservation-expiry
+> reconciler is specified and does not exist: an expired `Reserved` entry stops counting against capacity
+> but is never removed from `FleetZone.status`, and `onReservationExpiry` is read by nothing. (4) TDE-7 and
+> TDE-8 are upheld on the release paths: recovery releases the holds of every reservation it drops, a
+> release scans every zone in the namespace rather than only the action's own, and a preempted
+> reservation's holds are released with it. One residual: the preemption release covers only the zones
+> that request already holds locked, so a victim holding a resource declared in a zone outside that set
+> keeps it until its own release runs. (5) The TDE emits **no Kubernetes Events and no
+> Prometheus metrics at all**, so it has no observability surface at v0.3. The TDE runs as a blocking gate
+> the Scheduler must clear before every assignment that names a zone: zone-capacity gating, shared-resource
+> grant/queue (FIFO / Priority / PriorityWithDuration), preemptor-band preemption (`Critical` and `High`),
+> and startup reservation recovery from `FleetZone.status`. It reads and writes the `FleetZone` capacity/reservation fields (`spec.maxConcurrentRobots`, `spec.sharedResources[]`, `status.reservations[]`, `status.sharedResourceQueues[]`) and is tuned by the `SwarmadaConfig.spec.trafficDeconfliction` block.
 
-The Traffic Deconfliction Engine (TDE) is a synchronous blocking gate in the task assignment path. The Scheduler calls the TDE before committing every task assignment; no assignment is written to etcd until the TDE returns a positive grant. The TDE operates at the **task level** (seconds) — it decides whether a robot is permitted to enter a zone, not how to move once inside. Path planning, collision avoidance, and safe navigation within a zone are entirely the responsibility of each robot's Robot OS and hardware safety systems ([§4](#non-goals) item 1 — motion control). `maxConcurrentRobots` is a scheduling policy limit, not a physical safety guarantee.
+The Traffic Deconfliction Engine (TDE) is a synchronous blocking gate in the action assignment path. The Scheduler calls the TDE before committing every action assignment; no assignment is written to etcd until the TDE returns a positive grant. The TDE operates at the **action level** (seconds) — it decides whether a robot is permitted to enter a zone, not how to move once inside. Path planning, collision avoidance, and safe navigation within a zone are entirely the responsibility of each robot's Robot OS and hardware safety systems ([§4](#non-goals) item 1 — motion control). `maxConcurrentRobots` is a scheduling policy limit, not a physical safety guarantee.
 
 | Concern | Owner |
 | :---- | :---- |
@@ -9114,22 +10180,22 @@ The Traffic Deconfliction Engine (TDE) is a synchronous blocking gate in the tas
 | Path-level collision avoidance within a zone | Robot OS |
 | Safe navigation speed and deceleration | Robot OS hardware safety |
 
-All TDE state is stored in `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]` — durable in etcd, visible to operators via `kubectl get fleetzone -o yaml`, and the single source of truth shared with the Zone Controller. `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]` are **controller-owned fields**; the admission webhook rejects any operator write to them.
+All TDE state is stored in `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]` — durable in etcd, visible to operators via `kubectl get fleetzone -o yaml`, and the single source of truth shared with the Zone Controller. `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]` are **controller-owned fields**; the admission webhook is specified to reject any operator write to them — **specified, not implemented at v0.3**, see TDE-4 below: the `FleetZone` webhook validates hierarchy and geometry only and never inspects `status`.
 
 <a id="tde-the-core-question"></a>
 #### 9.4.1 The Core Question
 
 The TDE answers exactly one question per assignment attempt:
 
-> *Given robot R, task T targeting zone Z, requesting shared resources S₁…Sₙ, at priority P — can I commit this assignment right now?*
+> *Given robot R, `FleetAction` A targeting zone Z, requesting shared resources S₁…Sₙ, at priority P — can I commit this assignment right now?*
 
 | Result | Meaning | Scheduler action |
 | :---- | :---- | :---- |
 | `Granted` | Slot and all resources reserved | Write `FleetAction.status.assignedRobot`; transition to Assigned |
-| `PreemptedGranted` | Slot granted by evicting a lower-priority reservation | Write assignment; return evicted task to Pending |
-| `Denied` | Zone at capacity or resource unavailable | Return task to Pending with `RetryAfter` hint |
+| `PreemptedGranted` | Slot granted by evicting a lower-priority reservation | Write assignment; return evicted action to Pending |
+| `Denied` | Zone at capacity or resource unavailable | Return action to Pending with `RetryAfter` hint |
 
-The Scheduler **MUST NOT** write `FleetAction.status.assignedRobot` or transition a task to Assigned without a preceding `Granted` or `PreemptedGranted` from the TDE. A FleetAction in phase Assigned with no corresponding entry in `FleetZone.status.reservations[]` is a protocol violation; the FleetAction reconciler detects and corrects this on the next reconciliation cycle.
+The Scheduler **MUST NOT** write `FleetAction.status.assignedRobot` or transition a action to Assigned without a preceding `Granted` or `PreemptedGranted` from the TDE. A FleetAction in phase Assigned with no corresponding entry in `FleetZone.status.reservations[]` is a protocol violation; the FleetAction reconciler detects and corrects this on the next reconciliation cycle.
 
 <a id="tde-reservation-state"></a>
 #### 9.4.2 Reservation State
@@ -9161,8 +10227,10 @@ ReleaseReservation(actionID) — on the action's confirmed stop / terminal phase
     → entry deleted; all shared resource holds released
 ```
 
-<a id="tde-go-interface"></a>
-#### 9.4.3 Go Interface
+<a id="tde-go-interface-illustrative"></a>
+#### 9.4.3 Go Interface (illustrative)
+
+The signature block below states the TDE's contract — the operations, their scoping, and their return semantics — in Go syntax because that is the clearest available notation for it. It is **not** a published Go package: `TrafficDeconflictionEngine`, `ReservationRequest` and `ReservationResult` are not exported types in `api/v1`, and an implementer should not expect to import them. The normative surface a conformant implementation must provide is the behaviour described here plus the `FleetZone.status` reservation and queue fields, which are real API types.
 
 ```go
 package tde
@@ -9173,10 +10241,12 @@ import (
 )
 
 // TrafficDeconflictionEngine is the synchronous blocking gate between the
-// Scheduler and task commitment. All methods MUST return within
-// SwarmadaConfig.spec.trafficDeconfliction.tdeCallTimeoutMs. If the timeout
-// is exceeded the Scheduler treats the result as Denied(tde_unavailable) and
-// returns the task to Pending.
+// Scheduler and action commitment. All methods are specified to return within
+// SwarmadaConfig.spec.trafficDeconfliction.tdeCallTimeoutMs, with the Scheduler
+// treating an exceeded timeout as Denied(tde_unavailable) and returning the
+// action to Pending. SPECIFIED, NOT IMPLEMENTED AT V0.3: tdeCallTimeoutMs is
+// validated and defaulted but read by no TDE call site — a slow or hung TDE
+// call is not bounded by this field today.
 //
 // Third-party schedulers MUST NOT bypass the TDE by writing
 // FleetAction.status.assignedRobot directly.
@@ -9243,20 +10313,27 @@ func RequestReservation(req):
   max      = zone.spec.maxConcurrentRobots
   capacity_ok = (max == 0) or (occupied + reserved < max)
 
-  resource_ok = true
-  for each r in req.Resources:
-    resource = getSharedResource(r.ZoneName, r.ResourceName)
-    if count(resource.currentHolders) >= resource.capacity:
-      resource_ok = false
-      break
+  // Shared resources do NOT gate the grant. Each requested resource is granted
+  // if it has room and queued if it does not; the reservation is granted either
+  // way. A Granted response therefore confirms ZONE CAPACITY ONLY -- see the
+  // note below the algorithm.
+  //
+  // SPECIFIED, NOT IMPLEMENTED at v0.3: an earlier revision of this algorithm
+  // denied the reservation with DeniedReason "resource_unavailable" when any
+  // requested resource was full. The reference engine does not, and never
+  // returns that reason. The grant-or-queue behaviour below is what ships and
+  // what this specification now defines.
 
-  if capacity_ok and resource_ok:
-    return grant(req, zone)
+  if capacity_ok:
+    result = grant(req, zone)
+    grantOrQueueResources(req, zone)   // per reservationPolicy, see below
+    return result
 
   if req.Priority == Critical or req.Priority == High:
     return attemptPreemption(req, zone)
 
-  // Normal or Low; denied
+  // Normal or Low; denied. Zone capacity is the only reason a reservation is
+  // denied; DeniedReason is "zone_capacity" or "tde_unavailable".
   return Denied{
     DeniedReason: capacityDenied(capacity_ok),
     RetryAfter:   earliestExpiresAt(zone.status.reservations),
@@ -9272,9 +10349,9 @@ func grant(req, zone):
   for each r in req.Resources:
     enqueueOrGrant(r, req)
     ownerZones.add(r.ZoneName)          // resource may be declared on an ancestor zone
-  patch(zone.status)                    // target zone: reservation entry (CAS on resourceVersion)
+  patch(zone.status)                    // target zone: reservation entry (mutex-serialised, not CAS — see TDE-6)
   for each oz in ownerZones where oz != zone.name:
-    patch(getFleetZone(oz).status)      // resource-owning zone: holder/queue state (CAS on resourceVersion)
+    patch(getFleetZone(oz).status)      // resource-owning zone: holder/queue state (mutex-serialised, not CAS — see TDE-6)
   return Granted
 ```
 
@@ -9297,6 +10374,13 @@ func enqueueOrGrant(resourceReq, assignmentReq):
       requestedAt:              now(),
       estimatedDurationSeconds: resourceReq.EstimatedDurationSeconds,
     }, policy=resource.spec.reservationPolicy)
+    // `Manual` is the fourth reservationPolicy value ([§9.1.6](#fleetzone)), specified to
+    // select no automatic queue discipline — the TDE grants nothing and dequeues
+    // nothing for that resource, and an operator arbitrates access out of band.
+    // SPECIFIED, NOT IMPLEMENTED AT V0.3 (Maturity note above): `Manual` takes no
+    // branch of its own in the reference TDE and is queued, granted, and backfilled
+    // exactly as `Priority`. The ordering rules below therefore apply to a resource
+    // declaring `Manual` today, not just to FIFO, Priority and PriorityWithDuration.
 
 func insertByPolicy(queue, entry, policy):
   if policy.mode == Priority:
@@ -9331,7 +10415,7 @@ func releaseResourceHolds(actionID):
   // An action may hold or await shared resources on this zone or on any ancestor
   // that declared them. Release every hold and remove any queued waiter for it,
   // backfill each affected resource from its queue, and persist the
-  // resource-owning zone's status (CAS on resourceVersion).
+  // resource-owning zone's status (mutex-serialised, not CAS — see TDE-6).
   for each resource holding or queuing actionID (across owning zones):
     onResourceHolderReleased(resource, actionID)
     resource.waitQueue.removeWhere(w => w.actionID == actionID)
@@ -9339,6 +10423,14 @@ func releaseResourceHolds(actionID):
 ```
 
 **Queue ordering comparison:**
+
+> **Reachability at v0.3.** The Scheduler does not populate `ReservationRequest.Resources`, so no
+> assignment-path request ever names a shared resource. The only live entry point is the adapter-initiated
+> `ReserveResource` message, which requests at `Normal` priority and supplies no
+> `estimatedDurationSeconds` — under which `Priority` and `PriorityWithDuration` both degenerate to arrival
+> order. Neither row of the table below can therefore be observed from a `FleetAction` assignment at v0.3;
+> the table specifies the target behaviour. Note also that the default is **`FIFO`**, both on the CRD field
+> and in the engine — the column heading below marks `Priority` as the default in error.
 
 | Scenario | Priority (default) | PriorityWithDuration | FIFO |
 | :---- | :---- | :---- | :---- |
@@ -9376,7 +10468,7 @@ func attemptPreemption(req, zone):
     // stop is confirmed (double-execution). The reservation stays Occupied
     // (expiresAt=null); there is no "Preempted" reservation state.
     grant(req, zone)                              // zone now at maxConcurrentRobots+1 transiently
-    notifyScheduler(target.actionID, Preempted)   // FleetAction → Revoking; lease renewal stops; cancel_action queued
+    notifyScheduler(target.actionID, Preempted)   // FleetAction → Preempted → Revoking; lease renewal stops; cancel_action queued
     // Released by ReleaseReservation(target.actionID) on the action's confirmed stop
     // (Revoking → Pending, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee))
     // or OnRobotExitedZone, whichever fires first.
@@ -9384,7 +10476,7 @@ func attemptPreemption(req, zone):
     return PreemptedGranted{PreemptedActionIDs: [target.actionID]}
 ```
 
-The evicted action is returned to `Pending` **only after its stop is provably confirmed**, never before — preserving the single-executor guarantee ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). An Occupied eviction (robot executing under a live lease) moves the FleetAction to `Revoking`; the control plane stops lease renewal, queues `cancel_action`, and returns the action to `Pending` only when the lease is provably dead (cancel acknowledged, the robot reports not-running on reconnect, or the lease horizon passes). A Reserved eviction whose assignment was never accepted (no lease outstanding) returns to `Pending` immediately. In every case `retryCount` is **not** incremented — preemption is a scheduling event, not a task failure.
+The evicted action is returned to `Pending` **only after its stop is provably confirmed**, never before — preserving the single-executor guarantee ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). An Occupied eviction (robot executing under a live lease) moves the FleetAction to `Revoking`; the control plane stops lease renewal, queues `cancel_action`, and returns the action to `Pending` only when the lease is provably dead (cancel acknowledged, the robot reports not-running on reconnect, or the lease horizon passes). A Reserved eviction whose assignment was never accepted (no lease outstanding) returns to `Pending` immediately. In every case `retryCount` is **not** incremented — preemption is a scheduling event, not a action failure.
 
 <a id="tde-restart-recovery"></a>
 #### 9.4.7 Restart Recovery
@@ -9422,11 +10514,11 @@ func recover():
       if reservation.state == Reserved:
         // Cannot safely validate transit state.
         // Cost of releasing: one scheduling round-trip.
-        // Cost of reinstating stale reservation: phantom slot blocking tasks indefinitely.
+        // Cost of reinstating stale reservation: phantom slot blocking actions indefinitely.
         zone.status.reservations.remove(reservation)
         releaseResourceHolds(reservation.actionID)     // free this action's shared-resource holds (may be on ancestor zones)
         emitEvent(TDEReservedReleasedOnRestart)
-        // FleetAction reconciler returns affected task to Pending.
+        // FleetAction reconciler returns affected action to Pending.
 
     patch(zone.status)
 
@@ -9441,15 +10533,27 @@ func applyConservativeFallback():
     patch(zone.status)
   emitEvent(TDEConservativeRecovery)
   markCondition(TDEAvailable, True,
-    message: "Conservative recovery applied; all tasks returned to Pending")
+    message: "Conservative recovery applied; all actions returned to Pending")
 ```
 
-**Why Reserved entries are released unconditionally:** A Reserved entry means the robot has not entered the zone. At restart time, the robot may be in transit, may have completed its task, may have reconnected in a different state, or may have been reassigned. None of these cases can be distinguished without cross-component coordination. Re-queuing the task costs one scheduling round-trip. Reinstating a stale Reserved entry could block the slot indefinitely.
+**Why Reserved entries are released unconditionally:** A Reserved entry means the robot has not entered the zone. At restart time, the robot may be in transit, may have completed its action, may have reconnected in a different state, or may have been reassigned. None of these cases can be distinguished without cross-component coordination. Re-queuing the action costs one scheduling round-trip. Reinstating a stale Reserved entry could block the slot indefinitely.
 
 **Why Occupied entries survive (with validation):** The Zone Controller wrote `Robot.status.currentZone` to etcd before the TDE crashed. That etcd write is durable. Cross-checking `Robot.status.currentZone` is a stateless read. If the robot is still in the zone, the slot is genuinely consumed; releasing it would permit over-subscription during recovery.
 
 <a id="tde-reservation-expiry-reconciler"></a>
 #### 9.4.8 Reservation Expiry Reconciler
+
+> **Specified, not implemented at v0.3.** No such loop exists in the reference TDE. The engine *excludes*
+> an expired `Reserved` entry from its live capacity count at read time, so an expired reservation stops
+> blocking new grants — but the entry is never removed from `FleetZone.status.reservations[]`, no
+> `TDEReservationExpired` event fires, no scheduler notification is sent, and
+> `SwarmadaConfig.spec.trafficDeconfliction.onReservationExpiry` is read by nothing, so both
+> `ReservationExpiryAction` values behave identically. Two consequences an operator should expect:
+> `FleetZone.status.reservations[]` accumulates stale entries indefinitely and is not a reliable picture of
+> live holds, and once any stale entry is present the `RetryAfter` hint on a capacity denial degrades to a
+> constant one second rather than the true earliest expiry. An action whose reservation expired before the
+> robot entered the zone is not returned to `Pending` by the TDE; it is recovered by the FleetAction
+> controller's own lease handling instead.
 
 Background loop running every 10 seconds:
 
@@ -9457,7 +10561,7 @@ Background loop running every 10 seconds:
 for each zone in listAllFleetZones():
   for each reservation where state == Reserved and expiresAt < now():
     zone.status.reservations.remove(reservation)
-    emitEvent(TDEReservationExpired{robot, task, zone})
+    emitEvent(TDEReservationExpired{robot, action, zone})
     if onReservationExpiry == ReleaseAndRequeue:
       notifyScheduler(reservation.actionID, ReturnToPending)
   patch(zone.status)
@@ -9468,6 +10572,14 @@ for each zone in listAllFleetZones():
 
 <a id="tde-kubernetes-events"></a>
 ##### 9.4.9.1 Kubernetes Events
+
+> **Specified, controller pending — the reference TDE emits none of these.** The engine holds no event
+> recorder, so every row below is unimplemented at v0.3. Combined with the Prometheus metrics in the next
+> subsection being unregistered, **the TDE has no observability surface at all at v0.3**: a denial, a
+> preemption, a conservative recovery and a queued resource are all invisible. An operator MUST NOT build
+> alerting or dashboards on either set until this lands. Reservation state is inspectable only by reading
+> `FleetZone.status.reservations[]` and `.sharedResourceQueues[]` directly, bearing in mind the stale-entry
+> caveat in the Reservation Expiry Reconciler above.
 
 | Event | Severity |
 | :---- | :---- |
@@ -9504,17 +10616,30 @@ swarmada_tde_recovery_releases_total{namespace, type}
     type ∈ {reserved, occupied, conservative}
 ```
 
-> **impl (v0.2):** the TDE reservation, preemption, and recovery behaviour is
+> **impl (v0.3):** the TDE reservation, preemption, and recovery behaviour is
 > implemented, but these `swarmada_tde_*` Prometheus metrics are **specified, not yet
-> emitted** — the engine does not register Prometheus collectors at v0.2. The metric
-> names above are the specified target; TDE observability today is via the Kubernetes
-> Events in the preceding subsection.
+> emitted** — the engine does not register Prometheus collectors at v0.3. The metric
+> names above are the specified target. **There is no working substitute:** the Kubernetes Events in
+> the preceding subsection are not emitted either, so a v0.3 deployment has no TDE signal on either
+> surface. Inspect `FleetZone.status.reservations[]` and `.sharedResourceQueues[]` directly, bearing in
+> mind the stale-entry caveat in the Reservation Expiry Reconciler above.
 
 <a id="tde-normative-invariants"></a>
 #### 9.4.10 Normative Invariants
 
 **TDE-1 — Scheduler-TDE atomicity.**
-The Scheduler MUST NOT write `FleetAction.status.assignedRobot` or transition a task to Assigned without a preceding `Granted` or `PreemptedGranted` from the TDE.
+For any `FleetAction` that names a zone, the Scheduler MUST NOT write `FleetAction.status.assignedRobot` or
+transition the action to Assigned without a preceding `Granted` or `PreemptedGranted` from the TDE. That
+response confirms **zone capacity**; it does not confirm that every shared resource named on the request is
+held, because resources are granted or queued rather than denied (see [§9.4.4](#tde-requestreservation-algorithm)).
+An adapter MUST therefore still honour a `ReserveResult` before using a shared resource, and MUST NOT infer
+availability from having received the assignment.
+
+**`spec.zone` is optional on `FleetAction`, and an action that omits it does not reach the gate at v0.3** —
+it is assigned with no entry in `FleetZone.status.reservations[]`. Such an action is outside this
+invariant rather than in violation of it; a zone-less action makes no zone-capacity claim to deconflict.
+An implementation that requires every action to be deconflicted should make `spec.zone` required in its own
+admission policy.
 
 **TDE-2 — Reserved state is transient.**
 `reservationTTLSeconds` MUST exceed the worst-case robot transit time to any zone boundary in the facility. Under-setting causes periodic spurious re-scheduling.
@@ -9523,19 +10648,19 @@ The Scheduler MUST NOT write `FleetAction.status.assignedRobot` or transition a 
 A preemptor priority (`Critical` or `High`) MAY evict a `Normal` or `Low` reservation — Reserved or Occupied — and MUST NOT evict another `Critical` or `High` reservation. `currentConcurrentRobots` MAY briefly exceed `maxConcurrentRobots` by 1 during preemption of an Occupied slot. `maxConcurrentRobots` is a scheduling policy limit, not a physical safety guarantee.
 
 **TDE-4 — Single authority.**
-The TDE is the sole authority for zone capacity and shared resource reservations. `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]` are controller-owned. Operator edits to these fields MUST be rejected by the admission webhook.
+The TDE is the sole authority for zone capacity and shared resource reservations. `FleetZone.status.reservations[]` and `FleetZone.status.sharedResourceQueues[]` are controller-owned. Operator edits to these fields MUST be rejected by the admission webhook — **specified, not implemented at v0.3**: the `FleetZone` webhook validates hierarchy and geometry only and never inspects `status`, so a hand-edited reservation list is accepted and will be partially overwritten by the next mirror rather than rejected.
 
 **TDE-5 — Shared resources admit up to `capacity` concurrent holders.**
 `FleetZone.status.sharedResourceQueues[].currentHolders[]` holds at most `spec.sharedResources[].capacity` entries; a resource at `count(currentHolders) == capacity` is full and further requests queue by `reservationPolicy`. A capacity-1 resource degenerates to a single holder — the common lift/door case.
 
-**TDE-6 — The TDE is the single writer; reservation writes are compare-and-swap.**
-Every mutation of `FleetZone.status.reservations[]` and `.sharedResourceQueues[]` is performed only by the TDE and only via an optimistic `resourceVersion`-guarded update. A write that loses the compare-and-swap (HTTP 409 Conflict) MUST be retried against the re-read object, never blind-overwritten. This serialises concurrent grants against the same zone or shared resource, so `currentHolders` can never exceed `capacity` under a race.
+**TDE-6 — The TDE is the single writer; concurrent grants against the same zone or shared resource are serialised so `currentHolders` can never exceed `capacity` under a race.**
+Every mutation of `FleetZone.status.reservations[]` and `.sharedResourceQueues[]` is performed only by the TDE. **At v0.3, the serialisation mechanism is an in-process mutex, not a `resourceVersion`-guarded compare-and-swap** (see the Maturity note above): each zone has its own `sync.Mutex`, held for the duration of evaluating and granting a request against that zone, and multi-zone requests lock the involved zones in a deterministic sorted order to avoid deadlock. The `FleetZone.status` write that follows (`mirror`) is a plain merge patch with no optimistic-lock option — it is a best-effort mirror of already-serialised in-memory state onto the object, not the source of the safety guarantee. This holds `currentHolders ≤ capacity` correctly for exactly one active TDE instance. It does **not** extend across replicas: leader election is off by default in the reference deployment (a single active manager is the only topology this guarantee covers), so a future multi-replica or active-active TDE deployment would need the mutex replaced with real cross-process serialisation — a `resourceVersion`-guarded CAS with retry-on-conflict, as `internal/controller/fleetaction_controller.go` already uses for its own status writes, would be the natural mechanism, but is not implemented here.
 
 **TDE-7 — Recovery releases the shared-resource holds of every dropped reservation.**
-When recovery removes a reservation (an unvalidated `Occupied` or any `Reserved`), it MUST also release that action's shared-resource holds and queue entries via `releaseResourceHolds`, backfilling freed capacity from each resource's queue. A reservation and its resource holds are released together; neither is left dangling.
+When recovery removes a reservation (an unvalidated `Occupied` or any `Reserved`), it MUST also release that action's shared-resource holds and queue entries via `releaseResourceHolds`, backfilling freed capacity from each resource's queue. A reservation and its resource holds are released together; neither is left dangling. **Specified, not upheld at v0.3:** the reference recovery path rebuilds queue state verbatim from `FleetZone.status` and calls no release, so under the default `RecoverValidate` mode a dropped reservation's holder and queue entries survive and permanently consume that resource's capacity. Only `conservativeRecoveryFallback: ReleaseAll` clears them, and it clears everything. An operator recovering from a control-plane restart should expect to inspect `status.sharedResourceQueues[]` for orphaned holders.
 
 **TDE-8 — Holder and queue state is persisted on the resource-owning zone.**
-A `SharedResource` is addressed by its declaring zone, which MAY be an ancestor of the requesting robot's target zone. Grants and releases MUST persist `currentHolders[]`/`waitQueue[]` to that resource-owning zone's `status` — in addition to the reservation entry on the target zone — so a shared lift or corridor tracked on a parent zone stays consistent across its children.
+A `SharedResource` is addressed by its declaring zone, which MAY be an ancestor of the requesting robot's target zone. Grants and releases MUST persist `currentHolders[]`/`waitQueue[]` to that resource-owning zone's `status` — in addition to the reservation entry on the target zone — so a shared lift or corridor tracked on a parent zone stays consistent across its children. **Specified, partly upheld at v0.3:** the grant path resolves and writes the owning zone correctly. The **release** path touches only the target zone, so releasing an action that held an ancestor-owned resource leaves that holder in place. The **preemption** path is worse: it removes the evicted action's zone reservation and releases none of its resource holds, on the target zone or on an ancestor, so a preempted action's holds survive until that action later reaches a terminal phase. A lift or corridor declared on a parent zone therefore leaks capacity on every completed or preempted action that used it, until a `ReleaseAll` recovery clears it.
 
 <a id="tde-decision-record"></a>
 #### 9.4.11 Decision Record
@@ -9546,7 +10671,7 @@ A `SharedResource` is addressed by its declaring zone, which MAY be an ancestor 
 | D-TDE-2 | TDE owns both zone capacity and shared resource reservations | Single gate; avoids Zone Controller / TDE coordination on every assignment |
 | D-TDE-3 | Reserved expires by timeout; Occupied does not | Physical presence is ground truth; transit time is bounded, occupancy is not |
 | D-TDE-4 | Critical and High actions preempt the lowest-priority Normal/Low reservation (Reserved or Occupied) when zone full; never preempt Critical/High | Preemptor semantics require it; bounding victims to Normal/Low protects committed high-priority work; transient +1 on Occupied eviction is documented and accepted |
-| D-TDE-5 | Scheduler returns Denied task to Pending with RetryAfter hint | Avoids TDE queue buildup; Scheduler remains the single assignment authority |
+| D-TDE-5 | Scheduler returns Denied action to Pending with RetryAfter hint | Avoids TDE queue buildup; Scheduler remains the single assignment authority |
 | D-TDE-6 | State stored in FleetZone.status | Survives TDE restarts; operator-visible; no separate database |
 | D-TDE-7 | Priority wins across bands; SJF optional (PriorityWithDuration) within band | Predictable default; per-resource configurable without global policy change |
 | D-TDE-8 | Reserved entries released unconditionally on TDE restart | Cannot safely validate transit state; re-scheduling cost is acceptable |
@@ -9557,7 +10682,7 @@ A `SharedResource` is addressed by its declaring zone, which MAY be an ancestor 
 
 Swarmada's security model operates across two distinct authentication contexts — humans and automation interacting with the control plane, and Fleet Adapters connecting on behalf of robots — and applies layered controls for transport security, authorization, audit, and secrets management. This section defines the contracts that all Swarmada implementations must satisfy. It does not specify implementation details (specific key algorithms, library choices) beyond the minimum version floors required for interoperability.
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. Transport-layer mTLS and Kubernetes RBAC/OIDC, plus the Swarmada-specific enforcement: per-message `robot_id` authorization ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)), the five built-in RBAC roles and custom verbs (`admit`/`reject`/`cancel`/`estop-trigger`/`estop-clear`, [§9.5.3](#security-authorization-swarmada-rbac-roles)) authorized at the admission site via SubjectAccessReview, the tamper-evident hash-chained audit log ([§9.5.4](#security-audit-logging), [§9.6.5](#safety-safety-audit-log)), and the artifact-signing surface (`SwarmadaConfig.spec.signing.trustRoots`, and `modelSignatureRef`/`registryCredentialsRef` on rollout specs, [§9.5.5](#security-secrets-management)) with fail-closed signature verification. Remaining signature-convention items — cosign multi-layer, adapter-side artifact-body re-verification ([§9.2](#fleet-adapter-protocol)), and Rekor inclusion-proof depth — are adapter-side/format refinements that fail closed today, not control-plane gaps.
+> **Maturity (v0.3):** stage: alpha · control-plane: implemented · end-to-end: partial. Transport-layer mTLS and Kubernetes RBAC/OIDC, plus the Swarmada-specific enforcement: per-message `robot_id` authorization ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)), the six built-in RBAC roles and their custom verbs (`admit`/`reject`/`cancel`/`verify`/`policy-reset`/`estop-trigger`/`estop-clear`, [§9.5.3](#security-authorization-swarmada-rbac-roles)) authorized at the admission point via SubjectAccessReview, the tamper-evident hash-chained audit log ([§9.5.4](#security-audit-logging), [§9.6.5](#safety-safety-audit-log) — whose chain survives a control-plane restart only as far as its sink can be read back, and whose default sink is in-memory; both conditions, and how they change the reading of a `verify` result, are set out there), and the artifact-signing surface (`SwarmadaConfig.spec.signing.trustRoots` and `modelSignatureRef`/`firmwareSignatureRef` on rollout specs, [§9.5.5](#security-secrets-management)) with fail-closed signature verification. **`registryCredentialsRef` is specified, not present in the API at v0.3:** rollout specs carry no such field, and registry credentials are read from a conventional per-namespace Secret instead — see [§9.5.5](#security-secrets-management). The cosign multi-layer convention, adapter-side artifact-body re-verification ([§9.2](#fleet-adapter-protocol), enforced by conformance C7.2) and Rekor inclusion-proof plus signed-entry-timestamp verification are all implemented. **Rekor verification degrades silently when `signing.rekorPublicKey` is unset:** it falls back to index presence only — the inclusion proof and signed entry timestamp are not checked, the rollout dispatches, and no condition, event or status field records that it happened, so an operator reading a successful rollout cannot tell which mode verified it ([§9.1.12](#swarmadaconfig)). Cosign **keyless**/Fulcio certificate-identity verification remains unimplemented.
 
 <a id="security-authentication"></a>
 #### 9.5.1 Authentication
@@ -9585,21 +10710,21 @@ There are no Swarmada-specific authentication credentials for operators. An oper
 
 Each Fleet Adapter authenticates to the Swarmada API Server with the **mTLS client certificate** ([§9.5.2](#security-transport-security)) it presents when it opens its `ControlStream`. That certificate is the adapter's identity; there is no separate per-robot credential, and Swarmada does **not** issue per-robot JSON Web Tokens.
 
-**Why no per-robot token.** A single `ControlStream` multiplexes every robot a Fleet Adapter manages ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)), so there is no per-robot connection on which a per-robot bearer token could be presented. More fundamentally, a per-robot token would add no containment: an adapter that is compromised already drives every robot on its stream, with or without a token. The boundary that actually matters is the adapter↔robot-set binding, and Swarmada enforces that on the server, on every message — not with a credential the adapter holds.
+**Why no per-robot credential.** A single `ControlStream` multiplexes every robot a Fleet Adapter manages ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)), so there is no per-robot connection on which a per-robot bearer token could be presented. More fundamentally, a per-robot credential would add no containment: an adapter that is compromised already drives every robot on its stream, with or without one. The boundary that actually matters is the adapter↔robot-set binding, and Swarmada enforces that on the server, on every message — not with a credential the adapter holds.
 
-**Adapter identity.** The adapter's client-certificate SAN is `<adapter-name>.<namespace>.svc.cluster.local`, issued by the namespace CA ([§9.5.2.3](#security-certificate-management)). The API Server resolves it to a `FleetAdapter` resource in that namespace. The certificate's namespace is authoritative; an adapter cannot assert a different one.
+**Adapter identity.** The adapter's client-certificate SAN is `<adapter-name>.<namespace>.svc.cluster.local`, issued by the namespace CA ([§9.5.2.3](#security-certificate-management)). The API Server resolves it to a `FleetAdapter` resource in that namespace. The certificate's namespace is authoritative; an adapter cannot assert a different one. **Specified, not implemented at v0.3:** the reference `ControlStream` server takes the namespace for every subsequent Kubernetes read and write from the adapter's own `AdapterHello.namespace` field, and uses the certificate-derived namespace only for metrics and for the suggested-class lookup. An adapter that presents a valid certificate for one namespace and declares another in its hello is served against the declared one. Until this is closed, do not rely on the certificate namespace as an isolation boundary — see Cross-namespace isolation below, which has the same caveat.
 
-**Per-message robot authorization.** On every `AdapterMessage` (telemetry, task status, command result, registration, resource request), the API Server authorizes the message's `robot_id` against the authenticated adapter identity. All of the following must hold, or the message is refused `PERMISSION_DENIED`:
+**Per-message robot authorization.** On every `AdapterMessage` that names a robot — telemetry, command result, registration, resource request — the API Server authorizes the message's `robot_id` against the authenticated adapter identity. **One arm is outside this rule at v0.3, and it is a wire-contract limitation rather than a controller gap:** `ActionStatusUpdate` is action-addressed and carries no `robot_id` field at all ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)), so it cannot be authorized this way. It is correlated by `action_id` against the assignment the control plane already holds. Closing this requires an additive proto change. All of the following must hold, or the message is refused `PERMISSION_DENIED`:
 
 1. the robot is in the adapter's namespace;
 2. the robot's `Robot.spec.adapter` (or, before admission, its `DiscoveredRobot`) names this adapter; and
 3. the robot's `RobotClass` is one the adapter declares it serves (`FleetAdapter.spec.servesRobotClasses`).
 
-A single unauthorized `robot_id` is an authorization failure for that message only; it does not tear down the stream (a stray id is not a connection-level fault). This per-message check is what scopes an adapter to the robots it actually serves — the role a per-robot token claim would otherwise have played.
+A single unauthorized `robot_id` is an authorization failure for that message only; it does not tear down the stream (a stray id is not a connection-level fault). This per-message check is what scopes an adapter to the robots it actually serves — the role a per-robot credential claim would otherwise have played.
 
-**Revoking an adapter's authority over a robot.** Because authority derives from the `Robot.spec.adapter` binding rather than from a token the adapter holds, an operator revokes it by re-pointing that binding (or deleting the `Robot`) — a normal `Robot` spec update available to `swarmada:fleet-manager` and `swarmada:admin`. Revoking the adapter's **client certificate** removes its authority over all of its robots at once and is the response to a suspected adapter compromise. There is no per-robot token to revoke and therefore no token denylist to maintain.
+**Revoking an adapter's authority over a robot.** Because authority derives from the `Robot.spec.adapter` binding rather than from a credential the adapter holds, an operator revokes it by re-pointing that binding (or deleting the `Robot`) — a normal `Robot` spec update available to `swarmada:fleet-manager` and `swarmada:admin`. Revoking the adapter's **client certificate** removes its authority over all of its robots at once and is the response to a suspected adapter compromise. There is no per-robot credential to revoke and therefore no credential denylist to maintain.
 
-**Cross-namespace isolation.** An adapter's certificate is signed by its namespace CA ([§9.5.2.3](#security-certificate-management)); a different namespace uses a different CA, so an adapter in `warehouse-a` cannot complete the mTLS handshake against `warehouse-b`'s API Server at all, let alone act on its robots. Cross-namespace access fails at the transport layer, before any application-layer check.
+**Cross-namespace isolation.** This isolation is a property of how an operator provisions certificate authorities, not something the reference control plane enforces on its own. When each namespace is served by a distinct CA ([§9.5.2.3](#security-certificate-management)), an adapter in `warehouse-a` cannot complete the mTLS handshake against `warehouse-b`'s API Server, and cross-namespace access fails at the transport layer before any application-layer check. The reference manager accepts a **single** client CA bundle per process, so a deployment that uses one CA across namespaces does not get this property — and, per the caveat under Adapter identity above, the application-layer namespace is taken from the adapter's hello rather than its certificate. Operators requiring cross-namespace isolation MUST provision per-namespace CAs; Swarmada does not ship a CA ([§9.5.2.3](#security-certificate-management)).
 
 <a id="security-transport-security"></a>
 #### 9.5.2 Transport Security
@@ -9612,7 +10737,7 @@ All gRPC connections between Fleet Adapters and the Swarmada API Server MUST use
 - **Server certificate:** the API Server presents a certificate issued by the namespace CA. Fleet Adapters verify this certificate against the CA bundle they received at admission time.
 - **Client certificate:** the Fleet Adapter presents a certificate issued by the namespace CA. The API Server verifies this certificate on connection establishment.
 - **Minimum TLS version:** TLS 1.3. TLS 1.2 is not permitted. TLS 1.1 and 1.0 are not permitted.
-- **Certificate validity:** 90 days for Fleet Adapter client certificates; rotated automatically by the Swarmada certificate manager at 75 days.
+- **Certificate validity:** 90 days for Fleet Adapter client certificates, with rotation at 75 days. **Swarmada ships no certificate manager and no CA** ([§9.5.2.3](#security-certificate-management)) — this is a recommended operator policy to implement with cert-manager or an equivalent, not a component the control plane provides.
 
 **The two-layer security model.** mTLS provides transport-layer authentication and the adapter's identity (this connection is from a specific, valid Fleet Adapter). Server-side per-message authorization ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)) provides application-layer scoping (this `robot_id` is one the adapter is allowed to act on). Both layers are required. A connection that passes mTLS but names a `robot_id` the adapter does not serve has that message rejected `PERMISSION_DENIED` at the application layer. A connection that fails mTLS is rejected at the transport layer and never reaches the application layer.
 
@@ -9684,9 +10809,11 @@ spec:
 <a id="security-authorization-swarmada-rbac-roles"></a>
 #### 9.5.3 Authorization — Swarmada RBAC Roles
 
-Swarmada defines six built-in `ClusterRole` resources that operators bind to users, groups, or service accounts using standard Kubernetes `RoleBinding` (for namespace-scoped access) or `ClusterRoleBinding` (for cluster-wide access). All five roles are namespace-scoped in practice (bound via `RoleBinding` to a specific namespace) even though defined as `ClusterRole` resources.
+Swarmada defines six built-in `ClusterRole` resources — five operator-facing roles plus `swarmada:edge` for the zone edge node — that operators bind to users, groups, or service accounts using standard Kubernetes `RoleBinding` (for namespace-scoped access) or `ClusterRoleBinding` (for cluster-wide access). All six roles are namespace-scoped in practice (bound via `RoleBinding` to a specific namespace) even though defined as `ClusterRole` resources.
 
-The six built-in roles and their custom verbs (`admit`/`reject`/`cancel`/`verify`/`policy-reset`/`estop-trigger`/`estop-clear`) are the complete set defined by RFC-0001. Future RFCs may introduce additional custom verbs or audit event types; any such addition MUST be separately grantable (never folded into an existing role by default), MUST fail closed, and — for any safety-relevant verb — MUST be recorded in the tamper-evident safety audit log. This keeps the security substrate extensible without broadening any existing grant.
+The built-in roles and their custom verbs (`admit`/`reject`/`cancel`/`append`/`verify`/`policy-reset`/`rollout-resume`/`estop-trigger`/`estop-clear`) are the complete set defined by RFC-0001. (`append` gates growing a `FleetTask`'s plan after creation, [§9.1.5](#fleettask), and is enforced by `SubjectAccessReview` on the same terms as the others.) **One family in the permission matrix below is not enforceable at v0.3 and is marked accordingly:** the `read`/`export`/`verify` verbs on the audit log. The audit log is not a Kubernetes API object ([§9.6.5](#safety-safety-audit-log)), so there is nothing for `SubjectAccessReview` to authorize against, and `swarmctl audit` reads the chain from a file or stdin without any access review. Grant those rows as a statement of intent, and control access to the log by filesystem or object-store permissions on the sink until an API surface for it exists. Every other custom verb in the matrix is genuinely SAR-gated and fails closed. Future RFCs may introduce additional custom verbs or audit event types; any such addition MUST be separately grantable (never folded into an existing role by default), MUST fail closed, and — for any safety-relevant verb — MUST be recorded in the tamper-evident safety audit log. This keeps the security substrate extensible without broadening any existing grant.
+
+Not every operator-settable annotation carries a custom verb, and the asymmetry is deliberate rather than an omission. `swarmada.io/cancel-requested` is gated by the `cancel` verb because a confirmed cancel finalizes a `FleetAction`, releases the robot binding and frees the TDE slot ([§9.1.4.2](#fleetaction-state-machine)) — an irreversible transition with a physical consequence. `swarmada.io/requeue-requested` returns an action to `Pending` for reconsideration by the same scheduler filters; it destroys no state, and any principal able to set it can already achieve the same outcome by editing the resource it is set on. A custom verb is warranted where an action is irreversible, safety-relevant, or grants authority the underlying RBAC verb does not already imply, and is otherwise a grant an operator must maintain for no additional control.
 
 <a id="security-role-definitions"></a>
 ##### 9.5.3.1 Role Definitions
@@ -9706,70 +10833,74 @@ The six built-in roles and their custom verbs (`admit`/`reject`/`cancel`/`verify
 <a id="security-permission-matrix"></a>
 ##### 9.5.3.2 Permission Matrix
 
-The following table defines which operations each role can perform. `✓` = permitted, `✗` = denied, `own` = permitted only for the robots the Fleet Adapter is authorized to serve (resolved server-side per message from the adapter's mTLS identity, [§9.5.1.2](#security-fleet-adapter-authentication-robot-identity); there is no per-robot token).
+The following table defines which operations each role can perform. `yes` = permitted, `no` = denied, `own` = permitted only for the robots the Fleet Adapter is authorized to serve (resolved server-side per message from the adapter's mTLS identity, [§9.5.1.2](#security-fleet-adapter-authentication-robot-identity); there is no per-robot credential).
 
 | Resource / Verb | `viewer` | `operator` | `fleet-manager` | `admin` | `robot` | `edge` |
 | :---- | :---- | :---- | :---- | :---- | :---- | :---- |
-| **Robot** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | own | ✓ |
-| **Robot** `create`, `update`, `patch` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **Robot** `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **Robot/status** `update`, `patch` | ✗ | ✗ | ✗ | ✓ | own | ✗ |
-| **Robot** `estop-trigger` (custom verb) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **Robot** `estop-clear` (custom verb) | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
-| **DiscoveredRobot** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **DiscoveredRobot** `admit` (custom verb) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **DiscoveredRobot** `reject` (custom verb) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **RobotClass** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **RobotClass** `create`, `update`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **FleetAction** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | own | ✗ |
-| **FleetAction** `create`, `update`, `patch` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **FleetAction** `delete`, `cancel` (custom verb) | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **FleetZone** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | own | ✓ |
-| **FleetZone** `create`, `update`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **FleetZone** `estop-trigger` (custom verb) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **FleetZone** `estop-clear` (custom verb) | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
-| **ZoneMaintenance** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **ZoneMaintenance** `create`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **RobotProbe** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **RobotProbe** `create`, `update`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **FirmwareRollout** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **FirmwareRollout** `create`, `update`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **ModelRollout** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **ModelRollout** `create`, `update`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **ModelPolicy** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **ModelPolicy** `create`, `update`, `delete` | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **ModelPolicy** `policy-reset` (custom verb) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **SwarmadaConfig** `get`, `list`, `watch` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **SwarmadaConfig** `update`, `patch` | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
-| **SwarmadaConfig** `estop-trigger` (custom verb, fleet-wide) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **SwarmadaConfig** `estop-clear` (custom verb, fleet-wide) | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
-| **Audit log** `read` (`swarmctl get audit`) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-| **Audit log** `export` (`swarmctl export audit`) | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
-| **Audit log** `verify` (`swarmctl verify audit`) | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| **Robot** `get`, `list`, `watch` | yes | yes | yes | yes | own | yes |
+| **Robot** `create`, `update`, `patch` | no | no | yes | yes | no | no |
+| **Robot** `delete` | no | no | yes | yes | no | no |
+| **Robot/status** `update`, `patch` | no | no | no | yes | own | no |
+| **Robot** `estop-trigger` (custom verb) | no | no | yes | yes | no | no |
+| **Robot** `estop-clear` (custom verb) | no | no | no | yes | no | no |
+| **DiscoveredRobot** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **DiscoveredRobot** `admit` (custom verb) | no | no | yes | yes | no | no |
+| **DiscoveredRobot** `reject` (custom verb) | no | no | yes | yes | no | no |
+| **RobotClass** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **RobotClass** `create`, `update`, `delete` | no | no | yes | yes | no | no |
+| **FleetAction** `get`, `list`, `watch` | yes | yes | yes | yes | own | no |
+| **FleetAction** `create`, `update`, `patch` | no | yes | yes | yes | no | no |
+| **FleetAction** `delete`, `cancel` (custom verb) | no | yes | yes | yes | no | no |
+| **FleetZone** `get`, `list`, `watch` | yes | yes | yes | yes | own | yes |
+| **FleetZone** `create`, `update`, `delete` | no | no | yes | yes | no | no |
+| **FleetZone** `estop-trigger` (custom verb) | no | no | yes | yes | no | no |
+| **FleetZone** `estop-clear` (custom verb) | no | no | no | yes | no | no |
+| **ZoneMaintenance** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **ZoneMaintenance** `create`, `delete` | no | no | yes | yes | no | no |
+| **RobotProbe** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **RobotProbe** `create`, `update`, `delete` | no | no | yes | yes | no | no |
+| **FirmwareRollout** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **FirmwareRollout** `create`, `update`, `delete` | no | no | yes | yes | no | no |
+| **FirmwareRollout** `rollout-resume` (custom verb) | no | no | yes | yes | no | no |
+| **ModelRollout** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **ModelRollout** `create`, `update`, `delete` | no | no | yes | yes | no | no |
+| **ModelRollout** `rollout-resume` (custom verb) | no | no | yes | yes | no | no |
+| **ModelPolicy** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **ModelPolicy** `create`, `update`, `delete` | no | no | yes | yes | no | no |
+| **ModelPolicy** `policy-reset` (custom verb) | no | no | yes | yes | no | no |
+| **SwarmadaConfig** `get`, `list`, `watch` | yes | yes | yes | yes | no | no |
+| **SwarmadaConfig** `update`, `patch` | no | no | no | yes | no | no |
+| **SwarmadaConfig** `estop-trigger` (custom verb, fleet-wide) | no | no | yes | yes | no | no |
+| **SwarmadaConfig** `estop-clear` (custom verb, fleet-wide) | no | no | no | yes | no | no |
+| **Audit log** `read` verb | no | no | yes | yes | no | no |
+| **Audit log** `export` verb | no | no | no | yes | no | no |
+| **Audit log** `verify` verb | no | no | yes | yes | no | no |
 
 **`policy-reset` is an override, not an approval.** A `ModelPolicy` that has hit `spec.consecutiveRejectionLimit` suspends itself: polling stops and further triggers are dropped ([§9.1.10](#modelpolicy)). `policy-reset` clears that suspension and resumes evaluation. It does **not** approve a model or overturn a quality-gate verdict — the next trigger is evaluated on its merits, and a policy whose underlying quality problem persists suspends again. It is granted separately from `create`/`update` on the same resource for the same reason `estop-clear` is separated from `estop-trigger`: clearing an automated safety-ish stop is a distinct authority from configuring the thing that stopped. Enforcement is a `SelfSubjectAccessReview` at the CLI, failing closed, so the check runs before the policy is read and a denied caller learns nothing about whether it exists.
 
+**`rollout-resume` abandons work rather than repeating it.** A rollout halted by `pauseOnError` is released by `swarmctl rollout resume`, which writes the `swarmada.io/rollout-resume` annotation after a `SelfSubjectAccessReview` on this verb. It carries its own verb rather than folding into `update` because it is destructive of intent: the robots that failed are recorded in `status.excludedRobots` and this rollout never attempts them again — retrying a failed artifact is what a FRESH rollout is for (ADR-0041). Excluding them is also what lets the rollout reach a terminal phase, and only a terminal record may be deleted; without it a paused rollout could be neither advanced nor removed. Every resume is sealed as `ROLLOUT_RESUMED` naming the reason and the excluded set. It is specified to name the operator as well; at v0.3 it carries the controller's own service-account identity instead — see the `actor` discussion below.
+
 **The `estop-clear` restriction.** Only `swarmada:admin` can clear an estop. This is a deliberate constraint: estop clearance is a safety decision. Operators who need to grant estop-clear to a wider set of users must create a custom `ClusterRole` with the `estop-clear` verb explicitly and bind it to the appropriate users. Swarmada does not provide a built-in role that grants estop-clear to non-admins.
 
-**Automation cannot clear estops.** CI/CD pipelines, upstream-system integrations, and Fleet Adapters cannot hold the `swarmada:admin` role. The `swarmada:operator` and `swarmada:fleet-manager` roles do not include `estop-clear`. This is not configurable in RFC-0001. A future RFC may define a time-bounded estop-clear token for supervised automation (e.g. an autonomous resume procedure that has been pre-approved by a human operator).
+**Automation cannot clear estops.** CI/CD pipelines, upstream-system integrations, and Fleet Adapters cannot hold the `swarmada:admin` role. The `swarmada:operator` and `swarmada:fleet-manager` roles do not include `estop-clear`. This is not configurable in RFC-0001. A future RFC may define a time-bounded, single-use estop-clear grant for supervised automation (e.g. an autonomous resume procedure that has been pre-approved by a human operator).
 
 <a id="security-audit-logging"></a>
 #### 9.5.4 Audit Logging
 
-The Swarmada safety audit log (defined fully in [§9.6.5](#safety-safety-audit-log)) records all safety-relevant events. The security model adds a requirement that ALL of the following events produce audit log entries with the structured fields listed below, regardless of whether they are also safety-relevant:
+The Swarmada safety audit log (defined fully in [§9.6.5](#safety-safety-audit-log)) records all safety-relevant events. The security model adds a requirement that ALL of the following events produce audit log entries with the structured fields listed below, regardless of whether they are also safety-relevant. **Coverage is partial at v0.3.** The safety-relevant subset in [§9.6.5.1](#safety-required-events) carries a per-row status column and is fully written; five event types in the table below are **specified, controller pending** and are written by nothing: `FLEETACTION_CREATED`, `FLEETACTION_ASSIGNED`, `FIRMWARE_ROLLOUT_COMPLETED`, `MODEL_ROLLOUT_COMPLETED` and `RBAC_BINDING_CREATED`. An auditor MUST NOT read the absence of those entries as evidence the events did not occur.
 
 **Required security audit events:**
 
 | Event type | Trigger |
 | :---- | :---- |
-| `ROBOT_ADMITTED` | `swarmctl admit robot` |
-| `ROBOT_REJECTED` | `swarmctl delete robot --reason` |
+| `ROBOT_ADMITTED` | the `admit` verb on a `DiscoveredRobot` |
+| `ROBOT_REJECTED` | the `reject` verb — the `swarmada.io/rejected` annotation carrying the reason |
 | `ROBOT_AUTHZ_DENIED` | An `AdapterMessage` named a `robot_id` the adapter is not authorized to serve |
 | `FLEETACTION_CREATED` | Any `FleetAction` resource created |
 | `FLEETACTION_ASSIGNED` | Scheduler writes `status.assignedRobot` |
 | `FLEETACTION_CANCELLED` | FleetAction transitions to `Cancelled` |
-| `ESTOP_TRIGGERED` | `estop` `Command` or `swarmctl estop` |
-| `ESTOP_CLEARED` | `swarmctl estop-clear` |
+| `ESTOP_TRIGGERED` | `estop` `Command`, or the `estop-trigger` verb |
+| `ESTOP_CLEARED` | the `estop-clear` verb |
 | `ESTOP_CLEAR_REJECTED` | Estop clear attempted but precondition not met |
 | `ZONE_MAINTENANCE_ACTIVATED` | `ZoneMaintenance` resource created |
 | `ZONE_MAINTENANCE_DEACTIVATED` | `ZoneMaintenance` resource deleted or deactivated |
@@ -9803,15 +10934,15 @@ The Swarmada safety audit log (defined fully in [§9.6.5](#safety-safety-audit-l
   "action": "create",
   "outcome": "Allowed",
   "detail": { },
-  "swarmada_version": "v0.2.0",
+  "swarmada_version": "v0.3.0",
   "log_version": "1",
   "chain_hash": "sha256:..."
 }
 ```
 
-**`actor.type`** is one of `user` (human operator via kubeconfig/OIDC), `service-account` (CI/CD or in-cluster automation), or `robot` (Fleet Adapter mTLS identity). The `identity` field carries the fully qualified Kubernetes identity string.
+**`actor.type`** is one of `user` (human operator via kubeconfig/OIDC), `service-account` (CI/CD or in-cluster automation), or `robot` (Fleet Adapter mTLS identity). The `identity` field carries the fully qualified Kubernetes identity string. Events an OPERATOR causes carry that operator: a mutating admission webhook stamps the authenticated username onto the carrier object at admission, and the controller that seals the entry reads it back, so `ESTOP_TRIGGERED`, `ESTOP_CLEARED` and `ROLLOUT_RESUMED` name a person even though a controller writes them asynchronously ([§9.6.2.3](#safety-estop-state-machine)). Events the CONTROL PLANE itself causes — install outcomes, a rollout pausing on error, capability derivation — keep a service-account identity naming the controller, because attributing them to a user would be a false claim rather than a missing one. Where an operator-caused event cannot be attributed (the stamping webhook was skipped, or the write carried no user), the identity is prefixed `unattributed:` and the type stays `service-account`; an implementation MUST NOT record `user` for an identity it did not authenticate.
 
-**`outcome`** is one of `Allowed`, `Denied`, or `Error`. Every denied action produces an audit entry; denied actions are never silently dropped.
+**`outcome`** is one of `Allowed`, `Denied`, or `Error`. Every denied action is specified to produce an audit entry, so that denied actions are never silently dropped. **Specified, not implemented at v0.3 for admission-time denials:** of the eight admission webhooks, only the `SwarmadaConfig` one holds an audit recorder, so a denial of `estop-trigger`, `estop-clear`, `cancel`, `append`, `policy-reset` or `rollout-resume` at admission is refused correctly and recorded nowhere. Two denial paths *are* written: `ROBOT_AUTHZ_DENIED` on the adapter stream, and `ESTOP_CLEAR_REJECTED` on a resume blocked by an uncleared estop. Until the rest land, correlate denials from the Kubernetes API server's own audit log.
 
 **`source_ip`** is the IP address of the client that made the API call. For gRPC calls from Fleet Adapters, this is the adapter's pod IP (from the TCP connection). For REST calls from operators, this is the operator's IP (or the last-hop IP if behind a proxy).
 
@@ -9821,17 +10952,25 @@ The Swarmada safety audit log (defined fully in [§9.6.5](#safety-safety-audit-l
 <a id="security-fleet-adapter-credentials"></a>
 ##### 9.5.5.1 Fleet Adapter Credentials
 
-A Fleet Adapter's only credential is its **mTLS client certificate and private key** ([§9.5.2.3](#security-certificate-management)), held as a Kubernetes `Secret` (e.g. `acme-fleet-adapter-tls`) mounted into the adapter pod. There is no per-robot token Secret: Swarmada issues no per-robot JWT ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)), so there is nothing per-robot to store, rotate, or leak.
+A Fleet Adapter's only credential is its **mTLS client certificate and private key** ([§9.5.2.3](#security-certificate-management)), held as a Kubernetes `Secret` (e.g. `acme-fleet-adapter-tls`) mounted into the adapter pod. There is no per-robot credential Secret: Swarmada issues no per-robot JWT ([§9.5.1.2](#security-fleet-adapter-authentication-robot-identity)), so there is nothing per-robot to store, rotate, or leak.
 
-The client private key is the sensitive material. It is provisioned and rotated by cert-manager (or `swarmada-certsync` for air-gapped sites) and is never written to any CRD `spec` or `status` field, nor to any log entry. Only the adapter's own service account can mount it. Possession of this key is possession of the adapter's full authority over its robot set, so it is protected like any other private key: short-lived (90-day) certificates, automatic rotation at 75 days, and certificate revocation as the response to a suspected adapter compromise (which removes the adapter's authority over all of its robots at once).
+The client private key is the sensitive material. It is provisioned and rotated by the operator's own certificate tooling — cert-manager, or an equivalent for air-gapped sites — and is never written to any CRD `spec` or `status` field, nor to any log entry. Only the adapter's own service account can mount it. Possession of this key is possession of the adapter's full authority over its robot set, so it is protected like any other private key: short-lived (90-day) certificates, automatic rotation at 75 days, and certificate revocation as the response to a suspected adapter compromise (which removes the adapter's authority over all of its robots at once).
 
 <a id="security-model-and-firmware-registry-credentials"></a>
 ##### 9.5.5.2 Model and Firmware Registry Credentials
 
 `ModelRollout.spec.modelUri` and `FirmwareRollout.spec.firmwareUri` reference artifacts in OCI registries or HTTPS servers that may require authentication. Registry credentials are never stored inline in CRD fields. They are referenced by Secret name:
 
+**`registryCredentialsRef` is specified, not present in the API at v0.3.** The block below is the target
+design; it is not a field an operator can set today. `FirmwareRollout` and `ModelRollout` carry no such
+property in their Go types or their generated CRD schemas, so a `registryCredentialsRef` key written into
+a rollout spec is silently pruned by the API server rather than validated, stored or rejected. At v0.3 the
+reference implementation reads registry credentials from a single conventional per-namespace Secret named
+`swarmada-registry-credentials`, which is not selectable per rollout.
+
 ```yaml
 # In FirmwareRollout or ModelRollout spec:
+# SPECIFIED, NOT PRESENT IN THE API at v0.3 -- registryCredentialsRef is pruned on write.
 spec:
   modelUri: "oci://registry.swarmada.io/models/item-recognition:4.0.0"
   modelSignatureRef: "oci://registry.swarmada.io/models/item-recognition:4.0.0.sig"
@@ -9840,14 +10979,14 @@ spec:
     key: .dockerconfigjson             # key within the Secret
 ```
 
-The OTA/Model Update Manager reads the Secret when constructing download instructions for the Robot Agent. The Secret content is never written to any CRD status field or transmitted in any log entry. The Secret must be of type `kubernetes.io/dockerconfigjson` for OCI registries.
+The OTA/Model Update Manager is specified to read the Secret when constructing download instructions for the Robot Agent. Under either mechanism the Secret content is never written to any CRD status field or transmitted in any log entry, and the Secret must be of type `kubernetes.io/dockerconfigjson` for OCI registries.
 
 **Artifact signature trust roots.** Registry credentials prove a download was authorised; they do not prove the artifact was built by a trusted publisher. Signature verification fills that gap. Trust roots are configured in `SwarmadaConfig.spec.signing.trustRoots` — a list of Kubernetes Secrets in the same namespace, each containing a PEM-encoded cosign public key or x509 certificate. The OTA/Model Update Manager passes the applicable trust roots to the Robot Agent and Fleet Adapter alongside download instructions. The private-key counterparts of these trust roots are held exclusively by the signing system (CI/CD pipeline or a registry with cosign integration) and are never mounted into any Swarmada component. Only the public verification keys are stored as namespace Secrets; their exposure does not grant signing authority.
 
 <a id="security-webhook-hmac-secrets-modelpolicy"></a>
 ##### 9.5.5.3 Webhook HMAC Secrets (ModelPolicy)
 
-`ModelPolicy.spec.trigger.webhook.authSecretRef` references a Secret containing the HMAC key used to validate webhook payload signatures ([§9.1.10](#modelpolicy)). The Secret must have a key named `hmac-secret` containing a cryptographically random byte sequence of at least 32 bytes. The ModelPolicy controller reads the Secret at admission time and on each webhook receipt. The HMAC secret is never logged.
+`ModelPolicy.spec.trigger.webhook.authSecretRef` references a Secret containing the HMAC key used to validate webhook payload signatures ([§9.1.10](#modelpolicy)). The Secret must have a key named `hmac-secret` containing a cryptographically random byte sequence of at least 32 bytes. **The 32-byte floor is a requirement on the operator, not a validated one at v0.3:** the webhook handler checks only that the key is non-empty, and there is no admission-time read of `authSecretRef` — the Secret is read on each webhook receipt. A short key is accepted and weakens the HMAC silently. The HMAC secret is never logged.
 
 <a id="security-what-swarmada-does-not-provide"></a>
 #### 9.5.6 What Swarmada Does NOT Provide
@@ -9858,11 +10997,11 @@ The following security controls are outside Swarmada's scope. Operators are resp
 
 **Physical access control to robots.** Swarmada's RBAC controls who can assign tasks to robots and trigger estops via software. It cannot prevent a person from physically interacting with a robot — powering it off, pressing a hardware estop button, or removing it from the network. Physical access control is the responsibility of facilities management and is outside Swarmada's scope.
 
-**Encryption of telemetry data at rest.** Only the coarse, material-transition `Robot.status` projections of telemetry (coarse robot position, battery level, hardware status, written on material transitions) are persisted in etcd as Kubernetes resource status fields; live, high-cadence `TelemetryPayload` telemetry is streamed to the time-series database (TSDB), never to etcd. Whether the etcd-persisted projections are encrypted at rest depends on whether the Kubernetes cluster has etcd encryption configured. Swarmada does not configure etcd encryption; operators must enable it at the cluster level if required by their data governance policy. The Swarmada safety audit log is similarly stored in etcd (or in the configured archive store) and subject to the same at-rest encryption policy.
+**Encryption of telemetry data at rest.** Only the coarse, material-transition `Robot.status` projections of telemetry (coarse robot position, battery level, hardware status, written on material transitions) are persisted in etcd as Kubernetes resource status fields; live, high-cadence `TelemetryPayload` telemetry is streamed to the time-series database (TSDB), never to etcd. Whether the etcd-persisted projections are encrypted at rest depends on whether the Kubernetes cluster has etcd encryption configured. Swarmada does not configure etcd encryption; operators must enable it at the cluster level if required by their data governance policy. **The Swarmada safety audit log is not in etcd and is not covered by etcd encryption.** At v0.3 it is written to an append-only file on the manager's own filesystem, mode `0600`, when a log file is configured — and to an in-memory sink that is discarded on exit when one is not ([§9.6.5](#safety-safety-audit-log)). There is no archive store. Operators requiring the audit log to be encrypted at rest MUST arrange that at the volume or object-store layer; enabling etcd encryption does not cover it.
 
 **Robot-level data sovereignty.** `FleetAction.spec.payload` is an opaque JSON object that may contain business-sensitive data (order IDs, patient references, inventory locations). Swarmada stores this in etcd with the `FleetAction` resource for the lifetime of the resource. Operators who need payload data to be encrypted independently of etcd encryption (for example, under a customer-managed key) must encrypt it before placing it in the payload field. Swarmada does not provide payload-level encryption.
 
-**Identity federation between namespaces.** A user with `swarmada:operator` in `warehouse-a` cannot access `warehouse-b` unless explicitly granted a role there. Swarmada does not provide cross-namespace identity federation; that is standard Kubernetes multi-tenancy, and the cluster administrator is responsible for ensuring proper namespace isolation.
+**Identity federation between namespaces.** A user with `swarmada:operator` in `warehouse-a` cannot access `warehouse-b` unless explicitly granted a role there. Swarmada does not provide cross-namespace identity federation; that is standard Kubernetes multi-tenancy, and the cluster administrator is responsible for ensuring proper namespace isolation. Where a future RFC defines a policy object governing cross-namespace routing of work, RBAC remains authoritative and is evaluated first: such a policy MAY only narrow the set of routes RBAC already permits, and MUST NOT widen it. A route RBAC forbids is forbidden irrespective of policy, and a route no policy admits is not attempted even where RBAC would allow it. The two are conjunctive and evaluation is fail-closed.
 
 ---
 
@@ -9871,7 +11010,7 @@ The following security controls are outside Swarmada's scope. Operators are resp
 
 **Reading guidance.** This section is written for safety engineers, legal reviewers, and enterprise operators evaluating Swarmada for deployment in regulated environments. Every claim is scoped precisely. Where a claim is not verifiable from the Swarmada codebase alone (because it depends on the robot manufacturer's hardware or the Robot OS), that dependency is stated explicitly. Imprecise safety assurances are more dangerous than honest scope statements.
 
-> **Maturity (v0.2):** stage: alpha · impl: implemented. Both the wire protocol (dedicated `SafetyStream`, `Estop`/`EstopAck`, [§9.2](#fleet-adapter-protocol)) and the control-plane behaviour are specified: confirmed estop propagation and delivery (a robot the control plane cannot confirm resolves to `Failed`/escalate, never falsely `Stopped`), zone-tree estop propagation with operator-gated clear, assignment-lease renewal and self-stop ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)), the edge/headless estop path over the EdgeStream ([§9.6.2.5](#safety-edge-headless-emergency-stop)), the tamper-evident safety audit log, and the FleetAction `Paused`/`Revoking` phases and Robot `health`/`connectivity`/`currentZone` status the flow uses. The Layer-1 boundary in [§9.6.1](#safety-scope-and-responsibility-boundary) holds: physical safety guarding must be independent of Swarmada regardless of implementation state, and a software estop is never a substitute for a hardware estop circuit.
+> **Maturity (v0.3):** stage: alpha · control-plane: partial · end-to-end: partial. Both the wire protocol (dedicated `SafetyStream`, `Estop`/`EstopAck`, [§9.2](#fleet-adapter-protocol)) and the control-plane behaviour are specified: confirmed estop propagation and delivery (a robot the control plane cannot confirm resolves to `Failed`/escalate, never falsely `Stopped`), zone-tree estop propagation with operator-gated clear, assignment-lease renewal and self-stop ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)), the edge/headless estop path over the EdgeStream ([§9.6.2.5](#safety-edge-headless-emergency-stop)), the tamper-evident safety audit log, and the FleetAction `Paused`/`Revoking` phases and Robot `health`/`connectivity`/`currentZone` status the flow uses. **One specified state is not yet reachable in the reference implementation:** `Resuming` ([§9.6.2.3](#safety-estop-state-machine)) is authored by the control plane on an authorized `estop-clear`, and the reference implementation clears directly to `Normal` without passing through it. The state machine and the clear authorization are as specified; the intermediate window in which motion is re-enabling and capabilities are restoring is not yet observable. An implementer MUST NOT infer from a robot reporting `Normal` that its capabilities have finished restoring. The Layer-1 boundary in [§9.6.1](#safety-scope-and-responsibility-boundary) holds: physical safety guarding must be independent of Swarmada regardless of implementation state, and a software estop is never a substitute for a hardware estop circuit. **The audit-log archival/retention mechanism in the Retention Policy section below is specified, not implemented:** `SwarmadaConfig` has no `spec.audit` block and no `archiveBucket` field at v0.3, and no archival or age-based deletion runs against the audit log. The tamper-evident append/chain mechanism itself is implemented; only the 90-day archive-and-delete lifecycle described below is not.
 
 <a id="safety-scope-and-responsibility-boundary"></a>
 #### 9.6.1 Scope and Responsibility Boundary
@@ -9882,19 +11021,19 @@ Swarmada is a software orchestration platform. It does not manufacture robots, d
 | :---- | :---- | :---- | :---- |
 | **Layer 1: Robot hardware + manufacturer** | Robot manufacturer | Physical safety hardware (light curtains, safety PLCs, mechanical brakes, safety-rated sensors); motor-level collision avoidance; physical braking; IEC 62061 / ISO 10218 compliance of the physical platform | **None.** Swarmada cannot and does not replace physical safety hardware. A Swarmada software estop is not a substitute for a hardware estop circuit. |
 | **Layer 2: Robot OS + Fleet Adapter** | Robot OS vendor + Fleet Adapter implementer | Motion-level navigation and path planning; translating Swarmada's `estop` `Command` into hardware stop commands within the required timing budget; accurate position reporting; autonomous zone navigation (where Robot OS supports it); verifying firmware and model checksums before install | **Interface only.** Swarmada defines the protocol ([§9.2](#fleet-adapter-protocol)) and the timing requirements ([§9.6.2](#safety-emergency-stop-protocol)). Whether the Fleet Adapter and Robot OS meet those requirements is the implementer's responsibility. |
-| **Layer 3: Swarmada control plane** | Swarmada | Software-level estop propagation via the `estop` `Command`; halting task assignment to robots in `Error`, `Offline`, or `Maintenance` phase; zone-tree estop propagation per `FleetZone.spec.estopPolicy`; `FleetAction` phase management during estop and maintenance; tamper-evident safety audit log; `ZoneMaintenance` lifecycle management | **Full responsibility within this layer.** The specific guarantees Swarmada makes are stated in [§9.6.2](#safety-emergency-stop-protocol)–[§9.6.5](#safety-safety-audit-log). |
+| **Layer 3: Swarmada control plane** | Swarmada | Software-level estop propagation via the `estop` `Command`; halting action assignment to robots in `Error`, `Offline`, or `Maintenance` phase; zone-tree estop propagation per `FleetZone.spec.estopPolicy`; `FleetAction` phase management during estop and maintenance; tamper-evident safety audit log; `ZoneMaintenance` lifecycle management | **Full responsibility within this layer.** The specific guarantees Swarmada makes are stated in [§9.6.2](#safety-emergency-stop-protocol)–[§9.6.5](#safety-safety-audit-log). |
 
 **What Swarmada does NOT guarantee:**
 
 1. **Physical stopping distance.** The distance a robot travels after receiving the `estop` `Command` depends on the robot's speed, mass, braking system, and floor surface. These are Layer 1 properties. Swarmada guarantees that the command is sent; it cannot guarantee the physical outcome.
 
-2. **Collision avoidance.** Swarmada's Traffic Deconfliction Engine ([§5.1.1](#architecture-the-two-plane-model)) attempts to prevent path conflicts by scheduling tasks to avoid simultaneous occupancy. It is a scheduling aid, not a real-time collision avoidance system. Layer 1 and Layer 2 must provide real-time collision avoidance independently of Swarmada.
+2. **Collision avoidance.** Swarmada's Traffic Deconfliction Engine ([§5.1.1](#architecture-the-two-plane-model)) attempts to prevent path conflicts by scheduling actions to avoid simultaneous occupancy. It is a scheduling aid, not a real-time collision avoidance system. Layer 1 and Layer 2 must provide real-time collision avoidance independently of Swarmada.
 
-3. **Fail-safe under control-plane failure.** If the Swarmada control plane becomes unavailable, robots continue executing their current task (Fleet Adapter local execution) and stop accepting new tasks. They do NOT automatically stop. Operators must design their deployments such that control-plane unavailability does not create a safety hazard. Physical safety guarding must not depend on the control plane being available, and must not depend on the Zone Controller edge node either. The Zone Controller edge node ([§9.6.2.5](#safety-edge-headless-emergency-stop)) is a best-effort software mechanism that can retain a local software estop path when the control plane is unreachable; it runs on non-safety-rated compute and is NOT a safety-rated device. It does not replace, and never sits above, an independent hardware safety circuit (light curtains, safety PLC, e-stop circuits per IEC 62061 / ISO 13849), which must remain in place and functional whether or not an edge node is deployed.
+3. **Fail-safe under control-plane failure.** If the Swarmada control plane becomes unavailable, robots continue executing their current action (Fleet Adapter local execution) and stop accepting new actions. They do NOT automatically stop. Operators must design their deployments such that control-plane unavailability does not create a safety hazard. Physical safety guarding must not depend on the control plane being available, and must not depend on the Zone Controller edge node either. The Zone Controller edge node ([§9.6.2.5](#safety-edge-headless-emergency-stop)) is a best-effort software mechanism that can retain a local software estop path when the control plane is unreachable; it runs on non-safety-rated compute and is NOT a safety-rated device. It does not replace, and never sits above, an independent hardware safety circuit (light curtains, safety PLC, e-stop circuits per IEC 62061 / ISO 13849), which must remain in place and functional whether or not an edge node is deployed.
 
-4. **Personnel safety.** `ZoneMaintenance` pauses robot task execution. It does not create a physically safe zone. A technician entering a zone where `ZoneMaintenance` is active MUST verify independently (via physical lockout or estop) that robots are stopped before entering.
+4. **Personnel safety.** `ZoneMaintenance` pauses robot action execution. It does not create a physically safe zone. A technician entering a zone where `ZoneMaintenance` is active MUST verify independently (via physical lockout or estop) that robots are stopped before entering.
 
-**Applicable standards.** Swarmada does not claim compliance with ISO 10218-1, ISO 10218-2, IEC 62061, or ISO 13849. Those standards govern the physical robot platform and its integrated safety systems, which are outside Swarmada's scope. Operators deploying Swarmada in environments subject to these standards must ensure that their physical deployment — robots, safety PLCs, guarding, and operating procedures — independently meets the applicable standard requirements. Swarmada's safety audit log ([§9.6.5](#safety-safety-audit-log)) may be used as evidence in a safety case, but it is not by itself sufficient for certification — and at v0.2 an assessor should first check the Status column in [§9.6.5.1](#safety-required-events) for which event types a deployment actually records.
+**Applicable standards.** Swarmada does not claim compliance with ISO 10218-1, ISO 10218-2, IEC 62061, or ISO 13849. Those standards govern the physical robot platform and its integrated safety systems, which are outside Swarmada's scope. Operators deploying Swarmada in environments subject to these standards must ensure that their physical deployment — robots, safety PLCs, guarding, and operating procedures — independently meets the applicable standard requirements. Swarmada's safety audit log ([§9.6.5](#safety-safety-audit-log)) may be used as evidence in a safety case, but it is not by itself sufficient for certification — and at v0.3 an assessor should first check the Status column in [§9.6.5.1](#safety-required-events) for which event types a deployment actually records.
 
 <a id="safety-emergency-stop-protocol"></a>
 #### 9.6.2 Emergency Stop Protocol
@@ -9902,15 +11041,15 @@ Swarmada is a software orchestration platform. It does not manufacture robots, d
 <a id="safety-estop-scopes"></a>
 ##### 9.6.2.1 Estop Scopes
 
-Swarmada supports **zone-scoped**, **robot-scoped**, and **namespace-scoped** emergency stop. Each estop scope is triggered by writing a `swarmada.io/estop-triggered` annotation on the scope's carrier resource (FleetZone, Robot, or the namespace's SwarmadaConfig singleton), which is SAR-gated for the `estop-trigger` / `estop-clear` custom verbs at admission (§F-2b); removing the annotation is the operator-authorized clear.
+Swarmada supports **zone-scoped**, **robot-scoped**, and **namespace-scoped** emergency stop. Each estop scope is triggered by writing a `swarmada.io/estop-triggered` annotation on the scope's carrier resource (FleetZone, Robot, or the namespace's SwarmadaConfig singleton), which is SAR-gated for the `estop-trigger` / `estop-clear` custom verbs at admission ([§9.5.3](#security-authorization-swarmada-rbac-roles)); removing the annotation is the operator-authorized clear.
 
 | Scope | Trigger mechanism | Propagation | Status |
 | :---- | :---- | :---- | :---- |
-| **Zone-level** | `swarmctl estop trigger <zone>`; or a child zone propagating upward via `estopPolicy.propagateToParent: true` | Propagates to all descendant zones if `estopPolicy.propagateToChildren: true` (default) | implemented |
+| **Zone-level** | `kubectl annotate fleetzone <zone> swarmada.io/estop-triggered=<reason>` (the `estop-trigger` verb, enforced at admission); or a child zone propagating upward via `estopPolicy.propagateToParent: true` | Propagates to all descendant zones if `estopPolicy.propagateToChildren: true` (default) | implemented |
 | **Robot-level** | `swarmada.io/estop-triggered` annotation on a single Robot (`estop-trigger` verb) | No propagation; confirmed-estops one robot only | implemented |
 | **Namespace-level** | `swarmada.io/estop-triggered` annotation on the namespace's SwarmadaConfig (`estop-trigger` verb) | Confirmed-estops every robot in the namespace | implemented |
 
-Zone-level estop propagation follows the `FleetZone` tree according to `spec.estopPolicy`. The control plane sends an `estop` `Command` to every in-scope robot's Fleet Adapter in parallel — not sequentially. Each command is issued independently; a slow acknowledgement from one robot does not delay the estop signal to others.
+Zone-level estop propagation follows the `FleetZone` tree according to `spec.estopPolicy`. The control plane is specified to send an `estop` `Command` to every in-scope robot's Fleet Adapter in parallel — not sequentially — so that each command is issued independently and a slow acknowledgement from one robot does not delay the estop signal to others. The reference implementation issues one concurrent send per in-scope robot, so the episode's wall clock is the SLOWEST robot rather than the sum of every round trip, and a single unreachable adapter delays nobody. Robot-scoped estop is unaffected: it targets exactly one robot and has no fan-out to be sequential or parallel about.
 
 All `estop` `Command`s are sent on the dedicated `SafetyStream` ([§9.2.1](#fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams)), not on the `ControlStream` that carries bulk telemetry. `SafetyStream` is kept permanently empty in steady state so an estop is never queued behind a large `CapabilitiesSnapshot` or a burst of `ActionStatusUpdate` messages. `EstopAck` results return on the same `SafetyStream`; the latency measured in [§9.6.2.2](#safety-timing-requirements) is `SafetyStream` round-trip latency.
 
@@ -9922,6 +11061,28 @@ All `estop` `Command`s are sent on the dedicated `SafetyStream` ([§9.2.1](#flee
 | Control plane to Fleet Adapter (`estop` `Command` acknowledgement) | **< 500ms** | Swarmada control plane (latency of `estop` `Command` send on `SafetyStream`) and Fleet Adapter (acknowledgement before physical stop initiation). Measured from `SafetyStream` send to `EstopAck` receipt on `SafetyStream`. `SafetyStream` is dedicated and permanently empty in steady state; the SLA path is never blocked by bulk telemetry. |
 | Fleet Adapter acknowledgement to hardware stop command issued | **< 1s** after ACK | Fleet Adapter and Layer 2 (Robot OS). Swarmada does not measure this; it is reported by the Fleet Adapter in `EstopAck.stop_initiated_at`. |
 | Hardware stop command to physical stop (zero velocity) | **Robot manufacturer's specification** | Layer 1. Swarmada makes no claim about this value. |
+| Operator trigger to the LAST robot in scope resolved, for a zone- or namespace-scoped estop | **< 2s** for a fleet of 50 robots; alert on the p99 | Swarmada control plane (the fan-out itself). This is a fleet-scope bound and it is NOT implied by the per-send row above — see the note below. Measured by `swarmada_estop_fanout_duration_seconds` ([§9.3.8](#control-plane-observability-prometheus-metrics-contract)), observed once per episode. |
+
+**The per-send bound does not bound the fan-out, and cannot.** The 500ms row above is measured
+from one robot's `SafetyStream` send to that robot's `EstopAck` — one round trip, in isolation.
+It says nothing about how long the *episode* took, because a fan-out's duration depends on the
+dispatch strategy, which that measurement does not observe.
+
+The failure mode this guards against is concrete. An earlier revision of the reference
+implementation dispatched zone- and namespace-scoped estops sequentially, awaiting each robot's
+outcome before sending to the next. The delay then accrued in the *wait before each send*, not
+in any round trip: every robot in a 50-robot zone reported a healthy sub-500ms latency,
+`swarmada_estop_latency_violations_total` stayed at zero, and the last robot was still commanded
+tens of seconds after the operator hit the trigger. The instrument reported health precisely
+when the fleet was least safe. Dispatch is parallel as of this revision
+([§9.6.2.1](#safety-estop-scopes)), but the blind spot was a property of the *measurement*, not of
+that particular bug — so the fleet-scope row and its metric remain the thing that closes it, and
+they are what would catch a regression back to serialised dispatch.
+
+An implementer MUST NOT read a green `swarmada_estop_command_latency_seconds` as evidence that a
+zone or namespace estop met its timing bound; only
+`swarmada_estop_fanout_duration_seconds` ([§9.3.8](#control-plane-observability-prometheus-metrics-contract))
+speaks to that (ADR-0042).
 
 **500ms measurement and logging.** The control plane records the wall-clock time at `estop` `Command` send on `SafetyStream` and at `EstopAck` receipt on `SafetyStream` for every estop event. If the measured latency exceeds 500ms, a `EstopLatencyViolation` Warning event is emitted on the robot object:
 
@@ -9960,7 +11121,7 @@ The following state machine governs a robot's estop status. It is independent of
                      ┌──────────▼──────────┐   no confirmation within
                      │      STOPPING       │   10s after ACK
                      │ Fleet Adapter has   ├──────────────────────────┐
-                     │ issued stop command │   (stop NOT confirmed)    │
+                    │ issued stop command │   (stop NOT confirmed)    │
                      │ to hardware         │                          │
                      └──────────┬──────────┘                          ▼
                                 │              ┌───────────────────────────────┐
@@ -9983,7 +11144,7 @@ The following state machine governs a robot's estop status. It is independent of
                                 │                              │
                     EXPLICIT OPERATOR ACTION                   │
                     REQUIRED. Either:                          │
-                    - swarmctl estop-clear <scope>             │
+                     - swarmctl estop-clear <fleetzone>        │
                     - invoke the estop-clear API verb on the   │
                       robot or FleetZone                       │
                       ([§9.5.3](#security-authorization-swarmada-rbac-roles))
@@ -10010,41 +11171,78 @@ The following state machine governs a robot's estop status. It is independent of
 
 **`RESUMING` is a control-plane state with no wire value.** The `fleet_adapter.v1` `EstopState` enum carries `STOPPING`, `STOPPED`, and `FAILED` only; an adapter cannot report `RESUMING` and is never asked to. The control plane authors it on `Robot.status.estopState` when an authorized `estop-clear` is accepted, and leaves it when the adapter's subsequent telemetry shows capabilities Active and the robot Idle or InProgress. The enum is deliberately not extended: [§9.2.2](#fleet-adapter-protocol-package-and-versioning) pins the `Estop`/`EstopAck` schema as version-invariant across the supported contract range, so adding a value would break the one guarantee that lets an older adapter always parse a newer estop.
 
+**`RESUMING` is not yet reachable in the reference implementation.** The state and this state machine's `Stopped → Resuming → Normal` path are as specified above; the reference control plane clears an authorized `estop-clear` directly to `Normal`, skipping `Resuming`. The intermediate window in which motion is re-enabling and capabilities are restoring is therefore not observable at v0.3. An implementer MUST NOT infer from a robot reporting `Normal` that its capabilities have finished restoring — see the Maturity note at the top of this chapter.
+
 **Fresh estop during `RESUMING`.** An `estop` `Command` of any scope that arrives while a robot is in `RESUMING` re-enters `STOPPING` (and proceeds to `STOPPED` on confirmation, or `FAILED` if confirmation does not arrive). Re-enable never overrides a hazard raised during re-enable; the later estop always wins.
 
-**The `Stopped → Resuming` transition MUST NOT be automatic.** An explicit operator action is required. The control plane rejects any attempt to programmatically clear an estop via the API without an authenticated operator identity in the audit record. Automation pipelines (WMS integrations, CI/CD) MUST NOT be granted *standing* permission to clear estops. The Kubernetes RBAC verb for estop-clear is `estop-clear` on the `robots` or `fleetzones` resource; it must be granted separately from standard operator roles.
+**The `Stopped → Resuming` transition MUST NOT be automatic.** An explicit operator action is required,
+and there is no auto-clear path anywhere in the control plane: clearing always goes through the
+`estop-clear` verb, which is `SubjectAccessReview`-gated and fails closed. That part is enforced today.
 
-The sole exception contemplated by this specification is a *supervised* clear: a narrow, time-bounded, single-use grant issued only on a specific human pre-approval recorded in the audit log, which a named automation identity may redeem within its window for a specific scope, failing closed on any expiry, scope mismatch, or missing audit path. Such a grant, if defined, is the subject of a separate safety RFC and does not exist by default; **absent an explicit, current grant this prohibition is absolute, and no standing or role-based automation clear is permitted under any profile.** Nothing in this exception weakens the physical-safety-hardware boundary (Non-Goal #12): it governs only the software-layer estop intent.
+**The audit record names the authenticated operator.** A mutating admission webhook stamps the
+requesting user from the admission request onto the carrier object as `swarmada.io/estop-actor` at the
+moment the estop annotation is added, re-valued, or removed; the estop controllers read it and record it
+as the entry's actor. `ESTOP_TRIGGERED` and `ESTOP_CLEARED` therefore carry `actor.type: user` with the
+username the API server authenticated, on every scope — zone, robot and namespace — as does
+`ROLLOUT_RESUMED` for the operator resume path ([§9.1.8](#firmwarerollout)). The identity travels in the
+entry's actor envelope and MUST NOT be duplicated into the `detail` map ([§9.6.5.1](#safety-required-events)).
+
+**Attribution MUST NOT gate the stop.** The stamping webhooks are registered `failurePolicy: Ignore`
+precisely so that an unreachable or failing webhook cannot refuse an emergency stop: a safe stop is
+always honoured, and identity plumbing is never in its path. Authorization is unaffected and still fails
+closed — the `estop-trigger`/`estop-clear` `SubjectAccessReview` runs in the *validating* webhooks, which
+are `failurePolicy: Fail`. An implementation MUST NOT make the ability to record an actor a precondition
+for carrying out a stop.
+
+**When no identity resolves, the entry says so.** If the stamp is absent — the mutating webhook was
+skipped, or the write arrived by a route carrying no user — the control plane records the entry with
+`actor.type: service-account` and an identity prefixed `unattributed:` (for example
+`unattributed:zone-estop:floor-1`), preserving the scope while stating plainly that no person was
+resolved. An implementation MUST NOT record `actor.type: user` for an identity it did not authenticate,
+and MUST NOT substitute a synthetic identity that reads like a configured principal: an auditor has to be
+able to tell an attributed entry from an unattributable one, which the earlier scope-derived actors
+(`zone-estop:<zone>`) did not permit. A safety case relying on operator attribution
+([§9.6.6](#safety-standards-disclaimer) item 3) MUST treat `unattributed:` entries as carrying none, and
+recover attribution for those from the Kubernetes API server's own audit log, correlated by timestamp and
+resource. Automation pipelines (WMS integrations, CI/CD) MUST NOT be granted *standing* permission to clear estops. The Kubernetes RBAC verb for estop-clear is `estop-clear` on the `robots` or `fleetzones` resource; it must be granted separately from standard operator roles.
+
+The sole exception contemplated by this specification is a *supervised* clear: a narrow, time-bounded, single-use grant issued only on a specific human pre-approval recorded in the audit log, which a named automation identity may redeem within its window for a specific scope, failing closed on any expiry, scope mismatch, or missing audit path. Such a grant, if defined, is the subject of a separate safety RFC and does not exist by default; **absent an explicit, current grant this prohibition is absolute, and no standing or role-based automation clear is permitted under any configuration.** Nothing in this exception weakens the physical-safety-hardware boundary (Non-Goal #12): it governs only the software-layer estop intent.
 
 <a id="safety-fleetaction-behaviour-during-estop"></a>
 ##### 9.6.2.4 FleetAction Behaviour During Estop
 
-| Task phase at estop trigger | Behaviour | After estop cleared |
+| Action phase at estop trigger | Behaviour | After estop cleared |
 | :---- | :---- | :---- |
-| `Pending` | No change. Task waits in queue. | Assigned normally when robot is available. |
-| `Assigned` | Task moves to `Paused`. Robot cleared from `status.assignedRobot`. | Operator decides: resume (re-assign), requeue, or cancel. |
-| `InProgress` | Task moves to `Paused`. Robot stops mid-task. | Operator decides. Task is NOT automatically requeued or failed. |
+| `Pending` | No change. Action waits in queue. | Assigned normally when robot is available. |
+| `Assigned` | Action moves to `Paused`. Robot cleared from `status.assignedRobot`. | Operator decides: resume (re-assign), requeue, or cancel. |
+| `InProgress` | Action moves to `Paused`. Robot stops mid-action. | Operator decides. Action is NOT automatically requeued or failed. |
 | `Succeeded` / `Failed` / `Cancelled` | No change (terminal state). | N/A. |
 
-`Paused` tasks from an estop are NOT automatically requeued when the estop clears. This is a deliberate design choice: the operator must decide whether it is safe to resume interrupted work. A robot that was mid-pick when estop was triggered may have dropped a payload; the operator needs to inspect before re-assigning a pick task to it. Automatic requeue would remove this inspection gate. While a task is `Paused` and the robot remains connected, the control plane continues renewing the **server-side** assignment lease ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)), so the task stays bound to that robot and no reassignment to another robot is possible.
+`Paused` actions from an estop are NOT automatically requeued when the estop clears. This is a deliberate design choice: the operator must decide whether it is safe to resume interrupted work. A robot that was mid-pick when estop was triggered may have dropped a payload; the operator needs to inspect before re-assigning a pick action to it. Automatic requeue would remove this inspection gate. While a action is `Paused` and the robot remains connected, the control plane continues renewing the **server-side** assignment lease ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)), so the action stays bound to that robot and no reassignment to another robot is possible.
 
-**The two lease views diverge while `Paused`, deliberately.** Wire `renew_lease` `Command`s are *not* sent to the adapter during an estop pause. The robot's self-stop timer is measured from the last `renew_lease` receipt ([§9.6.3.3](#safety-fleet-adapter-local-behaviour-during-connectivity-loss) item 1), so it expires after `lease_duration_ms` and the robot self-stops its task — while the control plane goes on extending its own horizon. This is intended and harmless: an estopped robot is already stopped by the estop, not by the lease, and renewing a lease to keep a halted robot's timer alive would signal nothing useful. Adapter implementers should expect wire renewals to cease at the estop edge and MUST NOT treat their absence as a control-plane fault. What blocks reassignment is the `Paused` phase together with the server-side lease, not a live lease at the robot.
+**The two lease views diverge while `Paused`, deliberately.** Wire `renew_lease` `Command`s are *not* sent to the adapter during an estop pause. The robot's self-stop timer is measured from the last `renew_lease` receipt ([§9.6.3.3](#safety-fleet-adapter-local-behaviour-during-connectivity-loss) item 1), so it expires after `lease_duration_ms` and the robot self-stops its action — while the control plane goes on extending its own horizon. This is intended and harmless: an estopped robot is already stopped by the estop, not by the lease, and renewing a lease to keep a halted robot's timer alive would signal nothing useful. Adapter implementers should expect wire renewals to cease at the estop transition and MUST NOT treat their absence as a control-plane fault. What blocks reassignment is the `Paused` phase together with the server-side lease, not a live lease at the robot.
 
 Operators resume paused actions using:
 
 ```bash
-# Resume a single paused action (re-assigns to any eligible robot):
-swarmctl resume action fleetaction-pick-order-8821
-# Resume all actions paused by estop in a zone:
-swarmctl estop-clear zone floor-2-left --requeue-paused-actions
-# Cancel all actions paused by estop in a zone:
-swarmctl estop-clear zone floor-2-left --cancel-paused-actions
+# Resume a single paused action (returns it to Pending; re-assigns to any eligible robot).
+# The annotation is the operator intake the FleetAction controller reconciles; it reuses the
+# confirmed-stop discipline, so the bound robot is freed only once it provably stopped.
+kubectl annotate fleetaction fleetaction-pick-order-8821 \
+  swarmada.io/requeue-requested="estop cleared, aisle inspected" -n warehouse-a
+# Cancel a single paused action instead:
+kubectl annotate fleetaction fleetaction-pick-order-8821 \
+  swarmada.io/cancel-requested="payload dropped during estop"
 ```
+
+> Bulk requeue and bulk cancel across an estopped zone are **not** specified at v0.3. The
+> operator resumes or cancels each paused action individually; the per-action inspection gate
+> this section describes is the reason the bulk form is not offered.
 
 <a id="safety-edge-headless-emergency-stop"></a>
 ##### 9.6.2.5 Edge / Headless Emergency Stop
 
-The default behaviour on control-plane connectivity loss ([§9.6.1](#safety-scope-and-responsibility-boundary) item 3, [§9.6.3.3](#safety-fleet-adapter-local-behaviour-during-connectivity-loss)) is “continue the current task; accept no new ones.” This is correct for *operational continuity* but is not a positive safety mechanism: if a robot’s current task becomes hazardous during the outage — because of a zone-boundary breach, a proximity event, or a local operator pressing a hardware button — there is no path for the control plane (which is unreachable) to deliver an `estop` Command.
+The default behaviour on control-plane connectivity loss ([§9.6.1](#safety-scope-and-responsibility-boundary) item 3, [§9.6.3.3](#safety-fleet-adapter-local-behaviour-during-connectivity-loss)) is “continue the current action; accept no new ones.” This is correct for *operational continuity* but is not a positive safety mechanism: if a robot’s current action becomes hazardous during the outage — because of a zone-boundary breach, a proximity event, or a local operator pressing a hardware button — there is no path for the control plane (which is unreachable) to deliver an `estop` Command.
 
 The **Zone Controller edge node** ([§5.1.1](#architecture-the-two-plane-model)) fills this gap. Each edge node is a lightweight process running on on-premise hardware co-located with the zone — a Jetson device, a Raspberry Pi 5, or any always-on edge compute — that retains a local software estop path for the robots in its zone *independently of control-plane availability*. A multi-zone facility deploys one edge node per zone, each independent: an edge node's software estop authority is scoped only to the robots in its own zone (per `FleetZone.spec.edgeNode`) and it has no authority over, and no visibility into, any other zone's robots. There is no single facility-wide edge server — that would reintroduce the single point of failure this mechanism exists to remove.
 
@@ -10060,16 +11258,16 @@ The **Zone Controller edge node** ([§5.1.1](#architecture-the-two-plane-model))
 
 **Mechanism.** The persistent local channel is the **EdgeStream** ([§9.2.10](#fleet-adapter-protocol-the-edge-stream)): the Fleet Adapter dials each edge node listed in `RegisterAck.edge_endpoints` — directly, bypassing the control plane — and the connection survives control-plane partitions. When an edge estop trigger fires, the edge node sends an `Estop` down the EdgeStream. The Fleet Adapter handles it identically to a control-plane-issued estop: it transitions the robot to `STOPPING` → `STOPPED` via the confirmed `EstopAck` protocol ([§9.6.2.3](#safety-estop-state-machine)). The edge node records the event locally for later synchronisation to the control plane’s safety audit log when connectivity resumes.
 
-**Local fleet map and staleness.** The edge node’s fleet map is built from the EdgeStream position tee: one `PositionFrame` per robot per telemetry tick, evaluated against the zone polygons the edge node caches from the control plane while connectivity exists (polygons change rarely; a stale polygon set is refreshed on reconnect). Silence on a robot’s feed MUST NOT be treated as a breach and MUST NOT trigger an estop — breach is confirmed from position data, never inferred from its absence, the same discipline that forbids inferring a stop from a timeout ([§9.6.2.3](#safety-estop-state-machine)). Stale feeds are marked locally and reported in the reconnect sync below; if the gap traces to an adapter that never established its EdgeStream, the Zone Controller emits an `EdgeFeedUnavailable` Warning on the FleetZone ([§9.2.10](#fleet-adapter-protocol-the-edge-stream)).
+**Local fleet map and staleness.** The edge node’s fleet map is built from the EdgeStream position tee: one `PositionFrame` per robot per telemetry tick, evaluated against the zone polygons the edge node caches from the control plane while connectivity exists (polygons change rarely; a stale polygon set is refreshed on reconnect). Silence on a robot’s feed MUST NOT be treated as a breach and MUST NOT trigger an estop — breach is confirmed from position data, never inferred from its absence, the same discipline that forbids inferring a stop from a timeout ([§9.6.2.3](#safety-estop-state-machine)). Stale feeds are marked locally and reported in the reconnect sync below; if the gap traces to an adapter that never established its EdgeStream, the Zone Controller is specified to emit an `EdgeFeedUnavailable` Warning on the FleetZone ([§9.2.10](#fleet-adapter-protocol-the-edge-stream)) — **specified, not implemented at v0.3**: the `FleetZone.status.edgeFeedUnavailable` field **is** written; the Kubernetes Warning is not. Watch the status field.
 
 **Distinguishing lease self-stop from edge estop.** These are independent mechanisms at different layers:
 
 | Mechanism | What stops | Trigger | Resume path |
 | :---- | :---- | :---- | :---- |
-| **Lease self-stop** (Fleet Adapter, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) | The *task* | Assignment lease expiry (no renewal received) | Task returns to `Pending`; robot is Idle and can accept new assignments |
+| **Lease self-stop** (Fleet Adapter, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) | The *action* | Assignment lease expiry (no renewal received) | Action returns to `Pending`; robot is Idle and can accept new assignments |
 | **Edge estop** (Zone Controller edge node, this section) | The *robot* | Local safety input, boundary breach, or operator control | Robot enters `Stopped` estop state; MUST NOT resume until explicit estop-clear from edge node or control plane |
 
-Lease expiry stops the task; edge estop stops the robot. They can occur independently and can both be active simultaneously. An edge estop takes precedence over any active task regardless of lease state.
+Lease expiry stops the action; edge estop stops the robot. They can occur independently and can both be active simultaneously. An edge estop takes precedence over any active action regardless of lease state.
 
 **Precedence and state-machine reconciliation.** The [§9.6.4](#safety-zonemaintenance-vs-estop-explicit-separation) precedence rule (estop supersedes `ZoneMaintenance`) applies identically to edge-initiated estops. An edge estop triggered while `ZoneMaintenance` is active governs: the robot transitions to `Stopped` estop state per [§9.6.2.3](#safety-estop-state-machine). When the edge estop is cleared the robot enters `Maintenance` phase (not `Idle`), consistent with [§9.6.4](#safety-zonemaintenance-vs-estop-explicit-separation). The [§9.6.2.3](#safety-estop-state-machine) state machine is unchanged: `NORMAL` → `STOPPING` → `STOPPED`; the `Stopped → Resuming` transition requires an explicit operator action regardless of whether the estop originated at the control plane or the edge node.
 
@@ -10077,8 +11275,8 @@ Lease expiry stops the task; edge estop stops the robot. They can occur independ
 
 ```text
 Control-plane partition active:
-  ControlStream down:    Fleet Adapter continues current task (lease permitting),
-                         stops accepting new tasks. Robot is NOT automatically stopped.
+  ControlStream down:    Fleet Adapter continues current action (lease permitting),
+                         stops accepting new actions. Robot is NOT automatically stopped.
   SafetyStream down:     Control plane CANNOT deliver estop. This is the gap
                          the edge node addresses.
   Edge node reachable:   Zone Controller edge node CAN still deliver estop on
@@ -10091,9 +11289,9 @@ Control-plane partition active:
 
 **Sync on reconnect.** When the control plane reconnects to the edge node:
 
-1. The edge node reports all locally-triggered estops, including timestamps and triggers.
+1. The edge node reports all locally-triggered estops, including timestamps and triggers. **Specified, not implemented at v0.3:** edge synchronisation is a one-directional control-plane-to-edge configuration pull with no upstream estop-report message, so a locally-triggered estop is not replayed to the control plane on reconnect. The edge node does write its own `EDGE_ESTOP_TRIGGERED` entry with actor identity `edge:<namespace>`, but to a local in-memory log discarded when the edge process exits — it never reaches the namespace chain in [§9.6.5](#safety-safety-audit-log). An operator investigating an edge-initiated stop must collect the edge node's own logs.
 2. The control plane writes the corresponding `ESTOP_TRIGGERED` audit log entries with the edge node as the operator identity (`edge-node:<zone-name>`).
-3. Any robots still in `Stopped` estop state remain stopped until an explicit `swarmctl estop-clear` or a local operator panel action.
+3. Any robots still in `Stopped` estop state remain stopped until the `swarmada.io/estop-triggered` annotation is removed under the `estop-clear` verb, or a local operator panel action clears them.
 
 **No SwarmadaConfig knob for edge estop policy.** Edge estop authority is architectural: the Zone Controller edge node is always a software estop authority for its zone. There is no config knob to disable this, because doing so would remove the best-effort software estop path in the exact scenario — control-plane outage — where it is most useful. This software path is a complement to, never a replacement for, the independent hardware safety circuit ([§9.6.1](#safety-scope-and-responsibility-boundary), Non-Goal #12).
 
@@ -10118,16 +11316,16 @@ Both thresholds are measured from the timestamp of the last received `TelemetryP
 Last telemetry received at time T₀:
 
 ```text
-T₀ + 0         Normal operation. Scheduler assigns tasks.
+T₀ + 0         Normal operation. Scheduler assigns actions.
 T₀ + T1 (30s)  OFFLINE TRANSITION
                Robot.status.phase         → Offline
-               Robot.status.health.status → Critical
                Scheduler: no new FleetActions assigned to this robot
                In-progress FleetAction:     → Revoking (NOT Paused; NOT Failed)
                  Control plane STOPS renewing the assignment lease.
-                 On reconnect the task is re-adopted or reassigned per its reported state ([§9.6.3.4](#safety-reconnection-flow)).
-                 retryCount: NOT incremented (connectivity loss ≠ task failure).
-               Kubernetes Warning event:  RobotOffline
+                 On reconnect the action is re-adopted or reassigned per its reported state ([§9.6.3.4](#safety-reconnection-flow)).
+                 retryCount: NOT incremented (connectivity loss ≠ action failure).
+               Kubernetes Warning event:  RobotOffline   [not emitted at v0.3 --
+                                                          see note below]
                  "amr-acme-007: no telemetry for 30s.
                   Last seen: <T₀>. Phase: Offline."
                Control plane attempts HeartbeatRequest/HeartbeatResponse exchange over
@@ -10137,27 +11335,47 @@ T₀ + T1 (30s)  OFFLINE TRANSITION
                If 3 attempts go unanswered, or no stream exists to ask on: Offline,
                  continue to T2. Being unable to ask is evidence of loss, not a reason
                  to leave a dead robot holding its assignment.
-T₀ + leaseDuration + clockSkewMargin
-               LEASE EXPIRY HORIZON (per-task; computed from last renewal receipt)
+T₀ + leaseDurationSeconds + clockSkewMarginSeconds
+               LEASE EXPIRY HORIZON (per-FleetAction; computed from last renewal receipt)
                The robot's self-stop timer fires (robot-side; [§9.6.3.3](#safety-fleet-adapter-local-behaviour-during-connectivity-loss) item 1).
-               The robot MUST bring the task to a safe stop autonomously.
+               The robot MUST bring the action to a safe stop autonomously.
                Control plane verifies the lease is provably dead: now ≥ last
-               acknowledged renewal time + leaseDuration + skew margin.
-               On confirmation: Revoking FleetAction → Pending (safe to reassign;
+               acknowledged renewal time + leaseDurationSeconds +
+               clockSkewMarginSeconds.
+               On confirmation, the disposition is governed by
+               SwarmadaConfig.spec.actionCancellation.onDisconnect, which this
+               chapter does not otherwise name and whose DEFAULT is `Never`:
+                 Never (default) — the action is HELD in Revoking with its robot
+                   still bound. It is NOT requeued; an operator clears it through
+                   the confirmed-cancel path. Safest for physical-side-effect work.
+                 AfterTimeout — requeues, but only once the disconnect has also
+                   outlasted disconnectTimeoutSeconds.
+                 WhenActionExpired — inert at v0.3 (it reads status.startTime,
+                   which nothing writes); behaves as Never.
+               Under AfterTimeout: Revoking FleetAction → Pending (safe to reassign;
                retryCount NOT incremented). Reassignment is gated on lease
                expiry, not on T2 wall-clock.
 T₀ + T2 (120s) CRITICAL TRANSITION (alert only; requeue already gated above)
-               Kubernetes Warning event:  RobotCritical
+               Kubernetes Warning event:  RobotCritical  [not emitted at v0.3 --
+                                                          see note below]
                  "amr-acme-007: no telemetry for 120s.
-                  In-progress task fleetaction-pick-0041 in Revoking;
+                  In-progress action fleetaction-pick-0041 in Revoking;
                   awaiting lease expiry before reassignment."
                Operator alert emitted (via configured alerting channel)
-               If the task is still in Revoking at T2 the alert fires but the
-               task is NOT requeued at T2 — it waits for the lease horizon above.
+               If the action is still in Revoking at T2 the alert fires but the
+               action is NOT requeued at T2 — it waits for the lease horizon above.
                Robot remains Offline until Fleet Adapter reconnects.
 T₀ + T2 + ∞   Robot remains Offline. No further automatic action.
                A Robot that is Offline for > 24h without reconnecting
                triggers a RobotLongOffline event (advisory; no automatic action).
+
+**None of `RobotOffline`, `RobotCritical`, `RobotReconnected` or `RobotLongOffline` is emitted at v0.3.**
+The Robot reconciler holds no event recorder. The phase and condition transitions this timeline describes
+do happen and are observable on `Robot.status`; the Kubernetes Events are specified, controller pending. An
+operator MUST NOT build alerting on these event reasons — alert on `status.phase: Offline`, on the
+`ConnectivityCritical` condition, and on the `swarmada_robots_by_phase` and
+`swarmada_robot_connectivity_critical_total` metrics
+([§9.3.8](#control-plane-observability-prometheus-metrics-contract)) instead.
 ```
 
 <a id="safety-fleet-adapter-local-behaviour-during-connectivity-loss"></a>
@@ -10165,15 +11383,13 @@ T₀ + T2 + ∞   Robot remains Offline. No further automatic action.
 
 When a Fleet Adapter loses its gRPC connection to the control plane, it MUST:
 
-1. **Continue executing the current task** if it is safe to do so AND the assignment lease has not expired. The Fleet Adapter has the full task payload and can complete a task without control-plane contact. This is the correct behaviour: aborting mid-task on network loss creates more hazards than completing safely. However, when the lease expires without renewal (timed from the last received `renew_lease` Command), the Fleet Adapter MUST bring the current task to a safe stop — the robot can no longer be the task's sole valid executor, and the control plane may reassign the task to another robot ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)).
+1. **Continue executing the current `FleetAction`** if it is safe to do so AND the assignment lease has not expired. The Fleet Adapter has the full action payload and can complete the action without control-plane contact. This is the correct behaviour: aborting mid-action on network loss creates more hazards than completing safely. However, when the lease expires without renewal (timed from the last received `renew_lease` Command), the Fleet Adapter MUST bring the current action to a safe stop — the robot can no longer be that action's sole valid executor, and the control plane may reassign the action to another robot ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)). Only `FleetAction`s cross this boundary; a `FleetTask` is never delivered to an adapter ([§9.1.5](#fleettask)).
 
-2. **Stop accepting new tasks.** The Fleet Adapter MUST NOT invent task assignments without control-plane authorization. Only `assign_action` Commands from the authenticated control plane are valid task sources.
+2. **Maintain safety-critical functions.** `estop.receive` and `health.heartbeat` capabilities MUST remain active. Local estop response (hardware-level) MUST continue to function without control-plane connectivity.
 
-3. **Maintain safety-critical functions.** `estop.receive` and `health.heartbeat` capabilities MUST remain active. Local estop response (hardware-level) MUST continue to function without control-plane connectivity.
+3. **Attempt reconnection** using the exponential backoff policy defined in [§9.2.5](#fleet-adapter-protocol-connection-lifecycle). The Fleet Adapter MUST NOT attempt to re-discover (send a `discover` message) — it must send a `register` message on reconnect.
 
-4. **Attempt reconnection** using the exponential backoff policy defined in [§9.2.5](#fleet-adapter-protocol-connection-lifecycle). The Fleet Adapter MUST NOT attempt to re-discover (send a `discover` message) — it must send a `register` message on reconnect.
-
-5. **Buffer telemetry** for up to 5 minutes. On reconnect, the Fleet Adapter SHOULD send buffered telemetry payloads with original timestamps so the control plane can reconstruct the robot's state history during the outage. Buffered payloads older than 5 minutes MAY be discarded.
+4. **Buffer telemetry** for up to 5 minutes. On reconnect, the Fleet Adapter SHOULD send buffered telemetry payloads with original timestamps so the control plane can reconstruct the robot's state history during the outage. Buffered payloads older than 5 minutes MAY be discarded.
 
 <a id="safety-reconnection-flow"></a>
 ##### 9.6.3.4 Reconnection Flow
@@ -10195,51 +11411,52 @@ On register ACCEPTED:
   Robot.status.phase:  Offline → Idle
     (brief Discovered intermediate state is skipped on reconnect)
   Robot.status.connectivity.lastSeenAt: updated
-  Scheduler: robot eligible for new task assignments
+  Scheduler: robot eligible for new action assignments
   Fleet Adapter: sends full-snapshot TelemetryPayload within 10s ([§9.2.8](#fleet-adapter-protocol-fleet-adapter-compliance-checklist))
-Tasks that transitioned to `Revoking` (connectivity loss, lease outstanding) are
+Actions that transitioned to `Revoking` (connectivity loss, lease outstanding) are
 resolved by the robot's REPORTED TASK STATE on reconnect — never by the mere fact
 of reconnection (the [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee) invariant):
-  - lease already expired before reconnect: the Scheduler already moved the task to
+  - lease already expired before reconnect: the Scheduler already moved the action to
     `Pending` (robot self-stopped at expiry); it is reassigned. retryCount unchanged.
-  - reconnect snapshot shows the task NOT running (self-stopped / completed / failed):
+  - reconnect snapshot shows the action NOT running (self-stopped / completed / failed):
     lease is provably dead → `Pending` (or terminal); reassigned. retryCount unchanged.
-  - robot STILL executing the task under a not-yet-expired lease: the control plane
+  - robot STILL executing the action under a not-yet-expired lease: the control plane
     RE-ADOPTS it — resumes `renew_lease` at the same `assignmentGeneration` and moves
-    the task `Revoking → InProgress`. NO reassignment (reassigning here would put the
-    task on two robots — the double-execution hazard). This is the path a brief Wi-Fi drop takes.
-Tasks that were in `Paused` phase (estop-paused, not Revoking): remain `Paused`.
+    the action `Revoking → InProgress`. NO reassignment (reassigning here would put the
+    action on two robots — the double-execution hazard). This is the path a brief Wi-Fi drop takes.
+Actions that were in `Paused` phase (estop-paused, not Revoking): remain `Paused`.
   Operator must explicitly resume or cancel them ([§9.6.2.4](#safety-fleetaction-behaviour-during-estop)).
 ```
 
 <a id="safety-assignment-lease-and-the-single-executor-guarantee"></a>
 ##### 9.6.3.5 Assignment Lease and the Single-Executor Guarantee
 
-**The double-execution risk.** A connectivity partition can place a `FleetAction` in a state where two robots execute it simultaneously: robot A loses connectivity while executing task T; a control plane that requeued on unreachability alone ([§9.6.3.2](#safety-control-plane-response)) would requeue T to robot B; A (offline, still moving) and B both physically execute T. Per-robot fencing tokens cannot prevent this — A's and B's token sequences are independent.
+**The double-execution risk.** A connectivity partition can place a `FleetAction` in a state where two robots execute it simultaneously: robot A loses connectivity while executing action X; a control plane that requeued on unreachability alone ([§9.6.3.2](#safety-control-plane-response)) would requeue X to robot B; A (offline, still moving) and B both physically execute X. Per-robot fencing tokens cannot prevent this — A's and B's token sequences are independent.
 
 **Assignment lease.** Each new assignment of a `FleetAction` to a robot is a **lease**:
 
-- **`assignmentGeneration`**: a per-task strictly-monotonic `uint64` minted by the Scheduler from the persisted generation store ([§9.3.2](#control-plane-scheduler)). A new generation is issued on every new assignment, never from in-memory state, so it survives a Scheduler failover.
-- **`leaseDurationMs`**: the robot may physically execute the task only while it holds an unexpired lease. The control plane renews the lease at an interval well below `leaseDurationMs` via `renew_lease` Commands while the assignment stands.
-- **Self-stop obligation**: the Fleet Adapter MUST autonomously bring the current task to a safe stop if the lease is not renewed before `leaseDurationMs` elapses (timed robot-side from the last renewal receipt). This self-stop is a Layer-2 responsibility consistent with the [§9.6.1](#safety-scope-and-responsibility-boundary) scope boundary.
+- **`assignmentGeneration`**: a per-`FleetAction` strictly-monotonic `uint64` minted by the Scheduler from the persisted generation store ([§9.3.2](#control-plane-scheduler)). A new generation is issued on every new assignment, never from in-memory state, so it survives a Scheduler failover.
+- **`spec.scheduling.leaseDurationSeconds`**: the robot may physically execute the action only while it holds an unexpired lease. The control plane renews the lease every `leaseDurationSeconds / 3` via `renew_lease` Commands while the assignment stands. This one namespace-resolved value governs BOTH halves of the guarantee: the control plane writes it to `FleetAction.status.leaseExpiresAt` and sends it to the adapter as `lease_duration_ms`, so the robot's self-stop deadline and the control plane's reassignment horizon can never be computed from different numbers (ADR-0044).
+- **Units.** `leaseDurationSeconds` and `clockSkewMarginSeconds` are the configuration fields, in seconds ([§9.1.12](#swarmadaconfig)); `lease_duration_ms` is the wire encoding of the first, in milliseconds ([§9.2](#fleet-adapter-protocol)). They are the same quantity in two encodings, and the control plane converts at the wire boundary. No other spelling of either quantity is normative — in particular `clockSkewMarginMs`, used in earlier revisions, was never a field and had no defined value.
+- **Self-stop obligation**: the Fleet Adapter MUST autonomously bring the current action to a safe stop if the lease is not renewed before `lease_duration_ms` elapses (timed robot-side from the last renewal receipt). This self-stop is a Layer-2 responsibility consistent with the [§9.6.1](#safety-scope-and-responsibility-boundary) scope boundary.
 
 **Safe-reassignment invariant.** The control plane MAY assign a `FleetAction` to a **new** robot only after the prior assignment's lease is **provably dead** — exactly one of:
 
 1. The prior robot confirmed revocation (`cancel_action` → `CancelActionResult.acknowledged = true`).
-2. The prior robot's adapter, on reconnect, reported the task is no longer running (a `action_status` not in `RUNNING` for task T, or re-registered with `current_action ≠ T`).
-3. The lease has provably expired: `now ≥ last-ack'd-renewal-time + leaseDuration + clock-skew-margin`, at which point the robot has self-halted T per the self-stop obligation above.
+2. The prior robot's adapter, on reconnect, reported the action is no longer running (an `action_status` not in `RUNNING` for X, or re-registered with `current_action ≠ X`).
+3. The lease has provably expired: `now ≥ last-ack'd-renewal-time + leaseDurationSeconds + clockSkewMarginSeconds`, at which point the robot has self-halted per the self-stop obligation above.
 
-Reassignment MUST NEVER be triggered by unreachability alone before the lease horizon. (Task-level analogue of the estop invariant: stopped is confirmed, never inferred.)
+Reassignment MUST NEVER be triggered by unreachability alone before the lease horizon. (Action-level analogue of the estop invariant: stopped is confirmed, never inferred.)
 
-**Unified interrupted-task fate by cause:**
+**Unified interrupted-action fate by cause:**
 
 | Cause | Transitions | Auto-requeue? | Notes |
 | :---- | :---- | :---- | :---- |
-| **E-stop** (robot reachable, commanded) | InProgress/Assigned → Paused | No — operator decides | Server-side lease renews while Paused+connected; task stays bound to that robot. Wire `renew_lease` stops at the estop edge, so the robot self-stops at lease expiry — expected, see [§9.6.2.4](#safety-fleetaction-behaviour-during-estop) |
+| **E-stop** (robot reachable, commanded) | InProgress/Assigned → Paused | No — operator decides | Server-side lease renews while Paused+connected; action stays bound to that robot. Wire `renew_lease` stops at the estop transition, so the robot self-stops at lease expiry — expected, see [§9.6.2.4](#safety-fleetaction-behaviour-during-estop) |
 | **ZoneMaintenance** (robot reachable, commanded) | InProgress → Paused | Yes, after drain | Requeued once the drain timeout elapses |
-| **Connectivity loss** (robot unreachable, lease outstanding) | InProgress/Assigned → Revoking | Yes — gated on lease expiry | T2 alert fires but requeue waits for lease horizon, not T2 |
-| **Assigned, not started, no lease** | Assigned → Pending | Yes — immediate | Scheduling miss; robot never held task; retryCount not incremented |
-| **Preemption** (a Critical or High preemptor displaces a Normal/Low victim, robot reachable) | InProgress → Revoking → Pending | Yes — after confirmed stop | `cancel_action` + `CancelActionResult.acknowledged`; then → Pending; retryCount unchanged |
+| **Connectivity loss** (robot unreachable, lease outstanding) | InProgress/Assigned → Revoking | **Only under `actionCancellation.onDisconnect: AfterTimeout`**, and then gated on lease expiry *and* `disconnectTimeoutSeconds`. Under the **default `Never`** the action is held in Revoking with its robot bound until an operator cancels it | T2 alert fires but requeue waits for the lease horizon, not T2 |
+| **Assigned, not started, no lease** | Assigned → Pending | Yes — immediate | Scheduling miss; robot never held action; retryCount not incremented |
+| **Preemption** (a Critical or High preemptor displaces a Normal/Low victim, robot reachable) | Assigned → Preempted → Pending (reservation was `Reserved`, no lease outstanding); InProgress → Preempted → Revoking → Pending (reservation was `Occupied`) | Yes — after confirmed stop | `cancel_action` + `CancelActionResult.acknowledged`; then → Pending; retryCount unchanged |
 
 **Failover safety.** The `assignmentGeneration` and per-robot fencing tokens are both drawn from the persisted generation store ([§9.3.2](#control-plane-scheduler)). A Scheduler crash cannot cause two assignment attempts to share a generation across a failover.
 
@@ -10254,10 +11471,10 @@ Reassignment MUST NEVER be triggered by unreachability alone before the lease ho
 | **Initiation** | Operator-scheduled; may have a future `scheduledStart` | Immediate; no scheduling |
 | **Mode** | Graceful (drain) or Immediate | Always Immediate |
 | **FleetAction behaviour** | InProgress → **Pending** (re-schedulable on another robot) once the robot is provably stopped — Immediate requeues at once, Graceful after the drain timeout. The action is never left bound to a robot going out of service | InProgress → Paused; stays bound to its robot; NOT automatically requeued |
-| **Task auto-requeue on clear** | Yes (configurable) | No (operator decides) |
+| **Action auto-requeue on clear** | Yes (configurable) | No (operator decides) |
 | **Affected capabilities** | Only `pauseable: true` | All capabilities suspended by the robot's hardware stop |
 | **Physical stop required** | Yes (Fleet Adapter must stop before ACK) | Yes (Fleet Adapter must stop before ACK) |
-| **Operator action to clear** | Delete resource or `swarmctl deactivate maintenance` | Explicit `swarmctl estop-clear` with authenticated operator identity |
+| **Operator action to clear** | `kubectl delete zonemaintenance <name>` | Removing the `swarmada.io/estop-triggered` annotation, which requires the `estop-clear` verb and an authenticated operator identity |
 | **Audit log entry** | `ZONE_MAINTENANCE_ACTIVATED`, `ZONE_MAINTENANCE_DEACTIVATED`, `ACTION_REQUEUED_BY_MAINTENANCE` | `ESTOP_TRIGGERED`, `ESTOP_CLEARED`, `ACTION_PAUSED_BY_ESTOP` (separate event types) |
 | **Can be automated** | Yes (e.g. CronJob creates `ZoneMaintenance` at scheduled time) | No (clear requires human operator; automation MUST NOT clear estop) |
 
@@ -10270,7 +11487,7 @@ Reassignment MUST NEVER be triggered by unreachability alone before the lease ho
 <a id="safety-safety-audit-log"></a>
 #### 9.6.5 Safety Audit Log
 
-Swarmada maintains a tamper-evident audit log for the safety-relevant events listed below. The log is append-only; entries cannot be modified or deleted via the API. Integrity and coverage are both complete at v0.2: the log proves that what it contains was not altered, and the Status column below records that every event type this section requires is written today. Coverage was NOT complete in earlier drafts, and the gap was not where it appeared to be — several rows named an event the control plane could not observe at all, because the adapter contract had no way to report it (ADR-0033). What closed them was a contract change; the Status column and its mechanical check are what keep the claim honest as the set grows. Retention is configurable (default: 90 days); events older than the retention period are archived to the configured object store before deletion.
+Swarmada maintains a tamper-evident audit log for the safety-relevant events listed below. The log is append-only; entries cannot be modified or deleted via the API. Integrity is complete at v0.3 within a single manager lifetime (see the restart limitation under Tamper-evidence mechanism below), and coverage of **this section's** required events is complete: the Status column below records that every event type this section requires is written today. Coverage of the wider security-event set in [§9.5.4](#security-audit-logging) is **not** complete — five event types there are specified and written by nothing, and that table carries no status column. Coverage was NOT complete in earlier drafts, and the gap was not where it appeared to be — several rows named an event the control plane could not observe at all, because the adapter contract had no way to report it (ADR-0033). What closed them was a contract change; the Status column and its mechanical check are what keep the claim honest as the set grows. Retention is specified as configurable (default: 90 days), with events older than the retention period archived to the configured object store before deletion. **Specified, not implemented at v0.3** — see the Retention Policy section below: `SwarmadaConfig` has no `spec.audit` block and no `archiveBucket` field, no archival runs, and nothing deletes an entry by age. Entries accumulate in the configured sink indefinitely.
 
 <a id="safety-required-events"></a>
 ##### 9.6.5.1 Required Events
@@ -10279,12 +11496,12 @@ The following event types MUST be logged. Each entry uses the **canonical audit 
 
 | Event type | Trigger | Status | Required `detail` fields |
 | :---- | :---- | :---- | :---- |
-| `ESTOP_TRIGGERED` | `estop` `Command` sent or `swarmctl estop` called | emitted | `reason`, `robots_in_scope` (list), `robots`, `stopped`, `unconfirmed`, `max_ack_latency_ms` on a zone/namespace fan-out; `reason`, `state`, `rpc_sent_at`, `delivered`, `ack_received_at`, `ack_latency_ms`, `latency_violation` on a robot-scope estop |
+| `ESTOP_TRIGGERED` | `estop` `Command` sent, or the `swarmada.io/estop-triggered` annotation added under the `estop-trigger` verb | emitted | `reason`, `robots_in_scope` (list), `robots`, `stopped`, `unconfirmed`, `max_ack_latency_ms` on a zone/namespace fan-out; `reason`, `state`, `rpc_sent_at`, `delivered`, `ack_received_at`, `ack_latency_ms`, `latency_violation` on a robot-scope estop |
 | `ESTOP_LATENCY_VIOLATION` | `estop` `Command` ACK latency > 500ms | emitted | `latency_ms`, `adapter_version` |
-| `ESTOP_CLEARED` | `swarmctl estop-clear` called | emitted | `robots`, `cleared` |
+| `ESTOP_CLEARED` | the `swarmada.io/estop-triggered` annotation removed under the `estop-clear` verb | emitted | `robots`, `cleared` |
 | `ESTOP_CLEAR_REJECTED` | Clear attempted but precondition not met (e.g. `requireEstopClearBeforeResume`) | emitted | `reason`, `zonemaintenance`, `robot_estopstate` |
 | `ROBOT_OFFLINE` | Robot transitions to Offline (T1 threshold) | emitted | `last_seen_at`, `offline_threshold_seconds` |
-| `ROBOT_CRITICAL` | Robot reaches T2 threshold (operator alert; in-flight tasks are in `Revoking`, not requeued at T2 — reassignment is gated on lease expiry, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) | emitted | `offline_duration_seconds`, `revoking_actions[]` |
+| `ROBOT_CRITICAL` | Robot reaches T2 threshold (operator alert; in-flight actions are in `Revoking`, not requeued at T2 — reassignment is gated on lease expiry, [§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) | emitted | `offline_duration_seconds`, `revoking_actions[]` |
 | `ROBOT_RECONNECTED` | `register` accepted after Offline | emitted | `offline_duration_seconds`, `firmware_version` |
 | `ZONE_MAINTENANCE_ACTIVATED` | `ZoneMaintenance` transitions to Active | emitted | `zone`, `mode`, `reason`, `robots_in_scope[]` |
 | `ZONE_MAINTENANCE_DEACTIVATED` | `ZoneMaintenance` closes (operator or auto-resume) | emitted | `zone`, `duration_seconds`, `closed_by` |
@@ -10301,18 +11518,21 @@ The following event types MUST be logged. Each entry uses the **canonical audit 
 | `MODEL_SIGNATURE_VERIFIED` | Fleet Adapter verified the model artifact signature before install and attested the signer on its `model_update` acknowledgement | emitted | `model_name`, `artifact_digest`, `verified_signer` |
 | `MODEL_SIGNATURE_FAILED` | Fleet Adapter rejected the model artifact; signature verification failed; install aborted and nothing entered the batch | emitted | `model_name`, `artifact_digest`, `reason` |
 | `ROBOT_ADMITTED` | DiscoveredRobot promoted to Robot CRD | emitted | `zone`, `robot_class`, `admission_path` (`operator` \| `auto-admit`) |
-| `ROBOT_REJECTED` | DiscoveredRobot rejected | `emitted` — `swarmctl admit reject` marks the object with the `swarmada.io/rejected` annotation carrying the operator's reason; the DiscoveredRobot controller seals the entry and then deletes. The mark is the discriminating signal: a TTL sweep deletes without it, so a reap can never present as a refusal | `reason` |
+| `ROBOT_REJECTED` | DiscoveredRobot rejected | `emitted` — the object is marked with the `swarmada.io/rejected` annotation carrying the operator's reason (`kubectl annotate discoveredrobot <name> swarmada.io/rejected=<reason>`, the `reject` verb); the DiscoveredRobot controller seals the entry and then deletes. The mark is the discriminating signal: a TTL sweep deletes without it, so a reap can never present as a refusal | `reason` |
 | `CAPABILITY_DEGRADED` | Robot capability transitions from Active to Degraded or Inactive | emitted | `capability_name`, `prior_status`, `new_status`, `reason` |
 | `PROBE_FAILURE` | RobotProbe crosses its failure threshold for a robot — the sustained failure that demotes the component, not a single failed tick | emitted | `probe_name`, `consecutive_failures`, `failed_metrics` |
 | `ROBOT_AUTHZ_DENIED` | An `AdapterMessage` named a robot the authenticated adapter does not serve ([§9.2.7](#fleet-adapter-protocol-transport-security)) | emitted | `reason` |
 | `FLEETACTION_CANCELLED` | A FleetAction reached `Cancelled` through the confirmed-cancel path ([§9.6.3.5](#safety-assignment-lease-and-the-single-executor-guarantee)) | emitted | `reason` (omitted when the cancel carried none) |
 | `FIRMWARE_ROLLOUT_CREATED` | A FirmwareRollout was created | emitted | `version` |
 | `MODEL_ROLLOUT_CREATED` | A ModelRollout was created, including auto-creation by a ModelPolicy quality gate | emitted | `model`, `version`, `policy` |
+| `FIRMWARE_ROLLOUT_PAUSED` | A FirmwareRollout halted on `pauseOnError` after an install failure — sealed on the transition into `Paused`, not once per reconcile while paused | emitted | `version`, `failed_robots` |
+| `MODEL_ROLLOUT_PAUSED` | A ModelRollout halted on `pauseOnError` after an install failure — sealed on the transition into `Paused` | emitted | `model_name`, `failed_robots` |
+| `ROLLOUT_RESUMED` | An operator released a `Paused` rollout of either kind via the `rollout-resume` verb. The robots that had failed are EXCLUDED from further attempts by that rollout, not retried (ADR-0041), so this entry records work being abandoned rather than repeated | emitted | `reason`, `excluded_robots` |
 | `SWARMADA_CONFIG_MODIFIED` | The namespace `SwarmadaConfig` singleton was changed | emitted | — (identity and target are carried by `actor` / `resource`) |
 | `EDGE_ESTOP_TRIGGERED` | A Zone Controller edge node issued a headless estop while the control plane was unreachable ([§9.6.2.5](#safety-edge-headless-emergency-stop)) | emitted | `robot` |
 
-**Status column.** `emitted` means a production code path writes this entry into the tamper-evident chain today — not merely that an event-name constant is declared for it. This column is checked mechanically against the code — every row marked `emitted` must have a production writer, and every row that is not must not — so it cannot drift the way an unverified tally can.
-Every event type above is `emitted` at v0.2: each has a production writer, and each writer is
+**Status column.** `emitted` means a production code path writes this entry into the tamper-evident chain today — not only that an event-name constant is declared for it. This column is checked mechanically against the code — every row marked `emitted` must have a production writer, and every row that is not must not — so it cannot drift the way an unverified tally can.
+Every event type above is `emitted` at v0.3: each has a production writer, and each writer is
 reachable from state an adapter actually reports. Reaching that took a contract change, not
 only controller work — the install-outcome rows depended on a firmware/model install result
 the wire could not express (ADR-0033).
@@ -10345,8 +11565,8 @@ Two consequences are called out because they are easy to misread:
   outcome `Allowed`, because the stop was delivered and acknowledged; what breached was the
   timing guarantee, and an entry marked `Error` would read as a failed emergency stop. All
   three event types the safety case was gated on now reach the chain.
-- **The chain mechanism is complete; the coverage is not.** The per-namespace hash chain, its genesis entry,
-  and `swarmctl verify audit` all behave as [§9.5.4](#security-audit-logging) describes. What a v0.2 deployment
+- **The chain mechanism is complete within a manager lifetime; coverage of the wider security-event set is not.** The per-namespace hash chain, its seed value,
+  and `swarmctl verify audit` all behave as [§9.5.4](#security-audit-logging) describes. What a v0.3 deployment
   cannot yet demonstrate is the *breadth* of the record, not its integrity.
 
 <a id="safety-log-entry-format"></a>
@@ -10364,23 +11584,21 @@ Two consequences are called out because they are easy to misread:
     "source_ip": "10.0.1.42"
   },
   "resource": {
-    "kind": "Robot",
+    "kind": "FleetZone",
     "namespace": "warehouse-a",
-    "name": "amr-acme-007"
+    "name": "zone-aisle-b3"
   },
   "action": "estop-trigger",
   "outcome": "Allowed",
   "detail": {
-    "scope": "zone",
-    "zone_name": "zone-aisle-b3",
-    "triggered_by": "system:serviceaccount:warehouse-a:wms-integration",
     "reason": "Proximity sensor triggered near personnel",
     "robots_in_scope": "amr-acme-007,amr-acme-008",
-    "rpc_sent_at": "2026-06-23T22:14:33.847291Z",
-    "ack_received_at": "2026-06-23T22:14:34.112004Z",
-    "ack_latency_ms": "265"
+    "robots": "2",
+    "stopped": "2",
+    "unconfirmed": "0",
+    "max_ack_latency_ms": "265"
   },
-  "swarmada_version": "v0.2.0",
+  "swarmada_version": "v0.3.0",
   "log_version": "1",
   "chain_hash": "sha256:..."
 }
@@ -10397,11 +11615,35 @@ a numeric quantity appears quoted (`"ack_latency_ms": "265"`), and a list — wh
 spaces** (`"robots_in_scope": "amr-acme-007,amr-acme-008"`), which a reader splits on `,`. Field names ending
 `[]` in the table above denote such a list, not a JSON array.
 
-**Tamper-evidence mechanism.** Each log entry includes a `chain_hash` field (SHA-256 of the previous entry's `chain_hash` concatenated with the current entry's content). The `swarmctl verify audit` command walks the chain and detects any gap, deletion, or modification. The chain is per-namespace and resets on namespace creation (the genesis entry has `chain_hash: "0000...0000"`).
+**Tamper-evidence mechanism.** Each log entry includes a `chain_hash` field (SHA-256 of the previous
+entry's `chain_hash` concatenated with the current entry's content, with `chain_hash` itself excluded from
+that content). The chain is per-namespace. The first entry in a namespace chains against a fixed
+all-zeroes seed; no separate genesis entry is written, so the first real entry's own `chain_hash` is an
+ordinary hash rather than the seed value. The `swarmctl verify audit` command walks the chain and detects
+any gap, deletion, or modification.
+
+> **How a `verify` result should be read across a restart.**
+>
+> **The chain survives a restart only as far as the sink can be read back.** The running sequence number
+> and previous hash are held per namespace in the manager process; at startup the manager rehydrates them
+> from the sink, so a restarted manager continues each namespace's chain rather than opening a second one.
+> A sink that cannot be read back — a write-only forwarder — cannot support this, and the manager says so
+> at startup instead of restarting the chain silently: it then begins each namespace again at sequence 1
+> against the seed, and `swarmctl verify audit`
+> reports that discontinuity as a sequence gap and a hash mismatch. **A routine pod restart is therefore
+> not distinguishable from tampering by this mechanism at v0.3.** Read a `verify` failure as "investigate",
+> correlate the break against the manager's restart history. On a resumable sink a clean chain across a
+> restart boundary IS the expected result.
+>
+> **The default sink is in-memory.** Unless the manager is started with an audit log file configured, every
+> entry described in this section is written to a memory sink and discarded when the process exits. An
+> operator who needs a durable safety audit log MUST configure the file sink explicitly. The manager logs a
+> warning at startup when no audit log file is configured, so the absence of a durable trail is not silent,
+> but it is not fatal — the in-memory default is what the development and test paths run on.
 
 ```bash
-# Verify log integrity for a namespace:
-swarmctl verify audit -n warehouse-a
+# Verify chain integrity of an exported log:
+swarmctl verify audit --file audit-june-2026.ndjson
 # OUTPUT:
 # Chain verification: PASSED
 # Entries verified: 10,482
@@ -10414,32 +11656,32 @@ swarmctl verify audit -n warehouse-a
 <a id="safety-accessing-the-audit-log"></a>
 ##### 9.6.5.3 Accessing the Audit Log
 
+> **Why these three are shown as `swarmctl` and not `kubectl`.** The audit chain is verified by recomputing `chain_hash` over an exported file; there is no API object to `get`, and verification must run against the bytes an auditor holds rather than against a live server that could be the thing under suspicion. These are the only operations in this document with no Kubernetes API equivalent. They remain a convenience client and not part of the conformance surface ([§4](#non-goals), item 20); the flags shown are the ones the reference client implements.
+
 ```bash
-# Stream recent safety events:
-swarmctl get audit -n warehouse-a --since 1h
+# Read an exported audit chain (see the note below on why this one is CLI-only):
+swarmctl get audit --file audit-june-2026.ndjson
 # OUTPUT (most recent first):
 # SEQ    TIME                         TYPE                      ROBOT           DETAIL
 # 10482  2026-06-23T22:14:33.847Z    ESTOP_TRIGGERED           amr-acme-007   zone-aisle-b3, latency 265ms
 # 10481  2026-06-23T22:14:33.791Z    ACTION_PAUSED_BY_ESTOP    fleetaction-...   amr-acme-007
 # 10480  2026-06-23T21:03:11.002Z    ROBOT_RECONNECTED         amr-acme-012   offline 47s
-# Filter by event type:
-swarmctl get audit -n warehouse-a --type ESTOP_TRIGGERED --since 30d
-# Export for external SIEM integration (NDJSON format):
-swarmctl export audit -n warehouse-a   --since 2026-06-01T00:00:00Z   --until 2026-06-23T23:59:59Z   --format ndjson   > audit-june-2026.ndjson
-# Verify log integrity:
-swarmctl verify audit -n warehouse-a [--from-sequence 10000] [--to-sequence 10482]
+# Export for external SIEM integration:
+swarmctl export audit --file <source> --out-file audit-june-2026.ndjson
+# Verify chain integrity:
+swarmctl verify audit --file audit-june-2026.ndjson
 ```
 
 <a id="safety-retention-policy"></a>
 ##### 9.6.5.4 Retention Policy
 
-Default retention is 90 days. When a log entry reaches the retention boundary:
+**Specified, not implemented at v0.3** (Maturity note above). The design intent is a default 90-day retention with archive-then-delete at the boundary:
 
 1. The entry is archived to the configured object store (`SwarmadaConfig.spec.audit.archiveBucket`, if set).
 2. The entry is deleted from the active log store.
 3. The `sequence_number` is preserved in the chain permanently; gaps are distinguishable from tampering by the archive pointer in the genesis entry.
 
-Operators in regulated environments should set `archiveBucket` and configure their object store with appropriate access controls and immutability policies (e.g. S3 Object Lock, GCS Bucket Lock) to meet their data retention requirements. Swarmada does not enforce immutability at the object store layer; that is the operator's responsibility.
+At v0.3, `SwarmadaConfig` has no `spec.audit` block at all — `archiveBucket` is not a field anywhere in the schema — and no controller archives or deletes audit log entries by age. The log accumulates without a retention boundary; operators who need bounded retention or archival today must implement it outside Swarmada against the log store directly. Once implemented, operators in regulated environments should set `archiveBucket` and configure their object store with appropriate access controls and immutability policies (e.g. S3 Object Lock, GCS Bucket Lock) to meet their data retention requirements; Swarmada does not enforce immutability at the object store layer, and that remains the operator's responsibility.
 
 <a id="safety-standards-disclaimer"></a>
 #### 9.6.6 Standards Disclaimer
@@ -10458,7 +11700,7 @@ Operators deploying Swarmada in environments subject to any of the above standar
 
 1. The physical robot platforms they deploy are certified for their intended use case by the robot manufacturer under the applicable standard.
 2. The overall robot system integration (including the Fleet Adapter, site layout, guarding, and operating procedures) meets the applicable standard's requirements, assessed independently of Swarmada.
-3. Swarmada's safety audit log ([§9.6.5](#safety-safety-audit-log)) is used as supporting evidence in their safety case, not as primary compliance evidence.
+3. Swarmada's safety audit log ([§9.6.5](#safety-safety-audit-log)) is used as supporting evidence in their safety case, not as primary compliance evidence — and, at v0.3, only with the limitations that section records: the chain continues across a control-plane restart only as far as its sink can be read back, so on a non-resumable sink a `verify` failure at a restart boundary is not by itself evidence of tampering, and the log is discarded on exit unless a file sink is explicitly configured. An estop entry names the authenticated operator who triggered or cleared it where one was resolved, and is explicitly marked `unattributed:` where none was. An assessor should also read the Status column in [§9.6.5.1](#safety-required-events) for which event types a given deployment actually records.
 
 This disclaimer is a permanent part of RFC-0001 and must be reproduced in any derivative specification, deployment guide, or operator manual that references Swarmada's safety capabilities.
 
@@ -10468,7 +11710,7 @@ This disclaimer is a permanent part of RFC-0001 and must be reproduced in any de
 This section defines the acronyms and key terms used throughout this
 specification. As established in the Abstract, unless explicitly qualified,
 "robot" means a *mobile* robot. The key words **MUST**, **MUST NOT**,
-**SHOULD**, **MAY**, and **REQUIRED** are used as described in RFC 2119.
+**SHOULD**, **SHOULD NOT**, **MAY**, **REQUIRED**, and **OPTIONAL** are to be interpreted as described in BCP 14 (RFC 2119 and RFC 8174) when, and only when, they appear in all capitals as shown here.
 
 | Term | Definition |
 | :--- | :--------- |
@@ -10482,24 +11724,50 @@ specification. As established in the Abstract, unless explicitly qualified,
 | **RBAC** | Role-Based Access Control — permissions granted by role. |
 | **CRD** | Custom Resource Definition — a Kubernetes API extension type; Swarmada's resources are CRDs. |
 | **TDE** | Traffic Deconfliction Engine — the Swarmada component that prevents robot path conflicts. |
-| **Contract version** | The semantic version of the Fleet Adapter *contract* — the proto surface, the `SupportedAction` schema, and the conformance-suite revision taken together. Distinct from the wire **package identity** (`fleet_adapter.v1`), which is an identity string and cannot express compatibility, and from an adapter's own **build version**, which versions an implementation rather than the contract. A release advertises the range of contract versions it implements. |
+| **Contract version** | The semantic version of the Fleet Adapter *contract* — the proto surface and the `SupportedAction` schema taken together. A conformance result is recorded *against* a contract version, but the **conformance-suite version** it was produced by is a separate field, not a component of it. Distinct from the wire **package identity** (`fleet_adapter.v1`), which is an identity string and cannot express compatibility, and from an adapter's own **build version**, which versions an implementation rather than the contract. A release advertises the range of contract versions it implements. |
 | **mTLS** | Mutual TLS — a connection in which both peers authenticate with certificates. |
 | **OTA** | Over-the-Air — remote delivery of firmware or software updates. |
 | **SLA** | Service-Level Agreement — a committed performance/availability target. |
 | **Open-RMF** | Open Robotics Fleet Management Framework — an existing open-source fleet framework (see Motivation). |
 | **VDA5050** | An open robot-to-fleet-manager communication standard for AMRs/AGVs. |
 | **MAVLink** | An open messaging protocol for uncrewed aerial (and other) vehicles. |
-| **eVTOL** | Electric Vertical Take-Off and Landing aircraft (e.g., air taxis). |
 | **UTM** | Uncrewed-aircraft Traffic Management — airspace coordination for drones. |
 | **Fleet Adapter** | The per-vendor bridge that implements Swarmada's `fleet_adapter.v1` gRPC contract; the only data-plane component Swarmada owns or defines. May run on-robot or on nearby edge compute. |
 | **Robot Agent** | The robot manufacturer's own onboard control software that a Fleet Adapter calls into. Out of Swarmada's scope — Swarmada does not author, ship, or modify it (contrast Fleet Adapter). |
 | **Control plane** | The Swarmada components that reconcile declared fleet state toward actual state. |
-| **Data plane** | The edge/on-robot side of the system — Fleet Adapters and the robots they drive — as distinct from the Control plane. |
+| **Data plane** | The edge/on-robot side of the system — Fleet Adapters and the robots they drive — as distinct from the Control plane. Distinct from the **two-data-plane split** of the telemetry pipeline ([§9.3.7](#control-plane-telemetry-pipeline-and-the-two-data-plane-split)), which names two planes *inside* the control plane — the time-series plane and the material `Robot.status` plane — and is unrelated to this control-plane/data-plane division. |
 | **Zone** | A `FleetZone` — a spatial region of the workspace with waypoints and capacity. |
+| **Action** | A `FleetAction` — the atomic unit of dispatch: one discrete unit of work executed by exactly one robot. The only work object that crosses the fleet-adapter boundary. |
+| **Task** | A `FleetTask` — a composite objective that owns a graph of `FleetAction`s through `ownerReferences`. A `FleetTask` never crosses the fleet-adapter boundary. Where this specification says "task" without qualification in a scheduling, lease, or estop context, it refers to the `FleetAction` being executed, not the owning `FleetTask`. |
+| **Protocol profile** | The external interoperability standard, at a stated version, that robots of a class speak on the wire and that a Fleet Adapter translates — the VDA5050 entry above names one such standard. It describes the far side of the adapter from the control plane. A protocol profile is *declared or undeclared*: it has no health, no activation state, no deployment state and no connection state. It never means the Swarmada contract (contrast **Protocol** below), and the qualifier is part of the term — this specification does not use the bare word "profile" as a defined term. Protocol-profile declarations are **not** specified at v0.3 (see FleetAdapter and RobotClass). |
+| **Capability set** | A named subset of the Fleet Adapter contract that an adapter could declare conformance to independently of the rest, at its own version. It divides *the contract surface*, not a robot's abilities: the phrase "a robot's capability set" elsewhere in this document is ordinary English and not this term. Capability sets are **not** specified at v0.3 and are a deliberate future seam (see Fleet Adapter Protocol). |
+| **Protocol** | Unqualified, "protocol" means the Swarmada Fleet Adapter contract: `spec.protocolVersion` and `status.negotiatedProtocolVersion` on `FleetAdapter` both carry the wire package identity `fleet_adapter.v1`, never an external standard. An external standard is always named as a **protocol profile**. RFC-0004 (planned) uses "profile" in a third sense — the north-side task-submission surface as a profile over the Kubernetes API, with its own conformance profiles — which is neither of these. |
+| **Hardware component** | A physical part present on a robot, of an enumerated type (`Lidar`, `Camera`, `Gripper`, `LoadPlatform`, `Arm`, `Thermal`, `Microphone`, `Display`, `Custom`), carrying type-specific physical attributes. A hardware component is *present or absent*; it is never active or inactive, and it never depends on software. |
+| **Capability** | A named ability a robot can be asked to perform, declared on `RobotClass.spec.baseCapabilities[]` or `Robot.spec.capabilities[]` and reported with a status. The status enum and the rules that produce it are normative in the `Robot` chapter's capability truth table, which this row does not restate: the table carries six values and two overrides — an active `ZoneMaintenance` forces every `pauseable` capability to `Paused`, and a `ModelRollout` in progress is *specified* to force a granted capability to `Unavailable` (**specified, controller pending** — the reference control plane writes `Inactive` instead at v0.3; see [§5.2](#resource-model)) — so hardware health alone does not determine the value. Distinct from a **capability set**, which divides the Fleet Adapter contract rather than a robot's abilities. |
+| **Inference model** | A versioned ML artefact addressed by URI that grants named capabilities and may itself require hardware. A model is *deployed or not deployed*; a `model-driven` capability is inactive until its providing model is `Active`. Distinct from `RobotClass.spec.model`, which is the manufacturer's name for the robot line, and from `hardware[].model`, which identifies a component part. |
+| **Adapter binding** | The Fleet Adapter that brokers a class's robots, named and versioned at `RobotClass.spec.baseAdapter` and resolved per unit at `Robot.spec.adapter`. It identifies a *running process*, not a protocol and not an ability; an adapter is *connected or not connected*. One adapter build may translate several protocol profiles, and one protocol profile may be translated by several adapter builds. |
+| **Assignment generation** | The strictly-monotonic counter on `FleetAction.status.assignmentGeneration`, minted per assignment attempt from the persisted generation store and carried on the wire as `lease_generation`. It is `uint64` on the wire and `int64` on the CRD, per the Kubernetes API convention against unsigned integers; it is always non-negative. Per-action. Distinct from `metadata.generation`, which Kubernetes increments on any spec write. |
+| **Fencing token** | The per-robot strictly-monotonic `uint64` that totally orders commands to one robot. The adapter persists the highest accepted value per robot and rejects any lower one. Per-robot, and distinct from the per-action assignment generation. It is an ordering counter with no secret content and no authentication role — it is not a credential. `Estop` is not fenced. **The per-robot/per-action distinction is specified, not implemented at v0.3:** the reference control plane mints both from the same per-action counter, so `fencing_token` and `lease_generation` carry equal values on every message ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)). |
+| **Package identity** | The wire package name (`fleet_adapter.v1`), carried on `FleetAdapter.spec.protocolVersion` and `status.negotiatedProtocolVersion`. It states which proto package is in use and cannot express compatibility; the contract version does that. |
+| **Conformance-suite version** | The revision of the conformance harness a passing result was produced by, recorded on `FleetAdapter.spec.conformanceReport`. Recorded alongside — not folded into — the contract version the result was earned against. |
+| **Assignment lease** | The control-plane-side lease that makes a `FleetAction`'s assignment to one robot safe to revoke: it is renewed while the action runs and must be *provably dead* before the action is reassigned. It is a Swarmada concept, not a Kubernetes `Lease` object — where this specification says a Kubernetes `Lease` it always says so, and that object is only ever one possible persistence medium for the fencing-token high-water mark. |
+| **Observed-degraded mode** | The telemetry pipeline's state when `SwarmadaConfig.spec.telemetry.sink.type` is unset: frames are still ingested and projected, but no high-cadence sink is active. Distinct from an explicit `Drop` sink, which is an operator opt-in; observed-degraded is the absence of a choice and is reported rather than assumed. |
+| **Adapter build version** | `Robot.spec.adapter.version` / `RobotClass.spec.baseAdapter.version` — the semver of one adapter implementation. Versions an implementation, not the contract. |
+| **RA-1 (status-write discipline)** | The rule that a resource's `status` is never written on a telemetry tick. Status is a throttled projection, written only on a *material transition*; per-tick status writes are prohibited. This is what bounds control-plane write load to the rate of transitions rather than to fleet size × telemetry rate, and it is why the read surface a task source observes is coarse and eventually consistent rather than live. Cited throughout this specification as "RA-1". |
+| **Estop** | A software emergency stop — an `Estop` `Command` carried on the `SafetyStream`, or on the `EdgeStream` when issued headlessly, which the Fleet Adapter translates into a hardware stop command. It is a Layer-3 signal only: Swarmada guarantees that the command is sent and that an `EstopAck` is required, never the physical outcome, and it is never a substitute for a hardware estop circuit (see Scope and Responsibility Boundary). Scoped zone-, robot- or namespace-wide; triggered and cleared only by the `swarmada.io/estop-triggered` annotation on the scope's carrier resource. Spelled "estop" in this specification; "e-stop" and "E-stop" are variants of the same term, not a different mechanism. |
+| **Operator** | Unqualified, a human — or a system acting under a named human identity recorded in the safety audit log — authenticated to the Kubernetes API. It is **not** the `swarmada:operator` `ClusterRole`, which cannot modify robots, zones or configuration and does not hold `estop-clear`; only `swarmada:admin` holds that verb. Where this specification requires "explicit operator action", the requirement is on the authenticated identity, not on any role name. |
+| **Zone Controller edge node** | A lightweight process on on-premise, non-safety-rated compute, one per `FleetZone` that declares `spec.edgeNode`, which serves `EdgeService.EdgeStream` on the facility LAN and can issue a zone-local estop while the control plane is unreachable. Despite the name it is not the control plane's Zone Controller: its authority is scoped to the robots of its own zone, it holds only the `swarmada:edge` role, and it grants no task, estop-verb or configuration authority at the Kubernetes API. It is not a safety function and never sits above an independent hardware safety circuit. |
+| **Stream** | One of the three adapter-initiated bidirectional gRPC streams. `ControlStream` carries all operational traffic and terminates at the control plane. `SafetyStream` carries only `Estop` / `EstopAck` (and optionally safety-critical `PauseCapabilities`), terminates at the control plane, and is kept permanently empty in steady state so the <500 ms estop budget is never spent queueing. `EdgeStream` carries a fire-and-forget `PositionFrame` tee up and `Estop` down, and is served by the edge node rather than the control plane, which is what lets an established one survive a control-plane partition. The adapter is the client on all three; both control-plane streams MUST be open at adapter startup. |
+| **Telemetry frame** | One `TelemetryPayload` from one robot at one telemetry tick, as it arrives at the Ingestor. It is the unit RA-1 refers to as a "telemetry tick", the unit the material-transition projector evaluates, and the unit counted by `swarmada_telemetry_dropped_frames_total`. Distinct from `PositionFrame`, the pose-only message on the `EdgeStream`, which is never a telemetry frame and is never sink-routed. |
+| **Reservation** | A TDE-granted entry in `FleetZone.status.reservations[]` that consumes one unit of `spec.maxConcurrentRobots` for one `FleetAction`. It is `Reserved` before the robot has entered the zone and `Occupied` once it has; the distinction decides eviction cost, since evicting a `Reserved` entry is clean and evicting an `Occupied` one leaves the zone transiently at `maxConcurrentRobots + 1` until the evicted action's stop is confirmed. `maxConcurrentRobots` is a scheduling-policy limit, not a physical safety guarantee. |
+| **Single-executor guarantee** | The invariant that at most one robot may physically execute a given `FleetAction` at any instant. It is enforced by the assignment lease, not by fencing tokens: two robots' fencing-token sequences are independent and cannot be ordered against each other, so a token cannot prevent double execution across a partition. |
+| **Provably dead** | The condition a prior assignment lease MUST reach before its `FleetAction` may be assigned to a different robot — exactly one of: the prior robot acknowledged `cancel_action` (`CancelActionResult.acknowledged = true`); the prior robot's adapter reported on reconnect that the task is no longer running; or `now ≥ last-ack'd-renewal-time + leaseDuration + clock-skew-margin`. Unreachability alone never satisfies it. Distinct from a **confirmed stop**: the third disjunct is a clock horizon and involves no message from the robot. |
+| **Confirmed stop** | A stop the control plane has been told about rather than inferred: `Robot.status.estopState` becomes `Stopped` only on an `EstopAck.state = STOPPED` from the adapter, and an action leaves a bound robot only on an adapter acknowledgement. Absence of confirmation within 10 s of the estop acknowledgement resolves to `Failed` and escalates to a human, never to `Stopped`. The discipline is stated throughout as "stopped is confirmed, never inferred", and it applies equally to an edge-issued estop. Distinct from **provably dead** (contrast above). |
+| **Safe stopping point** | The point at which a Fleet Adapter may halt an in-flight `FleetAction` without leaving the robot mid-commitment. The adapter, not the control plane, is authoritative for choosing it: no control-plane-initiated stop for capability loss or preemption is a mid-motion interrupt, and a `cancel_action` issued for capability-loss reassignment MUST be honoured at one. It bounds *when* the stop happens; whether the stop has happened is a **confirmed stop**. |
 <a id="references"></a>
 ## References
 
-References are grouped by category. ISO standards are paywalled; free access alternatives or abstracts are noted where available. URLs were verified as of the `updated` date in the RFC frontmatter.
+References are grouped by category. ISO standards are paywalled; free access alternatives or abstracts are noted where available. URLs were verified as of the `updated` date in the RFC frontmatter, except where an entry carries its own access date, in which case that entry was verified on the date it states.
 
 ---
 
@@ -10518,17 +11786,17 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 [6] gRPC Authors, "gRPC Documentation." [https://grpc.io/docs/](https://grpc.io/docs/) *Normative reference for gRPC stream types (client-streaming, server-streaming, bidirectional) used in the Fleet Adapter service definition ([§9.2.3](#fleet-adapter-protocol-the-controlstream-service)).*
 
-[7] ISO 10218-1:2011, "Robots and robotic devices — Safety requirements for industrial robots — Part 1: Robots." ISO Store: [https://www.iso.org/standard/51330.html](https://www.iso.org/standard/51330.html) ⚠ **Paywalled.** Available for purchase from ISO. *Referenced in [§9.6.1](#safety-scope-and-responsibility-boundary) (Scope and Responsibility Boundary) and [§9.6.6](#safety-standards-disclaimer) (Standards Disclaimer). Governs physical robot platform safety; Swarmada does not claim compliance.*
+[7] ISO 10218-1:2011, "Robots and robotic devices — Safety requirements for industrial robots — Part 1: Robots." ISO Store: [https://www.iso.org/standard/51330.html](https://www.iso.org/standard/51330.html) **Paywalled.** Available for purchase from ISO. *Referenced in [§9.6.1](#safety-scope-and-responsibility-boundary) (Scope and Responsibility Boundary) and [§9.6.6](#safety-standards-disclaimer) (Standards Disclaimer). Governs physical robot platform safety; Swarmada does not claim compliance.*
 
-[8] ISO/TS 15066:2016, "Robots and robotic devices — Collaborative robots." ISO Store: [https://www.iso.org/standard/62996.html](https://www.iso.org/standard/62996.html) ⚠ **Paywalled.** Available for purchase from ISO. *Relevant for hospital and factory deployments where robots share workspace with humans. Outside Swarmada's scope but referenced for operator awareness.*
+[8] ISO/TS 15066:2016, "Robots and robotic devices — Collaborative robots." ISO Store: [https://www.iso.org/standard/62996.html](https://www.iso.org/standard/62996.html) **Paywalled.** Available for purchase from ISO. *Relevant for hospital and factory deployments where robots share workspace with humans. Outside Swarmada's scope but referenced for operator awareness.*
 
 [9] Open Container Initiative, "OCI Image Specification v1.1.0." [https://specs.opencontainers.org/image-spec/](https://specs.opencontainers.org/image-spec/) *Defines the `oci://` URI scheme used in `FirmwareRollout.spec.firmwareUri` and `ModelRollout.spec.modelUri` ([§9.1.8](#firmwarerollout), [§9.1.9](#modelrollout)). Fleet Adapters that implement PullOnIdle delivery use OCI-compliant registries.*
 
-[10] IEC 62061:2021, "Safety of machinery — Functional safety of safety-related control systems." IEC Webstore: [https://webstore.iec.ch/publication/61987](https://webstore.iec.ch/publication/61987) ⚠ **Paywalled.** Available for purchase from IEC. *Referenced in [§9.6.6](#safety-standards-disclaimer) (Standards Disclaimer). Governs functional safety of machine control systems; physical safety PLCs used alongside Swarmada-managed robots may need to meet this standard.*
+[10] IEC 62061:2021, "Safety of machinery — Functional safety of safety-related control systems." IEC Webstore: [https://webstore.iec.ch/publication/61987](https://webstore.iec.ch/publication/61987) **Paywalled.** Available for purchase from IEC. *Referenced in [§9.6.6](#safety-standards-disclaimer) (Standards Disclaimer). Governs functional safety of machine control systems; physical safety PLCs used alongside Swarmada-managed robots may need to meet this standard.*
 
-[11] ISO 13849-1:2023, "Safety of machinery — Safety-related parts of control systems — Part 1: General principles for design." ISO Store: [https://www.iso.org/standard/80195.html](https://www.iso.org/standard/80195.html) ⚠ **Paywalled.** Available for purchase from ISO. *Referenced in [§9.6.6](#safety-standards-disclaimer) (Standards Disclaimer).*
+[11] ISO 13849-1:2023, "Safety of machinery — Safety-related parts of control systems — Part 1: General principles for design." ISO Store: [https://www.iso.org/standard/80195.html](https://www.iso.org/standard/80195.html) **Paywalled.** Available for purchase from ISO. *Referenced in [§9.6.6](#safety-standards-disclaimer) (Standards Disclaimer).*
 
-[12] ISO 3691-4:2023, "Industrial trucks — Safety requirements and verification — Part 4: Driverless industrial trucks and their systems." ISO Store: [https://www.iso.org/standard/82481.html](https://www.iso.org/standard/82481.html) ⚠ **Paywalled.** Available for purchase from ISO. *Most directly applicable to AMRs operating in warehouses. Referenced in [§6.4](#design-details-why-is-motion-control-explicitly-out-of-scope) (Why motion control is out of scope).*
+[12] ISO 3691-4:2023, "Industrial trucks — Safety requirements and verification — Part 4: Driverless industrial trucks and their systems." ISO Store: [https://www.iso.org/standard/82481.html](https://www.iso.org/standard/82481.html) **Paywalled.** Available for purchase from ISO. *Most directly applicable to AMRs operating in warehouses. Referenced in [§6.4](#design-details-why-is-motion-control-explicitly-out-of-scope) (Why motion control is out of scope).*
 
 [13] OpenID Foundation, "OpenID Connect Core 1.0." [https://openid.net/specs/openid-connect-core-1_0.html](https://openid.net/specs/openid-connect-core-1_0.html) *OIDC is the recommended operator authentication method for enterprise deployments ([§9.5.1.1](#security-operator-authentication-humans-and-ci-cd-systems)).*
 
@@ -10541,7 +11809,7 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 [15] Open Robotics / Open Source Robotics Alliance, "Open RMF source repository." [https://github.com/open-rmf/rmf_ros2](https://github.com/open-rmf/rmf_ros2) *Open RMF is the most directly comparable existing project to Swarmada. Its architecture is discussed in §A.1 (Alternatives Considered). The ROS 2 Fleet Adapter interface defined there is the basis for the Fleet Adapter analogy in Swarmada.*
 
-[16] Open Robotics, "ROS 2 Jazzy Documentation." [https://docs.ros.org/en/jazzy](https://docs.ros.org/en/jazzy) *ROS 2 is the dominant robot middleware. Swarmada's Fleet Adapter for ROS 2 robots translates between the gRPC protocol ([§9.2](#fleet-adapter-protocol)) and ROS 2 action/topic interfaces. Nav2 (ROS 2 navigation) is the Layer 2 navigation stack referenced in [§9.6.1](#safety-scope-and-responsibility-boundary).*
+[16] Open Robotics, "ROS 2 Documentation." [https://docs.ros.org/](https://docs.ros.org/) *ROS 2 is the dominant robot middleware. Swarmada's Fleet Adapter for ROS 2 robots translates between the gRPC protocol ([§9.2](#fleet-adapter-protocol)) and ROS 2 action/topic interfaces. Nav2 (ROS 2 navigation) is the Layer 2 navigation stack referenced in [§9.6.1](#safety-scope-and-responsibility-boundary). This specification does not pin a ROS 2 distribution; the Fleet Adapter contract is distribution-independent.*
 
 [17] NVIDIA, "Isaac ROS 2 — Hardware-accelerated ROS 2 packages." [https://github.com/NVIDIA-ISAAC-ROS](https://github.com/NVIDIA-ISAAC-ROS) *Isaac ROS is the NVIDIA GPU-accelerated perception and navigation stack built on ROS 2. Relevant to the developer/prototype topology ([§5.1.4](#architecture-deployment-topology)), one of several simulation-capable stacks a Fleet Adapter can drive.*
 
@@ -10551,7 +11819,7 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 [20] NVIDIA, "Isaac Lab — Robot Learning Framework." [https://isaac-sim.github.io/IsaacLab/](https://isaac-sim.github.io/IsaacLab/) *Isaac Lab is the training environment whose webhook integration with `ModelPolicy` is defined in [§9.1.10.3](#modelpolicy-isaac-lab-integration-webhook-payload). The webhook payload schema in that section is designed to be called from an Isaac Lab training script.*
 
-[21] Acme Robotics, "acme-picker Origin Product Page." [https://acme-robotics.com/robots/](https://acme-robotics.com/robots/) *The Acme acme-picker picker robot is used as the primary worked example throughout the CRD specifications. Its use is illustrative; this RFC takes no position on the relative merits of specific robot vendors.*
+[21] *No external source — fictional.* "Acme Robotics" and its `acme-picker` model are an invented manufacturer and robot used as the primary worked example throughout the CRD specifications. They are not a real product and no URL is given. Their use is illustrative; this RFC takes no position on the relative merits of specific robot vendors.
 
 ---
 
@@ -10564,7 +11832,7 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 [24] Cloud Native Computing Foundation (CNCF), "CNCF Sandbox Criteria." [https://github.com/cncf/toc/blob/main/process/sandbox.md](https://github.com/cncf/toc/blob/main/process/sandbox.md) *Goal 14 in [§3](#goals) (Goals) requires Swarmada to be proposable as a CNCF Sandbox project. This document defines the criteria. The vendor-neutrality requirement that motivates §A.1 is stated in the Sandbox criteria.*
 
-[25] Linux Foundation / Open3D Foundation, "Newton Physics Engine." [https://github.com/newton-physics/newton](https://github.com/newton-physics/newton) *Newton is the Linux Foundation's open-source robotics physics engine, relevant to simulation environments used with Swarmada's developer topology. Listed for awareness; not a dependency of Swarmada itself.*
+[25] "Newton Physics Engine." [https://github.com/newton-physics/newton](https://github.com/newton-physics/newton) *Newton is an open-source robotics physics engine hosted by the Linux Foundation, relevant to simulation environments used with Swarmada's developer topology. Listed for awareness; not a dependency of Swarmada itself, and this document makes no claim about its contributor set or governance beyond its stated host.*
 
 [26] cert-manager Authors, "cert-manager Documentation." [https://cert-manager.io/docs/](https://cert-manager.io/docs/) *cert-manager is the recommended certificate management tool for Swarmada's mTLS infrastructure ([§9.5.2.3](#security-certificate-management)). It automates the issuance and rotation of Fleet Adapter client certificates and the API Server serving certificate.*
 
@@ -10577,12 +11845,12 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 
 
-[28] McKinsey Global Institute, "The Robotics Market Forecast to 2040." Long-range total-robotics-market outlook. [https://www.mckinsey.com/capabilities/operations/our-insights/tech-forward/the-next-wave-in-the-automation-revolution](https://www.mckinsey.com/capabilities/operations/our-insights/tech-forward/the-next-wave-in-the-automation-revolution)
+[28] McKinsey Global Institute, "The Robotics Market Forecast to 2040." Long-range **total-robotics-market** outlook. Cited in [§2](#motivation) as context for overall deployment growth only; it is not a source for the share of facilities running more than one manufacturer, and this document does not claim one. [https://www.mckinsey.com/capabilities/operations/our-insights/tech-forward/the-next-wave-in-the-automation-revolution](https://www.mckinsey.com/capabilities/operations/our-insights/tech-forward/the-next-wave-in-the-automation-revolution)
 
 
-[29] CobotFinder, "Top Robotics as a Service Companies (2026)," March 2026. Overview of warehouse AMR Robots-as-a-Service (recurring per-robot monthly subscription) procurement. [https://www.cobotfinder.com/guides/robotics-as-a-service-companies](https://www.cobotfinder.com/guides/robotics-as-a-service-companies)
+[29] CobotFinder, "Top Robotics as a Service Companies (2026)," March 2026. Vendor-listing overview of warehouse AMR Robots-as-a-Service (recurring per-robot monthly subscription) offerings. A commercial aggregator page, not independent market research: it establishes that the model is offered and priced per robot, not its share of procurement. [https://www.cobotfinder.com/guides/robotics-as-a-service-companies](https://www.cobotfinder.com/guides/robotics-as-a-service-companies)
 
-[30] PricingNow, "RaaS Pricing 2026: Real Costs, Fees & What Others Paid," December 2025. Overview of RaaS subscription cost structures. [https://pricingnow.com/question/raas-pricing/](https://pricingnow.com/question/raas-pricing/)
+[30] PricingNow, "RaaS Pricing 2026: Real Costs, Fees & What Others Paid," December 2025. Commercial overview of RaaS subscription cost structures, cited on the same basis as [29]. [https://pricingnow.com/question/raas-pricing/](https://pricingnow.com/question/raas-pricing/)
 
 ---
 
@@ -10591,7 +11859,7 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 
 
-[31] Open Source Robotics Alliance (OSRA), "Open RMF Governance." [https://www.open-rmf.org/](https://www.open-rmf.org/) *Cited in [§2.2](#motivation-why-existing-approaches-are-insufficient). The OSRA structure providing community governance for Open RMF since 2024.*
+[31] Open Source Robotics Alliance (OSRA), "Open RMF Project Governance." [https://www.open-rmf.org/](https://www.open-rmf.org/) *Cited in [§2.2](#motivation-why-existing-approaches-are-insufficient) and [§8](#alternatives). Source for two claims: that OSRA has governed Open RMF since 2024, and the composition of its Project Management Committee. **This is a live page and its roster changes.** The committee composition stated in [§8](#alternatives) was read on 2026-08-12; a reader checking it later may find a different roster, and the claim should be re-read rather than assumed. Accessed 2026-08-12.*
 
 [32] The Robot Report, "AWS RoboMaker shuts down after failing to gain traction," September 2025. [https://www.therobotreport.com/aws-robomaker-shuts-down-after-failing-to-gain-traction/](https://www.therobotreport.com/aws-robomaker-shuts-down-after-failing-to-gain-traction/) *Cited in [§2.2](#motivation-why-existing-approaches-are-insufficient). Source for AWS RoboMaker end-of-service September 10, 2025.*
 
@@ -10606,7 +11874,7 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 [35] The composite `FleetTask` resource — dependency-ordered fan-out to N `FleetAction`s with completion, failure, and compensation semantics — is specified in this document; see [§9.1.5](#fleettask). Coordinated multi-robot *start* (the synchronized-start barrier and the `FleetAction` start-gate it rests on) is deferred to RFC-0007 (planned); see [37].
 
-[36] RFC-0003 (planned): "Swarmada Event-Driven Flows." *Defines event-driven and time-synchronized flows: robot-emitted semantic events and the additive fleet-adapter event channel that carries them, the standardized trigger-binding object (source → condition → target → response), and control loops scoped to the actions within a single `FleetTask` [§9.1.5](#fleettask) — no cross-task control loop. The original RFC-0003 scope (a `FleetTaskGroup` multi-robot resource) was folded into this document's composite `FleetTask` (see [35]); the RFC-0003 number is reused here for event-driven flows.*
+[36] RFC-0003 (reserved, not shipped): "Swarmada Event-Driven Flows." *Number and title only. No document exists, none is published with this draft, and nothing in this specification depends on one. The features once grouped under this number — robot-emitted semantic events, a declarative trigger-binding object, and control loops scoped within a single `FleetTask` [§9.1.5](#fleettask) — are stated as out of scope where they arise and are not specified here or elsewhere. The original RFC-0003 scope (a `FleetTaskGroup` multi-robot resource) was folded into this document's composite `FleetTask` (see [35]).*
 
 [37] RFC-0007 (planned): "Swarmada Multi-Robot Task Coordination." *Defines synchronized multi-robot start: the start-gate primitive on `FleetAction`, the `spec.synchronization` start barrier on `FleetTask`, and bounded co-reservation with timeout. Deferred from RFC-0001; layered additively on the composite `FleetTask` [§9.1.5](#fleettask).*
 
@@ -10614,7 +11882,22 @@ References are grouped by category. ISO standards are paywalled; free access alt
 
 [39] RFC-0005 (planned): "Swarmada FleetSchedule — Recurring Tasks." *Defines a `FleetSchedule` resource (a CronJob-equivalent) that generates `FleetAction` resources on a recurring cadence, distinct from the one-shot `FleetAction` of RFC-0001 [§9.1.4](#fleetaction).*
 
-[40] RFC-0006 (planned): "Swarmada Supervised Estop-Clear." *Defines a time-bounded, pre-authorised token permitting supervised automation to clear an emergency stop, relaxing — under audited human pre-approval — the RFC-0001 [§9.6.2.3](#safety-estop-state-machine) rule that automation cannot clear estops. Safety-sensitive; introduced only via its own RFC.*
+[40] RFC-0006 (reserved, not shipped): "Swarmada Supervised Estop-Clear." *Number and title only. No mechanism is specified, proposed, or promised by this specification, and no document is published with this draft. The rule at [§9.6.2.3](#safety-estop-state-machine) — that automation cannot clear an emergency stop — is unqualified and has no exception. Any future relaxation would be safety-sensitive and would require its own RFC, its own review, and evidence this project does not hold.*
 
 
-[41] Kinexon, "VDA5050-Powered Fleet Management," 2026. Overview of the VDA5050 robot-to-fleet-manager communication standard and its adoption for multi-vendor AMR/AGV interoperability. [https://kinexon.com/resources/whitepaper/vda5050-powered-fleet-management](https://kinexon.com/resources/whitepaper/vda5050-powered-fleet-management)
+---
+
+<a id="references-robot-interoperability-standards"></a>
+### Robot Interoperability Standards
+
+[41] Verband der Automobilindustrie (VDA) and VDMA, "VDA 5050 — Interface for the Communication between Mobile Robots and a Fleet Control," Version 3.0.0, March 2026. Free-of-charge PDF: [https://www.vda.de/en/topics/automotive-industry/vda-5050](https://www.vda.de/en/topics/automotive-industry/vda-5050) · Normative text and JSON schemas, MIT-licensed, at tag `3.0.0`: [https://github.com/VDA5050/VDA5050](https://github.com/VDA5050/VDA5050) *Primary source for the VDA5050 characterisation in [§2.2](#motivation-why-existing-approaches-are-insufficient) and [§8](#alternatives), for the VDA5050 definition in the Terminology chapter, and for the message mapping used by the VDA5050 reference Fleet Adapter, which is exercised against a simulated binding. VDA 5050 specifies the link between a mobile robot and a fleet control system over MQTT; route-network layout is explicitly outside its scope (§5.2) and is delegated to a separate VDMA interchange format. It is a VDA/VDMA industry recommendation rather than an ISO or IEC deliverable, and no conformity-assessment scheme is known to exist for it. Where the repository markdown and the VDA PDF differ, the repository README makes the PDF authoritative. Accessed 2026-08-12.*
+
+[42] ISO 21423, "Robotics — Industrial mobile robots — Communications and interoperability," ISO/TC 299. ISO catalogue: [https://www.iso.org/standard/86749.html](https://www.iso.org/standard/86749.html) **Paywalled.** Not yet published as of 2026-08-12. Scope text as balloted at draft stage is reproduced by BSI, the United Kingdom member body: [https://standardsdevelopment.bsigroup.com/projects/2023-01622](https://standardsdevelopment.bsigroup.com/projects/2023-01622) *Referenced in [§2.2](#motivation-why-existing-approaches-are-insufficient) and [§8](#alternatives). The catalogue record stands at stage 60.00, "International Standard under publication," stage date 2026-07-21, the FDIS ballot having closed at stage 50.60 on that same date; ISO states no committed date for the transition to stage 60.60. The BSI text is the scope as balloted at draft stage, not the text now under publication, and is cited as the only primary scope language publicly readable before the standard issues. Both records accessed 2026-08-12.*
+
+[43] MassRobotics, "MassRobotics AMR Interoperability Standard," Version 1.0, May 2021. Specification PDF, JSON Schema, and reference sender and receiver implementations: [https://github.com/MassRobotics-AMR/AMR_Interop_Standard](https://github.com/MassRobotics-AMR/AMR_Interop_Standard) *Referenced in [§2.2](#motivation-why-existing-approaches-are-insufficient) and [§8](#alternatives). The v1.0 schema admits exactly two messages, `identityReport` and `statusReport`, both emitted by the robot toward a receiver, and defines no message in the reverse direction — the standard therefore carries no order, task or assignment message of any kind. The publisher's own explanatory page states that the standard "isn't a fleet management, vehicle navigation, or safety system" and that "[t]his is not a task management type of system" ([https://www.massrobotics.org/what-is-the-massrobotics-amr-interoperability-standard/](https://www.massrobotics.org/what-is-the-massrobotics-amr-interoperability-standard/), accessed 2026-08-12); that page is published by MassRobotics but is not clause text. Nothing is paywalled and no membership is required to read or implement the standard, but the repository publishes no conformance test suite and names no certification body; the only tagged release is v1.0, dated 2021-05-17, and a v2.0 extending the standard to mission-level communication was announced in September 2022, with no v2.0 artefact appearing in the repository as of 2026-08-12. Repository accessed 2026-08-12.*
+
+[44] ISO 23725:2024, "Autonomous system and fleet management system interoperability," ISO/TC 82/SC 8, published August 2024. ISO Store: [https://www.iso.org/standard/76769.html](https://www.iso.org/standard/76769.html) **Paywalled.** Available for purchase from ISO. *Cited in [§8](#alternatives). ISO 23725:2024 specifies interfaces between a fleet management system and autonomous haulage systems, including truck dispatching, for surface mining. It is recorded here because it establishes that a dispatch-layer interface has already been standardised internationally in an adjacent domain: the boundary between it and the layer this document specifies is one of application domain, not one of architectural layer. Accessed 2026-08-12.*
+
+[45] InOrbit, "OpenRobOps + ROS Ecosystem," 2026-02-04. [https://www.inorbit.ai/blog/openrobops-announcement](https://www.inorbit.ai/blog/openrobops-announcement) · Contemporaneous coverage: Robotics 24/7, "InOrbit unveils OpenRobOps open-source fleet manager platform," 2026-02-04, [https://www.robotics247.com/article/inorbit-unveils-openrobops-open-source-fleet-manager-platform](https://www.robotics247.com/article/inorbit-unveils-openrobops-open-source-fleet-manager-platform) *Cited in [§8](#alternatives) and [§2.2](#motivation-why-existing-approaches-are-insufficient). Source for the February 2026 announcement of a self-hostable fleet-management platform to be published under a permissive open-source licence. The vendor's own announcement names the Apache-2.0 licence; the press release and trade coverage of the same date state the software "will be offered under a permissive, full open-source software license later in 2026," with access opened to selected early adopters ahead of general release. No public repository or download had been identified as of 2026-08-12; this entry is cited for the announcement, not for a shipped artefact. Accessed 2026-08-12.*
+
+---
