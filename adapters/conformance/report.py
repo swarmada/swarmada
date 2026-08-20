@@ -48,6 +48,10 @@ class SkipCause(str, enum.Enum):
     NEEDS_EXTENDED_RUN = "needs-extended-run"
     #: The adapter did not reach the state the check needs (no registration, no redial).
     ADAPTER_DID_NOT_REACH_STATE = "adapter-did-not-reach-state"
+    #: Needs the harness to terminate and respawn the adapter PROCESS. It spawns the
+    #: adapter once via --adapter-cmd and never restarts it, so anything that only a
+    #: restart can show (durable state) is unverified by this suite.
+    NEEDS_ADAPTER_RESTART = "needs-adapter-restart"
 
 
 class CheckStatus(str, enum.Enum):
@@ -108,7 +112,49 @@ class Report:
         level: str = "MUST",
         detail: str = "",
     ) -> None:
+        # CONFORMANCE.md requires every SKIP to name an ENUMERATED cause, because a prose
+        # justification is not falsifiable and several early ones were simply wrong. Enforce
+        # it here rather than in one helper, so a skip recorded anywhere in the harness
+        # cannot bypass the rule.
+        if status is CheckStatus.SKIP:
+            if not any(detail.startswith(c.value) for c in SkipCause):
+                raise AssertionError(
+                    f"{check_id}: a SKIP must begin with an enumerated SkipCause; got {detail!r}. "
+                    f"Valid causes: {', '.join(c.value for c in SkipCause)}")
+        # A check id is this report's PRIMARY KEY: `counts` and the CONFORMANT verdict are
+        # computed over the rows. Two rows sharing an id can DISAGREE -- a PASS and a FAIL for
+        # the same check -- and BOTH are tallied, so a self-contradicting report still adds up
+        # and nothing downstream can detect it. Fail the run loudly instead.
+        #
+        # Keyed on the id ALONE, not (id, title). Several ids legitimately carry different
+        # titles across MUTUALLY EXCLUSIVE branches (C2.1's discover-vs-register arms, C5.2's
+        # no-ack arm, C8.1's skip arm, C4.3/C4.4's skip arms): only one such branch runs in a
+        # given report, so keying on the id is both correct and strictly stronger.
+        for r in self.results:
+            if r.check_id == check_id:
+                raise AssertionError(
+                    f"{check_id}: already recorded as {r.title!r}, now {title!r}. A check id "
+                    f"must name exactly one check in a report. A precondition belongs under a "
+                    f"C0.x harness-context id -- see CONFORMANCE.md 'C0 - Report integrity'.")
         self.results.append(CheckResult(check_id, title, status, level, detail))
+
+    def skip_causes(self) -> list[tuple[str, str]]:
+        """(check_id, cause) for every recorded SKIP, read off the report itself.
+
+        C0.1 contradicts skip causes against what the run observed. It must read the
+        results actually recorded, not a static declaration list — a cause recorded
+        dynamically (for example NO_TELEMETRY_IN_RUN from the telemetry check) never
+        appears in a static list, so a contradiction test over one can never fire.
+        """
+        out = []
+        for r in self.results:
+            if r.status is not CheckStatus.SKIP:
+                continue
+            for c in SkipCause:
+                if r.detail.startswith(c.value):
+                    out.append((r.check_id, c.value))
+                    break
+        return out
 
     # ── Aggregates ────────────────────────────────────────────────────────────
 

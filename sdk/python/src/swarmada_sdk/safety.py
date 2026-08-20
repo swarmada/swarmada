@@ -38,6 +38,8 @@ __all__ = [
     "FenceDecision",
     "FenceGuard",
     "LeaseMonitor",
+    "command_estop",
+    "await_estop_confirmation",
     "confirm_estop",
     "ESTOP_STOPPED",
     "ESTOP_FAILED",
@@ -134,21 +136,68 @@ ESTOP_STOPPED = "STOPPED"
 ESTOP_FAILED = "FAILED"
 
 
-def confirm_estop(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40) -> str:
+def confirm_estop(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40,
+                  sleep: Callable[[float], None] = time.sleep) -> str:
     """Command a stop and confirm it from the robot's ground truth (C5.2/C5.3).
 
     Returns ``STOPPED`` only once ``sim.is_stopped(robot)`` is true — the robot is
-    actually at rest. If the stop cannot be confirmed within the bound, returns
-    ``FAILED`` (escalate). It NEVER infers STOPPED from a timeout or from silence.
+    actually at rest. If the stop cannot be confirmed within ``max_ticks * tick_dt``
+    (2.0 s by default), returns ``FAILED`` (escalate). It NEVER infers STOPPED from
+    a timeout or from silence.
 
     ``sim`` is any object exposing ``command_stop(robot)``, ``tick(dt)`` and
-    ``is_stopped(robot)`` — a simulator, or an adapter's binding to a real robot's
-    confirmed-halt signal. The confirmation MUST come from the robot, never a
-    timer.
+    ``is_stopped(robot)``. Two shapes must both work, and the difference is where
+    time comes from:
+
+    * **Synchronous** (a simulator): ``tick(dt)`` advances the world, so the loop
+      itself produces the elapsed time.
+    * **Asynchronous** (a binding to a real robot): ``tick(dt)`` is a no-op — the
+      robot decelerates on its own clock and confirmation arrives via telemetry.
+      Nothing in the loop advances anything, so the loop MUST wait.
+
+    ``sleep`` supplies that wait. Without it the loop burned ``max_ticks`` in
+    microseconds and returned ``FAILED`` for a robot that stopped correctly, which
+    is ITEM-0107: every real estop reported FAILED while the simulated one passed,
+    because the simulator was quietly supplying the time. Injectable so unit tests
+    stay instant.
+
+    ``max_ticks * tick_dt`` is therefore a **wall-clock budget for a confirmed
+    stop**, not a loop count. Treat it as a safety parameter.
+    """
+    command_estop(sim, robot)
+    return await_estop_confirmation(sim, robot, tick_dt, max_ticks, sleep)
+
+
+def command_estop(sim, robot: str) -> None:
+    """Issue the hardware stop and return IMMEDIATELY, without confirming rest.
+
+    Split out of :func:`confirm_estop` so an adapter can acknowledge an estop the moment
+    the command is issued (``ESTOP_STATE_STOPPING``) and confirm rest afterwards.
+
+    The estop SLA bounds the FIRST acknowledgement. Waiting for a real base to decelerate
+    before answering misses it by roughly 30% -- measured 604-657 ms against a live Nav2
+    stack, against a 500 ms budget, while the same code answers in 5 ms against a fake
+    server that was already stationary.
+
+    This does NOT weaken the confirmed-stop discipline. STOPPED is still reported only by
+    :func:`await_estop_confirmation`, from the robot's own ground truth; only the
+    acknowledgement moves earlier.
     """
     sim.command_stop(robot)
+
+
+def await_estop_confirmation(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40,
+                             sleep: Callable[[float], None] = time.sleep) -> str:
+    """Wait for CONFIRMED rest after :func:`command_estop`.
+
+    Returns ``ESTOP_STOPPED`` only once ``sim.is_stopped(robot)`` is true, and
+    ``ESTOP_FAILED`` if rest cannot be confirmed within ``max_ticks * tick_dt``. It NEVER
+    infers rest from a timeout or from silence -- see :func:`confirm_estop` for why
+    ``sleep`` is injected rather than assumed.
+    """
     for _ in range(max_ticks):
         sim.tick(tick_dt)
         if sim.is_stopped(robot):
             return ESTOP_STOPPED
+        sleep(tick_dt)
     return ESTOP_FAILED

@@ -10,7 +10,7 @@ make quickstart
 
 That runs [`run.sh`](run.sh), which brings up a **real** control plane (no mocks),
 applies the maintained sample fleet, drives the robots Ready, and lets the real
-scheduler assign the sample tasks. It ends with a ✅ and leaves the cluster up so
+scheduler assign the sample tasks. It ends with a success line and leaves the cluster up so
 you can poke at it.
 
 ## What it does
@@ -37,7 +37,7 @@ never drift from the canonical manifests.
    adapter), depending on the chosen scenario — see
    [Honest notes](#honest-notes-what-is-and-isnt-real).
 5. **Assert** the end state: wait until all robots are `Idle` **and** the
-   scheduler has assigned a `FleetAction`, then print ✅ (or ❌ + diagnostics and
+   scheduler has assigned a `FleetAction`, then print a success line (or a failure line plus diagnostics and
    exit non-zero).
 
 ## Prerequisites
@@ -113,7 +113,7 @@ kind delete cluster --name swarmada-quickstart
 The quickstart fronts a **scenario** choice before it dials the control plane, so
 you can pick what the simulated fleet does. See
 [`SCENARIOS.md`](SCENARIOS.md) for a per-scenario reference (what's real vs.
-simulated in each, known limitations, open questions) — this section is just
+simulated in each, known limitations, open questions) — this section is only
 the picker itself. On a terminal it shows an interactive numbered picker
 (press Enter for the default):
 
@@ -130,8 +130,8 @@ Pick a scenario to run against your local Swarmada cluster:
 > 3
 ```
 
-**`battery-handoff`** is a different kind of story from `battery-edge`: instead
-of a dying robot simply losing out on *new* work, a robot that's *already
+**`battery-handoff`** is a different story from `battery-edge`: instead
+of a dying robot losing out on *new* work, a robot that's *already
 working* gets its battery cut and its task gets moved — live — to a healthy
 one. Only one of the two sample FleetActions is applied for this scenario, so
 one status-projected robot stays genuinely spare to receive the hand-off; see
@@ -188,7 +188,7 @@ text above and `handle_battery_handoff` in `run.sh`.
 
 Whenever the script stops — success, failure, or Ctrl-C — it prints a reminder
 of how to clean up the cluster (`run.sh --clean` or `kind delete cluster`),
-unless `--clean` itself was what just ran (nothing left to remind you about).
+unless `--clean` itself was what last ran (nothing left to remind you about).
 
 ## Honest notes (what is and isn't real)
 
@@ -278,7 +278,7 @@ make quickstart-test
 ```
 
 That is `make quickstart` on a `kind` cluster with automatic teardown; it fails
-the build if the ✅ end state is not reached within the timeouts. This is what
+the build if the success end state is not reached within the timeouts. This is what
 keeps "getting started" from silently rotting — an untested quickstart is the #1
 source of a broken first experience.
 
@@ -310,7 +310,7 @@ real handshake/comms/startup latency won't fit in 15s.
 ### Pacing, for presenting live
 
 Rolling straight through all 7 steps is fine for a quick check, but not for
-narrating to an audience. Rather than pausing at every step (which just
+narrating to an audience. Rather than pausing at every step (which only
 dilutes attention), there's exactly **one** deliberate pause, placed right
 before the LIVE scenario's actual payoff — the moment the live sim adapter
 starts talking to the real control plane and the scenario clock begins
@@ -326,7 +326,7 @@ examples/warehouse-quickstart/run.sh --scenario hardware-fault --pace off       
 worth narrating) and `off` on the status-projected path (nothing to pace on).
 It's always `off` under `CI=true`, regardless of what's passed.
 
-The prompt itself says what's about to happen, not just "press Enter" — e.g.
+The prompt itself says what's about to happen, not only "press Enter" — e.g.
 for `hardware-fault`:
 
 ```text

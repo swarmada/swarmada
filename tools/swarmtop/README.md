@@ -1,7 +1,7 @@
 # swarmtop — a terminal fleet inspector for Swarmada
 
 **Status: demo-only, in-tree; distribution deferred (see
-[ADR-0018](../../docs/adr/0018-swarmtop-repository-placement.md)).** For now
+[ADR-0018](../../docs/adr/0018-swarmtop-repository-placement.md)).** At v0.3
 swarmtop exists only to make the demos legible — built with `make swarmtop` and
 launched by `make demo`. Repository extraction and packaged distribution
 (GoReleaser → Homebrew/Scoop/krew) are **not** set up yet and are deferred until
@@ -10,7 +10,7 @@ non-demo cluster. The build/release details below describe that eventual plan,
 not the current state.
 
 It will become its own repository (`github.com/swarmada/swarmtop`) at that point
-— staged here for now the same way the reference Fleet Adapters are staged
+— staged here at v0.3 the same way the reference Fleet Adapters are staged
 before graduating to their own repo (see
 [ADR-0005](../../docs/adr/0005-reference-adapter-policy.md)). It's a separate
 Go module (its own `go.mod`) specifically so that split is mechanical later.
@@ -47,7 +47,7 @@ Live updates are driven by controller-runtime informers (push, not poll):
 | Robot list | default | name, phase, estop, battery, zone (`*` = drift), capability summary, serving adapter, event badge (`1W 1N` = warnings/normals), current action — the member name alone when it belongs to a task |
 | Split | `s` | the robot list beside a live detail pane for the highlighted robot |
 | Robot detail | `enter` | full capabilities, hardware, position (coarse; RA-1), current action, health & connectivity, firmware & models, conditions, and recent events |
-| Tasks and actions | `t` | one screen for both shapes. Each row states its `KIND` (`task` or `action`) and, for an action, the `TASK` that owns it or `—`. Composites list first with their members nested beneath; actions no task owns follow. Columns: phase, robot, owning task, priority, progress, retries. A task row also names the member currently executing |
+| Tasks and actions | `t` | one screen for both shapes. Each row states its `KIND` (`task` or `action`) and, for an action, the `TASK` that owns it or `—`. Composites list first with their members nested beneath; actions no task owns follow. Columns: phase, robot, owning task, priority, progress, retries. A task row also names the member executing |
 | Task detail | `enter` on a task | completion and failure policy, desired state, action summary, start and completion times, every member from `status.actions[]` with the current one marked, and conditions |
 | Member detail | `enter` on a member with no action yet | states that no `FleetAction` has been generated, its dependency status, and why — the control plane creates a member's action only once its dependencies are met |
 | Action split / detail | `s` / `enter` on an action | the list beside — or full-screen — a live detail pane: phase, priority, progress, retries, deadline countdown, the owning task (or `—` when standalone), and the assigned robot's live phase + battery |
@@ -79,7 +79,7 @@ make run KUBECONFIG=~/.kube/config      # build + run against a cluster
 ```
 
 `--robot <name>` boots directly into that robot's full-screen detail view (it
-applies as soon as the robot first appears in a snapshot); press `esc` to drop
+applies once the robot first appears in a snapshot); press `esc` to drop
 back to the list.
 
 From the repo root, `make swarmtop` builds the binary and prints the
@@ -90,7 +90,7 @@ live fleet view.
 
 The build/release workflow has landed (`.goreleaser.yaml` +
 `.github/workflows/release.yml`, see the plan doc): a `v*` tag push builds
-Linux/macOS/Windows binaries (amd64 + arm64, Windows/arm64 excluded for now)
+Linux/macOS/Windows binaries (amd64 + arm64, Windows/arm64 excluded at v0.3)
 via GoReleaser and publishes to a Homebrew tap and a Scoop bucket, so most
 users never need Go installed at all. A separate PR-triggered workflow
 (`.github/workflows/test.yml`) builds, tests, and lints across all three

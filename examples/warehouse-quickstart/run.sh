@@ -24,9 +24,13 @@
 # Readiness note (honest): TWO paths exist, chosen automatically.
 #
 #   - healthy-fleet (default) or CI ($CI=true, e.g. `make quickstart-test`):
-#     status-projected — robots are driven Ready by projecting their status
-#     (kubectl patch phase=Idle), the same mechanism the maintained `make
-#     demo-b` uses. Deterministic and fast; this is what CI gates on.
+#     status-projected — robots are driven Ready by patching Robot.status.phase
+#     directly (kubectl patch --subresource=status phase=Idle). This is the RA-1
+#     anti-pattern the spec forbids (crds/robot.md:312-314) and is here only
+#     because no component owns the Discovered->Idle transition; see
+#     docs/quickstart.md, Honest notes. Deterministic and fast; CI gates on it.
+#     (The old `make demo-b` targets that did the same thing were removed for
+#     exactly this reason — see the Makefile comment above the Demo section.)
 #
 #   - any other scenario, chosen interactively or via --scenario, and NOT in
 #     CI: LIVE — one robot (sim-robot-001) is driven by a real, running
@@ -475,6 +479,9 @@ announce_scenario() {
     info "LIVE mode: $LIVE_ROBOT will be driven by a real sim_adapter.py process"
     info "against the real ControlStream (--scenario $SCENARIO). The other two"
     info "robots stay status-projected so the scheduler still has a 3-robot fleet."
+    info "NOTE: $LIVE_ROBOT's connection, registration and telemetry are real, but its"
+    info "status.phase=Idle is projected by this script too — no code path moves a Robot"
+    info "from Discovered to Idle. See docs/quickstart.md, Honest notes."
     info "This deploys via config/overlays/quickstart-dev (DEV/DEMO ONLY — see"
     info "that overlay and cmd/manager/main.go's --fleet-adapter-insecure-authz)."
   else
@@ -890,7 +897,11 @@ EOF
 }
 
 project_readiness() {
-  step "6/7 — Drive the robots Ready (status projection — see header note)"
+  step "6/7 — Project status.phase=Idle by hand (SHORTCUT — the control plane does not do this)"
+  info "writing Robot status directly is what RFC-0001 forbids (crds/robot.md:312-314; RA-1,"
+  info "terminology.md:55). It is unavoidable here: no component owns the Discovered->Idle"
+  info "transition (crds/discoveredrobot.md:342 requires it; no ownership table claims it), and"
+  info "scheduler filter 1 admits only Idle robots. See docs/quickstart.md, Honest notes."
   # phase=Idle with status.connectivity left nil is stable: the reconciler's
   # heartbeat-timeout→Offline branch only fires when connectivity.lastSeenAt is
   # set, so it never overwrites this. Capabilities are derived Active from the
@@ -1037,6 +1048,15 @@ run_live_scenario() {
     info "no telemetry observed from $LIVE_ROBOT within 20s — projecting Idle anyway;"
     info "check $ADAPTER_LOG and the port-forward log if this persists"
   fi
+  info ""
+  info "SHORTCUT — the control plane does NOT do this next step:"
+  info "  projecting $LIVE_ROBOT status.phase=Idle by hand (kubectl patch --subresource=status)."
+  info "  RFC-0001 says status is controller-owned and operators must not write it"
+  info "  (crds/robot.md:312-314; RA-1, terminology.md:55). It is needed because NOTHING"
+  info "  transitions a Robot Discovered->Idle: the spec requires it (crds/discoveredrobot.md:342)"
+  info "  but assigns it to no component, and the only Idle writer in code"
+  info "  (fleetaction_controller.go:1450) fires on task RELEASE. Scheduler filter 1 admits"
+  info "  only Idle robots, so without this line nothing is ever assigned. See docs/quickstart.md."
   kubectl patch "robot/$LIVE_ROBOT" -n "$NS" --subresource=status --type=merge \
     -p '{"status":{"phase":"Idle"}}'
 

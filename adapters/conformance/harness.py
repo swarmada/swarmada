@@ -40,6 +40,7 @@ verified for the adapter under test.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -56,9 +57,97 @@ pb = None  # fleet_adapter_pb2
 pb_grpc = None  # fleet_adapter_pb2_grpc
 
 ROBOT = "robot-conformance-1"
+
+# ── Fixture goal poses ───────────────────────────────────────────────────────────
+#
+# An assignment that is meant to EXECUTE carries a target, so the action is still IN
+# FLIGHT while the check that depends on it runs. Without one, `goal_from_assign`
+# resolves to the ORIGIN -- the robot is already standing there, every assignment in
+# the suite completes in milliseconds, and the suite cannot tell a real Nav2 stack
+# from a fake action server (it did not: ZERO checks differed between them).
+#
+# payload_json, NOT destination. fleet_adapter.proto marks
+#     string destination = 3 [deprecated = true];  // control plane no longer sets this
+# and payload coordinates are resolution path 1 in task.py::goal_from_assign, so this
+# exercises the path a real control plane actually takes.
+#
+# CONFIGURABLE because the three reference adapters have entirely different geometry;
+# a hard-coded warehouse coordinate is a landmine for -vda5050 and -mavlink. The
+# default is warehouse.pgm's open x=0 corridor (racking occupies |x| in [2, 6]), and
+# both poles are confirmed-reachable open floor.
+_GOAL_POSES_ENV = "SWARMADA_CONFORMANCE_GOAL_POSES"
+_GOAL_POSES_DEFAULT = "0,-6;0,6"
+# Speed the fixture assumes when turning a required travel TIME into a required
+# distance. Deliberately conservative -- a slower robot covers less ground in the
+# window, so under-estimating speed would under-size the goal.
+_FIXTURE_SPEED_MPS = 0.5
+
+
+def _goal_poses() -> list:
+    raw = os.environ.get(_GOAL_POSES_ENV, _GOAL_POSES_DEFAULT)
+    poses = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        x, y = (float(v) for v in part.split(",")[:2])
+        poses.append((x, y))
+    if len(poses) < 2:
+        raise ValueError(
+            f"{_GOAL_POSES_ENV} needs at least two poses so consecutive fixture goals are "
+            f"far apart; got {raw!r}")
+    return poses
+
+
+class _FixtureGoals:
+    """Hands out fixture targets that keep the action in flight while a check looks.
+
+    Call sites declare the TRAVEL TIME they need -- roughly twice the longest window
+    that check waits on -- not a distance. The requirement is "still moving when the
+    check looks", and that is a time, not a length.
+
+    Always picks the configured pose FARTHEST from the previous target. Sizing per site
+    against a fixed list is not sufficient on its own: consecutive goals can land close
+    to where the robot already is, and a zero-distance goal completes instantly however
+    carefully the check was sized.
+    """
+
+    def __init__(self) -> None:
+        self._poses = _goal_poses()
+        self._last = None
+
+    def payload(self, needs_seconds: float) -> bytes:
+        if self._last is None:
+            target = self._poses[0]
+        else:
+            target = max(self._poses, key=lambda p: (p[0] - self._last[0]) ** 2
+                                                    + (p[1] - self._last[1]) ** 2)
+            need_m = needs_seconds * _FIXTURE_SPEED_MPS
+            got_m = ((target[0] - self._last[0]) ** 2 + (target[1] - self._last[1]) ** 2) ** 0.5
+            if got_m < need_m:
+                print(f"harness: WARNING fixture goal {target} is {got_m:.1f} m from the "
+                      f"previous target but this check needs {need_m:.1f} m; the action may "
+                      f"complete before the check looks. Widen {_GOAL_POSES_ENV}.",
+                      file=sys.stderr, flush=True)
+        self._last = target
+        return json.dumps({"x": target[0], "y": target[1]}).encode()
+
 _GET_TIMEOUT = 8.0  # seconds to wait for any single adapter reply
 _STREAM_TIMEOUT = 10.0  # seconds to wait for the adapter to open both streams
 _REGISTER_WAIT = 1.5  # seconds to wait for an adapter-initiated registration
+# fleet-adapter-protocol.md performance table: Command.estop -> EstopAck is a HARD
+# < 500 ms requirement. C5.5 measures it; nothing did before.
+_ESTOP_ACK_BUDGET_MS = 500.0
+# C5.6 — how long a STOPPING ack has to reach a terminal STOPPED/FAILED.
+#
+# A HARNESS CONSTANT, deliberately NOT a spec value. The right bound is a property of the
+# base -- measured 0.588-0.876 s for this one -- and a drone, a floor scrubber and a 100 kg
+# hospital cart cannot share one number, so it belongs in the adapter's own declaration
+# (CapabilitiesSnapshot) once that field exists. Generous here so a slow CI box does not
+# flake; it is a liveness bound, not a performance target. Every C5.6 detail says so.
+_ESTOP_TERMINAL_BUDGET_S = 3.0
+# Spec budget for the first TelemetryPayload after reconnect; must not be tighter.
+_POST_RECONNECT_TELEMETRY_WAIT = 11.0
 _EDGE_WAIT = 3.0  # seconds to wait for the adapter to dial the advertised edge node
 _RECONNECT_WAIT = 5.0  # seconds to wait for the adapter to redial after a dropped ControlStream
 # Redial alone can be quick while the hello/register handshake that follows is not.
@@ -241,6 +330,10 @@ class _Driver:
         self.r = report
         self.port = port
         self._next_command_id = 1
+        self._goals = _FixtureGoals()
+        # Component names from the CapabilitiesSnapshot that `scan` returns (C12.1). None
+        # until scan answers. C6.1 cross-checks the first post-reconnect payload against it.
+        self._scan_components = None
         self._pushback: list = []  # messages peeked-then-returned to the stream
         self._contract_ok = False  # set at the hello (C13.1)
 
@@ -290,6 +383,36 @@ class _Driver:
             held.append(msg)
         self._pushback.extend(held)
         return found
+
+    def _recv_terminal_estop_ack(self, estop_id: str, timeout: float = _ESTOP_TERMINAL_BUDGET_S):
+        """The TERMINAL EstopAck for `estop_id`, skipping any STOPPING acks before it.
+
+        C5.5 bounds the FIRST acknowledgement, which the contract permits to be
+        ESTOP_STATE_STOPPING ("command received; robot is decelerating"). C5.2 and C14.1
+        govern the TERMINAL one, so they must not read the first ack and conclude the
+        robot never stopped. Returns (terminal_ack, saw_stopping, elapsed_s); terminal_ack
+        is None if none arrived within `timeout`.
+        """
+        import time as _time
+        t0 = _time.monotonic()
+        saw_stopping = False
+        while _time.monotonic() - t0 < timeout:
+            try:
+                msg = self.s.safety_in.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                break
+            if msg.WhichOneof("payload") != "estop_ack":
+                continue
+            ack = msg.estop_ack
+            if ack.estop_id != estop_id:
+                continue
+            if ack.state == pb.ESTOP_STATE_STOPPING:
+                saw_stopping = True
+                continue
+            return ack, saw_stopping, _time.monotonic() - t0
+        return None, saw_stopping, _time.monotonic() - t0
 
     def _recv_safety(self):
         item = self.s.safety_in.get(timeout=_GET_TIMEOUT)
@@ -393,10 +516,17 @@ class _Driver:
         if contract_ok:
             ack.negotiated_contract_version = CONTRACT_VERSION
         self.s.control_out.put(pb.ControlPlaneMessage(hello_ack=ack))
-        self.r.add("C13.1", "HelloAck carries negotiated_contract_version for an in-range adapter",
+        # NOT an adapter result: negotiated_contract_version is a field the HARNESS just set
+        # on its own HelloAck, so asserting it asserts the harness. Recorded as harness-side
+        # context under a C0 id so the report still shows what was negotiated, without
+        # counting a self-fulfilling row toward the adapter's verdict.
+        self.r.add("C0.2", "Harness context: negotiated contract version on HelloAck",
                    CheckStatus.PASS if ack.negotiated_contract_version else CheckStatus.SKIP,
-                   detail=("" if ack.negotiated_contract_version else
-                           "not negotiated: the adapter reported no supported contract_version, so "
+                   level="MAY",
+                   detail=(f"negotiated_contract_version={ack.negotiated_contract_version!r} "
+                           f"(harness-set)" if ack.negotiated_contract_version else
+                           SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                           + ": the adapter reported no supported contract_version, so "
                            "there was no version to negotiate"))
 
         # C2 — Robot lifecycle: adapter-initiated. If the adapter registers, the
@@ -437,13 +567,21 @@ class _Driver:
                    detail="" if ok else f"accepted={res.accepted} rejection={res.rejection}")
 
         # C3.2 (accept) + C3.5 — accept a fresh token and echo it back.
+        # ONE payload, reused BYTE-IDENTICALLY by the C3.4 re-delivery below: C3.4 asserts
+        # that an identical re-delivery is re-acked rather than treated as stale, so the two
+        # AssignActions must not differ in any field. ~2 s of window -> 4 s of travel.
+        t1_payload = self._goals.payload(4.0)
         cid = self._send_command(assign_action=pb.AssignAction(
-            action_id="t1", assignment_id="a1", fencing_token=5))
+            action_id="t1", assignment_id="a1", fencing_token=5, payload_json=t1_payload))
         res = self._await_result(cid).assign_action
         accept_ok = res.accepted
         echo_ok = res.HasField("accepted_fencing_token") and res.accepted_fencing_token == 5
-        self.r.add("C3.2", "Accept a fresh (higher) fencing token",
-                   CheckStatus.PASS if accept_ok else CheckStatus.FAIL,
+        # A PRECONDITION, not the catalog's C3.2 (which is the stale rejection only): a stale
+        # token cannot be demonstrated without a high-water mark for it to be stale against.
+        # Structurally identical to C0.3 for the lease. See CONFORMANCE.md "C0.x — harness
+        # context".
+        self.r.add("C0.4", "Harness context: a fresh (higher) fencing token is accepted",
+                   CheckStatus.PASS if accept_ok else CheckStatus.FAIL, level="MAY",
                    detail="" if accept_ok else f"accepted={res.accepted}")
         self.r.add("C3.5", "Echo the fenced token in AssignActionResult",
                    CheckStatus.PASS if echo_ok else CheckStatus.FAIL,
@@ -462,7 +600,7 @@ class _Driver:
         # C3.4 — identical re-delivery of the current assignment must be
         # idempotently re-acked, NOT treated as stale.
         cid = self._send_command(assign_action=pb.AssignAction(
-            action_id="t1", assignment_id="a1", fencing_token=5))
+            action_id="t1", assignment_id="a1", fencing_token=5, payload_json=t1_payload))
         res = self._await_result(cid).assign_action
         redeliver_ok = res.accepted
         self.r.add("C3.4", "Idempotently re-ack identical re-delivery",
@@ -525,8 +663,12 @@ class _Driver:
         # indistinguishable, in a clean report, from a check that never ran — and this one's
         # own failure mode is silence: it is guarded on a flag whose absence would disable it
         # rather than fail it. A reader auditing what the suite verified needs the pass.
-        claimed = [c for c, _, _, cause, _ in self._UNVERIFIED
-                   if cause is SkipCause.NO_TELEMETRY_IN_RUN]
+        # Read the causes actually RECORDED on the report, not the static _UNVERIFIED
+        # declarations. NO_TELEMETRY_IN_RUN is recorded dynamically by _check_telemetry and
+        # never appears in _UNVERIFIED at all, so the old contradiction test could not fire.
+        recorded = self.r.skip_causes()
+        claimed = [cid for cid, cause in recorded
+                   if cause == SkipCause.NO_TELEMETRY_IN_RUN.value]
         title = "Skip reasons are consistent with the run"
         if self.telemetry_seen and claimed:
             self.r.add("C0.1", title, CheckStatus.FAIL,
@@ -535,7 +677,7 @@ class _Driver:
         else:
             observed = "telemetry observed" if self.telemetry_seen else "no telemetry in run"
             self.r.add("C0.1", title, CheckStatus.PASS,
-                       detail=(f"{len(self._UNVERIFIED)} skip cause(s) checked against what the run "
+                       detail=(f"{len(recorded)} recorded skip cause(s) checked against what the run "
                                f"observed ({observed}); none contradicted"))
 
     def _check_leases(self) -> None:
@@ -547,6 +689,7 @@ class _Driver:
         aid = "t-lease-expiry"
         cid = self._send_command(assign_action=pb.AssignAction(
             action_id=aid, assignment_id="a-lease", fencing_token=11,
+            payload_json=self._goals.payload(8.0),   # C4.2 waits 4 s -> 8 s of travel
             lease_generation=1, lease_duration_ms=500))
         res = self._await_result(cid).assign_action
         if not res.accepted:
@@ -578,6 +721,7 @@ class _Driver:
         aid_live = "t-lease-held"
         cid = self._send_command(assign_action=pb.AssignAction(
             action_id=aid_live, assignment_id="a-held", fencing_token=12,
+            payload_json=self._goals.payload(4.0),   # C4.1 renews for ~1 s -> 4 s of travel
             lease_generation=3, lease_duration_ms=2000))
         if self._await_result(cid).assign_action.accepted:
             held = True
@@ -604,21 +748,38 @@ class _Driver:
         aid2 = "t-renew"
         cid = self._send_command(assign_action=pb.AssignAction(
             action_id=aid2, assignment_id="a-renew", fencing_token=13,
+            payload_json=self._goals.payload(4.0),   # C4.3/C4.4/C0.3 ~2 s -> 4 s of travel
             lease_generation=7, lease_duration_ms=5000))
         if self._await_result(cid).assign_action.accepted:
             cid = self._send_command(renew_lease=pb.RenewActionLease(
                 action_id=aid2, lease_generation=7, lease_duration_ms=5000))
             rr = self._await_result(cid).renew_lease
-            self.r.add("C4.3", "renew_lease renews a matching lease generation",
-                       CheckStatus.PASS if rr.renewed else CheckStatus.FAIL,
+            # Renewing a MATCHING generation is the precondition for the two catalog
+            # checks below, not a catalog check itself — recorded as harness context.
+            self.r.add("C0.3", "Harness context: a matching lease generation renews",
+                       CheckStatus.PASS if rr.renewed else CheckStatus.FAIL, level="MAY",
                        detail="" if rr.renewed else f"renewed={rr.renewed} running={rr.running}")
-            # A STALE generation must be refused, or a superseded lease could be revived.
+            # C4.3 (catalog): IGNORE a RenewActionLease whose lease_generation is stale.
+            # A superseded lease must not be revivable.
             cid = self._send_command(renew_lease=pb.RenewActionLease(
                 action_id=aid2, lease_generation=1, lease_duration_ms=5000))
             rs = self._await_result(cid).renew_lease
-            self.r.add("C4.4", "renew_lease rejects a stale lease generation",
+            self.r.add("C4.3", "Ignore a RenewActionLease with a stale lease_generation",
                        CheckStatus.PASS if not rs.renewed else CheckStatus.FAIL,
                        detail="" if not rs.renewed else "a stale generation was renewed")
+            # C4.4 (catalog): report running=false once the robot is no longer executing,
+            # so a silent completion during a renewal gap is detectable. End the action,
+            # then renew at the CURRENT generation and require running=false.
+            self._send_command(cancel_action=pb.CancelAction(action_id=aid2))
+            time.sleep(0.5)
+            cid = self._send_command(renew_lease=pb.RenewActionLease(
+                action_id=aid2, lease_generation=7, lease_duration_ms=5000))
+            re_ = self._await_result(cid).renew_lease
+            self.r.add("C4.4", "Report running=false once the task is no longer executing",
+                       CheckStatus.PASS if not re_.running else CheckStatus.FAIL,
+                       detail=("" if not re_.running else
+                               "renew_lease still reported running=true after the action was "
+                               "cancelled; a silent completion would be undetectable"))
         else:
             for cid_, name in (("C4.3", "renew_lease renews a matching lease generation"),
                                ("C4.4", "renew_lease rejects a stale lease generation")):
@@ -630,7 +791,8 @@ class _Driver:
         # untested: the control plane drives FleetAction Assigned -> InProgress from it.
         aid = "t-status"
         cid = self._send_command(assign_action=pb.AssignAction(
-            action_id=aid, assignment_id="a-status", fencing_token=14))
+            action_id=aid, assignment_id="a-status", fencing_token=14,
+            payload_json=self._goals.payload(6.0)))  # C16.1 waits 3 s -> 6 s of travel
         if not self._await_result(cid).assign_action.accepted:
             self.r.add("C16.1", "ActionStatusUpdate sent at a task phase transition",
                        CheckStatus.SKIP, detail=f"{SkipCause.ADAPTER_DID_NOT_REACH_STATE.value}: adapter refused the assignment")
@@ -657,6 +819,11 @@ class _Driver:
 
     def _check_estop(self) -> None:
         # C5.1 / C5.2 — send Estop on SafetyStream, expect a confirmed EstopAck.
+        # C5.5 times that exchange against the 500 ms hard requirement at
+        # fleet-adapter-protocol.md's performance table. Measured from the moment the
+        # Estop is queued to the moment the ack is dequeued, so the number includes the
+        # harness's own transport and is therefore conservative (never flattering).
+        _estop_sent_at = time.monotonic()
         self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
             robot_id=ROBOT,
             estop=pb.Estop(estop_id="e1", reason="conformance", issued_by="harness")))
@@ -665,7 +832,15 @@ class _Driver:
         except (EOFError, queue.Empty):
             self.r.add("C5.2", "Return a confirmed EstopAck on SafetyStream",
                        CheckStatus.FAIL, detail="no EstopAck received")
+            self.r.add("C5.5", "EstopAck within the 500 ms SafetyStream budget",
+                       CheckStatus.FAIL, detail="no EstopAck arrived, so the budget cannot be met")
             return
+        _estop_latency_ms = (time.monotonic() - _estop_sent_at) * 1000.0
+        _within = _estop_latency_ms <= _ESTOP_ACK_BUDGET_MS
+        self.r.add("C5.5", "EstopAck within the 500 ms SafetyStream budget",
+                   CheckStatus.PASS if _within else CheckStatus.FAIL,
+                   detail=(f"measured {_estop_latency_ms:.0f} ms "
+                           f"(budget {_ESTOP_ACK_BUDGET_MS:.0f} ms, harness transport included)"))
         if msg.WhichOneof("payload") == "estop_ack":
             ack = msg.estop_ack
             # C5.1 — the estop was accepted on SafetyStream and acted on: an ack for the
@@ -673,10 +848,50 @@ class _Driver:
             self.r.add("C5.1", "Accept Estop on SafetyStream and act on it",
                        CheckStatus.PASS if ack.estop_id == "e1" else CheckStatus.FAIL,
                        detail="" if ack.estop_id == "e1" else f"estop_id={ack.estop_id!r}")
-            ok = ack.estop_id == "e1" and ack.state == pb.ESTOP_STATE_STOPPED
+            # C5.2 governs the TERMINAL ack. The FIRST one may legitimately be
+            # ESTOP_STATE_STOPPING ("command received; robot is decelerating") -- C5.5
+            # bounds that one, this bounds the confirmation that follows it.
+            if ack.state == pb.ESTOP_STATE_STOPPING:
+                term, saw_stopping, waited = self._recv_terminal_estop_ack("e1")
+                saw_stopping = True
+            else:
+                term, saw_stopping, waited = ack, False, 0.0
+            ok = term is not None and term.estop_id == "e1" \
+                and term.state == pb.ESTOP_STATE_STOPPED
             self.r.add("C5.2", "Confirmed EstopAck (STOPPED) on SafetyStream",
                        CheckStatus.PASS if ok else CheckStatus.FAIL,
-                       detail="" if ok else f"estop_id={ack.estop_id!r} state={ack.state}")
+                       detail=("terminal ack STOPPED"
+                               + (f" after a STOPPING ack, {waited * 1000:.0f} ms later"
+                                  if saw_stopping else " on the first ack")) if ok else
+                              (f"no terminal EstopAck within {_ESTOP_TERMINAL_BUDGET_S:.0f}s "
+                               f"of a STOPPING ack" if term is None else
+                               f"estop_id={term.estop_id!r} state={term.state}"))
+
+            # C5.6 — a STOPPING ack MUST reach a terminal state. Acking STOPPING and never
+            # following up satisfies C5.5 while telling the control plane nothing: the robot
+            # is left in an unresolved emergency and dual execution cannot be ruled out.
+            # Only meaningful when the adapter actually used the two-phase shape.
+            if saw_stopping:
+                reached = term is not None and term.state in (pb.ESTOP_STATE_STOPPED,
+                                                              pb.ESTOP_STATE_FAILED)
+                self.r.add("C5.6", "A STOPPING EstopAck reaches a terminal state",
+                           CheckStatus.PASS if reached else CheckStatus.FAIL,
+                           detail=(f"terminal {pb.EstopState.Name(term.state)} "
+                                   f"{waited * 1000:.0f} ms after STOPPING. BOUND: "
+                                   f"{_ESTOP_TERMINAL_BUDGET_S:.0f}s is a HARNESS constant, "
+                                   f"not a contract figure -- the real bound is a property of "
+                                   f"the base and belongs in the adapter's own declaration")
+                                  if reached else
+                                  (f"STOPPING was acked but no terminal STOPPED/FAILED "
+                                   f"followed within {_ESTOP_TERMINAL_BUDGET_S:.0f}s; the "
+                                   f"control plane is left in an unresolved emergency"))
+            else:
+                self.r.add("C5.6", "A STOPPING EstopAck reaches a terminal state",
+                           CheckStatus.SKIP, level="MAY",
+                           detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                                   + ": the adapter answered with a terminal ack directly and "
+                                     "never sent STOPPING, which is equally conformant"))
+            ack = term if term is not None else ack
             # C5.3 — STOPPED must be adapter-CONFIRMED, never inferred from absent
             # motion or a timeout. Whether an adapter inferred it is a property of its
             # internal logic and is not decidable from the wire, so this asserts the
@@ -696,8 +911,15 @@ class _Driver:
                        CheckStatus.FAIL,
                        detail=f"safety payload was {msg.WhichOneof('payload')!r}")
 
-        # C5.4 — estop must not have arrived on ControlStream. None was sent
-        # there; confirm none was echoed back on the control path.
+        # C5.4 — estop MUST NOT be carried on ControlStream. Actively probe it: push a
+        # Command.estop down the control path and require the adapter to ignore it. The
+        # previous version sent nothing there and then confirmed nothing came back, which
+        # is a tautology — it passed for an adapter that would happily answer an estop on
+        # the wrong stream.
+        self._send_command(estop=pb.Estop(
+            estop_id="e-control-probe", reason="conformance: estop on the WRONG stream",
+            issued_by="harness"))
+        time.sleep(1.0)  # give a non-conformant adapter time to answer on the control path
         leaked = False
         try:
             while True:
@@ -711,7 +933,9 @@ class _Driver:
             pass
         self.r.add("C5.4", "Estop traffic not carried on ControlStream",
                    CheckStatus.FAIL if leaked else CheckStatus.PASS, level="MUST NOT",
-                   detail="estop result seen on ControlStream" if leaked else "")
+                   detail=("adapter answered a Command.estop pushed down ControlStream; estop is "
+                           "SafetyStream-only" if leaked else
+                           "a Command.estop pushed down ControlStream drew no response"))
 
     def _await_telemetry(self, timeout: float = 6.0):
         """Drain for a TelemetryPayload. Non-matching traffic is pushed back."""
@@ -749,26 +973,43 @@ class _Driver:
         # 0 (ground) is a VALID value that must be distinguishable from "not reported": a
         # dropped field deserialising to 0 would silently claim the robot is on the ground.
         # Assert presence on the zero-valued scalar, which is the only case that proves it.
+        # `floor` and `altitude` are FRAME-EXCLUSIVE (fleet-adapter-protocol.md:280): a
+        # ground robot reports floor, an aerial one reports altitude and no floor at all.
+        # Prove presence on whichever frame scalar the adapter actually reports; failing an
+        # aerial adapter for the absence of `floor` would contradict the spec's own rule.
         pos = payload.position
         floor_present = pos.HasField("floor")
-        zero_floor = floor_present and pos.floor == 0
-        if zero_floor:
+        alt_present = pos.HasField("altitude")
+        if floor_present and pos.floor == 0:
             detail = "floor=0 sent WITH explicit presence (absent != ground is preserved)"
+            status = CheckStatus.PASS
+        elif alt_present and pos.altitude == 0:
+            detail = "altitude=0 sent WITH explicit presence (absent != sea level is preserved)"
             status = CheckStatus.PASS
         elif floor_present:
             detail = f"floor={pos.floor} present, but non-zero — presence is only proven at 0"
             status = CheckStatus.PASS
+        elif alt_present:
+            detail = f"altitude={pos.altitude} present, but non-zero — presence is only proven at 0"
+            status = CheckStatus.PASS
         else:
-            detail = "position carries no explicit floor; a dropped field is indistinguishable from ground"
+            detail = ("position carries neither an explicit floor nor an explicit altitude; "
+                      "a dropped frame scalar is indistinguishable from ground/sea level")
             status = CheckStatus.FAIL
         self.r.add("C6.2", "Preserve proto3 explicit presence on safety scalars", status,
                    detail=detail)
 
-        # C6.3 — RA-1 is a CONTROL-PLANE discipline (no status write per tick), so the
-        # adapter side of it is simply that telemetry flows at all; the write policy is
-        # asserted in the control plane's own tests.
-        self.r.add("C6.3", "Telemetry streams for the RA-1 projection path", CheckStatus.PASS,
-                   detail="control-plane write throttling is asserted separately")
+        # C6.3 — RA-1 ("no Robot status write per telemetry tick") is a CONTROL-PLANE
+        # discipline. Nothing an adapter puts on the wire can demonstrate it, so this is
+        # recorded SKIP with an enumerated cause naming where it IS asserted. It was a
+        # bare PASS, which reported a MUST NOT as verified when nothing had tested it —
+        # the single most misleading row a conformance report can carry.
+        self.r.add("C6.3", "No Robot status write per telemetry tick (RA-1)",
+                   CheckStatus.SKIP, level="MUST NOT",
+                   detail=(SkipCause.NOT_OBSERVABLE_ON_WIRE.value
+                           + ": RA-1 governs the control plane's write policy, not adapter "
+                             "output; asserted in internal/controller's telemetry projection "
+                             "tests. Telemetry was observed, so the projection path is live."))
 
     def _maybe_handle_registration(self) -> bool:
         # C2.1 — peek for an adapter-initiated Register/Discover. If one arrives,
@@ -888,7 +1129,8 @@ class _Driver:
                            + res.push_firmware.message))
         else:
             self.r.add("C10.1", "push_firmware may emit UpdateProgress", CheckStatus.SKIP,
-                       level="MAY", detail="accepted firmware without advisory progress (allowed)")
+                       level="MAY", detail=(SkipCause.OPTIONAL_DECLINED.value
+                                    + ": accepted firmware without advisory progress, which the MAY permits"))
 
         # C10.2 (MUST, when implemented) — an adapter that ANSWERS push_firmware must report a
         # terminal outcome (ADR-0033). Advisory phases are optional; the terminal report is not.
@@ -929,7 +1171,7 @@ class _Driver:
             res = self._await_result(cid)
         except (EOFError, queue.Empty):
             self.r.add("C11.1", "pause/resume answered with a result", CheckStatus.SKIP,
-                       level="MAY", detail="no CommandResult for the optional pause command")
+                       level="MAY", detail=f"{SkipCause.OPTIONAL_DECLINED.value}: no CommandResult for the optional pause command")
             return
         if res.unsupported or res.WhichOneof("result") != "pause":
             self.r.add("C11.1", "pause/resume answered with a result", CheckStatus.SKIP,
@@ -952,14 +1194,20 @@ class _Driver:
         try:
             res = self._await_result(cid)
         except (EOFError, queue.Empty):
-            self.r.add("C12.1", "scan answers with a CapabilitiesSnapshot", CheckStatus.SKIP,
-                       level="MAY", detail="no CommandResult for the optional scan command")
+            self.r.add("C12.1", "scan answers with a CapabilitiesSnapshot", CheckStatus.FAIL,
+                       detail="no CommandResult for scan; scan is a required command")
             return
         answered = not res.unsupported and res.WhichOneof("result") == "scan"
+        if answered:
+            # Kept for C6.1: the full inventory, by NAME, from an INDEPENDENT path. The
+            # snapshot is full by definition -- the adapter builds the registration push and
+            # this reply from one builder -- so C6.1 becomes an agreement invariant between
+            # two paths rather than a self-comparison.
+            self._scan_components = {c.name for c in res.scan.hardware}
         self.r.add("C12.1", "scan answers with a CapabilitiesSnapshot",
-                   CheckStatus.PASS if answered else CheckStatus.SKIP, level="MAY",
+                   CheckStatus.PASS if answered else CheckStatus.FAIL,
                    detail="" if answered else
-                   f"{SkipCause.OPTIONAL_DECLINED.value}: adapter declined scan (conformant; see C7)")
+                   "adapter declined scan; scan is a required command (RFC-0001 Required-message table)")
 
     def _check_edge(self, advertised_edge: bool) -> None:
         # C8 — the harness advertised an edge endpoint (on RegisterAck). An
@@ -973,10 +1221,21 @@ class _Driver:
                            "advertised (edge is exercised for registering adapters)"))
             return
         if not self.s.edge_established.wait(_EDGE_WAIT):
+            # The harness advertised a non-empty edge_endpoints on RegisterAck, which is
+            # the "a zone declares an edge node" case in which dialling is REQUIRED. A SKIP
+            # here would let an adapter that ignores the advertisement report CONFORMANT.
             self.r.add("C8.1", "Adapter dials the advertised edge endpoint",
-                       CheckStatus.SKIP, detail=(
-                           "adapter did not dial the advertised edge endpoint "
-                           "(edge support is optional unless a zone declares an edge node)"))
+                       CheckStatus.FAIL, detail=(
+                           f"edge_endpoints was advertised on RegisterAck and the adapter did "
+                           f"not dial within {_EDGE_WAIT}s"))
+            self.r.add("C8.2", "Tee a PositionFrame per robot to the edge node",
+                       CheckStatus.SKIP,
+                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                               + ": the adapter never established the EdgeStream (C8.1)"))
+            self.r.add("C8.3", "Confirmed EstopAck for an edge-issued estop",
+                       CheckStatus.SKIP,
+                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                               + ": the adapter never established the EdgeStream (C8.1)"))
             return
         self.r.add("C8.1", "Adapter dials the advertised edge endpoint", CheckStatus.PASS)
 
@@ -1002,9 +1261,13 @@ class _Driver:
             if which == "position":
                 saw_position = True  # C8.2 — position tee observed
 
-        if saw_position:
-            self.r.add("C8.2", "Tee a PositionFrame per robot to the edge node",
-                       CheckStatus.PASS)
+        # Exactly one C8.2 row per run that reached the EdgeStream: PASS when frames were
+        # seen, FAIL when none were. Omitting the row on absence made a missing tee
+        # invisible in the report rather than a failure.
+        self.r.add("C8.2", "Tee a PositionFrame per robot to the edge node",
+                   CheckStatus.PASS if saw_position else CheckStatus.FAIL,
+                   detail="" if saw_position else
+                          "EdgeStream established but no PositionFrame was teed to it")
         if ack is None:
             self.r.add("C8.3", "Confirmed EstopAck for an edge-issued estop",
                        CheckStatus.FAIL, detail="no confirmed EstopAck on the EdgeStream")
@@ -1064,8 +1327,9 @@ class _Driver:
         if res.unsupported:
             self.r.add("C7.2", "Verify FIRMWARE artifact body before flashing, fail closed",
                        CheckStatus.SKIP, detail=(
-                           "adapter declines push_firmware (conformant, C7.1), so body re-verify "
-                           "was not exercised"))
+                           SkipCause.OPTIONAL_DECLINED.value
+                           + ": adapter declines push_firmware (conformant, C7.1), so body "
+                             "re-verify was not exercised"))
             return
         fw = res.push_firmware
         ok = not fw.accepted
@@ -1144,23 +1408,45 @@ class _Driver:
 
         # C6.1 — the first payload after reconnect must carry the FULL hardware set, not a
         # delta. Compared against the snapshot size seen before the drop.
-        payload = self._await_telemetry(timeout=8.0)
+        # fleet-adapter-protocol.md performance table: first telemetry after reconnect is
+        # "< 10 s after RegisterAck". Waiting 8 s failed adapters the spec permits.
+        payload = self._await_telemetry(timeout=_POST_RECONNECT_TELEMETRY_WAIT)
         if payload is None:
             self.r.add("C6.1", "First TelemetryPayload after reconnect is a full snapshot",
                        CheckStatus.SKIP, detail=SkipCause.NO_TELEMETRY_IN_RUN.value)
-        else:
-            # The discriminating property is NON-EMPTINESS. A resumed delta stream sends
-            # only what changed, and nothing changes across a reconnect, so a
-            # non-compliant adapter's first payload carries zero components. Comparing
-            # against a mid-stream sample would be wrong: mid-stream payloads are deltas
-            # and legitimately empty.
-            n = len(payload.hardware)
+        elif not self._scan_components:
+            # No independent inventory to compare against: either scan was never answered,
+            # or it answered with an empty hardware list. NON-EMPTINESS alone cannot tell a
+            # full snapshot from a PARTIAL one, which is the whole point of this check, so
+            # say so rather than pass on the weaker property.
             self.r.add("C6.1", "First TelemetryPayload after reconnect is a full snapshot",
-                       CheckStatus.PASS if n > 0 else CheckStatus.FAIL,
-                       detail=(f"{n} components re-sent after reconnect") if n > 0 else
-                              ("first post-reconnect payload carried no hardware; a resumed "
-                               "delta leaves the control plane with a stale picture it "
-                               "cannot detect"))
+                       CheckStatus.SKIP,
+                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                               + ": scan returned no components, so there is no independent "
+                                 "inventory to compare the first post-reconnect payload "
+                                 "against"))
+        else:
+            # Compare by NAME against the inventory `scan` reported (C12.1), not by COUNT and
+            # not against the pre-drop payload. A count says nothing about WHICH components
+            # arrived, and the pre-drop sample is produced by the same possibly-broken path --
+            # a run that re-sent one of two components passed exactly that way.
+            got = {u.component_name for u in payload.hardware}
+            missing = sorted(self._scan_components - got)
+            extra = sorted(got - self._scan_components)
+            ok = not missing
+            detail = (f"all {len(self._scan_components)} component(s) named by scan were "
+                      f"re-sent: {sorted(self._scan_components)}"
+                      + (f"; also present but not in scan: {extra}" if extra else "")
+                      + ". LIMIT: if scan itself under-reports, both paths agree and this "
+                        "check is blind -- an empty snapshot cannot say whether it means "
+                        "'no hardware' or 'none observed yet'.")
+            self.r.add("C6.1", "First TelemetryPayload after reconnect is a full snapshot",
+                       CheckStatus.PASS if ok else CheckStatus.FAIL,
+                       detail=detail if ok else (
+                           f"first post-reconnect payload OMITTED {missing} of the "
+                           f"{len(self._scan_components)} component(s) scan reported "
+                           f"({sorted(self._scan_components)}); a PARTIAL snapshot leaves the "
+                           f"control plane with a stale picture it cannot detect"))
 
         # C2.3 — the RegisterAck above advertised telemetry_interval_seconds=1. Honouring
         # per-robot configuration is a WIRE effect: measure the spacing of the payloads
@@ -1237,7 +1523,8 @@ class _Driver:
         except queue.Empty:
             self.r.add("C13.2", "No work accepted after a VERSION_MISMATCH registration refusal",
                        CheckStatus.SKIP, level="SHOULD",
-                       detail="adapter reconnected but sent no second AdapterHello")
+                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                               + ": adapter reconnected but sent no second AdapterHello"))
             return
 
         # Accept the CONNECTION but negotiate no contract version — the control plane's real
@@ -1274,13 +1561,30 @@ class _Driver:
         except (EOFError, queue.Empty):
             self.r.add("C3.1", "Highest accepted fencing token survives a reconnect",
                        CheckStatus.SKIP,
-                       detail="adapter sent no result on the refused session")
+                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                               + ": adapter sent no result on the refused session"))
+
+        # C3.7 — the OTHER half of the catalog's C3.1: durability across a process RESTART.
+        # C3.1 above faults and redials the STREAM, which does not touch process memory, so
+        # an adapter holding the mark in a plain dict passes it. This suite spawns the
+        # adapter once and never restarts it, so the restart half is not verified -- recorded
+        # rather than left to a reader comparing the catalog against the harness.
+        #
+        # Deliberately NOT implemented here: a real restart turns this red for all three
+        # reference adapters at once (none persists the mark), and that is an SDK decision,
+        # not a harness change.
+        self.r.add("C3.7", "Highest accepted fencing token survives an adapter RESTART",
+                   CheckStatus.SKIP,
+                   detail=(SkipCause.NEEDS_ADAPTER_RESTART.value
+                           + ": the suite spawns the adapter once and never restarts it, so a "
+                             "passing report attests NOTHING about durability across a restart"))
 
         if not refused:
             self.r.add("C13.2", "No work accepted after a VERSION_MISMATCH registration refusal",
                        CheckStatus.SKIP, level="SHOULD", detail=(
-                           "adapter attempted no registration on the refused session, so there was "
-                           "nothing to refuse"))
+                           SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                           + ": adapter attempted no registration on the refused session, so "
+                             "there was nothing to refuse"))
             return
 
         # The refusal must not be read as success: the adapter must not go on to accept work. A
@@ -1360,6 +1664,12 @@ class _Driver:
                        detail=f"safety payload was {msg.WhichOneof('payload')!r}")
             return
         ack = msg.estop_ack
+        # The first ack may be STOPPING (see C5.2); estop version-invariance is about the
+        # CONFIRMED stop, so wait for the terminal one rather than failing on the first.
+        if ack.state == pb.ESTOP_STATE_STOPPING:
+            term, _saw, _w = self._recv_terminal_estop_ack("e-refused")
+            if term is not None:
+                ack = term
         ok = ack.estop_id == "e-refused" and ack.state == pb.ESTOP_STATE_STOPPED
         self.r.add("C14.1", "Estop honored against an adapter that failed the version gate",
                    CheckStatus.PASS if ok else CheckStatus.FAIL,

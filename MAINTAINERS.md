@@ -11,6 +11,11 @@ This file lists the current maintainers and reviewers of Swarmada. See
 
 > Swarmada is pre-1.0 (`0.x`); until additional maintainers join, changes land in bulk through the
 > maintainer — see [GOVERNANCE.md](GOVERNANCE.md) → Project maturity.
+>
+> **Position against the multi-employer threshold** ([GOVERNANCE.md](GOVERNANCE.md) → Vendor
+> neutrality): the threshold is three maintainers across two or more organizations. The project
+> has one maintainer from one organization and **does not meet it.** The threshold is
+> to be met before the project seeks CNCF Incubation.
 
 ## Reviewers
 

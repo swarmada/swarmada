@@ -59,15 +59,15 @@ so that the structure is in place before it is needed:
 - **Founding seats** — held by the project's founding maintainer(s).
 - **Partner seats (reserved)** — up to two seats for contributing organizations that
   invest sustained engineering in the project (for example, a hardware-platform
-  partner and an enterprise operator). These seats are **currently vacant** and are
+  partner and an enterprise operator). These seats are **vacant** and are
   filled by TSC invitation as such partners emerge.
 - **Community-elected seats (reserved)** — two to four seats elected by contributors,
   activated once the contributor base supports a meaningful election (target: within
-  twelve months of the first external maintainers). **Currently vacant.**
+  twelve months of the first external maintainers). **Vacant.**
 
 Swarmada is, at this stage, founder-led: the project was founded by **Alex Bahel**, who
 holds the founding maintainer seat while the reserved seats are unfilled. Standard-
-critical decisions currently rest with the founding maintainer, consistent with the
+critical decisions rest with the founding maintainer, consistent with the
 code-ownership rules in the repository. This is stated plainly rather than obscured.
 The reserved-seat structure is the mechanism by which the project distributes
 authority as partners and community contributors arrive — governance is designed for
@@ -96,6 +96,15 @@ Swarmada's value is that it belongs to no one vendor. To protect that:
 
 - Maintainer and TSC authority is held by individuals, and no single organization may
   hold a majority of maintainer or TSC positions.
+- **Multi-employer maintainer threshold.** A maintainer group drawn from a single
+  employer cannot demonstrate the property this section describes, whatever its
+  members intend. The project therefore commits to a maintainer group of at least
+  three individuals employed by no fewer than two distinct organizations, with no
+  single organization holding more than half of maintainer seats, to be met before
+  the project seeks CNCF Incubation. The threshold is stated here rather than in
+  positioning material because it is a governance obligation, and the project's
+  current position against it — including where it falls short — is stated in
+  `MAINTAINERS.md`.
 - Commercial products built on or around Swarmada — managed services, support
   offerings, certified-adapter programs — are developed **outside** this project and
   its organization, and confer no governance influence. Contributing to the standard

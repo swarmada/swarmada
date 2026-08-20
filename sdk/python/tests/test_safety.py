@@ -20,6 +20,8 @@ here directly and independently of any wire types or fleet API.
 
 from __future__ import annotations
 
+import time
+
 from swarmada_sdk.safety import (
     ESTOP_FAILED,
     ESTOP_STOPPED,
@@ -123,3 +125,51 @@ def test_c5_confirmed_stopped() -> None:
 def test_c5_unconfirmed_is_failed_never_stopped() -> None:
     # Cardinal safety property: no confirmation → FAILED, never STOPPED by timeout.
     assert confirm_estop(_NonStoppingSim(), "r1", tick_dt=0.01, max_ticks=5) == ESTOP_FAILED
+
+
+class _AsyncSim:
+    """A robot whose tick() advances NOTHING - the shape of every real binding.
+
+    Nav2Binding.tick() is `pass` ("rclpy spins its own executor"). The robot comes
+    to rest on its own clock; confirmation arrives via telemetry. This stands in for
+    that: it reports stopped only after `stop_after` seconds of REAL time have
+    elapsed since the stop was commanded.
+    """
+
+    def __init__(self, stop_after: float = 0.12) -> None:
+        self._stop_after = stop_after
+        self._commanded_at: float | None = None
+
+    def command_stop(self, robot: str) -> None:
+        self._commanded_at = time.monotonic()
+
+    def tick(self, dt: float) -> None:
+        pass                      # deliberately a no-op
+
+    def is_stopped(self, robot: str) -> bool:
+        if self._commanded_at is None:
+            return False
+        return (time.monotonic() - self._commanded_at) >= self._stop_after
+
+
+def test_confirm_estop_confirms_an_asynchronous_robot() -> None:
+    """ITEM-0107: the loop must WAIT, not just iterate.
+
+    Before the fix this returned FAILED - max_ticks iterations completed in
+    microseconds against a robot that needed real time to decelerate, and every
+    estop on real hardware reported FAILED while the simulated path passed.
+    """
+    assert confirm_estop(_AsyncSim(stop_after=0.12), "r1") == ESTOP_STOPPED
+
+
+def test_confirm_estop_still_fails_when_the_robot_never_stops() -> None:
+    """The wait must not become an inference: no stop, no STOPPED."""
+    assert confirm_estop(_NonStoppingSim(), "r1", tick_dt=0.01, max_ticks=5) == ESTOP_FAILED
+
+
+def test_confirm_estop_sleep_is_injectable_so_tests_stay_fast() -> None:
+    """The simulated path must not pay 2 s per estop in a unit test."""
+    slept: list[float] = []
+    assert confirm_estop(_StoppableSim(), "r1", sleep=slept.append) == ESTOP_STOPPED
+    # _StoppableSim stops on the first tick, so the wait is never reached.
+    assert slept == []

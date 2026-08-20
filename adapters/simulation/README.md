@@ -24,7 +24,7 @@ runnable adapter that costs **$0** to build and run.
   edge node (C8).
 
 The safety logic lives in [`safety.py`](safety.py) as pure, proto-free code and is
-unit-tested in `tests/python/test_sim_adapter.py`.
+unit-tested in [`tests/python/test_sim_adapter.py`](../../tests/python/test_sim_adapter.py).
 
 ## Multi-simulator
 
