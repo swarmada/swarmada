@@ -60,7 +60,7 @@ An ADR has one status at a time:
 | [0015](0015-tde-recovery-and-reservation-expiry-config.md) | Source TDE reservation-expiry per namespace and recovery tunables from the manager namespace | accepted |
 | [0016](0016-estop-delivery-config.md) | Resolve estop delivery tuning per namespace; implement partial-delivery response | accepted |
 | [0017](0017-coordinate-system-annotation.md) | Surface the namespace coordinate system as stamped annotations, not transformation | accepted |
-| [0018](0018-swarmtop-repository-placement.md) | swarmtop stays in-tree and demo-only for now; repository extraction and distribution deferred | accepted |
+| [0018](0018-swarmtop-repository-placement.md) | swarmtop stays in-tree and demo-only at v0.3; repository extraction and distribution deferred | accepted |
 | [0019](0019-adapter-action-discovery-and-validation.md) | Adapter action discovery and validation | accepted |
 | [0020](0020-model-artifact-integrity-parity.md) | Model artifact integrity and provenance parity with firmware | accepted |
 | [0021](0021-quality-gate-fail-closed-semantics.md) | Quality-gate evaluation is fail-closed on missing and simulation-only metrics | accepted |
@@ -78,4 +78,14 @@ An ADR has one status at a time:
 | [0033](0033-install-outcome-reporting.md) | Firmware/model install outcome is an adapter-reported fact: streamed for latency, snapshotted for recovery, projected onto Robot.status; failure sealed only when confirmed | accepted |
 | [0034](0034-preferred-robot-soft-scheduling-preference.md) | `spec.preferredRobot`: a soft "this robot if it can" scheduling preference | accepted |
 | [0035](0035-async-operation-outcome-protocol.md) | A general async-operation outcome mechanism for the Fleet Adapter protocol (generalizes ADR-0033) | proposed |
-| [0036](0036-reachability-aware-conformance-gate.md) | The Required-Events/conformance gate must assert reachability, not just reference | proposed |
+| [0036](0036-reachability-aware-conformance-gate.md) | The Required-Events/conformance gate must assert reachability, not only reference | proposed |
+| [0037](0037-protocol-profiles-record-not-enforce.md) | Protocol profiles — declare which external standard an adapter speaks; record it, do not enforce it | accepted |
+| [0038](0038-simulated-robot-source-annotation.md) | Declare simulated Fleet Adapters and stamp robot-source onto Robot | accepted |
+| [0039](0039-observation-state-on-capabilitiessnapshot.md) | An observation-state signal on `CapabilitiesSnapshot` | proposed |
+| [0040](0040-zone-bounds-on-registerack-and-off-zone-assignment-refusal.md) | Carry the zone boundary on `RegisterAck`, and refuse an off-zone assignment | proposed |
+| [0041](0041-rollout-resume-excludes-rather-than-retries.md) | A rollout resume excludes the robots that failed rather than retrying them (closes the pauseOnError deadlock) | accepted |
+| [0042](0042-estop-fanout-duration-metric.md) | Measure estop fan-out end to end (`swarmada_estop_fanout_duration_seconds`), not per robot | accepted |
+| [0043](0043-unbounded-estop-fanout.md) | Estop fan-out is unbounded — one goroutine per robot, not a worker pool | accepted |
+| [0044](0044-configurable-lease-horizon.md) | Make the assignment-lease horizon namespace-configurable, bounded, and resolved once | accepted |
+| [0045](0045-desiredstate-hold-is-operator-lifted.md) | A `desiredState` hold is entered declaratively and lifted only by an operator | accepted |
+| [0046](0046-estop-actor-stamped-at-admission.md) | Stamp the authenticated operator at admission; never let attribution block a stop | accepted |

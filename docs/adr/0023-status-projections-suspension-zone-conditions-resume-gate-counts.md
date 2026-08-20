@@ -174,7 +174,7 @@ where the lists are cleared. The values ride the existing
     deletes the maintenance, which resumes ungated).
   - `capabilitiesSuspendedAt` equals `updateStartedAt` for model rollouts today;
     the field is kept distinct because it is model-only and semantically the
-    suspension instant, not the entry instant (they merely coincide at entry).
+    suspension instant, not the entry instant (they only coincide at entry).
 - **Non-goals preserved.** No CRD field is added or renamed; the four
   "controller pending" doc-comments in `api/v1` are dropped when the controllers
   land (a comment-only `api/v1` edit that regenerates CRD descriptions, no schema

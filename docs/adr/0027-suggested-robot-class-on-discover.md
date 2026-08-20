@@ -38,7 +38,7 @@ Constraints that shape the fix:
 - Auto-admit is already gated by `SwarmadaConfig.provisioning` and by the presence
   of a matching `RobotClass` + `FleetZone`; this ADR must not widen that gate.
 - `Registrar.Discover(ctx, id AdapterIdentity, msg *DiscoverRobot)` does not
-  currently receive the verified `TLSIdentity`, though the caller
+  receive the verified `TLSIdentity`, though the caller
   (`server.go:dispatch`) already holds `tlsID`.
 - A `FleetAdapter` declares the classes it drives in `spec.servesRobotClasses`
   (`[]string`).
@@ -81,7 +81,7 @@ adapter yields an empty suggestion and stays on operator admission.
   **privileged create** come from adapter-supplied wire input. Deriving it instead
   from the adapter's own `FleetAdapter.servesRobotClasses` — an operator-controlled,
   namespaced resource keyed by the *verified* adapter name — keeps the class under
-  operator control. Rejected for now; noted as the path if per-robot heterogeneous
+  operator control. Rejected at v0.3; noted as the path if per-robot heterogeneous
   classes are later required.
 
 - **ALT B — infer the class by fuzzy-matching reported hardware/capabilities to a
@@ -102,7 +102,7 @@ adapter yields an empty suggestion and stays on operator admission.
   operator step. The previously-dead gate now has a real left-hand side.
 - The privilege boundary is preserved and, in fact, tightened: the class is a
   function only of the **verified** adapter's own configuration. A forged
-  `AdapterHello` cannot influence it — a mismatched name/namespace simply fails the
+  `AdapterHello` cannot influence it — a mismatched name/namespace fails the
   `FleetAdapter` lookup and yields an empty suggestion (no admission). The
   `provisioning` gate and the class/zone existence checks are unchanged.
 - New obligations: `Discover` performs one additional `FleetAdapter` `Get`. This is

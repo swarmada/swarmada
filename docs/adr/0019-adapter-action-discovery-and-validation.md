@@ -17,7 +17,7 @@ payload shapes. Two questions follow from this, and they are not the same questi
    tooling discovery, for schedule-time pre-filtering, and for rejecting an
    unserviceable submission early rather than after a wasted scheduling cycle.
 2. *Can a specific robot serve this specific action instance right now?* — needed for
-   the contextual validity a static description cannot capture: a currently-degraded
+   the contextual validity a static description cannot capture: a degraded
    capability, a robot-specific limit, the concrete payload.
 
 RFC-0001 already added `ValidateAction` (a push RPC) to answer question 2. The open

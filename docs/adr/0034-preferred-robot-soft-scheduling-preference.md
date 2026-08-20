@@ -47,7 +47,7 @@ function.
 **It ranks; it never filters.** The preferred robot is only in the eligible set if it passed every
 hard filter, so the preference can never hand work to a robot that cannot do it. When the named
 robot is busy, out of zone, low on battery, mid-model-update, under an estop, or missing a required
-capability, it is simply absent and the fleet takes the action with no special case.
+capability, it is absent and the fleet takes the action with no special case.
 
 Three consequences worth stating because they are the questions people ask:
 
@@ -70,7 +70,7 @@ expressing a preference.
   as an interim. Rejected as the answer: it is the hard pin, so it skips capability/zone checks and
   has no fallback, and it leaves the standard with no notion of the intent, so every client
   reinvents the decision.
-- **A `self` sentinel resolved at admission.** Rejected for now: there is no robot identity to
+- **A `self` sentinel resolved at admission.** Rejected at v0.3: there is no robot identity to
   resolve from. The action's author is the client's ServiceAccount, and an adapter's mTLS SAN
   encodes adapter and tenant, not robot. Worth revisiting if actions ever become robot-authored —
   it is the only variant that is tamper-resistant, since a client could not then claim to be a robot

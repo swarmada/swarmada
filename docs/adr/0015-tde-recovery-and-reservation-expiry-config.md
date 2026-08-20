@@ -12,10 +12,10 @@ Four `SwarmadaConfig.spec.trafficDeconfliction` tunables remain unconnected. The
 NOT share a scope, and that is the whole difficulty:
 
 - **`onReservationExpiry`** (`ReleaseAndRequeue` | `ReleaseOnly`) — per task/namespace.
-  Today reservation expiry is *lazy*: an expired Reserved slot simply stops counting
+  Today reservation expiry is *lazy*: an expired Reserved slot stops counting
   toward zone capacity (`engine.counts`). Nothing actively notices that a task's
   reservation expired before the robot entered the zone, so neither disposition is
-  applied. This is an unimplemented behavior, not just an unread field.
+  applied. This is an unimplemented behavior, not only an unread field.
 - **`tdeCallTimeoutMs`** — per namespace; bounds a `RequestReservation` call. The
   engine is in-process today (see ADR-deferred A10), so this is low-value until the
   engine can block.

@@ -37,7 +37,7 @@ maturity of the affected surface — not on whether the RFC is "accepted."
   design flaw, missing case, or semantics change where the affected surface is
   still `stage: alpha` and not depended upon in a release): corrected **in
   place**, with a re-review of the affected section when the blast radius is
-  non-trivial. No superseding RFC. Pre-stabilization surfaces are expected to
+  substantial. No superseding RFC. Pre-stabilization surfaces are expected to
   change; that is what `alpha` means.
 
 - **Substantive normative change to a `beta`/`stable`, shipped surface**: made

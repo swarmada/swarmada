@@ -14,7 +14,7 @@ an `origin` description. Its own doc is explicit that these describe conventions
 which every coordinate elsewhere (FleetZone `physicalBounds`/`waypoints`,
 `Robot.status.position`, the edge `PositionFrame` stream) is **already expressed**:
 "the control plane never transforms coordinates, only validates, annotates, and
-informs." Nothing currently reads the block.
+informs." Nothing reads the block.
 
 So the question is narrow: given that the control plane must not transform
 coordinates, what is the useful, in-scope behavior? The fields are enum-constrained
@@ -60,7 +60,7 @@ annotations via a defaulting webhook; do not transform or hard-validate coordina
   risk. Stays strictly within "annotate and inform," never transforming.
 - **Obligation.** Extend the existing defaulters to read `coordinateSystem` and stamp
   the annotations; tests for the stamp and the fail-safe defaults. If the defaulter
-  webhooks do not currently read SwarmadaConfig, add that read (informer-cached).
+  webhooks do not read SwarmadaConfig, add that read (informer-cached).
 - **RA-1 / safety.** Purely additive metadata at admission; no status writes, no
   behavioral change, no safety surface.
 - **Drawback accepted.** Annotations can drift if an operator edits the

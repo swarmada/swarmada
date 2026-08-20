@@ -14,12 +14,12 @@ required by any of the three.
 
 1. **`maxPendingActionsPerZone`** — `SwarmadaConfig.spec.scheduling.MaxPendingActionsPerZone`
    (`int32`, `0` = unbounded) is a namespace-configured cap applied *per named
-   zone* on the number of `Pending` `FleetAction`s. The field comment currently
+   zone* on the number of `Pending` `FleetAction`s. The field comment
    reads "caps the number the scheduler admits per zone before applying
    backpressure", which pre-supposes an enforcement point that has not actually
    been chosen. Two enforcement points are on the table: a validating admission
    webhook (reject at the door) vs. scheduler backpressure (let it be created,
-   refuse to schedule it). We must also decide how the per-zone `Pending` count
+   refuse to schedule it). This ADR must also decide how the per-zone `Pending` count
    is computed without an O(all-actions) list on every check.
 
 2. **`preferSameManufacturer`** — `SwarmadaConfig.spec.scheduling.PreferSameManufacturer`
@@ -32,7 +32,7 @@ required by any of the three.
    (no client, no writes; see ADR-0009); that property must be preserved.
 
 3. **`DiscoveredRobot.status.reportedHardware` full population** — the Discover
-   handler (`internal/registrar`) currently maps only `{Name, Type, Status}`
+   handler (`internal/registrar`) maps only `{Name, Type, Status}`
    into `DiscoveredHardwareComponent` and collapses any unrecognised component
    type to `Custom`, **dropping the original type string**. The CRD type already
    carries the richer attribute set (`Model`, `CustomType`, `RangeM`,
@@ -118,7 +118,7 @@ battery-descending order:
 Split "full population" by *what the adapter actually transmits*:
 
 - **Tier A — do now, no contract change** (`internal/registrar.mapDiscoveredHardware`):
-  - Set `Model` from `c.GetModel()` (transmitted today, currently dropped).
+  - Set `Model` from `c.GetModel()` (transmitted today, but dropped).
   - When the reported type string is unrecognised, keep the existing
     "collapse to `Custom`, never drop a component" behaviour **but preserve the
     original string in `CustomType`** so the operator-defined subtype survives
@@ -142,7 +142,7 @@ Split "full population" by *what the adapter actually transmits*:
 ## Alternatives considered
 
 **Pending cap — scheduler backpressure instead of admission (rejected as primary).**
-Letting the action be created and merely refusing to *schedule* it does not cap
+Letting the action be created and only refusing to *schedule* it does not cap
 the `Pending` count at all: the object still exists in `Pending`, so the queue
 the field claims to bound grows unbounded. Backpressure delays work; it does not
 shed it. Admission is the only point that actually bounds queue depth, and it
@@ -156,11 +156,11 @@ O(all FleetActions in the namespace) on every create; a busy namespace pays the
 full scan per admission. The field index reduces this to the matching set from
 the cache for the cost of one index registration. The only real cost is that it
 introduces the first field index in the tree — a small, well-understood
-controller-runtime pattern — which we accept.
+controller-runtime pattern — which this ADR accepts.
 
 **Pending cap — exact/serialized counting (rejected).** Admission webhooks are
 not serialized transactions; two concurrent creates can both observe a count
-just under the cap (TOCTOU), so the cap may overshoot by the number of in-flight
+immediately under the cap (TOCTOU), so the cap may overshoot by the number of in-flight
 admits. Rejected pursuing exactness: this is soft backpressure, not a safety
 invariant, and the approximate cap is the honest, cheap behaviour. Documented in
 Consequences.
