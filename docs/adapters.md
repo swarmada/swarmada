@@ -38,8 +38,18 @@ their own repository.
 
   The in-tree `simulation` adapter needs no clone.
 
-  To fetch or update all three reference adapters into `adapters/external/` at once,
-  run `make adapters` from the repository root (clones each, or fast-forwards if already present).
+  The three reference adapters live in their own repositories. Clone them into
+  `adapters/external/` (or `git -C <dir> pull --ff-only` to update):
+
+  ```sh
+  mkdir -p adapters/external && cd adapters/external
+  git clone https://github.com/swarmada/fleet-adapter-ros2.git
+  git clone https://github.com/swarmada/fleet-adapter-vda5050.git
+  git clone https://github.com/swarmada/fleet-adapter-mavlink.git
+  ```
+
+  A `make adapters` convenience target that does this in one step is planned; it is
+  not present in the Makefile today.
 
 ### If your machine has more than one Python interpreter
 
@@ -96,7 +106,7 @@ the conformance harness's own test server (see below) or a bare
 python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py \
     --endpoint localhost:9090
 
-# VDA5050 (simulated comms profile):
+# VDA5050 (simulated protocol profile):
 python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py \
     --endpoint localhost:9090 --comms simulated
 
@@ -126,14 +136,14 @@ python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py \
 The port-forward runs in the foreground; run it in a separate terminal or
 background it (`&`) before starting the adapter. Production connections use
 mutual TLS with the adapter's client certificate as its identity
-(RFC-0001 §9.5, Security Model); the in-cluster manager currently runs with
+(RFC-0001 §9.5, Security Model); the in-cluster manager runs with
 `ENABLE_WEBHOOKS=false` and no mTLS wiring yet, so this path is
 for development only.
 
 ## Running an adapter's own tests
 
 Each adapter ships unit tests for its safety wiring (fencing, confirmed
-estop, lease self-stop) and, where applicable, its comms-profile logic:
+estop, lease self-stop) and, where applicable, its protocol-profile logic:
 
 ```bash
 pytest adapters/external/fleet-adapter-ros2/tests/ -v
@@ -181,11 +191,11 @@ different thing from the `fleet_adapter.v1` wire-package identity (an identity
 string, which cannot express compatibility) and from the adapter's own build
 version (which versions an implementation, not the contract). `make conformance`
 prints it in the report header, and `adapters/REGISTRY.md` records it in the
-**Protocol** column.
+| **Major** (`1.x.y` → `2.0.0`) | Re-run `make conformance` and update the **Contract version** column in [`adapters/REGISTRY.md`](../adapters/REGISTRY.md). A major bump is breaking, so a result earned against the previous major stops being binding: a control plane on the new major will not admit or dispatch to robots bound to that adapter until the row is updated. |
 
 | Contract-version bump | What an adapter must do |
 | :--- | :--- |
-| **Major** (`1.x.y` → `2.0.0`) | Re-run `make conformance` and update the **Protocol** column in [`adapters/REGISTRY.md`](../adapters/REGISTRY.md). A major bump is breaking, so a result earned against the previous major stops being binding: a control plane on the new major will not admit or dispatch to robots bound to that adapter until the row is updated. |
+| **Major** (`1.x.y` → `2.0.0`) | Re-run `make conformance` and update the **Contract version** column in [`adapters/REGISTRY.md`](../adapters/REGISTRY.md). A major bump is breaking, so a result earned against the previous major stops being binding: a control plane on the new major will not admit or dispatch to robots bound to that adapter until the row is updated. |
 | **Minor** (`1.0.y` → `1.1.0`) | Nothing. A control plane supports minor N and N-1, so an adapter one minor behind is still in range and its existing qualification stays valid. |
 | **Patch** (`1.0.0` → `1.0.1`) | Nothing. The patch component is not considered in compatibility. |
 
@@ -234,5 +244,10 @@ pip install cookiecutter
 cookiecutter adapters/template/
 ```
 
-Then implement the `RobotBinding` seam for the target class/protocol and run
+Then implement the `RobotBinding` seam for the target robot interface and run
 the conformance suite until every non-skipped check passes.
+
+> **Rename pending.** This seam is named `RobotBinding` (CLI flag `--binding`) in the
+> current code. It identifies a robot-side *transport* — not the `Robot.spec.adapter`
+> binding, and not a Kubernetes `RoleBinding` — and is filed for rename to
+> `RobotTransport` (`--transport`). The current names remain correct until that lands.

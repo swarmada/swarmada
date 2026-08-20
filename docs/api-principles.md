@@ -115,7 +115,8 @@ declares an empty spec struct rather than an untyped map.
 ## Discoverability
 
 - **Short names.** Every kind declares a `+kubebuilder:resource:shortName` (`rob`,
-  `ft`, `fz`, `rc`, `fa`, `dr`, `rp`, `sc`, `mp`, `mr`, `fwr`, `zm`) for CLI economy.
+  `fact`, `ft`, `fz`, `rc`, `fa`, `dr`, `rp`, `sc`, `mp`, `mr`, `fwr`, `zm`) for CLI
+  economy — thirteen kinds, thirteen short names.
 - **Print columns.** Kinds declare `+kubebuilder:printcolumn` for the fields an
   operator scans in `kubectl get` — phase, key spec values, and age.
 

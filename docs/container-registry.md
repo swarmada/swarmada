@@ -8,7 +8,7 @@ Adapters, the in-tree simulation adapter).
 
 **Primary: GitHub Container Registry (`ghcr.io/swarmada/...`).** This is
 already the Makefile's default (`IMG ?= ghcr.io/swarmada/swarmada:latest`) —
-this doc just makes that choice explicit and extends the same convention to
+this doc makes that choice explicit and extends the same convention to
 every other image. Reasons to keep it as the primary:
 
 - **No pull-rate limiting** on public images, unlike Docker Hub's 100 (anonymous)

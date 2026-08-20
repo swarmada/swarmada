@@ -10,7 +10,7 @@ not drift (see the automation phase).
 
 ## Axes
 
-### `kind/` — what sort of work it is
+### `kind/` — what type of work it is
 
 | Label | Use for |
 | :---- | :------ |

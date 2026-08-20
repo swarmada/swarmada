@@ -12,7 +12,7 @@ simulated robots (or a Fleet Adapter connecting over `localhost`/in-cluster).
 It is not the single-site or multi-site production topology — no Zone
 Controller edge node or Jetson-hosted Fleet Adapter is involved here.
 
-> **OS scope:** macOS only for now (Apple Silicon and Intel). Linux and
+> **OS scope:** macOS only at v0.3 (Apple Silicon and Intel). Linux and
 > Windows setup scripts are planned closer to release. The `make`
 > targets themselves (`docker-build`, `install`, `deploy`, ...) are
 > OS-agnostic; only `scripts/setup-macos.sh` and `scripts/deploy-minikube.sh`
@@ -20,7 +20,7 @@ Controller edge node or Jetson-hosted Fleet Adapter is involved here.
 
 ## The fast path: two scripts
 
-If you're on macOS and just want it running:
+If you're on macOS and want it running:
 
 ```bash
 git clone https://github.com/swarmada/swarmada
@@ -174,12 +174,12 @@ reconciling against a cluster that's disappearing out from under it.
 If any Fleet Adapter is connected (see
 [Installing and running Fleet Adapters](adapters.md#running-an-adapter)),
 stop it first — `Ctrl-C` in its terminal. It disconnects cleanly; the control
-plane simply marks the robot's `FleetAdapter`/`Robot` status stale once its
+plane marks the robot's `FleetAdapter`/`Robot` status stale once its
 heartbeat lapses, it does not need to be told in advance. If a
 `kubectl port-forward` is running in another terminal, `Ctrl-C` that too (or
 `kill %1` if it was backgrounded with `&`).
 
-**To just stop working for now, keeping everything in place** (fastest to
+**To stop working temporarily, keeping everything in place** (fastest to
 resume — no rebuild, no re-`apply` needed next time):
 
 ```bash

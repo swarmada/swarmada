@@ -14,7 +14,7 @@ single entry point for running **every** demo scenario.
   cache.
 
 The quickstart itself is cross-platform (a portable `bash` script; the `make`
-targets just call `go`/`docker`/`kind`/`kubectl`). Install the prerequisites for
+targets only call `go`/`docker`/`kind`/`kubectl`). Install the prerequisites for
 your OS:
 
 - **macOS** — `make setup-macos` installs everything via Homebrew, then
@@ -40,7 +40,7 @@ make quickstart
 This runs a **real** control plane (no mocks) on `kind`, applies the sample fleet
 (one `FleetZone`, three `Robot`s, two `FleetTask`s from
 `config/samples/demo_a.yaml`), drives the robots Ready, lets the real scheduler
-assign the tasks, and ends with a ✅. It leaves the cluster running so you can
+assign the tasks, and ends with a success line. It leaves the cluster running so you can
 inspect it. On a terminal it first prompts for a scenario — press Enter for the
 default.
 
@@ -128,13 +128,52 @@ kind delete cluster --name swarmada-quickstart
 
 - The control plane, CRDs, capability derivation, scheduler, and (on LIVE
   scenarios) the ControlStream + adapter path are **real**.
-- `healthy-fleet` projects robot readiness with a direct `kubectl patch` — no
-  adapter runs. It's the one path CI always exercises.
-- LIVE scenarios drive **`sim-robot-001`** with a real `sim_adapter.py` process;
-  the other two robots are patched to a healthy baseline so the contrast is real.
 - LIVE scenarios deploy via `config/overlays/quickstart-dev`, a **dev/demo-only**
   overlay that disables per-robot ControlStream authorization — never a
   production configuration.
 
-Scenario-by-scenario detail (what each proves, what's simulated) is in
-[`examples/warehouse-quickstart/SCENARIOS.md`](../examples/warehouse-quickstart/README.md).
+### The one shortcut you should know about: `Robot.status.phase` is patched by hand
+
+**Every scenario — including the LIVE ones, and including `sim-robot-001` —
+reaches `phase: Idle` because the runner writes that field itself:**
+
+```bash
+kubectl patch robot/<name> -n warehouse-a --subresource=status --type=merge \
+  -p '{"status":{"phase":"Idle"}}'
+```
+
+`examples/warehouse-quickstart/run.sh:899`, `:937`, `:1040`;
+`examples/full-surface-demo/run.sh:429`, `:476`, `:492`.
+
+This is a **simulation shortcut, and the control plane does not perform it.** RFC-0001
+says status is controller-owned and operators must not write it
+(`rfcs/rfc-0001-core-spec/crds/robot.md:312-314`), and the RA-1 status-write discipline
+(`rfcs/rfc-0001-core-spec/terminology.md:55`) makes status a controller projection written
+only on a material transition. The runner is doing what the specification forbids.
+
+It is here because of a **known control-plane gap**: nothing transitions a `Robot` from
+`Discovered` to `Idle`. RFC-0001 requires that transition
+(`rfcs/rfc-0001-core-spec/crds/discoveredrobot.md:342-344`) but assigns it to no component —
+the Robot reconciler writes `phase` only to `Offline` (RFC-0001 §9.3.3), the Zone
+Controller only to `Maintenance` (`control-plane.md:318`), and the Scheduler only reads it
+(`control-plane.md:207`). In the code, the sole writer of `Idle`
+(`internal/controller/fleetaction_controller.go:1450`) fires on *task release* and requires
+the robot to have already been `Assigned`/`InProgress`. Since scheduler filter 1
+(`control-plane.md:148`, `internal/scheduler/scheduler.go:131`) admits only `Idle` robots,
+without the patch no robot is ever schedulable and no task is ever assigned.
+
+**What that means for reading this demo:** the scheduler's *selection* — filters, ranking,
+assignment, lease, reroute — is real and unmodified. The robot's *readiness* is asserted by
+the runner, not derived by the control plane. Do not read a green quickstart as evidence that
+robot admission works end to end.
+
+Two smaller projections, same rule, same reason:
+
+- `status.hardware[]` on the `hardware-fault` scenario
+  (`examples/warehouse-quickstart/run.sh:1272`, `:1296`) — the live adapter's hardware
+  telemetry does not reach `status.hardware`, so the runner writes it. Everything downstream of
+  the capability degrading (safe-stop, requeue, reroute) is real control-plane code.
+- `status.estopState` in the full-surface gate (`examples/full-surface-demo/run.sh:373-380`) —
+  the real estop path needs mTLS adapter identity, which the dev overlay disables. RFC-0001
+  requires this field to come from a confirmed `EstopAck` and never be inferred
+  (`crds/robot.md:331-332`); the runner infers it, and labels the step accordingly.

@@ -2,12 +2,12 @@
 
 `swarmtop` is a read-only terminal inspector for a running Swarmada control
 plane — a live view of `Robot`, `FleetAction`, `FleetTask`, `FleetZone`, `FleetAdapter`, and `RobotProbe`
-state. **For now it exists only to make the demos legible.** It is staged
+state. **Its only purpose is to make the demos legible.** It is staged
 in-tree at `tools/swarmtop/` and built with a single `make` target; there is no
 Helm chart, no Homebrew/Scoop/krew package, and no separate repo yet — those are
 deferred (see [ADR-0018](adr/0018-swarmtop-repository-placement.md)).
 
-If you just want to watch the demo, the simplest path is `make demo`, which
+If you want to watch the demo, the simplest path is `make demo`, which
 builds and launches swarmtop for you. Everything below is the two-terminal
 manual version and the details.
 
@@ -78,5 +78,5 @@ no import changes.
 | `command not found` | not built yet | `make swarmtop` → `tools/swarmtop/bin/swarmtop` |
 
 ## Related
-- [ADR-0018](adr/0018-swarmtop-repository-placement.md) — why swarmtop is demo-only and in-tree for now
+- [ADR-0018](adr/0018-swarmtop-repository-placement.md) — why swarmtop is demo-only and in-tree at v0.3
 - [`docs/deploy-minikube.md`](deploy-minikube.md)
