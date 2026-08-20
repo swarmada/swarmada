@@ -204,7 +204,7 @@ func TestDescribeGenericFleetAction(t *testing.T) {
 		Spec:       fleetv1.FleetActionSpec{Type: "pick", Zone: "warehouse-a", Priority: "Normal"},
 		Status:     fleetv1.FleetActionStatus{Phase: "InProgress", AssignedRobot: "sim-robot-002"},
 	}
-	def, _ := resolveResource("ft")
+	def, _ := resolveResource("fact")
 	var out bytes.Buffer
 	o := newTestOptions(&out, cli.OutputTable)
 	o.describeGeneric(def, action)
@@ -216,21 +216,48 @@ func TestDescribeGenericFleetAction(t *testing.T) {
 	}
 }
 
-func TestRegistryCoversTwelveCRDs(t *testing.T) {
-	if len(resourceOrder) != 12 {
-		t.Fatalf("expected 12 registered resources, got %d", len(resourceOrder))
+// The registry must cover every CRD, and every short name must be the one the
+// type itself declares. The previous version of this test asserted 12 resources
+// and "ft" => FleetAction, which pinned the FleetTask omission and the alias
+// collision as intended behaviour: the bug could not be fixed without the test
+// failing, so the test was evidence for the bug rather than against it.
+//
+// The short names below are transcribed from the +kubebuilder:resource markers
+// in api/v1. Anything else means `kubectl get <short>` and `swarmctl get <short>`
+// resolve to different kinds.
+func TestRegistryCoversEveryCRD(t *testing.T) {
+	const wantResources = 13
+	if len(resourceOrder) != wantResources {
+		t.Fatalf("expected %d registered resources, got %d", wantResources, len(resourceOrder))
 	}
 	// Every short name resolves back to its kind.
 	shorts := map[string]string{
-		"rob": "Robot", "ft": "FleetAction", "fz": "FleetZone", "rc": "RobotClass",
-		"dr": "DiscoveredRobot", "fa": "FleetAdapter", "rp": "RobotProbe",
+		"rob": "Robot", "fact": "FleetAction", "ft": "FleetTask", "fz": "FleetZone",
+		"rc": "RobotClass", "dr": "DiscoveredRobot", "fa": "FleetAdapter", "rp": "RobotProbe",
 		"fwr": "FirmwareRollout", "mr": "ModelRollout", "mp": "ModelPolicy",
 		"sc": "SwarmadaConfig", "zm": "ZoneMaintenance",
+	}
+	if len(shorts) != wantResources {
+		t.Fatalf("short-name table lists %d entries, want %d — add the new CRD here too", len(shorts), wantResources)
 	}
 	for short, kind := range shorts {
 		def, err := resolveResource(short)
 		if err != nil || def.kind != kind {
 			t.Errorf("short %q => %v (err %v), want kind %s", short, def, err, kind)
+		}
+	}
+	// Every registered resource is addressable by all four of its spellings, so a
+	// kind cannot be half-registered the way FleetTask was.
+	for _, r := range resourceOrder {
+		for _, spelling := range append([]string{r.plural, r.singular, strings.ToLower(r.kind)}, r.aliases...) {
+			def, err := resolveResource(spelling)
+			if err != nil {
+				t.Errorf("%s: spelling %q does not resolve: %v", r.kind, spelling, err)
+				continue
+			}
+			if def.kind != r.kind {
+				t.Errorf("%s: spelling %q resolves to %s", r.kind, spelling, def.kind)
+			}
 		}
 	}
 }

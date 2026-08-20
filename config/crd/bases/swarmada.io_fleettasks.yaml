@@ -116,6 +116,15 @@ spec:
                             reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
                             standalone action; for an action owned by a FleetTask the composite is authoritative and
                             reconciles it to the action's desiredState.
+
+                            LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                            Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                            action stays Paused until an operator resumes, requeues, or cancels it through the
+                            verb-gated intake, because Paused has a single resume rule whatever produced it —
+                            an estop or this field — and an operator reading phase: Paused must never have to
+                            ask which path produced it before deciding whether it will move on its own.
+                            Cancelled is the one value that is level-triggered in both directions, because
+                            cancellation is terminal and there is nothing to lift.
                           type: string
                         estimatedDurationSeconds:
                           description: |-
@@ -311,6 +320,15 @@ spec:
                             reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
                             standalone action; for an action owned by a FleetTask the composite is authoritative and
                             reconciles it to the action's desiredState.
+
+                            LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                            Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                            action stays Paused until an operator resumes, requeues, or cancels it through the
+                            verb-gated intake, because Paused has a single resume rule whatever produced it —
+                            an estop or this field — and an operator reading phase: Paused must never have to
+                            ask which path produced it before deciding whether it will move on its own.
+                            Cancelled is the one value that is level-triggered in both directions, because
+                            cancellation is terminal and there is nothing to lift.
                           type: string
                         estimatedDurationSeconds:
                           description: |-
@@ -459,7 +477,10 @@ spec:
                         DependsOn lists member names that gate this action's start. Empty = a root action, eligible
                         immediately (subject to the start barrier). Multiple entries are an AND-join: eligible only
                         when EVERY predecessor has reached this action's StartCondition. Must be acyclic and name
-                        existing members (enforced at admission).
+                        existing members. Specified to be enforced at admission; at v0.3 this is validated by
+                        validateGraph on every non-terminal reconcile instead, not by the admission webhook — a
+                        cyclic or dangling entry is currently admitted and fails on the next reconcile. See
+                        crds/fleettask.md.
                       items:
                         type: string
                       type: array
@@ -501,7 +522,11 @@ spec:
                       default: Auto
                       description: |-
                         Trigger controls eligibility. Auto (default): eligible when DependsOn is satisfied. OnEvent:
-                        dormant until an authorized append/patch activates it.
+                        dormant until an authorized append/patch activates it. Specified to allow an existing entry's
+                        Trigger to be flipped OnEvent -> Auto post-creation as the sole exception to Actions being
+                        otherwise immutable once created; at v0.3 this is not implemented — ValidateUpdate's
+                        append-only check rejects any change to an existing action, including a Trigger-only flip.
+                        See crds/fleettask.md.
                       type: string
                   required:
                   - action

@@ -195,6 +195,12 @@ func (e *Engine) RequestReservation(ctx context.Context, req ReservationRequest)
 			// reservation (§9.4.6).
 			if req.Priority.CanPreempt() {
 				if preempted := e.preempt(zs); preempted != nil {
+					// A preempted reservation's shared-resource holds go with it.
+					// preempt() drops the entry from zs.reservations and nothing else,
+					// so before this the evicted action stayed the recorded holder of
+					// every corridor and lift it had been granted -- with no reservation
+					// left for anything to release later.
+					e.releaseActionHolds(ctx, req.Namespace, preempted.ActionID, states)
 					e.appendReservation(zs, req, now, cfg)
 					e.grantResources(ctx, req, states, now)
 					e.mirrorAll(ctx, req.Namespace, states)
@@ -373,16 +379,97 @@ func durationOrMax(d *int32) int64 {
 // ReleaseReservation removes a action's zone reservation and releases any shared
 // resource it holds, promoting the next queued waiter.
 func (e *Engine) ReleaseReservation(ctx context.Context, namespace, zone, actionID string) error {
-	states, unlock := e.lockZones(namespace, zone)
+	// Every zone in the namespace, not just the action's own. A shared resource lives in
+	// the state of the zone that DECLARES it, which is routinely not the zone the action
+	// was reserved in -- RequestReservation already locks both for exactly that reason.
+	// Releasing only the action's own zone left every hold on an ancestor-declared
+	// corridor or lift permanently held by a finished action, with its waiters never
+	// promoted (D-TDE-8). lockZones sorts, so the wider set is still deadlock-free.
+	states, unlock := e.lockZones(namespace, append([]string{zone}, e.namespaceZones(ctx, namespace)...)...)
 	defer unlock()
-	zs := states[zoneKey(namespace, zone)]
-	zs.reservations = removeByAction(zs.reservations, actionID)
-	for _, q := range zs.resources {
-		capacity := e.resourceCapacity(ctx, namespace, zone, q.ResourceName)
-		releaseHolder(q, actionID, e.now(), capacity)
+	if zs := states[zoneKey(namespace, zone)]; zs != nil {
+		zs.reservations = removeByAction(zs.reservations, actionID)
 	}
-	e.mirrorAll(ctx, namespace, states)
+	touched := e.releaseActionHolds(ctx, namespace, actionID, states)
+	// The action's own zone is mirrored unconditionally -- its reservation list may have
+	// changed. Every other zone is mirrored only if a hold actually moved there, so a
+	// release does not turn into a status write against every zone in the namespace.
+	if zs := states[zoneKey(namespace, zone)]; zs != nil {
+		touched[zoneKey(namespace, zone)] = zs
+	}
+	e.mirrorAll(ctx, namespace, touched)
 	return nil
+}
+
+// releaseActionHolds drops actionID's holds and queued entries from every already-locked
+// zone state, promoting each freed resource's next waiter. Returns the states it changed.
+//
+// Callers must have locked every state passed in; this never widens the lock set, so a
+// caller holding a subset releases within that subset. ReleaseReservation locks the whole
+// namespace precisely so its call is complete.
+func (e *Engine) releaseActionHolds(
+	ctx context.Context, namespace, actionID string, states map[string]*zoneState,
+) map[string]*zoneState {
+	touched := map[string]*zoneState{}
+	for key, zs := range states {
+		zoneName := key[len(namespace)+1:]
+		for _, q := range zs.resources {
+			if !queueHasAction(q, actionID) {
+				continue
+			}
+			capacity := e.resourceCapacity(ctx, namespace, zoneName, q.ResourceName)
+			releaseHolder(q, actionID, e.now(), capacity)
+			touched[key] = zs
+		}
+	}
+	return touched
+}
+
+// queueHasAction reports whether actionID holds or is queued for the resource.
+func queueHasAction(q *fleetv1.SharedResourceQueue, actionID string) bool {
+	for i := range q.CurrentHolders {
+		if q.CurrentHolders[i].ActionID == actionID {
+			return true
+		}
+	}
+	for i := range q.WaitQueue {
+		if q.WaitQueue[i].ActionID == actionID {
+			return true
+		}
+	}
+	return false
+}
+
+// queueActionIDs lists every action holding or queued for the resource.
+func queueActionIDs(q *fleetv1.SharedResourceQueue) []string {
+	out := make([]string, 0, len(q.CurrentHolders)+len(q.WaitQueue))
+	for i := range q.CurrentHolders {
+		out = append(out, q.CurrentHolders[i].ActionID)
+	}
+	for i := range q.WaitQueue {
+		out = append(out, q.WaitQueue[i].ActionID)
+	}
+	return out
+}
+
+// namespaceZones lists every zone name in the namespace.
+//
+// Best-effort: on a list error it returns nothing, so a release still processes the zone
+// it was handed. Failing the release outright would be the worse direction -- it would
+// leave the reservation in place as well as the holds.
+func (e *Engine) namespaceZones(ctx context.Context, namespace string) []string {
+	if e.client == nil {
+		return nil
+	}
+	var zl fleetv1.FleetZoneList
+	if err := e.client.List(ctx, &zl, client.InNamespace(namespace)); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(zl.Items))
+	for i := range zl.Items {
+		out = append(out, zl.Items[i].Name)
+	}
+	return out
 }
 
 func removeByAction(rs []fleetv1.ZoneReservation, actionID string) []fleetv1.ZoneReservation {

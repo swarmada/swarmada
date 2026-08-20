@@ -93,9 +93,10 @@ spec:
               maxDownloadTimeMinutes:
                 default: 30
                 description: |-
-                  MaxDownloadTimeMinutes: if a model download exceeds this duration on a
-                  given robot, that robot's update is marked Failed.
-                  0 means no limit.
+                  MaxDownloadTimeMinutes: specified so that if a model download exceeds this
+                  duration on a given robot, that robot's update is marked Failed.
+                  0 means no limit. Specified, not implemented at v0.3: no controller reads
+                  this field or times a download against it.
                 format: int32
                 maximum: 480
                 minimum: 0
@@ -158,7 +159,9 @@ spec:
               revokesCapabilities:
                 description: |-
                   RevokesCapabilities lists capabilities removed when this model replaces
-                  a previous model with a different capability profile.
+                  a previous model with a different capability set. ("Capability set" is the
+                  northbound seam of ADR-0037; the southbound axis is a "protocol profile".
+                  This comment said "capability profile", which is neither.)
                   MaxItems bounds CEL cost (see GrantsCapabilities above).
                 items:
                   type: string
@@ -212,8 +215,16 @@ spec:
                       pauseOnError:
                         default: true
                         description: |-
-                          PauseOnError halts the rollout if any robot fails to update.
-                          The operator must resume with swarmctl resume rollout.
+                          PauseOnError halts the rollout if any robot fails to update: no further robot
+                          enters the batch while a failure stands, though in-flight updaters continue.
+
+                          The operator resumes with `swarmctl rollout resume`, which is gated on the
+                          rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                          annotation the controller consumes. Resume EXCLUDES the robots that failed from
+                          further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+                          artifact needs a fresh rollout. Excluded robots are named in
+                          status.excludedRobots and count as settled, so the rollout can reach a terminal
+                          phase and its record becomes deletable.
                         type: boolean
                     type: object
                   type:
@@ -401,6 +412,17 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              excludedRobots:
+                description: |-
+                  ExcludedRobots names the robots an operator resume removed from this rollout
+                  (ADR-0041). They failed, the operator resumed past them, and this rollout will
+                  not attempt them again — retrying a failed artifact is what a FRESH rollout is
+                  for. They are excluded from every progress bucket, so they neither re-pause the
+                  rollout nor hold it short of a terminal phase; a non-empty list surfaces that the
+                  fleet did not fully converge on this version.
+                items:
+                  type: string
+                type: array
               failedRobots:
                 items:
                   description: RolloutRobotResult records the failure outcome for

@@ -35,7 +35,7 @@ func requeueReqAction(name, robot string, phase fleetv1.ActionPhase, gen int64, 
 // Adapter acks the stop → the action returns to Pending (re-schedulable), the robot
 // is freed to Idle, the generation is preserved, and the annotation is cleared.
 func TestRequeue_AdapterAckReturnsToPending(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		requeueReqAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -78,7 +78,7 @@ func capLossReqAction(name, robot string, gen int64, lease *metav1.Time) *fleetv
 // Disposition STOPPED_SAFELY: the adapter safe-stopped → requeue to Pending, exactly
 // like the ZoneMaintenance path.
 func TestCapabilityLoss_StoppedSafely_Requeues(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		capLossReqAction("t1", "r1", 4, live),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -99,7 +99,7 @@ func TestCapabilityLoss_StoppedSafely_Requeues(t *testing.T) {
 // Disposition RECOVERED: the adapter recovered a mid-commitment robot → the action
 // Fails with CapabilityLostDuringExecution (onFailure then governs retry).
 func TestCapabilityLoss_Recovered_Fails(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		capLossReqAction("t1", "r1", 4, live),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -124,7 +124,7 @@ func TestCapabilityLoss_Recovered_Fails(t *testing.T) {
 // cancel is moot, the annotation is dropped, and the action is neither requeued nor
 // failed (normal completion settles it).
 func TestCapabilityLoss_Completed_NoReassign(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		capLossReqAction("t1", "r1", 4, live),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -145,7 +145,7 @@ func TestCapabilityLoss_Completed_NoReassign(t *testing.T) {
 // Unreachable adapter with a LIVE lease → HOLD: the robot may still be executing,
 // so the action is not requeued and the robot stays bound (single-executor safety).
 func TestRequeue_UnreachableLiveLeaseHolds(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		requeueReqAction("t1", "r1", fleetv1.ActionPhaseInProgress, 4, live),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),

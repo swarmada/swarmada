@@ -262,6 +262,20 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	robot.Status.Capabilities = deriveCapabilities(robot)
 	r.recordCapabilityDegradations(ctx, robot, priorCaps, robot.Status.Capabilities)
 
+	// ── 3a. Derive aggregate health (§9.3.3) ──────────────────────────────────
+	// A pure summary of the two collections resolved immediately above — no lookups,
+	// no clock, no I/O — so it adds NO etcd write of its own: like the OfflineSince
+	// write below it rides the material-change patch in section 4 (RA-1: never a
+	// telemetry-tick write). deriveHealth sorts every name it reports for exactly
+	// that reason; an unstably-ordered message would differ on every reconcile and
+	// turn the DeepEqual guard into a write amplifier.
+	//
+	// Phase is deliberately NOT an input. Connectivity carries its own signal in the
+	// ConnectivityCritical condition below, and folding it in here would report an
+	// Offline robot with faultless hardware as Critical hardware — making both
+	// signals harder to read.
+	robot.Status.Health = deriveHealth(robot)
+
 	// ── 3b. Offline-duration accounting (§9.3.8) ──────────────────────────────
 	// Anchor OfflineSince when the robot enters Offline; at reconnect (phase left
 	// Offline) observe the completed span and clear the anchor. Purely
@@ -403,9 +417,10 @@ func (r *RobotReconciler) autoRemovePolicy(ctx context.Context, namespace string
 
 // assignedLeaseProvablyDead reports whether the robot holds no live lease: it has no assigned
 // action, the named FleetAction is gone, or that action's lease horizon is provably past
-// (§9.6.3.5, reusing leaseProvablyDead/leaseClockSkew from the action controller). A nil horizon
-// is NOT proof of death, and a transient lookup error FAILS CLOSED (returns false) so removal
-// never races a robot that might still be executing (ADR-0030).
+// (§9.6.3.5, reusing leaseProvablyDead/leaseTimings from the action controller, so this
+// controller and the FleetAction controller judge lease death by the SAME namespace-resolved
+// skew — ADR-0044). A nil horizon is NOT proof of death, and a transient lookup error FAILS
+// CLOSED (returns false) so removal never races a robot that might still be executing (ADR-0030).
 func (r *RobotReconciler) assignedLeaseProvablyDead(ctx context.Context, robot *fleetv1.Robot) bool {
 	name := robot.Status.AssignedAction
 	if name == "" {
@@ -418,7 +433,8 @@ func (r *RobotReconciler) assignedLeaseProvablyDead(ctx context.Context, robot *
 		}
 		return false // fail closed on a transient error
 	}
-	return leaseProvablyDead(leaseTime(action.Status.LeaseExpiresAt), time.Now(), leaseClockSkew)
+	_, _, skew := leaseTimings(ctx, r.Client, robot.Namespace)
+	return leaseProvablyDead(leaseTime(action.Status.LeaseExpiresAt), time.Now(), skew)
 }
 
 // isLivenessOwnedPhase reports whether the Robot controller may advance this phase when the
@@ -526,6 +542,81 @@ func deriveCapabilities(robot *fleetv1.Robot) []fleetv1.CapabilityStatusEntry {
 		result[i] = byName[name]
 	}
 	return result
+}
+
+// deriveHealth computes status.health from status.hardware[] and status.capabilities[],
+// per the aggregate rule in §9.3.3:
+//
+//	Healthy  — all hardware components Healthy; all pauseable:false capabilities Active
+//	Degraded — >=1 component Degraded, none Failed; all pauseable:false capabilities Active
+//	Critical — any component Failed, OR any pauseable:false capability not Active
+//
+// Two things the rule does not settle, resolved here:
+//
+//   - A Disabled component does not count against health. HardwareDisabled is
+//     "intentionally not in service ... benign, reversible, and NOT critical"
+//     (api/v1/robot_types.go), so it is neither a fault nor grounds to withhold Healthy.
+//     Read literally, "all components Healthy" would leave a robot with one switched-off
+//     sensor in none of the three states at all.
+//   - Only spec-declared capabilities carry a pauseable flag. Model-granted entries
+//     (status.modelGrantedCapabilities) are synthetic, declare no pauseable, and are
+//     additive grants — so they are not "pauseable:false capabilities" and do not gate
+//     health.
+//
+// Phase is not an input; see the call site.
+func deriveHealth(robot *fleetv1.Robot) *fleetv1.RobotHealth {
+	var failed, degraded []string
+	for _, hw := range robot.Status.Hardware {
+		switch hw.Status {
+		case fleetv1.HardwareFailed:
+			failed = append(failed, hw.Name)
+		case fleetv1.HardwareDegraded:
+			degraded = append(degraded, hw.Name)
+		}
+	}
+
+	// A capability gates health only when its definition marks it non-pauseable: those
+	// are the safety-critical ones the scheduler may never suspend, so losing one is a
+	// different class of event from losing a capability that is allowed to be paused.
+	nonPauseable := make(map[string]bool, len(robot.Spec.Capabilities))
+	for i := range robot.Spec.Capabilities {
+		if !robot.Spec.Capabilities[i].Pauseable {
+			nonPauseable[robot.Spec.Capabilities[i].Name] = true
+		}
+	}
+	var lost []string
+	for _, c := range robot.Status.Capabilities {
+		if nonPauseable[c.Name] && c.Status != fleetv1.CapabilityStatusActive {
+			lost = append(lost, c.Name)
+		}
+	}
+
+	// Sorted so the message is a function of the SET, not of telemetry arrival order.
+	sort.Strings(failed)
+	sort.Strings(degraded)
+	sort.Strings(lost)
+
+	switch {
+	case len(failed) > 0 || len(lost) > 0:
+		var parts []string
+		if len(failed) > 0 {
+			parts = append(parts, "hardware failed: "+strings.Join(failed, ", "))
+		}
+		if len(lost) > 0 {
+			parts = append(parts, "non-pauseable capability not Active: "+strings.Join(lost, ", "))
+		}
+		return &fleetv1.RobotHealth{
+			Status:  fleetv1.HealthStateCritical,
+			Message: strings.Join(parts, "; "),
+		}
+	case len(degraded) > 0:
+		return &fleetv1.RobotHealth{
+			Status:  fleetv1.HealthStateDegraded,
+			Message: "hardware degraded: " + strings.Join(degraded, ", "),
+		}
+	default:
+		return &fleetv1.RobotHealth{Status: fleetv1.HealthStateHealthy}
+	}
 }
 
 // evaluateCapability applies the §6.10 truth table to one declared capability.

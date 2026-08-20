@@ -10,6 +10,66 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-swarmada-io-v1-firmwarerollout
+  failurePolicy: Ignore
+  name: mfirmwarerollout.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - firmwarerollouts
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-swarmada-io-v1-fleetzone
+  failurePolicy: Ignore
+  name: mfleetzone.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - fleetzones
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-swarmada-io-v1-modelrollout
+  failurePolicy: Ignore
+  name: mmodelrollout.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - modelrollouts
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-swarmada-io-v1-robot
   failurePolicy: Fail
   name: mrobot.swarmada.io
@@ -23,6 +83,26 @@ webhooks:
     - UPDATE
     resources:
     - robots
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-swarmada-io-v1-swarmadaconfig
+  failurePolicy: Ignore
+  name: mswarmadaconfig.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - swarmadaconfigs
   sideEffects: None
 ---
 apiVersion: admissionregistration.k8s.io/v1

@@ -760,6 +760,11 @@ func (in *FirmwareRolloutStatus) DeepCopyInto(out *FirmwareRolloutStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.ExcludedRobots != nil {
+		in, out := &in.ExcludedRobots, &out.ExcludedRobots
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))
@@ -1864,6 +1869,11 @@ func (in *ModelRolloutStatus) DeepCopyInto(out *ModelRolloutStatus) {
 	}
 	if in.RolledBackRobots != nil {
 		in, out := &in.RolledBackRobots, &out.RolledBackRobots
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ExcludedRobots != nil {
+		in, out := &in.ExcludedRobots, &out.ExcludedRobots
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}

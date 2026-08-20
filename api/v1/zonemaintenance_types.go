@@ -109,8 +109,11 @@ type ZoneMaintenanceSpec struct {
 	ScheduledStart *metav1.Time `json:"scheduledStart,omitempty"`
 
 	// AutoResumeAfterMinutes: if non-zero, the maintenance automatically
-	// deactivates this many minutes after activation (ZoneMaintenance deleted).
-	// 0 means the operator must manually resume.
+	// deactivates this many minutes after activation: status.phase transitions
+	// to Completed and all paused/wound-down robots are resumed. The object
+	// itself is NOT deleted — it is terminal (the controller no longer acts on
+	// it) but remains until the operator deletes it; there is no automatic
+	// garbage collection. 0 means the operator must manually resume.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1440
 	// +kubebuilder:default=0

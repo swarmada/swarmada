@@ -51,7 +51,7 @@ func soon(d time.Duration) *metav1.Time { t := metav1.NewTime(time.Now().Add(d))
 // A Succeeded action retires: the robot is freed for reuse and the lease cleared.
 func TestReconcile_Succeeded_RetiresAndFreesRobot(t *testing.T) {
 	r, c := newActionReconciler(t,
-		assignedAction("t1", "r1", fleetv1.ActionPhaseSucceeded, 5, soon(leaseDuration)),
+		assignedAction("t1", "r1", fleetv1.ActionPhaseSucceeded, 5, soon(defaultLeaseDuration)),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
 	)
 

@@ -29,6 +29,7 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
+	"github.com/swarmada/swarmada/internal/metrics"
 	"github.com/swarmada/swarmada/internal/safety"
 )
 
@@ -81,10 +82,15 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if reason == "" || reason == "true" {
 		reason = "robot emergency stop"
 	}
-	issuedBy := "robot-estop:" + robot.Name
+	actor := estopActor(robot.Annotations, "robot-estop:"+robot.Name)
+	issuedBy := actor.Identity
 
 	sentAt := r.clock()
-	res, terr := r.Estopper.TriggerEstop(ctx, robot.Namespace, robot.Name, reason, issuedBy)
+	// Robot scope: a single stop, no fan-out — deliberately NOT observed on the fan-out
+	// histogram, whose population must stay "episodes that fan out" for its quantiles to
+	// mean anything.
+	res, terr := r.Estopper.TriggerEstop(ctx, robot.Namespace, robot.Name, reason, issuedBy,
+		metrics.ScopeRobot)
 	confirmed := terr == nil && res.State == fleetv1.RobotEstopStopped
 	if !confirmed {
 		logger.Info("robot estop not confirmed (escalate)", "robot", robot.Name,
@@ -101,7 +107,7 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			EventType: audit.EventEstopTriggered,
 			Action:    "estop-trigger",
 			Outcome:   outcome,
-			Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: issuedBy},
+			Actor:     actor,
 			Resource:  audit.Resource{Kind: "Robot", Namespace: robot.Namespace, Name: robot.Name},
 			// The §9.6.2.2 SLA is measured on this round trip, so the audit chain — not
 			// only Prometheus — carries the evidence a post-incident review needs. A
@@ -131,7 +137,8 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 // action Paused by the estop stays operator-gated (§9.6.2.4).
 func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, robot *fleetv1.Robot) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	clearedBy := "robot-estop:" + robot.Name
+	actor := estopActor(robot.Annotations, "robot-estop:"+robot.Name)
+	clearedBy := actor.Identity
 	if _, cerr := r.Estopper.ClearEstop(ctx, robot.Namespace, robot.Name, clearedBy); cerr != nil {
 		logger.Error(cerr, "clearing robot estop", "robot", robot.Name)
 	}
@@ -142,7 +149,7 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, robot *fleet
 			EventType: audit.EventEstopCleared,
 			Action:    "estop-clear",
 			Outcome:   audit.OutcomeAllowed,
-			Actor:     audit.Actor{Type: audit.ActorServiceAccount, Identity: clearedBy},
+			Actor:     actor,
 			Resource:  audit.Resource{Kind: "Robot", Namespace: robot.Namespace, Name: robot.Name},
 		}); aerr != nil {
 			logger.Error(aerr, "recording ESTOP_CLEARED audit entry")

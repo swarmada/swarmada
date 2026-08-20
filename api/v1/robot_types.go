@@ -564,6 +564,8 @@ type RobotStatus struct {
 	// bucket boundary — never on every telemetry tick (RA-1). For continuous
 	// battery history, query the telemetry TSDB, not this field.
 	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
 	BatteryPercent *int32 `json:"batteryPercent,omitempty"`
 
 	// Position is a COARSE, heavily-throttled last-known pose retained for

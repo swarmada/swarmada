@@ -227,6 +227,15 @@ type FleetActionSpec struct {
 	// reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
 	// standalone action; for an action owned by a FleetTask the composite is authoritative and
 	// reconciles it to the action's desiredState.
+	//
+	// LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+	// Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+	// action stays Paused until an operator resumes, requeues, or cancels it through the
+	// verb-gated intake, because Paused has a single resume rule whatever produced it —
+	// an estop or this field — and an operator reading phase: Paused must never have to
+	// ask which path produced it before deciding whether it will move on its own.
+	// Cancelled is the one value that is level-triggered in both directions, because
+	// cancellation is terminal and there is nothing to lift.
 	// +kubebuilder:validation:Enum=Running;Paused;Returning;Cancelled
 	// +kubebuilder:default=Running
 	// +optional

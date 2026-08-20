@@ -123,7 +123,7 @@ func TestFleetActionMetrics_AssignmentLatencyPriorityLabel(t *testing.T) {
 
 // A steady-state lease renewal (actionRenew) increments the renewals counter.
 func TestFleetActionMetrics_LeaseRenewalCounted(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, _ := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 3, live),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "t1"),
@@ -163,7 +163,7 @@ func TestFleetActionMetrics_LeaseExpiryCounted(t *testing.T) {
 // A clean condition-2 release (robot present, confirmed NOT running T) is not a
 // lease expiry and must NOT increment lease_expiries.
 func TestFleetActionMetrics_CleanReleaseIsNotAnExpiry(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	// InProgress action, robot reachable but Idle & not holding t1 → robotFree → the
 	// evaluateLease core returns actionReassign (cond. 2), a clean release.
 	r, _ := newActionReconciler(t,

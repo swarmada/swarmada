@@ -90,7 +90,7 @@ func TestRobotSchema_ProvidingModelMustBeInstalled(t *testing.T) {
 
 // ── FirmwareRollout: newVersion must be an orderable semver ────────────────────────────
 
-func TestFirmwareRolloutSchema_NewVersionIsSemver(t *testing.T) {
+func TestFirmwareRolloutSchema_NewVersionIsOpaque(t *testing.T) {
 	requireEnvtest(t)
 	ns := envtestNamespace(t)
 	ctx := context.Background()
@@ -107,20 +107,54 @@ func TestFirmwareRolloutSchema_NewVersionIsSemver(t *testing.T) {
 		}
 	}
 
-	// Each of these reads as a version to a human and orders as nothing to a comparator, so
-	// admitting them defers the failure to batch selection — after the operator believes the
-	// rollout is scheduled.
-	for _, bad := range []string{"latest", "v2.1.0", "2.1", "2.1.0-rc1", "2.1.0+build7", ""} {
-		if err := envK8s.Create(ctx, rollout(bad)); err == nil {
-			t.Fatalf("newVersion %q was accepted; it is not an orderable major.minor.patch", bad)
+	// Firmware versions are OPAQUE (RFC-0001 D2). The controller classifies robots by
+	// EQUALITY -- Status.FirmwareVersion == NewVersion, and the pending-firmware
+	// annotation == NewVersion -- and sorts the eligible set by NAME. Nothing orders
+	// versions, so constraining the form would reject valid vendor strings while
+	// protecting no behaviour.
+	for _, ok := range []string{"latest", "v2.1.0", "2.1", "2.1.0-rc1", "2.1.0+build7", "2026.06", "10.20.30"} {
+		if err := envK8s.Create(ctx, rollout(ok)); err != nil {
+			t.Fatalf("newVersion %q must be accepted -- firmware versions are opaque: %v", ok, err)
 		}
 	}
-	if err := envK8s.Create(ctx, rollout("2.1.0")); err != nil {
-		t.Fatalf("a plain semver must be accepted: %v", err)
+	// MinLength=1 still applies: a target with no version is meaningless.
+	if err := envK8s.Create(ctx, rollout("")); err == nil {
+		t.Fatal("an empty newVersion must be rejected (MinLength=1)")
 	}
-	// Multi-digit components are ordinary, not an edge case to exclude.
-	if err := envK8s.Create(ctx, rollout("10.20.30")); err != nil {
-		t.Fatalf("multi-digit semver must be accepted: %v", err)
+}
+
+func TestModelRolloutSchema_NewVersionIsSemver(t *testing.T) {
+	requireEnvtest(t)
+	ns := envtestNamespace(t)
+	ctx := context.Background()
+
+	rollout := func(version string) *fleetv1.ModelRollout {
+		return &fleetv1.ModelRollout{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "mr-", Namespace: ns},
+			Spec: fleetv1.ModelRolloutSpec{
+				TargetSelector: metav1.LabelSelector{MatchLabels: map[string]string{"fleet": "a"}},
+				ModelName:      "item-recognition",
+				NewVersion:     version,
+				ModelURI:       "oci://registry.example.test/models/item-recognition:1.0.0",
+				ModelChecksum:  "sha256:" + strings.Repeat("a", 64),
+			},
+		}
+	}
+
+	// The asymmetry with FirmwareRollout above is DELIBERATE and load-bearing: the
+	// ModelRollout controller refuses downgrades via versionIsNewer, which parses a
+	// bare major.minor.patch. Relaxing this pattern to "match firmware" would not
+	// fail loudly -- versionIsNewer would return ok=false and the downgrade refusal
+	// would silently stop firing. This test exists to make that regression visible.
+	for _, bad := range []string{"latest", "v2.1.0", "2.1", "2.1.0-rc1", "2.1.0+build7", ""} {
+		if err := envK8s.Create(ctx, rollout(bad)); err == nil {
+			t.Fatalf("newVersion %q was accepted; ModelRollout needs an orderable major.minor.patch", bad)
+		}
+	}
+	for _, ok := range []string{"2.1.0", "10.20.30"} {
+		if err := envK8s.Create(ctx, rollout(ok)); err != nil {
+			t.Fatalf("a plain semver must be accepted: %v", err)
+		}
 	}
 }
 

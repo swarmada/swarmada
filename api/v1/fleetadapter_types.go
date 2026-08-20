@@ -29,9 +29,14 @@ import (
 //
 // NOTE: this is the twelfth CRD (RFC-0001 §5.2.12). The admission-gating webhook
 // that consumes this type IS implemented (internal/webhook/robot_webhook.go,
-// RobotAdmissionGate). What remains follow-on work is the FleetAdapter status
-// controller that sets status.phase/status.conformance and the §5.3.7 conformance
-// suite that produces a verified passing report.
+// RobotAdmissionGate). The FleetAdapter status controller that sets
+// status.phase/status.conformance IS also implemented
+// (internal/controller/fleetadapter_controller.go: digest- and
+// signature-verified conformance report consumption per §9.1.12). The §5.3.7
+// conformance suite (adapters/conformance/) IS implemented as an executable
+// harness, but only drives the safety-critical subset C1-C6 (adapters/CONFORMANCE.md);
+// C7, C8, part of C4, and C9-C16 are not yet driven and report `skip`. Follow-on
+// work is widening that coverage, not building the harness from scratch.
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
 
@@ -81,9 +86,12 @@ type FleetAdapterSpec struct {
 	// Vendor is the robot manufacturer or adapter provider (e.g. "acme-robotics").
 	Vendor string `json:"vendor"`
 
-	// Endpoint is the gRPC address (host:port) the control plane dials to reach
-	// this adapter. The adapter implements fleet_adapter.v1.FleetAdapterService.
-	Endpoint string `json:"endpoint"`
+	// Endpoint is the gRPC address (host:port) the adapter is expected to be
+	// reachable at, for operator reference. Informational only: the control plane
+	// never dials it — the ControlStream is adapter-initiated (RFC-0001 §9.2), so
+	// nothing in the reconciler reads this field.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 
 	// ProtocolVersion is the Fleet Adapter protocol version this adapter
 	// implements. The control plane refuses to drive robots through an adapter

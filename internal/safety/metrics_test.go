@@ -30,7 +30,7 @@ import (
 // commandsCounter reads the current value of the estop_commands_total series for
 // (ns, acme, robot, result).
 func commandsCounter(result string) float64 {
-	return testutil.ToFloat64(metrics.EstopCommandsTotal.WithLabelValues(ns, "acme", metrics.ScopeRobot, result))
+	return testutil.ToFloat64(metrics.EstopCommandsTotal.WithLabelValues(ns, "acme", string(metrics.ScopeRobot), result))
 }
 
 // A confirmed STOPPED estop increments estop_commands_total{result=ack_stopped}.
@@ -42,7 +42,7 @@ func TestEstopMetrics_ConfirmedStoppedCounted(t *testing.T) {
 	d.RegisterStream(identity("acme"), sender)
 
 	before := commandsCounter(metrics.ResultAckStopped)
-	if _, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator"); err != nil {
+	if _, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot); err != nil {
 		t.Fatalf("TriggerEstop: %v", err)
 	}
 	if got := commandsCounter(metrics.ResultAckStopped) - before; got != 1 {
@@ -58,7 +58,7 @@ func TestEstopMetrics_DroppedCountedAsTimeout(t *testing.T) {
 	d.RegisterStream(identity("acme"), sender)
 
 	before := commandsCounter(metrics.ResultTimeout)
-	if _, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator"); err != ErrUndelivered {
+	if _, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot); err != ErrUndelivered {
 		t.Fatalf("err = %v, want ErrUndelivered", err)
 	}
 	if got := commandsCounter(metrics.ResultTimeout) - before; got != 1 {
@@ -86,7 +86,7 @@ func TestEstopMetrics_LatencyViolationCounted(t *testing.T) {
 
 	violations := metrics.EstopLatencyViolationsTotal.WithLabelValues(ns, "acme", "amr-1")
 	before := testutil.ToFloat64(violations)
-	if _, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator"); err != nil {
+	if _, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot); err != nil {
 		t.Fatalf("TriggerEstop: %v", err)
 	}
 	if got := testutil.ToFloat64(violations) - before; got != 1 {

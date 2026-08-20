@@ -165,7 +165,8 @@ func (d *Dispatcher) RouteAck(ack *fav1.EstopAck) {
 // EstopAck.state=STOPPED; a dropped estop, silence, a send failure, an adapter
 // FAILED, or STOPPING-without-STOPPED all resolve to Failed (escalate), never
 // Stopped. Estop is never fenced — no lease/priority gate.
-func (d *Dispatcher) TriggerEstop(ctx context.Context, namespace, robotID, reason, issuedBy string) (Result, error) {
+func (d *Dispatcher) TriggerEstop(ctx context.Context, namespace, robotID, reason, issuedBy string,
+	scope metrics.EstopScope) (Result, error) {
 	robot := &fleetv1.Robot{}
 	if err := d.Client.Get(ctx, client.ObjectKey{Name: robotID, Namespace: namespace}, robot); err != nil {
 		return Result{}, fmt.Errorf("estop: robot %q lookup: %w", robotID, err)
@@ -208,7 +209,7 @@ func (d *Dispatcher) TriggerEstop(ctx context.Context, namespace, robotID, reaso
 	case first = <-ch:
 	case <-time.After(deliveryTimeout):
 		// Sent but no EstopAck: a Command that never acked (§9.3.8 result=timeout).
-		metrics.IncEstopCommand(namespace, adapter, metrics.ScopeRobot, metrics.ResultTimeout)
+		metrics.IncEstopCommand(namespace, adapter, scope, metrics.ResultTimeout)
 		d.setEstopState(ctx, robot, fleetv1.RobotEstopFailed, "no EstopAck within delivery window (dropped estop)")
 		return Result{State: fleetv1.RobotEstopFailed}, ErrUndelivered
 	case <-ctx.Done():
@@ -219,7 +220,7 @@ func (d *Dispatcher) TriggerEstop(ctx context.Context, namespace, robotID, reaso
 	violation := latency > d.slaThreshold
 	// §9.3.8: record the round-trip latency for every ack'd estop, and the SLA
 	// violation counter alongside the existing EstopLatencyViolation event.
-	metrics.ObserveEstopLatency(namespace, adapter, robotID, metrics.ScopeRobot, latency)
+	metrics.ObserveEstopLatency(namespace, adapter, robotID, scope, latency)
 	if violation {
 		metrics.IncEstopLatencyViolation(namespace, adapter, robotID)
 		d.recordLatencyViolation(ctx, robot, latency)
@@ -231,17 +232,17 @@ func (d *Dispatcher) TriggerEstop(ctx context.Context, namespace, robotID, reaso
 	// but is not double-counted.
 	switch first.GetState() {
 	case fav1.EstopState_ESTOP_STATE_STOPPED:
-		metrics.IncEstopCommand(namespace, adapter, metrics.ScopeRobot, metrics.ResultAckStopped)
+		metrics.IncEstopCommand(namespace, adapter, scope, metrics.ResultAckStopped)
 		d.setEstopState(ctx, robot, fleetv1.RobotEstopStopped, "confirmed stopped")
 		res.Confirmed, res.State = true, fleetv1.RobotEstopStopped
 		return res, nil
 	case fav1.EstopState_ESTOP_STATE_FAILED:
-		metrics.IncEstopCommand(namespace, adapter, metrics.ScopeRobot, metrics.ResultAckFailed)
+		metrics.IncEstopCommand(namespace, adapter, scope, metrics.ResultAckFailed)
 		d.setEstopState(ctx, robot, fleetv1.RobotEstopFailed, "adapter reported FAILED: "+first.GetMessage())
 		res.State = fleetv1.RobotEstopFailed
 		return res, nil
 	default: // STOPPING (or unspecified): stop commanded; await CONFIRMED STOPPED.
-		metrics.IncEstopCommand(namespace, adapter, metrics.ScopeRobot, metrics.ResultAckStopping)
+		metrics.IncEstopCommand(namespace, adapter, scope, metrics.ResultAckStopping)
 		d.setEstopState(ctx, robot, fleetv1.RobotEstopStopping, "stop commanded; awaiting confirmation")
 	}
 

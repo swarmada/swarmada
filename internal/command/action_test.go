@@ -67,6 +67,64 @@ func TestPushAssignAction_AcceptedRoundTrip(t *testing.T) {
 	}
 }
 
+// The payload must reach the wire on the ASSIGNMENT (§9.1.4.5), not only on
+// validate_action. proto field 3 `destination` is deprecated in favour of
+// payload_json, so this is the only field that can carry a Navigate's destination.
+func TestPushAssignAction_CarriesPayloadOnTheWire(t *testing.T) {
+	d, _ := newDispatcher(t, cmdAdapter)
+	sender := &fakeSender{dispatch: d, respond: func(cmd *fav1.Command) *fav1.CommandResult {
+		return &fav1.CommandResult{
+			CommandId: cmd.GetCommandId(),
+			RobotId:   cmd.GetRobotId(),
+			Result: &fav1.CommandResult_AssignAction{AssignAction: &fav1.AssignActionResult{
+				Accepted: true, AcceptedFencingToken: u64ptr(1),
+			}},
+		}
+	}}
+	d.RegisterStream(verifiedIdentity(), sender)
+
+	payload := []byte(`{"destination":{"x":3,"y":4}}`)
+	if _, err := d.PushAssignAction(context.Background(), cmdNS, cmdRobotID, AssignAction{
+		ActionID: "nav-1", ActionType: "Navigate", FencingToken: 1, Payload: payload,
+	}); err != nil {
+		t.Fatalf("PushAssignAction: %v", err)
+	}
+
+	at := sender.sent[0].GetAssignAction()
+	if at == nil {
+		t.Fatal("no assign_action on the wire")
+	}
+	if got := string(at.GetPayloadJson()); got != string(payload) {
+		t.Errorf("payload_json = %q, want %q", got, payload)
+	}
+}
+
+// A nil payload sends no bytes rather than an empty non-nil slice, so an adapter can
+// tell "no payload" from "empty payload" (docs/api-principles.md explicit presence).
+func TestPushAssignAction_NilPayloadSendsNoBytes(t *testing.T) {
+	d, _ := newDispatcher(t, cmdAdapter)
+	sender := &fakeSender{dispatch: d, respond: func(cmd *fav1.Command) *fav1.CommandResult {
+		return &fav1.CommandResult{
+			CommandId: cmd.GetCommandId(),
+			RobotId:   cmd.GetRobotId(),
+			Result: &fav1.CommandResult_AssignAction{AssignAction: &fav1.AssignActionResult{
+				Accepted: true, AcceptedFencingToken: u64ptr(1),
+			}},
+		}
+	}}
+	d.RegisterStream(verifiedIdentity(), sender)
+
+	if _, err := d.PushAssignAction(context.Background(), cmdNS, cmdRobotID, AssignAction{
+		ActionID: "nav-1", ActionType: "Navigate", FencingToken: 1,
+	}); err != nil {
+		t.Fatalf("PushAssignAction: %v", err)
+	}
+
+	if got := sender.sent[0].GetAssignAction().GetPayloadJson(); got != nil {
+		t.Errorf("payload_json = %#v, want nil when no payload is set", got)
+	}
+}
+
 func TestPushAssignAction_RejectedReportsRejection(t *testing.T) {
 	d, _ := newDispatcher(t, cmdAdapter)
 	sender := &fakeSender{dispatch: d, respond: func(cmd *fav1.Command) *fav1.CommandResult {

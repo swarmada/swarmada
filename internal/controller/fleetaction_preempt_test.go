@@ -46,7 +46,7 @@ func bandAction(name, robot string, phase fleetv1.ActionPhase, prio fleetv1.Acti
 // Core §9.1.4.3: a Critical action with no Idle robot preempts a Normal InProgress
 // action on an eligible robot — victim → Preempted, Critical → Assigned to it.
 func TestPreempt_CriticalDisplacesNormal(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		criticalPending("crit"),
 		bandAction("norm", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityNormal, 2, lease),
@@ -76,7 +76,7 @@ func TestPreempt_CriticalDisplacesNormal(t *testing.T) {
 // Victim eviction: once the robot holds the Critical action, the Preempted victim
 // requeues to Pending (generation preserved, retryCount is not tracked).
 func TestPreempt_VictimRequeuesOnceRobotSwitches(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		// Robot already switched to the critical action; victim left in Preempted.
 		bandAction("norm", "r1", fleetv1.ActionPhasePreempted, fleetv1.ActionPriorityNormal, 2, lease),
@@ -99,7 +99,7 @@ func TestPreempt_VictimRequeuesOnceRobotSwitches(t *testing.T) {
 
 // Critical never preempts another Critical (FIFO within the band).
 func TestPreempt_NeverPreemptsCritical(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		criticalPending("crit2"),
 		bandAction("crit1", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityCritical, 2, lease),
@@ -119,7 +119,7 @@ func TestPreempt_NeverPreemptsCritical(t *testing.T) {
 // A preemptor band never preempts High: High is not a preemptible victim band
 // (only Normal/Low are), so a Critical action leaves a High action running.
 func TestPreempt_DoesNotPreemptHigh(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		criticalPending("crit"),
 		bandAction("high", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityHigh, 2, lease),
@@ -136,7 +136,7 @@ func TestPreempt_DoesNotPreemptHigh(t *testing.T) {
 // §9.1.4.3 High-band preemption: a High action with no Idle robot preempts a Normal
 // InProgress action on an eligible robot — same displacement path as Critical.
 func TestPreempt_HighDisplacesNormal(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		pendingInBand("high", fleetv1.ActionPriorityHigh),
 		bandAction("norm", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityNormal, 2, lease),
@@ -160,7 +160,7 @@ func TestPreempt_HighDisplacesNormal(t *testing.T) {
 // A High action never preempts another High (FIFO within the preemptor bands) nor a
 // Critical — only Normal/Low are preemptible victims.
 func TestPreempt_HighNeverPreemptsHighOrCritical(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		pendingInBand("high2", fleetv1.ActionPriorityHigh),
 		bandAction("high1", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityHigh, 2, lease),
@@ -185,7 +185,7 @@ func TestPreempt_HighNeverPreemptsHighOrCritical(t *testing.T) {
 // Lowest-priority victim first: with both a Normal and a Low candidate, Low is
 // preempted.
 func TestPreempt_PrefersLowestBandVictim(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		criticalPending("crit"),
 		bandAction("norm", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityNormal, 2, lease),
@@ -209,7 +209,7 @@ func TestPreempt_PrefersLowestBandVictim(t *testing.T) {
 // Case 1 — Connectivity loss: a Preempted victim whose robot goes Offline must NOT
 // requeue while its (frozen) lease is alive — the robot might still be executing.
 func TestPreempt_ConnectivityLoss_HoldsOnFrozenLease(t *testing.T) {
-	alive := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	alive := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		bandAction("norm", "r1", fleetv1.ActionPhasePreempted, fleetv1.ActionPriorityNormal, 2, alive),
 		robotInPhase("r1", fleetv1.RobotPhaseOffline, "norm"), // still claims the victim, now offline
@@ -230,7 +230,7 @@ func TestPreempt_ConnectivityLoss_HoldsOnFrozenLease(t *testing.T) {
 // Preempted victim re-evaluates purely; if the robot has switched, it requeues,
 // preserving generation. No in-memory state needed.
 func TestPreempt_RestartFailover_PureReevaluation(t *testing.T) {
-	alive := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	alive := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		bandAction("norm", "r1", fleetv1.ActionPhasePreempted, fleetv1.ActionPriorityNormal, 6, alive),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "crit"), // robot already switched
@@ -251,7 +251,7 @@ func TestPreempt_RestartFailover_PureReevaluation(t *testing.T) {
 // on a duplicate reconcile, and duplicate Preempted reconciles are idempotent
 // while the robot still claims the victim.
 func TestPreempt_DelayedDuplicate_NoDoublePreempt(t *testing.T) {
-	lease := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		// Critical already Assigned to r1; a Normal action sits InProgress on r2.
 		bandAction("crit", "r1", fleetv1.ActionPhaseAssigned, fleetv1.ActionPriorityCritical, 1, lease),

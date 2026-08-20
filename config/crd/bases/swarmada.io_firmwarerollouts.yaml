@@ -82,19 +82,20 @@ spec:
                 type: string
               newVersion:
                 description: |-
-                  NewVersion is the target firmware version string (semver).
+                  NewVersion is the target firmware version string.
 
-                  The pattern matches ModelRollout.spec.newVersion: both are compared for ordering at
-                  rollout start, and an unparseable version cannot be ordered. MinLength=1 alone admitted
-                  values like "latest" or "v2.1" that read as versions and sort as nothing, so the failure
-                  arrived at batch selection — after the rollout was created and an operator believed it
-                  scheduled — rather than at admission.
+                  Swarmada treats it as OPAQUE: it is never parsed, ordered or compared. Batch
+                  classification is by EQUALITY only — a robot is "done" when
+                  Status.FirmwareVersion == NewVersion and "updating" when its pending-firmware
+                  annotation == NewVersion; the eligible set is sorted by NAME, not by version.
+                  Vendor firmware strings are frequently not semver ("2.5.0-rc1", "v2.5.0",
+                  "2026.06"), so constraining the form here would reject valid targets while
+                  protecting nothing.
 
-                  Deliberately bare `major.minor.patch`: prerelease and build metadata are excluded here
-                  for the same reason the contract-version parser excludes them (RFC-0001 §9.2.2) —
-                  admitting them would require this API to define their precedence, and it does not.
+                  ModelRollout.NewVersion IS pattern-constrained to bare major.minor.patch,
+                  because that controller refuses downgrades via versionIsNewer and therefore
+                  needs a parseable order. The asymmetry is deliberate (RFC-0001 D2).
                 minLength: 1
-                pattern: ^\d+\.\d+\.\d+$
                 type: string
               rollbackPolicy:
                 default: Manual
@@ -146,8 +147,16 @@ spec:
                       pauseOnError:
                         default: true
                         description: |-
-                          PauseOnError halts the rollout if any robot fails to update.
-                          The operator must resume with swarmctl resume rollout.
+                          PauseOnError halts the rollout if any robot fails to update: no further robot
+                          enters the batch while a failure stands, though in-flight updaters continue.
+
+                          The operator resumes with `swarmctl rollout resume`, which is gated on the
+                          rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                          annotation the controller consumes. Resume EXCLUDES the robots that failed from
+                          further attempts by this rollout rather than retrying them (ADR-0041); a fixed
+                          artifact needs a fresh rollout. Excluded robots are named in
+                          status.excludedRobots and count as settled, so the rollout can reach a terminal
+                          phase and its record becomes deletable.
                         type: boolean
                     type: object
                   type:
@@ -326,6 +335,17 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              excludedRobots:
+                description: |-
+                  ExcludedRobots names the robots an operator resume removed from this rollout
+                  (ADR-0041). They failed, the operator resumed past them, and this rollout will
+                  not attempt them again — retrying a failed artifact is what a FRESH rollout is
+                  for. They are excluded from every progress bucket, so they neither re-pause the
+                  rollout nor hold it short of a terminal phase; a non-empty list surfaces that the
+                  fleet did not fully converge on this version.
+                items:
+                  type: string
+                type: array
               failedRobots:
                 items:
                   description: RolloutRobotResult records the failure outcome for

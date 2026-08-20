@@ -84,8 +84,10 @@ spec:
                 type: object
               endpoint:
                 description: |-
-                  Endpoint is the gRPC address (host:port) the control plane dials to reach
-                  this adapter. The adapter implements fleet_adapter.v1.FleetAdapterService.
+                  Endpoint is the gRPC address (host:port) the adapter is expected to be
+                  reachable at, for operator reference. Informational only: the control plane
+                  never dials it — the ControlStream is adapter-initiated (RFC-0001 §9.2), so
+                  nothing in the reconciler reads this field.
                 type: string
               heartbeatIntervalSeconds:
                 default: 10
@@ -122,7 +124,6 @@ spec:
                   (e.g. "acme-robotics").
                 type: string
             required:
-            - endpoint
             - vendor
             type: object
           status:

@@ -301,7 +301,24 @@ func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.Fleet
 		return
 	}
 	if nonTerminal == 0 {
-		// everything terminal, policy unmet -> failure path
+		// Everything terminal and the policy unmet. Distinguish WHY before calling it a
+		// failure: an operator who wrote spec.desiredState: Cancelled got what they asked
+		// for, and reporting Failed misattributes their intent as a fault — the difference
+		// an on-call engineer reads at 3am.
+		//
+		// FleetTaskPhaseCancelled is a declared enum value that nothing wrote before this:
+		// the fan-out cancelled the children, the children reached ActionPhaseCancelled,
+		// the policy was therefore unmet, and enactFailure reported Failed. Same defect
+		// shape as an enum value with no inbound transition.
+		//
+		// Compensate is deliberately NOT short-circuited: cancelling a half-done saga must
+		// still roll back its succeeded members, which is the whole point of the policy.
+		// That path ends at Compensated, its own terminal state.
+		if task.Spec.DesiredState == fleetv1.DesiredStateCancelled &&
+			task.Spec.FailurePolicy != fleetv1.FailurePolicyCompensate {
+			task.Status.Phase = fleetv1.FleetTaskPhaseCancelled
+			return
+		}
 		r.enactFailure(ctx, task, children)
 		return
 	}

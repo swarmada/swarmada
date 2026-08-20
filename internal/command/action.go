@@ -36,6 +36,20 @@ type AssignAction struct {
 	Priority        int32
 	// DeadlineMs is an absolute deadline in unix-millis; 0 means no deadline.
 	DeadlineMs int64
+	// Payload is the raw JSON of FleetAction.spec.payload, delivered on the
+	// assignment as AssignAction.payload_json (§9.1.4.5). It is the ONLY channel
+	// for an action's parameters: proto field 3 `destination` is deprecated
+	// ("destination now travels in payload_json"), so an assignment without this
+	// reaches the robot with nothing to act on — a Navigate with no destination.
+	//
+	// The adapter also sees the payload at validate_action, but §9.1.4.5 requires
+	// it to read the payload from the ASSIGNMENT rather than relying on what it
+	// retained at validation: validation is pure inspection that may have run
+	// against a different robot, or not at all.
+	//
+	// nil means "no payload" and is sent as no bytes; it is never an empty
+	// non-nil slice (docs/api-principles.md explicit presence).
+	Payload []byte
 }
 
 // AssignActionOutcome is the adapter's assign_action acknowledgement.
@@ -131,10 +145,16 @@ func (d *Dispatcher) PushAssignAction(ctx context.Context, namespace, robotID st
 	msg := &fav1.AssignAction{
 		ActionId:        a.ActionID,
 		ActionType:      a.ActionType,
+		PayloadJson:     a.Payload,
 		FencingToken:    u64ptr(a.FencingToken),
 		LeaseGeneration: u64ptr(a.LeaseGeneration),
 		LeaseDurationMs: a.LeaseDurationMs,
 		Priority:        a.Priority,
+		// assignment_id (proto field 6, "UUID for audit correlation") is deliberately
+		// left unset: nothing on either side of the wire reads it today — the safety
+		// audit log has no assignment event to correlate against — so choosing an
+		// identifier scheme for it is a design decision with no consumer to validate
+		// it. Populating it is a separate change from carrying the payload.
 	}
 	if a.DeadlineMs != 0 {
 		d := a.DeadlineMs

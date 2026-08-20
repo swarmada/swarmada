@@ -36,7 +36,7 @@ import (
 var (
 	// FleetActionPhases are the swarmada_fleetactions_by_phase `phase` values (§9.3.8).
 	FleetActionPhases = []string{
-		"Pending", "Assigned", "InProgress", "Revoking", "Paused", "Succeeded", "Failed", "Cancelled",
+		"Pending", "Assigned", "InProgress", "Revoking", "Paused", "Preempted", "Succeeded", "Failed", "Cancelled",
 	}
 	// RobotPhases are the swarmada_robots_by_phase `phase` values (§9.3.8).
 	RobotPhases = []string{
@@ -45,7 +45,10 @@ var (
 	// AdapterPhases are the swarmada_fleet_adapter_phase `phase` values (§9.3.8).
 	AdapterPhases = []string{"Pending", "Connected", "Degraded", "Disconnected", "Rejected"}
 	// EstopStates are the swarmada_robots_in_estop `estop_state` values (§9.3.8).
-	EstopStates = []string{"Stopping", "Stopped"}
+	// Failed is included: a robot whose estop could not be CONFIRMED is withheld from
+	// dispatch, which is precisely the robot an operator is debugging. Omitting it made
+	// that robot invisible to the gauge while the sweeper was already counting it.
+	EstopStates = []string{"Stopping", "Stopped", "Failed"}
 )
 
 // ── Estop metrics (§9.3.8) ────────────────────────────────────────────────────
@@ -63,6 +66,20 @@ var (
 		Name: "swarmada_estop_latency_violations_total",
 		Help: "estop Command ACK latency exceeding the 500ms SLA (RFC-0001 §9.3.8). Any non-zero rate is an SLO breach.",
 	}, []string{"namespace", "adapter", "robot_name"})
+
+	// EstopFanoutDurationSeconds — a whole zone-/namespace-scoped estop episode, from the
+	// operator's trigger to the last robot in scope resolving (ADR-0042).
+	//
+	// This exists because swarmada_estop_command_latency_seconds structurally cannot see
+	// the sequential-fan-out gap: it is stamped per robot just before THAT robot's send,
+	// so sequential dispatch delays the send rather than the round trip and every robot
+	// reports healthy. Buckets run past the per-send 500ms SLA into tens of seconds
+	// because that is the range a sequential fan-out over a large fleet actually occupies.
+	EstopFanoutDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "swarmada_estop_fanout_duration_seconds",
+		Help:    "Wall-clock duration of one zone- or namespace-scoped estop episode, from trigger to the last robot in scope resolving (RFC-0001 §9.3.8, §9.6.2.2). Robot-scoped estops have no fan-out and are not observed here.",
+		Buckets: []float64{0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0},
+	}, []string{"namespace", "scope"})
 
 	// EstopCommandsTotal — every estop Command by terminal disposition.
 	EstopCommandsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -124,7 +141,7 @@ var (
 	// SchedulerLeaseExpiriesTotal — leases that expired without prior confirmed cancel.
 	SchedulerLeaseExpiriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "swarmada_scheduler_lease_expiries_total",
-		Help: "Leases that expired (now >= last-ack'd renewal + leaseDuration + skew) without a prior confirmed cancellation (RFC-0001 §9.3.8).",
+		Help: "Leases that expired (now >= last-ack'd renewal + leaseDurationSeconds + clockSkewMarginSeconds) without a prior confirmed cancellation (RFC-0001 §9.3.8).",
 	}, []string{"namespace"})
 )
 
@@ -211,6 +228,7 @@ var SwarmadaVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 func collectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		EstopCommandLatencySeconds,
+		EstopFanoutDurationSeconds,
 		EstopLatencyViolationsTotal,
 		EstopCommandsTotal,
 		TelemetryDroppedFramesTotal,
@@ -234,7 +252,7 @@ func collectors() []prometheus.Collector {
 }
 
 // Register installs every §9.3.8 collector into r (cmd/manager passes the
-// controller-runtime registry so the manager's /metrics endpoint, default :9090,
+// controller-runtime registry so the manager's /metrics endpoint, default :8080,
 // serves them). It panics on a duplicate registration — call it exactly once per
 // registry at startup, which is the §9.3.8 "MustRegister at startup" contract.
 func Register(r prometheus.Registerer) {

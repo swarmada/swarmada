@@ -90,6 +90,18 @@ func (d *RobotDefaulter) Default(ctx context.Context, obj runtime.Object) error 
 	// purely informational, fail-safe to the CRD defaults.
 	d.stampCoordinateAnnotations(ctx, robot)
 
+	// Carry the authenticated operator onto a robot-scoped estop trigger/clear (ADR-0046).
+	// Robot is the one carrier that already had a mutating webhook, so the stamp rides
+	// here rather than in its own; the other four live in estop_actor_webhooks.go.
+	//
+	// NOTE the failurePolicy asymmetry this creates: this webhook is failurePolicy=fail
+	// (the RobotClass merge must not be skipped, or a Robot is admitted un-merged), while
+	// the four dedicated stampers are failurePolicy=ignore. A robot estop therefore
+	// inherits Robot admission's existing availability posture — unchanged by this
+	// change, since the validating RobotAdmissionGate already fails closed on the same
+	// write.
+	stampEstopActor(ctx, robot)
+
 	// Backfill the telemetry-projection identity (RFC-0001 §9.3.1): default
 	// swarmada.io/robot-id to metadata.name when unset, so operator-created Robots
 	// (and any predating auto-admit stamping) resolve robot_id → Robot for telemetry
@@ -169,10 +181,9 @@ func (d *RobotDefaulter) stampCoordinateAnnotations(ctx context.Context, robot *
 
 // mergeRobotClass applies RobotClassSpec's documented merge semantics onto
 // robot in place: list fields merge union-by-name with the Robot's own
-// entries winning on a name collision; Constraints/Charging are whole-value
-// overrides that only apply if the Robot left the field unset; the base
-// adapter name/version and the defaultTelemetry cadence scalars fill in only the
-// fields the Robot left empty.
+// entries winning on a name collision; manufacturer/model, the base adapter
+// name/version, the constraints and charging sub-fields, and the defaultTelemetry
+// cadence scalars all fill in only where the Robot left the field unset.
 func mergeRobotClass(robot *fleetv1.Robot, class *fleetv1.RobotClass) {
 	robot.Spec.Hardware = unionByName(class.Spec.Hardware, robot.Spec.Hardware,
 		func(h fleetv1.HardwareComponent) string { return h.Name })
@@ -183,14 +194,60 @@ func mergeRobotClass(robot *fleetv1.Robot, class *fleetv1.RobotClass) {
 	robot.Spec.Capabilities = unionByName(class.Spec.BaseCapabilities, robot.Spec.Capabilities,
 		func(c fleetv1.ClassCapability) string { return c.Name })
 
-	if robot.Spec.Constraints == nil && class.Spec.DefaultConstraints != nil {
-		robot.Spec.Constraints = class.Spec.DefaultConstraints.DeepCopy()
+	// Identity fills in from the class where the Robot omits it. Both fields are
+	// Required with MinLength=1 on the Robot, so until this assignment existed a Robot
+	// that relied on its class for identity — the case §9.1.1 documents as the point of
+	// a class — was rejected at admission on a field the operator was told not to repeat.
+	if robot.Spec.Manufacturer == "" {
+		robot.Spec.Manufacturer = class.Spec.Manufacturer
+	}
+	if robot.Spec.Model == "" {
+		robot.Spec.Model = class.Spec.Model
 	}
 
-	if robot.Spec.Charging == nil && class.Spec.DefaultChargingConfig != nil {
-		robot.Spec.Charging = &fleetv1.RobotChargingConfig{
-			MinBatteryPctToCharge: class.Spec.DefaultChargingConfig.MinBatteryPctToCharge,
-			TargetBatteryPct:      class.Spec.DefaultChargingConfig.TargetBatteryPct,
+	// Constraints inherit PER FIELD, not as a whole block. Whole-block inheritance meant
+	// a Robot that set one sub-field silently lost every other limit its class declared:
+	// overriding maxSpeedMs dropped the class's minBatteryPctForAction floor, so a safety
+	// limit disappeared on a write that never mentioned it.
+	if dc := class.Spec.DefaultConstraints; dc != nil {
+		if robot.Spec.Constraints == nil {
+			robot.Spec.Constraints = &fleetv1.ClassConstraints{}
+		}
+		rc := robot.Spec.Constraints
+		if rc.MaxPayloadKg == nil && dc.MaxPayloadKg != nil {
+			v := *dc.MaxPayloadKg
+			rc.MaxPayloadKg = &v
+		}
+		if rc.MinBatteryPctForAction == nil && dc.MinBatteryPctForAction != nil {
+			v := *dc.MinBatteryPctForAction
+			rc.MinBatteryPctForAction = &v
+		}
+		if rc.MaxSpeedMs == nil && dc.MaxSpeedMs != nil {
+			v := *dc.MaxSpeedMs
+			rc.MaxSpeedMs = &v
+		}
+	}
+
+	// Same per-field rule for charging. dockName is Robot-only: a dock is a zone-scoped
+	// shared resource and a class spans zones, so a class cannot name one.
+	//
+	// One consequence to expect: mixing a Robot-set minBatteryPctToCharge with a
+	// class-supplied targetBatteryPct can now produce a pair the RobotChargingConfig CEL
+	// rule rejects (target must exceed min). That is the operator having declared an
+	// inconsistent combination, and it fails closed at admission rather than silently
+	// discarding the class's value, which is what the whole-block merge did.
+	if dcc := class.Spec.DefaultChargingConfig; dcc != nil {
+		if robot.Spec.Charging == nil {
+			robot.Spec.Charging = &fleetv1.RobotChargingConfig{}
+		}
+		ch := robot.Spec.Charging
+		if ch.MinBatteryPctToCharge == nil && dcc.MinBatteryPctToCharge != nil {
+			v := *dcc.MinBatteryPctToCharge
+			ch.MinBatteryPctToCharge = &v
+		}
+		if ch.TargetBatteryPct == nil && dcc.TargetBatteryPct != nil {
+			v := *dcc.TargetBatteryPct
+			ch.TargetBatteryPct = &v
 		}
 	}
 

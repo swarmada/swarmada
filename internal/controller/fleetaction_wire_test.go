@@ -98,10 +98,64 @@ func TestWire_CommitPushesAssignAction(t *testing.T) {
 	}
 }
 
+// THE GAP THIS TEST EXISTS FOR. spec.payload.raw must ride the ASSIGNMENT, not just
+// validate_action: §9.1.4.5 tells adapter implementers "an adapter MUST read the payload
+// from payload_json on assignment rather than relying on what it retained at validation",
+// and since proto field 3 `destination` is deprecated ("destination now travels in
+// payload_json") this is the only channel for one. Before this, pushAssignAction built
+// seven fields and none of them was the payload, so every Navigate reached its robot with
+// no destination — and no test noticed.
+func TestWire_AssignActionCarriesTheSpecPayload(t *testing.T) {
+	payload := []byte(`{"destination":{"x":3,"y":4}}`)
+	pending := &fleetv1.FleetAction{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: actionNS},
+		Spec: fleetv1.FleetActionSpec{
+			Type:    fleetv1.ActionTypeNavigate,
+			Payload: &fleetv1.ActionPayload{Raw: payload},
+		},
+		Status: fleetv1.FleetActionStatus{Phase: fleetv1.ActionPhasePending},
+	}
+	cmd := &fakeCommander{}
+	r, _ := newActionReconciler(t, pending, robotInPhase("r1", fleetv1.RobotPhaseIdle, ""))
+	r.Commander = cmd
+
+	reconcileAction(t, r, "t1")
+
+	if len(cmd.assigns) != 1 {
+		t.Fatalf("assign pushes = %+v, want exactly one", cmd.assigns)
+	}
+	if got := string(cmd.assigns[0].Payload); got != string(payload) {
+		t.Errorf("assign_action payload = %q, want the spec.payload.raw %q", got, payload)
+	}
+}
+
+// An absent spec.payload sends NO bytes, not an empty non-nil slice — the explicit-presence
+// discipline in docs/api-principles.md. An adapter distinguishing "no payload" from "empty
+// payload" must not be handed the latter for the former.
+func TestWire_AssignActionSendsNoBytesWhenPayloadIsAbsent(t *testing.T) {
+	pending := &fleetv1.FleetAction{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: actionNS},
+		Spec:       fleetv1.FleetActionSpec{Type: fleetv1.ActionTypeNavigate}, // Payload is nil
+		Status:     fleetv1.FleetActionStatus{Phase: fleetv1.ActionPhasePending},
+	}
+	cmd := &fakeCommander{}
+	r, _ := newActionReconciler(t, pending, robotInPhase("r1", fleetv1.RobotPhaseIdle, ""))
+	r.Commander = cmd
+
+	reconcileAction(t, r, "t1")
+
+	if len(cmd.assigns) != 1 {
+		t.Fatalf("assign pushes = %+v, want exactly one", cmd.assigns)
+	}
+	if cmd.assigns[0].Payload != nil {
+		t.Errorf("assign_action payload = %#v, want nil for an absent spec.payload", cmd.assigns[0].Payload)
+	}
+}
+
 // On lease renewal (steady-state), the reconciler pushes renew_lease at the
 // current generation.
 func TestWire_RenewalPushesRenewLease(t *testing.T) {
-	live := &metav1.Time{Time: time.Now().Add(leaseDuration)}
+	live := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	cmd := &fakeCommander{}
 	r, _ := newActionReconciler(t,
 		assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 3, live),
@@ -156,5 +210,53 @@ func TestWire_NilCommanderCommitsCleanly(t *testing.T) {
 
 	if getAction(t, c, "t1").Status.Phase != fleetv1.ActionPhaseAssigned {
 		t.Fatal("commit failed with a nil Commander")
+	}
+}
+
+// TestWire_ConfiguredLeaseHorizonReachesTheRobot is the regression test for the
+// divergence ADR-0044 exists to prevent: the control plane resolves the namespace's
+// lease horizon for status.leaseExpiresAt, but pushes a DIFFERENT (constant) value as
+// lease_duration_ms. That would arm the robot's self-stop timer at 30s while the
+// control plane waited out a 90s horizon before reassigning — both halves of the
+// single-executor guarantee computed from different numbers.
+//
+// The assertion is deliberately a comparison between the two, not against a literal:
+// it fails if either half stops tracking spec.scheduling.leaseDurationSeconds.
+func TestWire_ConfiguredLeaseHorizonReachesTheRobot(t *testing.T) {
+	const leaseSeconds = 90
+
+	pending := &fleetv1.FleetAction{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: actionNS},
+		Spec:       fleetv1.FleetActionSpec{Type: fleetv1.ActionTypeNavigate},
+		Status:     fleetv1.FleetActionStatus{Phase: fleetv1.ActionPhasePending},
+	}
+	cfg := configWithSpec(actionNS, fleetv1.SwarmadaConfigSpec{
+		Scheduling: fleetv1.SwarmadaSchedulingConfig{LeaseDurationSeconds: leaseSeconds},
+	})
+	cmd := &fakeCommander{}
+	r, c := newActionReconciler(t, pending, robotInPhase("r1", fleetv1.RobotPhaseIdle, ""), cfg)
+	r.Commander = cmd
+
+	before := time.Now()
+	reconcileAction(t, r, "t1")
+
+	if len(cmd.assigns) != 1 {
+		t.Fatalf("assign pushes = %d, want 1", len(cmd.assigns))
+	}
+	// The wire carries the CONFIGURED horizon, not defaultLeaseDuration.
+	wantMs := command.LeaseDurationMs(leaseSeconds * time.Second)
+	if got := cmd.assigns[0].LeaseDurationMs; got != wantMs {
+		t.Errorf("assign_action lease_duration_ms = %d, want %d (the namespace horizon); default constant would be %d",
+			got, wantMs, command.LeaseDurationMs(defaultLeaseDuration))
+	}
+	// ...and the server-side horizon agrees with what the robot was told.
+	lease := getAction(t, c, "t1").Status.LeaseExpiresAt
+	if lease == nil {
+		t.Fatal("no leaseExpiresAt written")
+	}
+	horizon := lease.Sub(before)
+	if horizon < leaseSeconds*time.Second-5*time.Second || horizon > leaseSeconds*time.Second+5*time.Second {
+		t.Errorf("status.leaseExpiresAt is %v out, want ~%ds — control plane and robot disagree",
+			horizon, leaseSeconds)
 	}
 }
