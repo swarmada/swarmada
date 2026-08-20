@@ -1,0 +1,6 @@
+extends: existence
+message: "Exclamation points read as sales copy or as panic. Neither is the register."
+level: error
+nonword: true
+raw:
+  - '!(\s|$)'

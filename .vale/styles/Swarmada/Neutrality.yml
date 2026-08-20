@@ -1,0 +1,12 @@
+extends: existence
+message: "'%s' gives the project a corporate voice. Write what Swarmada does, or address the reader as 'you'."
+level: error
+ignorecase: true
+tokens:
+  - we
+  - we're
+  - we've
+  - we'll
+  - our
+  - ours
+  - let's

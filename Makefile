@@ -320,9 +320,20 @@ fmt-py:         ##! Format Python code with black + ruff
 	black simulation/ scripts/ tests/python/
 	ruff check --fix simulation/ scripts/
 
-lint-py:        ##! Lint Python code with ruff + mypy
+lint-py:        ##! Lint Python code with ruff + mypy, and enforce the message-voice rules
 	ruff check simulation/ scripts/
 	mypy simulation/
+	# The Voice_and_Tone gate on operator-facing message strings. It scans the whole tree
+	# (skipping _test.go, zz_generated, vendor, proto, bin, venv, node_modules). It had
+	# existed with no make target and no CI job, so it had never once run against the
+	# code it governs.
+	$(PYTHON) scripts/check-error-strings.py .
+
+lint-prose:     ##! Check documentation voice with vale (install: brew install vale)
+	@command -v vale >/dev/null 2>&1 || { \
+	  echo "vale not installed. brew install vale — rules are in .vale/styles/Swarmada/"; \
+	  exit 1; }
+	vale .
 
 test-py:        ##! Run Python tests with pytest
 	pytest tests/python/ -v

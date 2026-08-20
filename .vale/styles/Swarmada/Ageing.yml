@@ -1,0 +1,13 @@
+extends: existence
+message: "'%s' is relative to the day it was written. Documentation outlives the sentence."
+level: warning
+ignorecase: true
+tokens:
+  - currently
+  - presently
+  - nowadays
+  - recently
+  - soon
+  - in the near future
+  - at the time of writing
+  - as of today

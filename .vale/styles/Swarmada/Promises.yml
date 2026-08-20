@@ -1,0 +1,14 @@
+extends: existence
+message: "'%s' promises unshipped functionality. Describe what exists; state limits as facts."
+level: error
+ignorecase: true
+tokens:
+  - coming soon
+  - stay tuned
+  - on the roadmap
+  - in a future release
+  - will be supported
+  - will support
+  - not yet supported
+  - not yet implemented
+  - for now
