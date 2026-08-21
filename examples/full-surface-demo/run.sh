@@ -42,14 +42,15 @@
 #     because a HEALTHY fleet never sits in either phase; before the transport was fixed
 #     they were supplied by the breakage itself, which is not coverage.
 #   - PROJECTED via kubectl --subresource=status (the RA-1 anti-pattern; RFC-0001
-#     crds/robot.md:312-314 reserves status to controllers): RobotPhase Idle-bootstrap,
+#     §9.1.3 reserves status to controllers): RobotPhase Idle-bootstrap,
 #     Charging, Error, Maintenance, FleetAction Succeeded, and status.estopState
 #     Stopping→Stopped→Normal. The estop states are projected because this scenario
 #     issues no real TriggerEstop, not because the transport cannot carry one — see
-#     project_estop_states. Idle-bootstrap is not a
-#     cosmetic shortcut — no component owns the Discovered->Idle transition
-#     (crds/discoveredrobot.md:342 requires it; no ownership table in control-plane.md
-#     claims it), so no robot is schedulable without it. demo_test.py asserts these were
+#     project_estop_states. Idle-bootstrap applies ONLY to robots with no Fleet
+#     Adapter: the Robot reconciler owns Discovered->Idle and advances a robot from
+#     fresh adapter liveness (ADR-0029, RFC-0001 §9.3.3), so a robot nothing is
+#     connected to never goes live and never becomes schedulable. The live robot
+#     advances on its own. demo_test.py asserts these were
 #     OBSERVED, which is weaker than asserting the control plane produced them; the run
 #     output labels them projected. See docs/quickstart.md, Honest notes.
 #   - Fault FIXTURES for the range alerts: a SwarmadaConfig pointing the TSDB sink at
@@ -581,10 +582,11 @@ launch_live_adapter() {
   step "3 — Launch the live full-surface adapter (with estop-ack delay fixture)"
   kubectl annotate "robot/$LIVE_ROBOT" -n "$NS" "swarmada.io/robot-id=$LIVE_ROBOT" --overwrite >/dev/null
   # Non-live robots: healthy baseline so the scheduler has a real 3-robot fleet.
-  # SHORTCUT — status.phase is controller-owned (RFC-0001 crds/robot.md:312-314, RA-1).
-  # Patched here because nothing transitions a Robot Discovered->Idle; scheduler filter 1
-  # admits only Idle robots. See docs/quickstart.md, Honest notes.
-  info "projecting status.phase=Idle on sim-robot-002/003 (SHORTCUT — the control plane does not do this)"
+  # status.phase is controller-owned (RFC-0001 §9.1.3, RA-1). These two robots have no
+  # Fleet Adapter, so no liveness is ever reported for them and the Robot reconciler's
+  # Discovered->Idle advance (ADR-0029) never fires. Scheduler filter 1 admits only Idle
+  # robots. The patch substitutes for an adapter. See docs/quickstart.md, Honest notes.
+  info "projecting status.phase=Idle on sim-robot-002/003 (no adapter — simulation stand-in)"
   for r in sim-robot-002 sim-robot-003; do
     kubectl patch "robot/$r" -n "$NS" --subresource=status --type=merge \
       -p '{"status":{"phase":"Idle","batteryPercent":85}}'

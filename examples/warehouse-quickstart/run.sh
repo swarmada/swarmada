@@ -25,10 +25,13 @@
 #
 #   - healthy-fleet (default) or CI ($CI=true, e.g. `make quickstart-test`):
 #     status-projected — robots are driven Ready by patching Robot.status.phase
-#     directly (kubectl patch --subresource=status phase=Idle). This is the RA-1
-#     anti-pattern the spec forbids (crds/robot.md:312-314) and is here only
-#     because no component owns the Discovered->Idle transition; see
-#     docs/quickstart.md, Honest notes. Deterministic and fast; CI gates on it.
+#     directly (kubectl patch --subresource=status phase=Idle). Writing status is
+#     the RA-1 anti-pattern the spec reserves to controllers (RFC-0001 §9.1.3,
+#     RFC-0001 Terminology). It is here because THESE robots have no Fleet Adapter:
+#     the Robot reconciler advances Discovered->Idle from fresh adapter liveness
+#     (ADR-0029), and a robot nothing is connected to never becomes live. The patch
+#     stands in for an adapter in a simulated fleet — it is NOT a workaround for a
+#     missing transition. See docs/quickstart.md, Honest notes. Deterministic and fast; CI gates on it.
 #     (The old `make demo-b` targets that did the same thing were removed for
 #     exactly this reason — see the Makefile comment above the Demo section.)
 #
@@ -897,11 +900,13 @@ EOF
 }
 
 project_readiness() {
-  step "6/7 — Project status.phase=Idle by hand (SHORTCUT — the control plane does not do this)"
-  info "writing Robot status directly is what RFC-0001 forbids (crds/robot.md:312-314; RA-1,"
-  info "terminology.md:55). It is unavoidable here: no component owns the Discovered->Idle"
-  info "transition (crds/discoveredrobot.md:342 requires it; no ownership table claims it), and"
-  info "scheduler filter 1 admits only Idle robots. See docs/quickstart.md, Honest notes."
+  step "6/7 — Project status.phase=Idle for the adapter-less robots (simulation stand-in)"
+  info "these robots have NO Fleet Adapter, so nothing ever reports liveness for them. The Robot"
+  info "reconciler advances Discovered->Idle from fresh adapter liveness (ADR-0029, RFC-0001"
+  info "§9.3.3) — with no adapter that never fires, and scheduler filter 1 admits only Idle"
+  info "robots. Writing status directly is reserved to controllers (RFC-0001 §9.1.3, RA-1 in"
+  info "RFC-0001 Terminology); this patch substitutes for an adapter, not for a missing"
+  info "control-plane feature. See docs/quickstart.md, Honest notes."
   # phase=Idle with status.connectivity left nil is stable: the reconciler's
   # heartbeat-timeout→Offline branch only fires when connectivity.lastSeenAt is
   # set, so it never overwrites this. Capabilities are derived Active from the
@@ -1049,14 +1054,12 @@ run_live_scenario() {
     info "check $ADAPTER_LOG and the port-forward log if this persists"
   fi
   info ""
-  info "SHORTCUT — the control plane does NOT do this next step:"
-  info "  projecting $LIVE_ROBOT status.phase=Idle by hand (kubectl patch --subresource=status)."
-  info "  RFC-0001 says status is controller-owned and operators must not write it"
-  info "  (crds/robot.md:312-314; RA-1, terminology.md:55). It is needed because NOTHING"
-  info "  transitions a Robot Discovered->Idle: the spec requires it (crds/discoveredrobot.md:342)"
-  info "  but assigns it to no component, and the only Idle writer in code"
-  info "  (fleetaction_controller.go:1450) fires on task RELEASE. Scheduler filter 1 admits"
-  info "  only Idle robots, so without this line nothing is ever assigned. See docs/quickstart.md."
+  info "belt-and-braces: patching $LIVE_ROBOT status.phase=Idle, which should already be Idle."
+  info "  $LIVE_ROBOT HAS a live adapter, so the Robot reconciler advances it Discovered->Idle"
+  info "  on its own once fresh liveness arrives (ADR-0026/0029, RFC-0001 §9.3.3). Expect this"
+  info "  patch to report 'no change'. It stays only to cover a slow first heartbeat."
+  info "  Writing status is otherwise reserved to controllers (RFC-0001 §9.1.3, RA-1 in"
+  info "  RFC-0001 Terminology). See docs/quickstart.md, Honest notes."
   kubectl patch "robot/$LIVE_ROBOT" -n "$NS" --subresource=status --type=merge \
     -p '{"status":{"phase":"Idle"}}'
 

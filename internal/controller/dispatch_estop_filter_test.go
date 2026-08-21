@@ -44,7 +44,7 @@ func TestFilterDispatchEligible_Filter10Estop(t *testing.T) {
 		{"stopping", fleetv1.RobotEstopStopping, true, "stop issued to hardware; the robot may still be moving"},
 		{"stopped", fleetv1.RobotEstopStopped, true, "confirmed at rest, awaiting an operator clear"},
 		// Resuming is not withheld — but note that NOTHING IN THE TREE WRITES IT
-		// (ITEM-0102). safety.md:148 specifies it as the post-clear window;
+		// (ITEM-0102). RFC-0001 §9.6.2.3 specifies it as the post-clear window;
 		// ClearEstop goes straight to Normal, so this row currently describes a
 		// state that cannot occur at runtime. The row stays because the enum
 		// declares the value and the spec says the system reaches it; when
