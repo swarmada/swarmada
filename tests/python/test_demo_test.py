@@ -84,6 +84,35 @@ def test_ra1_ratio_none_without_frames():
     assert ra1_ok(None) is False   # no telemetry seen → not provable → fail
 
 
+def test_ra1_ratio_survives_the_label_mismatch_between_the_two_counters():
+    """Regression: frames and writes are not labelled with the same namespace.
+
+    frames_received carries the stream identity's namespace; status_writes derives
+    its own from the frame's robot_id via namespaceOf(), which is "" for the bare
+    robot_id a real adapter sends. Scoping both to the namespace then computes
+    0/frames and RA-1 "passes" while measuring nothing — which is exactly what
+    happened once the demo moved to the mTLS overlay and frames started arriving
+    correctly labelled. The ratio must come from the fleet-wide pair instead.
+    """
+    snap = Snapshot(
+        'swarmada_telemetry_frames_received_total{namespace="warehouse-a",adapter="sim"} 200\n'
+        'swarmada_telemetry_status_writes_total{namespace="",transition_type="phase_change"} 6\n'
+    )
+    r = ra1_ratio(snap, "warehouse-a")
+    assert r is not None
+    assert abs(r - 0.03) < 1e-9, "must not read as 0.0 — that is the tautology"
+
+
+def test_ra1_still_catches_a_per_tick_writer_across_the_label_mismatch():
+    """The fallback must not become a way to pass: a per-tick writer whose writes are
+    labelled "" still has to fail."""
+    snap = Snapshot(
+        'swarmada_telemetry_frames_received_total{namespace="warehouse-a",adapter="sim"} 200\n'
+        'swarmada_telemetry_status_writes_total{namespace="",transition_type="phase_change"} 200\n'
+    )
+    assert ra1_ok(ra1_ratio(snap, "warehouse-a")) is False
+
+
 def test_edge_estop_confirmed_matches_stopped_line():
     log = (
         "some noise\n"

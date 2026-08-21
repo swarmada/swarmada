@@ -1299,7 +1299,13 @@ type HelloAck struct {
 	Message                   string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	// The contract version the control plane agreed for this connection — the value it will hold the
 	// adapter to, echoed so the adapter can confirm what was negotiated rather than assume its own
-	// request was honoured. Set only when accepted; empty on rejection (ADR-0032).
+	// request was honoured. Set only when the reported contract_version is within the control
+	// plane's supported range; left empty otherwise (ADR-0032). This is independent of `accepted`
+	// above: `accepted` reflects the protocol-level (wire package) handshake only, so a stream with
+	// `accepted = true` can still carry an empty `negotiated_contract_version` — that combination
+	// means the connection stands (telemetry, heartbeat, and estop all work) but the contract
+	// version is incompatible, so RegisterRobot/DiscoverRobot on it are refused
+	// REGISTRATION_REJECTION_VERSION_MISMATCH. An empty value here is never an implicit pass.
 	NegotiatedContractVersion string `protobuf:"bytes,4,opt,name=negotiated_contract_version,json=negotiatedContractVersion,proto3" json:"negotiated_contract_version,omitempty"`
 	unknownFields             protoimpl.UnknownFields
 	sizeCache                 protoimpl.SizeCache
@@ -2075,9 +2081,9 @@ type Command_RenewLease struct {
 
 type Command_ValidateAction struct {
 	// optional (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist); adapter
-	// confirms it can serve type+payload. Not issued by the control plane at v0.1 — the
-	// supported-action catalog is the shipped pre-dispatch gate — so an adapter that
-	// implements it will not currently be asked.
+	// confirms it can serve type+payload. Issued once, at assignment-time candidate
+	// selection (RFC-0001 #control-plane-scheduler) — not at FleetAction acceptance,
+	// which is gated by the cheaper supported-action catalog pre-filter instead.
 	ValidateAction *ValidateAction `protobuf:"bytes,17,opt,name=validate_action,json=validateAction,proto3,oneof"`
 }
 
@@ -5880,8 +5886,10 @@ func (x *EdgeEndpoint) GetAddress() string {
 
 // ValidateAction asks the adapter whether it can serve an action's type+payload
 // from the Robot-OS command set it advertises. Pure inspection: reserves nothing,
-// moves no robot. Issued at FleetAction/FleetTask acceptance and re-checked at
-// assignment for the chosen robot; unsupported=true means unconfirmed (not servable).
+// moves no robot. Issued once, at assignment-time candidate selection for the
+// chosen robot — not at FleetAction/FleetTask acceptance, which instead uses the
+// cheaper supported-action catalog pre-filter; unsupported=true means unconfirmed
+// (not servable).
 type ValidateAction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ActionType    string                 `protobuf:"bytes,1,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
