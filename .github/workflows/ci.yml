@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Nightly run for the long kind e2e gate (demo-test), which is excluded from
+  # pull_request because of its runtime. See the demo-test job for the reasoning.
+  schedule:
+    - cron: "0 4 * * *"
 
 permissions:
   contents: read
@@ -191,6 +195,65 @@ jobs:
       # asserts the scheduler assigned a task, and tears the cluster down.
       - name: Quickstart end-to-end (build · deploy · assign · assert)
         run: make quickstart-test
+
+  # ── Full-surface demo-test: the headless coverage gate ───────────────────────
+  # make demo-test asserts every targeted RobotPhase / FleetAction phase / estop state,
+  # the §9.3.8 alert expressions (fire AND clear) and RA-1, against a real control plane
+  # driven by the live sim adapter over a mutually-authenticated ControlStream.
+  #
+  # It is wired here because it was NOT: the target existed, the README pointed at it, and
+  # no workflow ran it — so it sat structurally unpassable (it deployed the plaintext
+  # overlay, under which no FleetAction can ever be assigned) without anything going red.
+  # An unreferenced gate is not a gate.
+  #
+  # NOT run on pull_request: cert-manager install + image build + the ~95s assertion window
+  # put this well past the quickstart job, and it is too slow to sit on every push. It runs
+  # on push to main and nightly instead, which still catches a regression within a day of
+  # merge. Promote it to pull_request if that ever proves too loose.
+  demo-test:
+    name: Full-surface demo-test (kind e2e, coverage gate)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # Same rationale as the quickstart job: the manager image build regenerates the
+      # .gitignored Go proto stubs, and demo_test.py + sim_adapter.py need the PYTHON
+      # stubs, which `make proto-py` builds from the same protoc.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install proto plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install kind
+        run: |
+          curl -sSLo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+
+      # grpcio is the adapter's transport; the run.sh preflight builds the proto stubs.
+      - name: Install Python gRPC runtime
+        run: python3 -m pip install --upgrade grpcio grpcio-tools protobuf
+
+      # run.sh installs cert-manager, deploys config/overlays/quickstart-mtls, drives the
+      # live adapter, asserts, prints the COVERAGE SUMMARY naming what it did NOT exercise
+      # (EdgeStream/C8 is skipped here — cmd/edge is not published in this repository), and
+      # deletes the cluster on exit.
+      - name: Full-surface demo-test (assert every phase · estop · §9.3.8 alert · RA-1)
+        run: make demo-test
 
   # ── Prose: documentation voice ────────────────────────────────────────────────
   # The eight Swarmada style rules in .vale/styles/. They existed as a style guide

@@ -60,14 +60,20 @@ TARGET_ACTION_PHASES = [
 ]
 TARGET_ESTOP_STATES = ["Stopping", "Stopped"]
 
-# Alerts that cannot fire in the insecure-mode demo and are reported but NOT gated on.
+# Alerts this harness reports but does NOT gate on.
 # SwarmadaEstopLatencySLOBreach's counter (swarmada_estop_latency_violations_total) is
-# written ONLY by the real control-plane estop dispatcher, which needs mTLS to route a
-# SafetyStream command to a named adapter (insecure mode has empty adapter identity, so
-# the estop resolves Failed and never records a latency violation). Projection can drive
-# estopState (→ RobotEstopUncleared) but not this counter. See the harness README.
+# written ONLY by the real control-plane estop dispatcher, on a TriggerEstop that an
+# adapter acknowledges late. The run's estopState walk is projected, and a projected
+# status write drives RobotEstopUncleared but can never increment this counter.
+#
+# The transport is no longer the obstacle: run.sh deploys the mTLS overlay, so the adapter
+# has a verified identity and the dispatcher CAN route a SafetyStream command to it. What
+# is missing is a trigger — nothing in this scenario annotates swarmada.io/estop-triggered
+# or applies a ZoneEstop. Closing this gap means issuing a real estop and letting the
+# delayed-ack fixture (SWARMADA_SIM_ESTOP_ACK_DELAY_MS) breach the SLO, which is now
+# unblocked work rather than a transport limitation. See the harness README.
 KNOWN_GAPS = {"SwarmadaEstopLatencySLOBreach"}
-KNOWN_GAPS_REASON = "needs mTLS (insecure mode can't route a control-plane estop to a named adapter)"
+KNOWN_GAPS_REASON = "no real TriggerEstop is issued in this scenario (the estop states are projected)"
 
 # RA-1 ceiling: over a full run of high-cadence telemetry, status writes must be a
 # small fraction of frames. The sim emits at 5 Hz; a compliant projector writes
@@ -96,13 +102,29 @@ def coverage_gaps(seen: set[str], targets: list[str]) -> list[str]:
 
 
 def ra1_ratio(snap: Snapshot, namespace: str) -> float | None:
-    """status_writes_total / frames_received_total. Tries the namespace first, then
-    falls back to a fleet-wide sum (the telemetry pipeline may label these with a
-    different namespace than the robot's — e.g. the ingestor's — so a namespace miss
-    must not read as "no telemetry"). None only when NO frames exist anywhere."""
+    """status_writes_total / frames_received_total.
+
+    The two counters are NOT labelled consistently by the control plane today:
+    frames_received carries the stream identity's namespace, while status_writes (and
+    dropped_frames) derive theirs from the frame's robot_id via namespaceOf(), which
+    yields "" for the bare robot_id a real adapter sends
+    (internal/telemetry/ingest.go). Scoping BOTH to the namespace therefore divides a
+    real numerator by a real denominator only when the two happen to agree.
+
+    That is not hypothetical: it silently turned this assertion into a tautology. Once
+    the run moved to the mTLS overlay the adapter gained a verified identity, frames
+    started arriving labelled namespace="warehouse-a" while writes stayed at "", the
+    namespace branch computed 0/441 = 0.0, and RA-1 "passed" without measuring
+    anything. A ratio of exactly 0.0 alongside a non-zero fleet-wide write count is
+    the signature of that mismatch, not of a compliant writer.
+
+    So: prefer the namespace-scoped pair, but fall back to fleet-wide totals whenever
+    the scoped pair cannot be a real measurement — no frames, or no writes while the
+    fleet-wide count says writes happened. None only when NO frames exist anywhere.
+    """
     frames = snap.sum("swarmada_telemetry_frames_received_total", namespace=namespace)
     writes = snap.sum("swarmada_telemetry_status_writes_total", namespace=namespace)
-    if frames <= 0:  # fall back to fleet-wide totals
+    if frames <= 0 or (writes <= 0 and snap.sum("swarmada_telemetry_status_writes_total") > 0):
         frames = snap.sum("swarmada_telemetry_frames_received_total")
         writes = snap.sum("swarmada_telemetry_status_writes_total")
     if frames <= 0:
