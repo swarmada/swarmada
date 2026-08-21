@@ -973,7 +973,7 @@ class _Driver:
         # 0 (ground) is a VALID value that must be distinguishable from "not reported": a
         # dropped field deserialising to 0 would silently claim the robot is on the ground.
         # Assert presence on the zero-valued scalar, which is the only case that proves it.
-        # `floor` and `altitude` are FRAME-EXCLUSIVE (fleet-adapter-protocol.md:280): a
+        # `floor` and `altitude` are FRAME-EXCLUSIVE (RFC-0001 §9.2.3): a
         # ground robot reports floor, an aerial one reports altitude and no floor at all.
         # Prove presence on whichever frame scalar the adapter actually reports; failing an
         # aerial adapter for the absence of `floor` would contradict the spec's own rule.
