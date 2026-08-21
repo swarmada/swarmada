@@ -186,9 +186,18 @@ own prefix instead of a catalog id.
 - **C7.1 (MAY)** Decline an optional command (`VerifyHardware`, `PushFirmware`,
   `ModelUpdate`, reservations, zone admission, and similar) by returning
   `CommandResult.unsupported = true` with an empty result.
-- **C7.2 (MUST, when implemented)** For `PushFirmware` / `ModelUpdate`, verify
-  the artifact checksum and, when signature verification is required, verify the
-  signature against the configured trust roots and fail closed on failure.
+- **C7.2 (MUST, when implemented)** For `ModelUpdate`, verify the artifact checksum
+  and, when signature verification is required, verify the signature against the
+  configured trust roots, and fail closed on failure.
+- **C7.3 (MUST, when implemented)** For `PushFirmware`, re-verify the delivered
+  **bytes** against `firmware_checksum` on the robot before flashing, and fail closed
+  on mismatch. This is a distinct obligation from C7.2, not a restatement of it: the
+  control plane verifies the publisher's signature over the checksum, which says
+  nothing about the bytes that arrived at this particular robot. An adapter that
+  flashes without re-hashing is trusting every hop of the delivery path.
+
+  C7.2 and C7.3 are independent. Declining `ModelUpdate` under C7.1 says nothing about
+  `PushFirmware`, and an adapter may implement either alone.
 
 ## C8 — Edge stream (when a zone declares an edge node)
 
@@ -236,7 +245,7 @@ own prefix instead of a catalog id.
   download began*. Without a terminal report the control plane cannot distinguish
   a slow install from a finished one, and the rollout never completes.
 
-  **A refusal is terminal too.** An adapter that refuses an artifact under C7.2
+  **A refusal is terminal too.** An adapter that refuses an artifact under C7.2 or C7.3
   MUST still report `INSTALL_OUTCOME_FAILED` — declining in the `CommandResult`
   alone leaves the rollout waiting for an install that will never happen.
 
