@@ -34,16 +34,18 @@ manager:
   # The manager serves /metrics here (--metrics-bind-address) and health probes
   # here (--health-probe-bind-address). Ports are referenced by the metrics
   # Service and the probes below; keep the host empty to bind all interfaces.
-  # 9090 is the normative /metrics port from RFC-0001 §9.3.8 (config/manager's
-  # :8080 is a dev-quickstart artifact; the chart drives the flag explicitly).
-  metricsPort: 9090
+  # 8080 matches the manager's own default (--metrics-bind-address, cmd/manager/main.go).
+  # RFC-0001 §9.3.8 defines the scrape surface and the metric names; it deliberately does
+  # NOT mandate a port, so this number tracks the binary, not the specification. The chart
+  # drives the flag explicitly so container port, Service and scrape annotation agree.
+  metricsPort: 8080
   healthPort: 8081
 
   # Extra pod annotations. Set these for the RAW prometheus.io/* scrape fallback on
   # clusters WITHOUT the Prometheus Operator (no ServiceMonitor). Example:
   #   podAnnotations:
   #     prometheus.io/scrape: "true"
-  #     prometheus.io/port: "9090"
+  #     prometheus.io/port: "8080"
   #     prometheus.io/path: "/metrics"
   podAnnotations: {}
 
@@ -144,8 +146,8 @@ rbac:
 metrics:
   service:
     enabled: true
-    # Service port; targets the manager's metricsPort (/metrics), §9.3.8 default 9090.
-    port: 9090
+    # Service port; targets the manager's metricsPort (/metrics), §9.3.8 default 8080.
+    port: 8080
     annotations: {}
   # OPTIONAL Prometheus-Operator ServiceMonitor pointing an EXISTING Prometheus at
   # us. Renders ONLY when enabled (guarded so `helm template` is clean on clusters

@@ -71,6 +71,14 @@ spec:
             description: "P99 of swarmada_scheduler_assignment_latency_seconds for priority=Normal has exceeded 60s over 10m (RFC-0001 §9.3.8, scheduler)."
 
         # Stuck Revoking task — double-execution risk, assignment lease (§9.3.8).
+        # The spec threshold is the lease horizon:
+        #   SwarmadaConfig spec.scheduling.leaseDurationSeconds + clockSkewMarginSeconds
+        # which is 35s at the schema defaults (30 + 5), so `for: 1m` clears it. Those
+        # fields are per-namespace and settable up to 300 + 60 = 360s (ADR-0044); a
+        # namespace that raises leaseDurationSeconds above 55s MUST raise `for` past its
+        # own horizon too, or this alert fires on revocations that are still legitimately
+        # waiting out the lease. A static rule cannot read per-namespace config, so this
+        # is stated rather than computed.
         - alert: SwarmadaFleetActionStuckRevoking
           expr: swarmada_fleetactions_by_phase{phase="Revoking"} > 0
           for: 1m
@@ -78,7 +86,7 @@ spec:
             severity: critical
           annotations:
             summary: "FleetAction stuck in Revoking (namespace {{`{{ $labels.namespace }}`}})"
-            description: "A FleetAction has been Revoking longer than the lease horizon (leaseDurationMs + clockSkewMarginMs) — a single-executor / double-execution risk (RFC-0001 §9.3.8, assignment lease)."
+            description: "A FleetAction has been Revoking for over 1m — longer than the default lease horizon (spec.scheduling.leaseDurationSeconds + spec.scheduling.clockSkewMarginSeconds, 35s at the schema defaults). A single-executor / double-execution risk (RFC-0001 §9.3.8, assignment lease). If this namespace configures a lease horizon above 55s, raise this rule's `for` to match before treating the alert as real."
 
         # Estop-path outage: adapter disconnected — emergency stop protocol (§9.3.8).
         - alert: SwarmadaFleetAdapterDisconnected

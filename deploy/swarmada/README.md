@@ -39,7 +39,7 @@ helm uninstall swarmada -n swarmada-system   # CRDs and CRs are KEPT (see below)
 | `webhooks.caBundle` | `""` | CA bundle when cert-manager is disabled |
 | `installCRDs` | `true` | Install the 13 CRDs with the chart |
 | `rbac.create` / `rbac.clusterRoles` | `true` / `true` | Manager RBAC / the five `swarmada:*` roles |
-| `metrics.service.port` | `9090` | `/metrics` endpoint (RFC-0001 §9.3.8) |
+| `metrics.service.port` | `8080` | `/metrics` endpoint (RFC-0001 §9.3.8) |
 | `metrics.serviceMonitor.enabled` | `false` | Emit a Prometheus-Operator ServiceMonitor |
 | `metrics.prometheusRule.enabled` | `false` | Emit the §9.3.8 alert rules |
 
@@ -81,7 +81,7 @@ The chart CRDs are regenerated from `config/crd/bases` with `make helm-sync`
   manager:
     podAnnotations:
       prometheus.io/scrape: "true"
-      prometheus.io/port: "9090"
+      prometheus.io/port: "8080"
       prometheus.io/path: "/metrics"
   ```
 
