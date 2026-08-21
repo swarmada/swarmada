@@ -218,3 +218,39 @@ jobs:
       # per MinAlertLevel and the exemptions in .vale.ini.
       - name: Lint prose (vale)
         run: vale .
+
+  # ── Adapter conformance ───────────────────────────────────────────────────────
+  # The suite RFC-0001 §9.2.8 names and adapters/CONFORMANCE.md publishes, and the
+  # evidence behind "vendor-neutral by demonstration". It had no CI job from the day
+  # it was written, and it ABORTED on the in-tree reference adapter for an unknown
+  # period: a duplicate check id tripped report.py's integrity guard sixty seconds in.
+  # The guard was correct. Nothing was running it.
+  conformance:
+    name: Conformance (simulation adapter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Makefile's Go-discovery preflight runs at parse time, so every make target
+      # needs Go present even when it compiles none.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          make install-py
+
+      # Both scenarios. The fault run exercises the degrade/recover path, which the
+      # healthy run never reaches.
+      - name: Conformance — healthy fleet
+        run: make conformance-sim
+
+      - name: Conformance — hardware fault
+        run: make conformance-sim-fault

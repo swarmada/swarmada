@@ -545,7 +545,7 @@ class _Driver:
         self._check_update_progress()  # C10
         self._check_pause_resume()     # C11
         self._check_scan()             # C12
-        self._check_artifact_verification()  # C7.2
+        self._check_artifact_verification()  # C7.2 (model) + C7.3 (firmware body)
         self._check_version_bound()    # C15 (no adapter traffic; safe before the drop)
         # An ACCEPTING reconnect, before the refusing one below. C6.1 and C2.2 are both
         # about what happens on a SUCCESSFUL re-registration, which the version-refusal
@@ -830,7 +830,7 @@ class _Driver:
         try:
             msg = self._recv_safety()
         except (EOFError, queue.Empty):
-            self.r.add("C5.2", "Return a confirmed EstopAck on SafetyStream",
+            self.r.add("C5.2", "Confirmed EstopAck (STOPPED) on SafetyStream",
                        CheckStatus.FAIL, detail="no EstopAck received")
             self.r.add("C5.5", "EstopAck within the 500 ms SafetyStream budget",
                        CheckStatus.FAIL, detail="no EstopAck arrived, so the budget cannot be met")
@@ -1038,15 +1038,17 @@ class _Driver:
                 accepted=True, telemetry_interval_seconds=1, edge_endpoints=[edge])))  # 1s: the
                 # suite now MEASURES adoption of this value (C2.3), and a 10s cadence
                 # would starve every downstream check that waits on telemetry.
-            self.r.add("C2.1", "RegisterRobot for an admitted robot is acked",
-                       CheckStatus.PASS)
+            self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
+                       CheckStatus.PASS,
+                       detail="RegisterRobot for an admitted robot is acked")
             return True
         if kind == "discover":
             self.s.control_out.put(pb.ControlPlaneMessage(discover_ack=pb.DiscoverAck(
                 accepted=True, discovered_robot_name="dr-conformance")))
-            self.r.add("C2.1", "DiscoverRobot for an unadmitted robot is acked",
+            self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
                        CheckStatus.PASS,
-                       detail="edge endpoints are advertised on RegisterAck, not DiscoverAck")
+                       detail="DiscoverRobot for an unadmitted robot is acked; edge endpoints "
+                              "are advertised on RegisterAck, not DiscoverAck")
             return False
         # Not a registration — return it to the stream for the fencing checks.
         self._pushback.append(msg)
@@ -1117,14 +1119,14 @@ class _Driver:
             self.r.add("C10.1", "push_firmware may emit UpdateProgress", CheckStatus.PASS,
                        level="MAY", detail=f"phases: {[p.phase for p in emitted]}")
         elif not res.push_firmware.accepted:
-            # The probe carries no checksum, so a C7.2-compliant adapter REFUSES it and never
+            # The probe carries no checksum, so a C7.3-compliant adapter REFUSES it and never
             # reaches the progress path. That is correct behaviour, not a missing feature — and the
             # harness cannot supply a valid checksum here, because only the adapter knows what bytes
             # it would receive. Recorded distinctly so this never reads as "accepted but silent".
             self.r.add("C10.1", "push_firmware may emit UpdateProgress", CheckStatus.SKIP,
                        level="MAY", detail=(
                            SkipCause.OPTIONAL_DECLINED.value
-                           + ": adapter refused the unverifiable probe artifact (C7.2 body "
+                           + ": adapter refused the unverifiable probe artifact (C7.3 body "
                            "re-verify), so the optional progress path was not reachable: "
                            + res.push_firmware.message))
         else:
@@ -1137,7 +1139,7 @@ class _Driver:
         #
         # The obligation is conditional on the capability, so a decline SKIPs above and never
         # reaches here. But note what is NOT excused: a REFUSAL is still terminal. The probe
-        # carries an unmatchable checksum, so a C7.2-compliant adapter refuses it — and that
+        # carries an unmatchable checksum, so a C7.3-compliant adapter refuses it — and that
         # refusal must be reported as INSTALL_OUTCOME_FAILED, because a rollout that only sees
         # "accepted=false" in the command result is still waiting for an install that will never
         # happen. This is the check that catches an adapter which declines correctly but leaves
@@ -1214,7 +1216,7 @@ class _Driver:
         # edge-capable adapter dials it and honours an edge-issued estop with the
         # same confirmed-EstopAck discipline as SafetyStream.
         if not advertised_edge:
-            self.r.add("C8.1", "Edge stream when a zone declares an edge node",
+            self.r.add("C8.1", "Adapter dials the advertised edge endpoint",
                        CheckStatus.SKIP, detail=(
                            SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
                            + ": adapter registered no robot, so no edge_endpoints were "
@@ -1279,8 +1281,15 @@ class _Driver:
 
 
     def _check_artifact_verification(self) -> None:
-        """C7.2 (MUST, when implemented) — an adapter that accepts model_update MUST verify the
-        artifact and fail closed.
+        """C7.2 and C7.3 (MUST, when implemented) — verify the artifact and fail closed.
+
+        C7.2 covers model_update: verify the artifact checksum, and the signature when one is
+        required. C7.3 covers push_firmware and is a SEPARATE obligation, not a restatement —
+        it is the robot-side re-verify of the delivered BYTES. The control plane checked the
+        publisher's signature over the checksum, which says nothing about what arrived here.
+
+        The two are independent: an adapter may decline one under C7.1 and implement the other,
+        so a decline of model_update must not skip the firmware probe.
 
         Probed with a DELIBERATELY WRONG checksum. A conformant adapter answers acknowledged=false;
         acknowledging is a failed MUST, because the control plane records acknowledged=true as "this
@@ -1300,21 +1309,24 @@ class _Driver:
         ))
         res = self._await_result(cid)
         if res.unsupported:
-            self.r.add("C7.2", "Verify model artifact checksum/signature, fail closed",
+            self.r.add("C7.2", "Verify MODEL artifact checksum/signature, fail closed",
                        CheckStatus.SKIP, detail=(
                            SkipCause.OPTIONAL_DECLINED.value + ": " + "adapter declines model_update (conformant, C7.1), so artifact "
                            "verification was not exercised"))
-            return
+            # Do NOT return here. The firmware body re-verify below (C7.3) is a separate
+            # requirement against a separate command, and an adapter may decline one while
+            # implementing the other. An early return dropped C7.3 out of the report
+            # entirely — no PASS, no FAIL, no SKIP, simply absent.
+        else:
+            mu = res.model_update
+            ok = not mu.acknowledged
+            self.r.add("C7.2", "Verify MODEL artifact checksum/signature, fail closed",
+                       CheckStatus.PASS if ok else CheckStatus.FAIL,
+                       detail=("refused a bad checksum: " + mu.message if ok else
+                               "adapter ACKNOWLEDGED a model_update whose checksum cannot match "
+                               "the artifact — an unverified model would be installed"))
 
-        mu = res.model_update
-        ok = not mu.acknowledged
-        self.r.add("C7.2", "Verify MODEL artifact checksum/signature, fail closed",
-                   CheckStatus.PASS if ok else CheckStatus.FAIL,
-                   detail=("refused a bad checksum: " + mu.message if ok else
-                           "adapter ACKNOWLEDGED a model_update whose checksum cannot match the "
-                           "artifact — an unverified model would be installed"))
-
-        # C7.2 covers push_firmware too. The firmware half is the ROBOT-SIDE body re-verify: the
+        # C7.3 is the ROBOT-SIDE body re-verify, a separate requirement from C7.2: the
         # control plane already checked the publisher's signature over the checksum, but that says
         # nothing about the bytes this robot received. An adapter that flashes without re-hashing
         # trusts every hop of the delivery path.
@@ -1325,7 +1337,7 @@ class _Driver:
         ))
         res = self._await_result(cid)
         if res.unsupported:
-            self.r.add("C7.2", "Verify FIRMWARE artifact body before flashing, fail closed",
+            self.r.add("C7.3", "Verify FIRMWARE artifact body before flashing, fail closed",
                        CheckStatus.SKIP, detail=(
                            SkipCause.OPTIONAL_DECLINED.value
                            + ": adapter declines push_firmware (conformant, C7.1), so body "
@@ -1333,7 +1345,7 @@ class _Driver:
             return
         fw = res.push_firmware
         ok = not fw.accepted
-        self.r.add("C7.2", "Verify FIRMWARE artifact body before flashing, fail closed",
+        self.r.add("C7.3", "Verify FIRMWARE artifact body before flashing, fail closed",
                    CheckStatus.PASS if ok else CheckStatus.FAIL,
                    detail=("refused a bad checksum: " + fw.message if ok else
                            "adapter ACCEPTED a push_firmware whose checksum cannot match the "
