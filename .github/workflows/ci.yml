@@ -191,3 +191,30 @@ jobs:
       # asserts the scheduler assigned a task, and tears the cluster down.
       - name: Quickstart end-to-end (build · deploy · assign · assert)
         run: make quickstart-test
+
+  # ── Prose: documentation voice ────────────────────────────────────────────────
+  # The eight Swarmada style rules in .vale/styles/. They existed as a style guide
+  # with no runner from the day they were written; vale now reports zero errors
+  # across the tree, so the gate can be turned on rather than left as decoration.
+  prose:
+    name: Prose (vale)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A pinned release binary rather than a marketplace action: one fewer
+      # supply-chain dependency in a repository whose readers are evaluating whether
+      # to trust a robot fleet control plane, and the version that produced the first
+      # clean run is the version that gates every run after it.
+      - name: Install vale 3.17.1
+        run: |
+          curl -sSfL -o vale.tar.gz \
+            https://github.com/errata-ai/vale/releases/download/v3.17.1/vale_3.17.1_Linux_64-bit.tar.gz
+          tar -xzf vale.tar.gz vale
+          sudo mv vale /usr/local/bin/vale
+          vale --version
+
+      # vale exits non-zero on errors only; warnings and suggestions do not fail,
+      # per MinAlertLevel and the exemptions in .vale.ini.
+      - name: Lint prose (vale)
+        run: vale .
