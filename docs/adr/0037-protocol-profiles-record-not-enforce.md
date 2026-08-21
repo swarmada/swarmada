@@ -5,6 +5,13 @@
 - **Deciders:** API Designer, Kubernetes Expert, Distributed Systems Reviewer
 - **Related:** ADR-0032 (contract versioning and conformance gating), ADR-0019 (`status.supportedActions` as discovery), ADR-0007 (conformance is self-certified), ADR-0005 (reference adapter policy), RFC-0001 §9.6 (Fleet Adapter protocol), RFC-0001 {{ref:fleetadapter}}
 
+> **Implementation note (2026-08-21).** The rename this ADR mandates has landed: *capability
+> profile* no longer occurs anywhere in RFC-0001, and *capability set* is the term in use. The
+> Context below therefore describes the collision **as it stood on 2026-08-12**, not the current
+> text — it is retained as the record of why the decision was taken, and its citations name
+> chapters rather than line numbers because the passages it describes have since been rewritten
+> by this very decision.
+
 ## Context
 
 A Fleet Adapter bridges the Swarmada contract to some external protocol. Nothing in the
@@ -14,9 +21,9 @@ API records **which** external protocol that is.
 `SuiteVersion:123`, `ConformanceContractVersion:198`, `NegotiatedProtocolVersion:204`,
 `NegotiatedContractVersion:206` — and every one of those describes the *Swarmada*
 contract or its conformance suite. The external standard appears in exactly one place:
-`adapters/REGISTRY.md:55`, as prose in an `Interface / class` column, adjacent to a
+`adapters/REGISTRY.md`, as prose in an `Interface / class` column, adjacent to a
 `Protocol` column that means the Swarmada contract. Two columns, both reading
-"protocol", two different axes. `docs/adapters.md:99,:136` uses the words "comms
+"protocol", two different axes. `docs/adapters.md` uses the words "comms
 profile" for the same idea, in documentation only.
 
 The consequence is that a sentence of the form "adapter X supports standard Y" cannot
@@ -30,12 +37,12 @@ the harness does not make.
 
 Two further facts constrain the shape of any fix.
 
-**The word "profile" is already overloaded.** `fleet-adapter-protocol.md:56` reserves a
+**The word "profile" was already overloaded.** The Fleet Adapter protocol chapter reserved a
 future seam for *capability profiles* — an adapter declaring conformance to individual
 parts of the Swarmada contract at independent versions. That is a northbound axis.
-RFC-0004 (`references.md:114`) uses "profile" in a third sense, for the task-submission
-surface as a profile over the Kubernetes API. `safety.md:154` uses the word generically,
-and `docs/adapter-use-cases.md` uses it for a CLI flag. Adding a fourth sense without
+RFC-0004 (named in the references chapter) used "profile" in a third sense, for the task-submission
+surface as a profile over the Kubernetes API. The safety chapter used the word generically,
+and `docs/adapter-use-cases.md` used it for a CLI flag. Adding a fourth sense without
 resolving the collision would compound a defect that exists today.
 
 **Nothing on the robot side of the boundary declares which protocol is spoken.**
@@ -58,7 +65,7 @@ Introduce a **protocol profile**: a declared, versioned statement of which exter
 standard a Fleet Adapter speaks. It is recorded, not enforced.
 
 1. **Name.** The southbound axis is a *protocol profile*. The northbound seam reserved
-   at `fleet-adapter-protocol.md:56` is renamed from *capability profile* to
+   in the Fleet Adapter protocol chapter is renamed from *capability profile* to
    **capability set**. The *rename* is free — the seam is reserved and unimplemented, and the
    phrase "capability profile" occurred once in normative text. The *name* is not free of
    collision, which this ADR originally implied: "capability set" already appears in ordinary
@@ -96,7 +103,7 @@ standard a Fleet Adapter speaks. It is recorded, not enforced.
    protocol: `type:310` admits only `hardware-native`, `model-driven` or `manual`;
    `pauseable:316`, `requiredHardware:324` and `providingModel:329` have no meaning for
    a protocol; and a capability's defining property is that it is active or inactive as
-   a function of hardware health (`design-details.md:174`), which a protocol never is.
+   a function of hardware health (RFC-0001 §6.10.1), which a protocol never is.
    Capabilities state what a robot can do. A protocol profile states what language it is
    addressed in.
 
@@ -107,12 +114,12 @@ standard a Fleet Adapter speaks. It is recorded, not enforced.
    tick (RA-1).
 
 5. **Recording and enforcement stay separate concerns**, as ADR-0032 already states for
-   `conformanceContractVersion` (`crds/fleetadapter.md:100`). Specifically:
+   `conformanceContractVersion` (RFC-0001 §9.1.13). Specifically:
    - **Dispatch is never gated on a protocol profile.** Following ADR-0019
-     (`crds/fleetadapter.md:103`), a declaration may inform or pre-filter and must never
+     (RFC-0001 §9.1.13), a declaration may inform or pre-filter and must never
      cause a wrong dispatch or a silent non-dispatch.
    - **Admission is not gated on it.** The admission gate
-     (`crds/fleetadapter.md:113`) is scalar and fail-closed; a scalar condition cannot
+     (RFC-0001 §9.1.13) is scalar and fail-closed; a scalar condition cannot
      represent an adapter declaring two profiles of which one passes and one fails.
    - **No condition, no event, no status message is raised on a `spec`/`status`
      mismatch.** The two values are recorded and may be compared by a reader or an
@@ -201,8 +208,8 @@ adapters. Version drift becomes expressible, and later detectable.
   surface only.
 - CRD regeneration, and the API review that `docs/api-principles.md` requires for any
   new field.
-- The rename at `fleet-adapter-protocol.md:56` must land before anything is built
-  against that seam; after that it costs a migration.
+- The rename in the Fleet Adapter protocol chapter must land before anything is built
+  against that seam; after that it costs a migration. **Landed — see the implementation note.**
 
 **Drawbacks accepted.** One more noun in the specification. A declared field that
 nothing enforces in v1, whose value is documentary until the robot-side expectation

@@ -147,19 +147,19 @@ kubectl patch robot/<name> -n warehouse-a --subresource=status --type=merge \
 
 This is a **simulation shortcut, and the control plane does not perform it.** RFC-0001
 says status is controller-owned and operators must not write it
-(`rfcs/rfc-0001-core-spec/crds/robot.md:312-314`), and the RA-1 status-write discipline
-(`rfcs/rfc-0001-core-spec/terminology.md:55`) makes status a controller projection written
+(RFC-0001 §9.1.3), and the RA-1 status-write discipline
+(RFC-0001 Terminology) makes status a controller projection written
 only on a material transition. The runner is doing what the specification forbids.
 
 It is here because of a **known control-plane gap**: nothing transitions a `Robot` from
 `Discovered` to `Idle`. RFC-0001 requires that transition
-(`rfcs/rfc-0001-core-spec/crds/discoveredrobot.md:342-344`) but assigns it to no component —
+(RFC-0001 §9.1.2) but assigns it to no component —
 the Robot reconciler writes `phase` only to `Offline` (RFC-0001 §9.3.3), the Zone
-Controller only to `Maintenance` (`control-plane.md:318`), and the Scheduler only reads it
-(`control-plane.md:207`). In the code, the sole writer of `Idle`
+Controller only to `Maintenance` (RFC-0001 §9.3.4), and the Scheduler only reads it
+(RFC-0001 §9.3.2). In the code, the sole writer of `Idle`
 (`internal/controller/fleetaction_controller.go:1450`) fires on *task release* and requires
 the robot to have already been `Assigned`/`InProgress`. Since scheduler filter 1
-(`control-plane.md:148`, `internal/scheduler/scheduler.go:131`) admits only `Idle` robots,
+(RFC-0001 §9.3.2, `internal/scheduler/scheduler.go:131`) admits only `Idle` robots,
 without the patch no robot is ever schedulable and no task is ever assigned.
 
 **What that means for reading this demo:** the scheduler's *selection* — filters, ranking,
@@ -176,4 +176,4 @@ Two smaller projections, same rule, same reason:
 - `status.estopState` in the full-surface gate (`examples/full-surface-demo/run.sh:373-380`) —
   the real estop path needs mTLS adapter identity, which the dev overlay disables. RFC-0001
   requires this field to come from a confirmed `EstopAck` and never be inferred
-  (`crds/robot.md:331-332`); the runner infers it, and labels the step accordingly.
+  (RFC-0001 §9.1.3); the runner infers it, and labels the step accordingly.
