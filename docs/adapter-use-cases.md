@@ -118,8 +118,7 @@ When no live adapter is running (the projection-based quickstart), degrade the
 `Robot` status by hand. Note `status.hardware` is an **array** of
 
 > **This is a demo shortcut, not an operator workflow.** `Robot.status` is controller-owned
-> and operators must not write it (`rfcs/rfc-0001-core-spec/crds/robot.md:312-314`; RA-1,
-> `terminology.md:55`) — `status.hardware[]` is a control-plane-owned field, written from
+> and operators must not write it (RFC-0001 §9.1.3; RA-1, RFC-0001 Terminology) — `status.hardware[]` is a control-plane-owned field, written from
 > adapter telemetry by the Robot status sink (RFC-0001 §9.3.3). Use this only against a simulated fleet with no
 > live adapter, and never against a real one.
 `{name, status}` components:

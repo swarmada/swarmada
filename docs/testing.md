@@ -48,8 +48,8 @@ demo in this repository runs against Isaac Sim.
    robot), not in-flight reroute.
 
    **Known gap.** The admission → assignment leg is not end-to-end. No component owns
-   the `Discovered` → `Idle` transition (`crds/discoveredrobot.md:342` requires it; no
-   ownership table in `control-plane.md` claims it), so the run projects
+   the `Discovered` → `Idle` transition (RFC-0001 §9.1.2 requires it; no
+   ownership table in RFC-0001 §9.3 claims it), so the run projects
    `Robot.status.phase = Idle` directly to make the scheduler's `Idle` filter pass. The
    scheduling itself is real; robot readiness is asserted, not derived.
    `examples/warehouse-quickstart/run.sh` announces this at the step that performs it.
