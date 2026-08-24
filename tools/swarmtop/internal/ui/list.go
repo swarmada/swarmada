@@ -51,7 +51,7 @@ func (m Model) viewList() string {
 		b.WriteString(m.renderRobotTable())
 	}
 	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [t] tasks  [a] adapters  [z] zones  [/] filter  [?] keys"))
+	b.WriteString(m.helpLine("[↑↓] move  [s] split  [enter] detail  [t] tasks  [a] adapters  [z] zones  [/] filter  [?] keys"))
 	return b.String()
 }
 
@@ -154,6 +154,40 @@ func (m Model) robotColWidths(titles []string, rows []table.Row) []int {
 				break
 			}
 		}
+
+		// ACTION last. The surplus branch above grows it and the deficit branch used to
+		// leave it alone, so once CAPS/ADAPTER/NAME/ZONE hit their minimums the loop
+		// simply ended and the oversized widths were returned unchanged. On an
+		// 82-column pane with "sim-fleet-adapter" and "inspect-receiving-dock" in the
+		// data those four give up about 16 columns and the row still lands a few over.
+		// The terminal wraps it, the next repaint only covers the rows the renderer
+		// believes it owns, and the wrapped tail is stranded on screen for the rest of
+		// the recording. Every cast carried a few of those.
+		if need > 0 {
+			if give := w[components.ColAction] - mins[components.ColAction]; give > 0 {
+				if give > need {
+					give = need
+				}
+				w[components.ColAction] -= give
+				need -= give
+			}
+		}
+
+		// Hard floor. Below about 66 columns every minimum is already met and there is
+		// nothing legitimate left to give, but a row that cannot fit must still not
+		// overflow: trim from the right, down to one column each. Truncated is legible;
+		// wrapped is debris that never gets cleared.
+		for i := len(w) - 1; i >= 0 && need > 0; i-- {
+			give := w[i] - 1
+			if give <= 0 {
+				continue
+			}
+			if give > need {
+				give = need
+			}
+			w[i] -= give
+			need -= give
+		}
 	}
 	return w
 }
@@ -220,6 +254,31 @@ func (m Model) narrowNameWidth() int {
 	return w
 }
 
+// helpLine renders a key-hint footer clamped to the pane width.
+//
+// The hint strings are fixed and long -- 94 columns for robots, 95 for tasks and zones --
+// and were rendered with a bare style that has no width. Anything narrower than about 105
+// columns wrapped them onto the following row, and since a repaint only covers the rows the
+// renderer believes it owns, the wrapped tail stayed on screen. In a three-up layout at 250
+// columns each pane is 82, so this fired on every frame of every recording.
+//
+// MaxWidth truncates rather than wraps, which is the right trade for a hint line: the keys
+// are ordered most-used first, so a narrow pane loses "[?] keys" rather than corrupting the
+// pane below it. Guarded on m.width because it is zero until the first WindowSizeMsg.
+func (m Model) helpLine(s string) string {
+	return m.clampWidth(m.styles.help.Render(s))
+}
+
+// clampWidth truncates an already-rendered line to the pane width. Separate from helpLine
+// because the detail screens append a scroll hint after rendering the help text, so the
+// thing that must fit is the concatenation, not either part.
+func (m Model) clampWidth(s string) string {
+	if m.width <= 0 {
+		return s
+	}
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(s)
+}
+
 // titleBar is the top status line shared by every view.
 func (m Model) titleBar(section string) string {
 	left := m.styles.header.Render(fmt.Sprintf("swarmtop · %s", section))
@@ -240,7 +299,7 @@ func (m Model) titleBar(section string) string {
 		}
 	}
 	right := m.styles.muted.Render(count + "  " + state)
-	return left + "   " + right
+	return m.clampWidth(left + "   " + right)
 }
 
 // helpOverlay is the full key reference, shown by [?]. It exists so the footer does not have
@@ -264,7 +323,7 @@ func (m Model) helpOverlay() string {
 	for _, r := range rows {
 		b.WriteString("  " + m.styles.colHeader.Render(pad(r[0], 18)) + m.styles.muted.Render(r[1]) + "\n")
 	}
-	b.WriteString("\n" + m.styles.help.Render("any key closes this"))
+	b.WriteString("\n" + m.helpLine("any key closes this"))
 	return b.String()
 }
 
