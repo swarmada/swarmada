@@ -35,7 +35,7 @@ func (m Model) viewAdapters() string {
 	if len(m.fleet.Adapters) == 0 {
 		b.WriteString(m.styles.muted.Render("  no adapters"))
 		b.WriteByte('\n')
-		b.WriteString(m.styles.help.Render("[esc] robots  [t] tasks  [q] quit"))
+		b.WriteString(m.helpLine("[esc] robots  [t] tasks  [q] quit"))
 		return b.String()
 	}
 
@@ -55,7 +55,7 @@ func (m Model) viewAdapters() string {
 		}
 	}
 	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render("[↑↓] move  [s] split  [enter] detail  [r] robots  [t] tasks  [/] filter  [?] keys"))
+	b.WriteString(m.helpLine("[↑↓] move  [s] split  [enter] detail  [r] robots  [t] tasks  [/] filter  [?] keys"))
 	return b.String()
 }
 

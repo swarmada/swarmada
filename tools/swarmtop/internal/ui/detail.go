@@ -56,14 +56,19 @@ func (m Model) viewSplit() string {
 	divider := m.styles.paneDivet.Render("│")
 	rightBox := lipgloss.NewStyle().PaddingLeft(2).Render(right)
 
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, divider, rightBox))
+	// The joined body is the third place a row could outgrow the pane: the left list, the
+	// divider and the right detail are each sized independently and JoinHorizontal simply
+	// concatenates them. At 82 columns that overshot by one, which is enough to wrap and
+	// strand a row. Clamping the composed block is what makes the guarantee whole -- help
+	// lines and table widths alone were not sufficient.
+	b.WriteString(m.clampWidth(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, divider, rightBox)))
 	b.WriteByte('\n')
 
 	scrollHint := ""
 	if len(rightLines) > h {
 		scrollHint = m.styles.muted.Render(fmt.Sprintf("  detail %d-%d/%d", start+1, end, len(rightLines)))
 	}
-	b.WriteString(m.styles.help.Render("[↑↓] move  [PgUp/PgDn] scroll detail / page list  [s] unsplit  [enter] full  [t] tasks  [a] adapters  [q] quit") + scrollHint)
+	b.WriteString(m.clampWidth(m.styles.help.Render("[↑↓] move  [PgUp/PgDn] scroll detail / page list  [s] unsplit  [enter] full  [t] tasks  [a] adapters  [q] quit") + scrollHint))
 	return b.String()
 }
 
@@ -91,14 +96,14 @@ func (m Model) viewDetailScreen() string {
 	if end > len(lines) {
 		end = len(lines)
 	}
-	b.WriteString(strings.Join(lines[start:end], "\n"))
+	b.WriteString(m.clampWidth(strings.Join(lines[start:end], "\n")))
 	b.WriteByte('\n')
 
 	scrollHint := ""
 	if len(lines) > h {
 		scrollHint = m.styles.muted.Render(fmt.Sprintf("  (%d-%d/%d)", start+1, end, len(lines)))
 	}
-	b.WriteString(m.styles.help.Render("[↑↓/PgUp/PgDn/g/G] scroll  [esc] back  [q] quit") + scrollHint)
+	b.WriteString(m.clampWidth(m.styles.help.Render("[↑↓/PgUp/PgDn/g/G] scroll  [esc] back  [q] quit") + scrollHint))
 	return b.String()
 }
 
@@ -152,7 +157,7 @@ func (m Model) scrollScreen(title string, lines []string, helpText string) strin
 	if len(lines) > h {
 		scrollHint = m.styles.muted.Render(fmt.Sprintf("  (%d-%d/%d)", start+1, end, len(lines)))
 	}
-	b.WriteString(m.styles.help.Render(helpText) + scrollHint)
+	b.WriteString(m.clampWidth(m.styles.help.Render(helpText) + scrollHint))
 	return b.String()
 }
 
@@ -174,14 +179,14 @@ func (m Model) splitScreen(title, leftPane string, rightLines []string, helpText
 	leftBox := lipgloss.NewStyle().PaddingRight(2).Render(leftPane)
 	divider := m.styles.paneDivet.Render("│")
 	rightBox := lipgloss.NewStyle().PaddingLeft(2).Render(right)
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, divider, rightBox))
+	b.WriteString(m.clampWidth(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, divider, rightBox)))
 	b.WriteByte('\n')
 
 	scrollHint := ""
 	if len(rightLines) > h {
 		scrollHint = m.styles.muted.Render(fmt.Sprintf("  detail %d-%d/%d", start+1, end, len(rightLines)))
 	}
-	b.WriteString(m.styles.help.Render(helpText) + scrollHint)
+	b.WriteString(m.clampWidth(m.styles.help.Render(helpText) + scrollHint))
 	return b.String()
 }
 

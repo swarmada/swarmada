@@ -860,7 +860,30 @@ func (m Model) selectedAdapter() *k8sclient.AdapterView {
 }
 
 // View renders the current mode.
+// View renders the current screen, clamped to the terminal width.
+//
+// The clamp is a backstop, not the fix. A row wider than the terminal wraps, the next
+// repaint only covers the rows the renderer believes it owns, and the wrapped tail is
+// stranded -- in a recorded session, for the rest of the take. Three separate paths
+// produced that: fixed-width help footers, robotColWidths returning oversized columns when
+// it ran out of things to shrink, and the split view's horizontally joined body. Each is
+// fixed at its source, but "no row may exceed the width" is an invariant of the whole
+// screen rather than of any one renderer, so it is also enforced in the one place every
+// screen passes through. Anything added later inherits it.
 func (m Model) View() string {
+	// Nothing is drawn until the terminal size is known. Bubbletea calls View once before
+	// the first WindowSizeMsg, when m.width is still 0 and clampWidth can only pass the
+	// string through -- so that first paint went out unclamped, wrapped, and left fragments
+	// no later repaint covers. It survived every other fix precisely because it happens
+	// before the width the fixes depend on exists. The size message follows immediately,
+	// so the cost is one empty frame.
+	if m.width <= 0 {
+		return ""
+	}
+	return m.clampWidth(m.view())
+}
+
+func (m Model) view() string {
 	// The overlay replaces the screen rather than drawing over it: composing a floating
 	// panel over a table means clipping every line under it, and a half-covered fleet
 	// reads as a fleet that has changed.

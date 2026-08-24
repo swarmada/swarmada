@@ -492,7 +492,7 @@ func (m Model) viewTasks() string {
 	if len(rows) == 0 {
 		b.WriteString(m.styles.muted.Render("  no tasks or actions"))
 		b.WriteByte('\n')
-		b.WriteString(m.styles.help.Render("[esc] robots  [a] adapters  [q] quit"))
+		b.WriteString(m.helpLine("[esc] robots  [a] adapters  [q] quit"))
 		return b.String()
 	}
 
@@ -544,7 +544,7 @@ func (m Model) viewTasks() string {
 	}
 
 	b.WriteByte('\n')
-	b.WriteString(m.styles.help.Render(
+	b.WriteString(m.helpLine(
 		"[↑↓] move  [s] split  [enter] detail  [r] robots  [a] adapters  [z] zones  [/] filter  [?] keys"))
 	return b.String()
 }
@@ -559,7 +559,7 @@ func (m Model) titleBarTasks() string {
 		state = "PAUSED ‖"
 	}
 	count := fmt.Sprintf("%s  %s", plural(len(m.fleet.Tasks), "task"), plural(len(m.fleet.Actions), "action"))
-	return left + "   " + m.styles.muted.Render(count+"  "+state)
+	return m.clampWidth(left + "   " + m.styles.muted.Render(count+"  "+state))
 }
 
 // plural renders "1 task" / "2 tasks" — a count line that reads "1 tasks" looks
