@@ -20,7 +20,7 @@ commit and, for anything significant, an RFC.
 
 Prerequisites:
 
-- Go 1.22+
+- Go 1.26+
 - `minikube` and `kubectl`
 - `controller-gen` and `kubebuilder`
 - Python 3.12 (in a per-project virtualenv — see **Python environment** below)

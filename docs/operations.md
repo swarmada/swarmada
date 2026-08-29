@@ -192,9 +192,10 @@ kubectl annotate fleetaction <name> swarmada.io/requeue-requested="<reason>" [-n
                                                      # return a SYSTEM-paused action to Pending (estop, maintenance, preemption)
 kubectl delete fleetaction <name> [-n <namespace>]   # remove a settled record — Pending or terminal (Succeeded/Failed/Cancelled) only
 ```
-**`swarmctl` has no `FleetTask` surface today** — the composite is not registered as a
-CLI resource, so read and delete it with `kubectl`. A `swarmctl resume` verb over the
-requeue annotation is planned; the annotation is the operator intake the `FleetAction`
+`swarmctl` registers `FleetTask` as a resource — `get`, `describe`, and `delete` all
+resolve it, and its shortName is `ft`. `swarmctl cancel task <fleettask>` sets its
+`desiredState` to `Cancelled`. A `swarmctl resume` verb over the `FleetAction` requeue
+annotation is planned; the annotation is the operator intake the `FleetAction`
 controller already reconciles.
 A ready-to-apply example ships at `config/samples/fleettask_sample.yaml` — a
 three-member `receiving-round` chain whose members gate on `dependsOn`:

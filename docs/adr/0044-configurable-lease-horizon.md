@@ -139,7 +139,7 @@ tuning knob, and it is the only field in `spec.scheduling` of which that is true
   rather than a property that had to hold across nineteen call sites.
 - **Obligation — the constants must track the CRD defaults.** `defaultLeaseDuration` (30s) and
   `defaultLeaseClockSkew` (5s) are fail-safe fallbacks and MUST equal the `+kubebuilder:default`
-  values. `make spec-check` enforces the doc↔CRD half of that; the Go↔CRD half is by hand, as it is
+  values. The doc↔CRD half of that is unchecked — same as the Go↔CRD half — as it is
   for ADR-0011's thresholds.
 - **Obligation — the shipped `PrometheusRule` cannot read namespace config.** Its `for: 1m` clears
   the 35s default horizon, but a namespace configuring a horizon above 55s must raise `for` past its

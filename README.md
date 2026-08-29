@@ -110,9 +110,36 @@ The full design is in [docs/architecture.md](docs/architecture.md); the normativ
 specification is [RFC-0001](rfcs/dist/RFC-0001-core-spec.md), which governs wherever
 it and this document differ.
 
+## Non-Goals
+
+Swarmada does not do motion control, does not replace physical safety hardware, is not
+a hosted product, and does not define a scheduling algorithm — the full list (20 items)
+is in [RFC-0001 §4](rfcs/dist/RFC-0001-core-spec.md#non-goals).
+
 ## Quick start
 
-Install the control plane into an existing cluster with Helm:
+**Prerequisites:** Docker (running). See [docs/quickstart.md](docs/quickstart.md) for
+the full per-OS list and `make setup-macos`.
+
+No hardware required, no existing cluster needed. `make quickstart` creates its own
+`kind` cluster and brings the warehouse scenario up end-to-end; pass `SCENARIO=` to
+pick one — `healthy-fleet`, `battery-edge`,
+`battery-handoff`, `hardware-fault`, `comms-flaky`, `estop-drill`, or the coverage
+run `full-surface`:
+
+```bash
+make quickstart SCENARIO=hardware-fault
+```
+
+Two scenarios exercise the core loops end-to-end: discovery → admission →
+assignment, and camera-fault → capability-degrade → task-reroute → recovery. The
+[warehouse-quickstart](examples/warehouse-quickstart/README.md) packages these and
+more. [`tools/swarmtop`](tools/swarmtop/README.md) is a terminal fleet inspector that
+renders the status fields `kubectl get` can't column-ize.
+
+### Already have a cluster?
+
+Install the control plane with Helm:
 
 ```bash
 helm install swarmada deploy/swarmada -n swarmada-system --create-namespace
@@ -127,22 +154,9 @@ swarmctl admit robot sim-robot-001 --zone warehouse-a
 kubectl get robots,fleettasks -n warehouse-a
 ```
 
-No hardware required. `make quickstart` brings the warehouse scenario up on `kind`
-end-to-end; pass `SCENARIO=` to pick one — `healthy-fleet`, `battery-edge`,
-`battery-handoff`, `hardware-fault`, `comms-flaky`, `estop-drill`, or the coverage
-run `full-surface`:
+### Run from source
 
-```bash
-make quickstart SCENARIO=hardware-fault
-```
-
-Two scenarios exercise the core loops end-to-end: discovery → admission →
-assignment, and camera-fault → capability-degrade → task-reroute → recovery. The
-[warehouse-quickstart](examples/warehouse-quickstart/README.md) packages these and
-more. [`tools/swarmtop`](tools/swarmtop/README.md) is a terminal fleet inspector that
-renders the status fields `kubectl get` can't column-ize.
-
-To run the control plane from source instead — prerequisites are Go 1.22+,
+To run the control plane from source instead — prerequisites are Go 1.26+,
 `kubectl`, and a local cluster (`kind` or `minikube`); see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the full development environment, including
 the simulation stack (ROS 2 Jazzy, NVIDIA Isaac Sim):

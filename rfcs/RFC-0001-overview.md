@@ -154,7 +154,7 @@ healthcare evaluator will look for them:
 
 ## Honesty about maturity
 
-RFC-0001 includes a candid Drawbacks section enumerating twelve named limitations —
+RFC-0001 includes a candid Drawbacks section enumerating sixteen named limitations —
 the opaque task payload, the coarse eventually-consistent status, the bounded silent-
 failure window of interval-based probing, and others. This overview does not hide
 them; the willingness to state them is part of the case that the design is real.
