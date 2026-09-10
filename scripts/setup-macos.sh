@@ -160,10 +160,12 @@ protoc) — pick whichever local path you're following:
     scripts/deploy-minikube.sh (or follow docs/deploy-minikube.md by hand).
 
 If Go was JUST installed by this script (the "Go" step above said
-"installing...", not "already installed"): open a NEW terminal before running
-`make quickstart` or `make setup-macos && make quickstart` will fail with
-"Cannot find the 'go' binary" — the shell that ran this script doesn't see a
-binary Homebrew installed mid-session until it re-reads its profile.
+"installing...", not "already installed"), open a NEW terminal before you run
+`make quickstart`. The shell that ran this script does not see a binary
+Homebrew installed mid-session until it re-reads its profile, so running
+`make quickstart` here fails with "Cannot find the 'go' binary".
+Chaining `make setup-macos && make quickstart` in one shell fails for the
+same reason.
 
 Not installed by this script (only needed if you're building Python
 reference adapters, not for the Go controller-manager / docker-build path):
