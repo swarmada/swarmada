@@ -600,6 +600,34 @@ quickstart-test: ## Run the quickstart end-to-end on kind, assert ✅, then dele
 # Read the specification at rfcs/dist/RFC-0001-core-spec.md. To regenerate it,
 # work in the authoring tree.
 
+# ── Publication boundary ──────────────────────────────────────────────────────
+# The guard's ruleset enumerates precisely what must never be published, so it is not
+# itself publishable and lives in the authoring tree. For most of this repository's
+# life that meant the guard only ever ran there, against that tree — where it passes.
+# That was never evidence about what is published: two deny-severity findings reached
+# GitHub in 6e74560 while the guard reported clean, because it read the other tree.
+#
+# These targets run it against THIS checkout. Point them at the guard once with
+#   git config swarmada.boundary-guard /path/to/the/guard/script
+#
+# check-boundary fails on deny-severity findings, matching the guard's own exit codes.
+# check-boundary-strict also fails on warnings, which is the standard for a published
+# tree: the guard's warn severity is tuned for the authoring tree, and a gate that
+# ignores warnings here is a gate that certifies the defect it was built to catch.
+
+.PHONY: check-boundary check-boundary-strict hooks
+
+check-boundary: ##! Check this checkout against the publication boundary ruleset
+	bash scripts/check-publication-boundary.sh
+
+check-boundary-strict: ## Check the publication boundary, warnings fatal (pre-push standard)
+	STRICT=1 bash scripts/check-publication-boundary.sh
+
+hooks:          ## Install the git hooks (pre-push publication boundary guard)
+	@git config core.hooksPath hack/hooks
+	@echo "hooks: core.hooksPath -> hack/hooks (pre-push boundary guard active)"
+	@echo "hooks: uninstall with 'git config --unset core.hooksPath'"
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 # `clean` removes only what the build/test targets write into the working tree,
 # so a following `make build` is an ordinary rebuild.
