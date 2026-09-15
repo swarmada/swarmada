@@ -37,18 +37,14 @@ only inconvenient; above it, it is operationally unsustainable.
 
 ## Why now
 
-Three factors converge to make a neutral orchestration standard both viable and
+Two factors converge to make a neutral orchestration standard both viable and
 urgent:
 
 1. **Fleet sizes crossed the coordination threshold.** The median new AMR deployment
    grew from about 15 robots in 2024 to roughly 35 per facility in 2026. At 35-plus
    robots across three to five vendors, manual coordination stops working and a
    software orchestration layer becomes a requirement, not an optimization.
-2. **Per-robot budgets are legible.** Robots-as-a-Service already establishes a
-   recurring per-robot line item, so a neutral orchestration layer at a small
-   fraction of that spend is arithmetically justifiable against an existing budget
-   line.
-3. **The cloud-native layer is unoccupied, and no test oracle exists anywhere in
+2. **The cloud-native layer is unoccupied, and no test oracle exists anywhere in
    it.** There is no CNCF-hosted, declarative, cloud-native fleet orchestration
    standard. Separately, no interoperability standard in this field operates a
    conformance scheme: VDA 5050 and the MassRobotics AMR Interoperability Standard
