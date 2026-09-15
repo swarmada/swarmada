@@ -49,6 +49,9 @@ never drift from the canonical manifests.
 - No cluster required up front — the script creates one (or reuses an existing
   one if it's still healthy — see [Knobs](#knobs)). Nothing is installed
   outside the `kind` cluster and your Go build cache.
+- Installing these for the first time? See [`docs/quickstart.md`](../../docs/quickstart.md)
+  for the full per-OS list (macOS via `make setup-macos`, Linux package-manager
+  install, Windows via WSL2) — this page assumes they're already on your PATH.
 
 ## Run
 
