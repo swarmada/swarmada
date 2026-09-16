@@ -117,9 +117,9 @@ uses a full `Status().Update` with no retry (`capabilities_ingestor.go:62`)
   Robot in the namespace on each heartbeat. Rejected on cost.
 
 - **Projection only, leave `robot_controller` unchanged.** This is the literal
-  "write the field" framing, but it leaves `Ready=Unknown` forever — the Robot
-  still never reaches Ready. Rejected: the consumer promotion is required for
-  the stated outcome.
+  "write the field" framing, but per Context fact 2 it leaves `Ready=Unknown`
+  forever — the Robot still never reaches Ready. Rejected: the consumer promotion is
+  required for the stated outcome.
 
 ## Consequences
 
