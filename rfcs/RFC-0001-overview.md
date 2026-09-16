@@ -30,29 +30,32 @@ Kubernetes-native specification, or a versioned adapter contract with a publishe
 conformance catalog against which an implementation can be measured. Those two
 absences are what this RFC addresses.
 
-A facility running automation today typically operates robots from three to five
-manufacturers at once, each with its own dashboard, fleet API, and update toolchain,
-and no single source of truth for fleet state. Below a certain fleet size that is
-only inconvenient; above it, it is operationally unsustainable.
+A facility running automation increasingly operates robots from more than one
+manufacturer, each with its own dashboard, fleet API, and update toolchain, and no
+single source of truth for fleet state. Below a certain fleet size that is only
+inconvenient; above it, it is operationally unsustainable.
 
 ## Why now
 
 Two factors converge to make a neutral orchestration standard both viable and
 urgent:
 
-1. **Fleet sizes crossed the coordination threshold.** The median new AMR deployment
-   grew from about 15 robots in 2024 to roughly 35 per facility in 2026. At 35-plus
-   robots across three to five vendors, manual coordination stops working and a
-   software orchestration layer becomes a requirement, not an optimization.
-2. **The cloud-native layer is unoccupied, and no test oracle exists anywhere in
-   it.** There is no CNCF-hosted, declarative, cloud-native fleet orchestration
-   standard. Separately, no interoperability standard in this field operates a
-   conformance scheme: VDA 5050 and the MassRobotics AMR Interoperability Standard
-   publish schemas but no test suite and no certification body, ISO 21423 is not
-   yet published, and Open-RMF is a reference implementation rather than a
-   standard. A specification that publishes both a contract and the catalog that
-   measures conformance to it is what would occupy this layer as an open standard
-   rather than a proprietary one.
+1. **Facility fleets increasingly span several vendors.** RFC-0001 states this as a
+   premise rather than a sourced figure — see
+   [§2.3 Why Now](dist/RFC-0001-core-spec.md#motivation-why-now). Once a facility's
+   fleet includes robots from more than one manufacturer, coordination requires a
+   dedicated orchestration layer rather than manual, per-vendor operation.
+2. **The layer has open software but no specification and no conformance oracle.**
+   The robot fleet orchestration layer has open, foundation-hosted software in it,
+   but no declarative, Kubernetes-native specification: fleet state is not
+   expressible as API objects reconciled by controllers, and no protocol in the
+   layer is versioned as a standalone contract an implementer can build against
+   independently of any particular codebase. Nor does the layer have a conformance
+   oracle — the interoperability standards below it publish schemas but operate no
+   conformance scheme and recognise no certification body, and the one open project
+   in the layer itself publishes no enumerated check catalog. A specification that
+   publishes both a contract and the catalog that measures conformance to it is
+   what would occupy this layer as an open standard rather than a proprietary one.
 
 ## Why a new project — and not Open RMF
 
@@ -157,9 +160,12 @@ them; the willingness to state them is part of the case that the design is real.
 
 Implementation status: all thirteen CRDs are defined, generate, and are reconciled by
 controllers; the Traffic Deconfliction Engine and the `ControlStream`/`SafetyStream`
-wire are live; an executable conformance suite (C1–C8) covers the full protocol
-surface, the in-tree simulation adapter is conformant against it, and the ROS 2,
-VDA5050, and MAVLink reference adapters pass the same suite. Two scenarios run
+wire are live; an executable conformance harness covers the protocol surface, and the
+in-tree simulation adapter together with the ROS 2, VDA5050 and MAVLink reference
+adapters are each recorded `partial` in
+[`adapters/REGISTRY.md`](../adapters/REGISTRY.md): safety-complete, with optional
+commands declined, and every result earned against a simulated binding. No adapter is
+recorded `passing`, and no physical-hardware validation has been done. Two scenarios run
 end-to-end in simulation — discovery → admission → assignment, and camera-fault →
 capability-degrade → task-reroute → recovery. (The authoritative, current status is
 the Status section of the top-level `README.md`.)
