@@ -58,6 +58,32 @@ make run         # run the control plane against your current kubecontext
 A change to `api/v1` must be followed by `make generate && make manifests`, and the
 result committed alongside the change.
 
+## Git hooks
+
+```
+make hooks
+```
+
+This sets `core.hooksPath` to `hack/hooks`, which installs a `pre-push` check against
+the publication boundary ruleset. Push is the irreversible step, so that is where the
+check runs.
+
+The ruleset itself is not in this repository — it enumerates what must never be
+published, so publishing it would publish the map. Maintainers point the hook at it
+once:
+
+```
+git config swarmada.boundary-guard /path/to/the/guard/script
+```
+
+Without it, the hook explains what is missing and stops. If you are contributing
+without that ruleset, set `SKIP_IF_UNAVAILABLE=1` — it prints a notice saying the tree
+was not verified rather than passing quietly. A maintainer's `pre-push` still runs
+before anything reaches the remote.
+
+Run it by hand with `make check-boundary`, or `make check-boundary-strict` to apply the
+stricter standard the hook uses (warnings fatal as well as denials).
+
 ## The DCO: sign off every commit
 
 Swarmada uses the [Developer Certificate of Origin](https://developercertificate.org/).
