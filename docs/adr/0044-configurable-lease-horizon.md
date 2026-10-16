@@ -2,9 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-20
-- **Deciders:** Al — `spec.scheduling.{leaseDurationSeconds,clockSkewMarginSeconds}` with the bounds
-  below approved; the renewal interval stays derived (`duration / 3`) rather than becoming a third
-  field, and no per-`FleetAction` override is added
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §9.6.3.5 (assignment lease and the single-executor guarantee),
   §9.6.3.2 (control-plane response timeline), §9.6.3.3 item 1 (adapter local behaviour),
   §9.2.8 (Fleet Adapter compliance checklist — "Task-lease self-stop"), §9.3.8 (metrics and the
@@ -85,6 +83,9 @@ wire.**
    are the normative names, in seconds; `lease_duration_ms` is the wire encoding of the first, in
    milliseconds, converted at the wire boundary. §9.6.3.5 states the conversion; `leaseDurationMs`
    and `clockSkewMarginMs` are retired from normative prose.
+
+6. **No per-`FleetAction` override.** The horizon is set per namespace, not per action (see
+   Alternatives considered).
 
 ## Why these bounds
 

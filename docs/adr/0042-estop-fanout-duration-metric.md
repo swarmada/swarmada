@@ -2,9 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-19 (proposed) · decided 2026-08-20
-- **Deciders:** Al — do BOTH: plumb the `scope` label AND add `swarmada_estop_fanout_duration_seconds`,
-  because a per-robot latency histogram structurally cannot see the interval that matters. The
-  scope-label-alone option was ruled out as precisely the trap this ADR documents
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §9.3.8 (metrics contract), §9.6.2.1 (estop scopes — the parallel-dispatch requirement, sequential when this ADR was written), §9.6.2.2 (timing requirements), §9.6.5.1 (required events), ADR-0016 (per-adapter estop delivery timeout), `drawbacks.md` item 15
 
 ## Context

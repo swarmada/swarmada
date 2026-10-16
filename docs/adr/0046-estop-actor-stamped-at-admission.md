@@ -2,11 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-20
-- **Deciders:** Al — Option A (mutating webhooks stamp `swarmada.io/estop-actor` from the admission
-  request) approved; Option B (caller self-asserts the actor, validator refuses a mismatch) rejected
-  because it puts an identity round-trip on the estop path. Fallback reuses `service-account` with an
-  `unattributed:` prefix rather than adding a fourth `ActorType`; the chart's webhook drift is closed
-  and gated in the same change
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §9.6.5 (estop state machine and its audit record), §9.5.4 (audit envelope,
   `actor.type`), §9.6.2 (estop scopes and timing), §F-2b (estop verb authorization);
   ADR-0041 (rollout resume — the second operator intent this attributes), ADR-0025 (the cert-manager
@@ -95,7 +91,7 @@ the controllers read it off the object they already fetch.**
   — `robots_in_scope`, worst ack latency, per-robot outcome — because they do not exist until the
   fan-out runs. Splitting into an admission-time "requested" entry plus a controller-time "outcome" entry
   would work, but it changes the §9.6.5.1 event table and doubles the entries an auditor must correlate.
-- **A fourth `ActorType` (`unattributed`).** Cleaner to consume and machine-checkable. Rejected by Al:
+- **A fourth `ActorType` (`unattributed`).** Cleaner to consume and machine-checkable. Rejected by the maintainers:
   `actor.type` is a normative §9.5.4 enum, and widening it to describe a *provenance* property rather
   than an actor *kind* pushes the cost onto every existing consumer. `service-account` +
   `unattributed:` prefix carries the same information without a wire change.

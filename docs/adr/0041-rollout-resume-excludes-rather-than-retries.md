@@ -2,9 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-19 (proposed) · decided 2026-08-20
-- **Deciders:** Al — resume EXCLUDES the robots that failed; a fresh rollout is the retry path.
-  Retry-once-then-exclude and auto-resume-after-timeout both ruled out: they weaken a halt whose
-  whole purpose is to make an operator look before the fleet moves again
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §9.1.8 / §9.1.10 (FirmwareRollout, ModelRollout), §9.5.3 (RBAC custom verbs), §9.5.4 and §9.6.5.1 (required audit events), ADR-0021 (`policy-reset`: the operator-override precedent this mirrors), §6.7 (Auto model rollback, whose `rolledBackRobots` carries the same exclude-not-retry semantics)
 
 ## Context

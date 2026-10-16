@@ -2,10 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-20 (proposed and decided)
-- **Deciders:** Al — one goroutine per robot, unbounded, as implemented in
-  `internal/controller/estop_fanout.go`. A bounded worker pool and the bound-by-adapter variant were
-  ruled out as reintroducing send-behind-ack at a coarser granularity; splitting send from collect is
-  acknowledged as the better shape at very large scale and left as the documented next step
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §9.6.2.1 (estop scopes — the parallel-dispatch requirement this implements), §9.6.2.2 (timing requirements, fleet-scope row), §9.3.8 (metrics contract), ADR-0042 (`swarmada_estop_fanout_duration_seconds` — the metric that made the gap visible), ADR-0016 (per-adapter estop delivery timeout)
 
 ## Context

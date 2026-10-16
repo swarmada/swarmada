@@ -2,9 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-15 (proposed) · decided 2026-08-19
-- **Deciders:** Al — Option 1 (`spec.simulated` bool + `robot-source` annotation) approved now;
-  Option 2 (`AdapterKind` enum, see Alternatives) explicitly deferred, to be revisited only if a
-  genuine third category (digital twin) gets a real consumer
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §5.3 (Fleet Adapter), ADR-0005 (reference adapter policy — vendor adapters
   own their own repo), ADR-0017 (the coordinate-system annotation stamp this reuses the pattern of)
 
@@ -50,6 +48,9 @@ admission, read from the `FleetAdapter` it binds to.**
    safety signal, never transforms or validates anything. `RobotAdmissionGate`'s existing gate
    (Connected + Conformance == Passed) is unchanged — a simulated adapter is exactly as admissible
    as a physical one; this ADR only makes the distinction visible on the object.
+
+The `AdapterKind` enum (see Alternatives considered) is deferred, not adopted. Revisit it only if a
+genuine third category (digital twin) gets a real consumer.
 
 ## Alternatives considered
 
