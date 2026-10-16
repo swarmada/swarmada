@@ -2,8 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-20
-- **Deciders:** Al — the operator is the only party who may lift a hold. `spec.desiredState: Paused`
-  and `Returning` enact the hold; writing `Running` back does **not** resume the action
+- **Deciders:** Maintainers
 - **Related:** RFC-0001 §9.1.4 (`FleetAction.spec.desiredState`), §9.1.5 (`FleetTask` fan-out),
   §9.6.2.4 (FleetAction behaviour during estop — the operator-gated `Paused` phase),
   §9.6.3.5 (assignment lease and the single-executor guarantee); ADR-0007 (level-triggered
