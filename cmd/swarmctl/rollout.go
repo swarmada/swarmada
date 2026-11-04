@@ -33,7 +33,7 @@ import (
 // `status` is never edited from a client.
 const rolloutResumeAnnotation = "swarmada.io/rollout-resume"
 
-// rolloutResumeVerb is the custom verb the SelfSubjectAccessReview is run against (§9.5.3).
+// rolloutResumeVerb is the custom verb the SelfSubjectAccessReview is run against (RFC-0001 #security-permission-matrix).
 const rolloutResumeVerb = "rollout-resume"
 
 func newRolloutCommand(o *options) *cobra.Command {
@@ -65,7 +65,11 @@ robots. To retry them, fix the artifact and create a FRESH rollout (ADR-0041).
 Excluding them is also what lets the rollout finish: they count as settled, so the
 rollout can reach a terminal phase, and only a terminal record may be deleted.
 
-Gated by a SelfSubjectAccessReview on the rollout-resume custom verb (§9.5.3), and
+A model rollout with rollbackPolicy: Auto also halts on a robot it reverted after a
+failed update. Resume acknowledges those robots the same way: they are added to
+status.excludedRobots and stay rolled back.
+
+Gated by a SelfSubjectAccessReview on the rollout-resume custom verb (RFC-0001 #security-permission-matrix), and
 sealed into the safety audit log as ROLLOUT_RESUMED.`,
 		Example: `  swarmctl rollout resume nav-model-v4 --kind model --reason "amr-7 has a failed SSD; excluding it" --yes`,
 		Args:    cobra.ExactArgs(1),
@@ -110,14 +114,17 @@ func (o *options) rolloutResume(ctx context.Context, c client.Client, cs kuberne
 		return err
 	}
 
-	// Fail closed: no verb, no resume. Checked BEFORE reading the resource so a denied caller
-	// learns nothing about whether the rollout exists or is paused.
-	if err := cli.RequireVerb(ctx, cs, rolloutResumeVerb, resource, ns, name); err != nil {
-		return err
-	}
-
+	// Fetch, then authorise — the package rule in lifecycle.go, and the same
+	// reasoning as modelPolicyReset: the Get is enforced against read RBAC, so
+	// fetching first discloses nothing a `swarmctl get` would not, while gating
+	// first reported a permission failure for a rollout that is not there.
 	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, obj); err != nil {
 		return fmt.Errorf("getting %s/%s: %w", resource, name, err)
+	}
+
+	// Fail closed: no verb, no resume. Before any write.
+	if err := cli.RequireVerb(ctx, cs, rolloutResumeVerb, resource, ns, name); err != nil {
+		return err
 	}
 
 	ok, err := cli.Confirm(o.streams, fmt.Sprintf(

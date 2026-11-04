@@ -5,12 +5,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The SDK and the conformance harness are not published as packages: both come from a
+      # checkout of the Swarmada repository. TODO(vendor): pin `ref` to the release you target.
+      - uses: actions/checkout@v4
+        with:
+          repository: swarmada/swarmada
+          path: swarmada
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"  # the floor: ROS 2 Humble's interpreter
       - name: Install
-        run: pip install -e '.[dev]' swarmada-sdk grpcio-tools
+        run: pip install ./swarmada/sdk/python -e '.[dev]' pyyaml
       - name: Safety-wiring tests
-        run: pytest tests/ -v
-      # TODO(vendor): fetch the published Swarmada conformance harness and run it
-      # against this adapter (C0-C16). See adapters/conformance/README.md upstream.
+        run: make test
+      - name: Conformance harness (C0-C19)
+        run: make conformance SWARMADA=swarmada
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-report
+          path: conformance-report.json

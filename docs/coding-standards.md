@@ -7,7 +7,7 @@ contributors and for automated assistants working in the repository.
 
 ## Languages and tooling
 
-- **Go 1.22+** for the control plane, CRD types, scheduler, and CLI. Formatted with
+- **Go 1.25+** for the control plane, CRD types, scheduler, and CLI. Formatted with
   `gofmt`; linted with `golangci-lint` (config in `.golangci.yml`). Run
   `make fmt vet` before pushing.
 - **Python 3.12+** for simulation, ML scoring, and tooling (the floor numpy and scikit-learn impose). Formatted with `black`,

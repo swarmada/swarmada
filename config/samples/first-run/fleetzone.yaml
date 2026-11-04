@@ -1,0 +1,14 @@
+# One terminal zone. The admitted robot is placed in it (swarmctl admit --zone), and the
+# task runs in it.
+apiVersion: swarmada.io/v1
+kind: FleetZone
+metadata:
+  name: warehouse-a
+  namespace: warehouse-a
+spec:
+  displayName: "First-run zone"
+  waypoints:
+    - name: charging-bay
+      x: 1.1
+      "y": 1.1
+      yaw: 1.57

@@ -44,6 +44,7 @@ import (
 	"github.com/swarmada/swarmada/internal/controlstream"
 	"github.com/swarmada/swarmada/internal/metrics"
 	"github.com/swarmada/swarmada/internal/probe"
+	rbacpreflight "github.com/swarmada/swarmada/internal/rbac"
 	"github.com/swarmada/swarmada/internal/registrar"
 	"github.com/swarmada/swarmada/internal/safety"
 	"github.com/swarmada/swarmada/internal/streamauth"
@@ -70,7 +71,7 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
-// buildVersion is stamped onto every audit entry as swarmada_version (§9.6.5.2).
+// buildVersion is stamped onto every audit entry as swarmada_version (RFC-0001 #safety-log-entry-format).
 //
 // Set at link time: -ldflags "-X main.buildVersion=v0.3.1". The default is deliberately
 // "dev" rather than a plausible release number: an auditor reading swarmada_version
@@ -83,6 +84,12 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(fleetv1.AddToScheme(scheme))
 }
+
+// The command dispatcher is the safety dispatcher's fence sender, the cleared stop's fence included.
+var (
+	_ safety.FenceSender        = (*command.Dispatcher)(nil)
+	_ safety.ClearedFenceSender = (*command.Dispatcher)(nil)
+)
 
 func main() {
 	var (
@@ -100,6 +107,7 @@ func main() {
 		fleetAdapterTLSCertFile     string
 		fleetAdapterTLSKeyFile      string
 		fleetAdapterClientCAFile    string
+		requireLatchContract        bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address for the metrics endpoint.")
@@ -127,23 +135,27 @@ func main() {
 		"Leader election RenewDeadline. Must be less than the lease duration.")
 	flag.DurationVar(&leaderElectionRetryPeriod, "leader-election-retry-period", 1*time.Second,
 		"Leader election RetryPeriod. Must be less than the renew deadline.")
-	flag.StringVar(&fleetAdapterAddr, "fleet-adapter-bind-address", ":9443",
+	// 9445, not 9443: the admission webhook server always binds 9443, so a ControlStream
+	// default of 9443 made a webhooks-on manager that kept the default fail to bind one of them.
+	flag.StringVar(&fleetAdapterAddr, "fleet-adapter-bind-address", ":9445",
 		"Address the ControlStream gRPC server listens on for Fleet Adapter connections. Empty disables it.")
 	flag.StringVar(&modelWebhookAddr, "model-webhook-bind-address", ":9444",
 		"Address the ModelPolicy training-completion webhook (HMAC) listens on. Empty disables it.")
 	flag.StringVar(&auditLogFile, "audit-log-file", "",
-		"Path to a durable append-only §9.5.4 audit log (NDJSON). Empty uses an in-memory sink (dev only).")
+		"Path to a durable append-only audit log (NDJSON; RFC-0001 #safety-safety-audit-log). Empty uses an in-memory sink (dev only).")
 	flag.BoolVar(&fleetAdapterInsecure, "fleet-adapter-insecure-authz", false,
-		"DEV ONLY. Disable per-robot ControlStream authorization (RFC-0001 §9.2.7, §9.5.1.2) so a "+
+		"DEV ONLY. Disable per-robot ControlStream authorization (RFC-0001 #fleet-adapter-protocol-transport-security, RFC-0001 #security-fleet-adapter-authentication-robot-identity) so a "+
 			"plaintext adapter with no mTLS identity is authorized for every message. This activates "+
 			"the existing dev-mode path in internal/controlstream.Server (a nil Authorizer authorizes "+
 			"everything and logs a loud warning at connect) — it does not add a new bypass. The "+
-			"ControlStream listener is already plaintext by default (backlog §F); this flag additionally "+
+			"ControlStream listener is already plaintext by default; this flag additionally "+
 			"disables the authorization check that otherwise fail-closes every message from a connection "+
 			"with no verified mTLS identity. Off by default. NEVER set true outside a local dev/demo "+
-			"cluster — see examples/warehouse-quickstart's --scenario live path for the intended use.")
+			"cluster. Refused at startup together with the three --fleet-adapter-tls-* flags: with mTLS "+
+			"configured every adapter has a verified identity, and the authorization check is what "+
+			"scopes that identity to its own robots.")
 	flag.StringVar(&fleetAdapterTLSCertFile, "fleet-adapter-tls-cert-file", "",
-		"PEM server certificate for ControlStream mTLS (RFC-0001 §9.2.7). Set together with "+
+		"PEM server certificate for ControlStream mTLS (RFC-0001 #fleet-adapter-protocol-transport-security). Set together with "+
 			"--fleet-adapter-tls-key-file and --fleet-adapter-client-ca-file to terminate mTLS; the "+
 			"keypair is re-read on each handshake so cert rotation needs no restart.")
 	flag.StringVar(&fleetAdapterTLSKeyFile, "fleet-adapter-tls-key-file", "",
@@ -153,6 +165,13 @@ func main() {
 			"three TLS flags set, clients are required and verified (tls.RequireAndVerifyClientCert). "+
 			"If the bind address is set but no TLS material is provided, the ControlStream server is NOT "+
 			"registered unless --fleet-adapter-insecure-authz is set (fail closed).")
+
+	flag.BoolVar(&requireLatchContract, "require-latch-contract", false,
+		"Give work only to a robot whose adapter's ControlStream negotiated fleet-adapter contract 1.4.0, "+
+			"the version the Stop Latch binds: candidate filter 9's version condition and row A15's version "+
+			"send check (RFC-0001 #control-plane-scheduler, #safety-action-table). A 1.3.x connection is still "+
+			"sent every stop. Off at v0.4: the in-tree deployments run the simulation adapter at 1.3.0, which "+
+			"this would leave with no work.")
 
 	opts := zap.Options{
 		Development: true,
@@ -180,13 +199,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Register the RFC-0001 §9.3.8 metrics into the controller-runtime registry so
-	// the manager's existing /metrics endpoint (--metrics-bind-address, §9.3.8
-	// default :8080) serves them. Additive instrumentation only — no behaviour
+	// Register the metrics-contract metrics into the controller-runtime registry so
+	// the manager's existing /metrics endpoint (--metrics-bind-address, RFC-0001 #control-plane-observability-prometheus-metrics-contract
+	// default:8080) serves them. Additive instrumentation only — no behaviour
 	// change, RA-1 untouched.
 	metrics.Register(crmetrics.Registry)
 
-	// Periodically recompute the §9.3.8 aggregate resource gauges (fleetactions/
+	// Periodically recompute the metrics-contract aggregate resource gauges (fleetactions/
 	// robots/adapters by phase, robots in estop). Runs on every replica, reads
 	// only — never writes resource status (RA-1).
 	if err = mgr.Add(&controller.MetricsSweeper{Client: mgr.GetClient()}); err != nil {
@@ -194,7 +213,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Shared tamper-evident §9.5.4 audit recorder (per-namespace hash chain), used by
+	// Shared tamper-evident audit recorder (per-namespace hash chain; RFC-0001 #safety-safety-audit-log), used by
 	// every audit producer (action cancel, rollout creation, zone estop). A configured
 	// --audit-log-file selects the durable FileSink; otherwise an in-memory sink (dev
 	// only). A configured-but-unopenable audit log is fatal: we do NOT run a safety
@@ -211,17 +230,17 @@ func main() {
 		// Said out loud, every start. The in-memory sink loses the entire safety audit
 		// trail when the process exits, which is indistinguishable at runtime from a
 		// working one — an operator who never set --audit-log-file has no signal that
-		// §9.6.5 evidence is not being kept until they go looking for it after an
+		// safety-audit-log evidence is not being kept until they go looking for it after an
 		// incident. Not fatal: `make run` and the envtest suite rely on this default.
 		setupLog.Info("WARNING: no --audit-log-file configured; the safety audit log is IN MEMORY " +
-			"and is lost on restart. Do not run a production fleet in this mode (RFC-0001 §9.6.5.4).")
+			"and is lost on restart. Do not run a production fleet in this mode (RFC-0001 #safety-log-entry-format).")
 	}
 	auditRecorder := audit.New(auditSink, buildVersion)
 
 	// Continue each namespace's hash chain where the sink left off. Without this the
 	// chain is tamper-evident only within one process lifetime: every restart reopens
 	// each namespace at sequence 1 chained to genesis, which an auditor cannot tell
-	// apart from a truncate-and-reseal attack (§9.6.5.2).
+	// apart from a truncate-and-reseal attack (RFC-0001 #safety-log-entry-format).
 	if rerr := auditRecorder.Resume(); rerr != nil {
 		if errors.Is(rerr, audit.ErrSinkNotResumable) {
 			setupLog.Info("audit chain starts at genesis: the configured sink cannot be read back, " +
@@ -246,33 +265,51 @@ func main() {
 	var actionValidator command.ActionValidator
 	var cmdDispatcher *command.Dispatcher
 	var zoneAdmit controller.ZoneAdmissionNotifier
+	var zoneConstraints controller.ZoneConstraintsNotifier
 	if fleetAdapterAddr != "" {
 		cmdDispatcher = command.New(mgr.GetClient())
+		// The motion gate and the register's fences read the Robot past the cache; a fence that
+		// cannot be sent on a new ControlStream is an Event on the Robot (internal/command/fence.go).
+		cmdDispatcher.APIReader = mgr.GetAPIReader()
+		cmdDispatcher.Recorder = mgr.GetEventRecorderFor("command-dispatcher")
 		prober = cmdDispatcher
 		modelPusher = cmdDispatcher
 		actionCommander = cmdDispatcher
 		actionValidator = cmdDispatcher
 		zoneAdmit = cmdDispatcher
+		zoneConstraints = cmdDispatcher
 	}
 
 	// The Robot controller uses the dispatcher as its LivenessProber, so the dispatcher is
 	// built before the controller is registered. With ControlStream disabled it stays nil and
-	// the Offline transition falls back to elapsed time alone (§9.6.3.2).
+	// the Offline transition falls back to elapsed time alone (RFC-0001 #safety-control-plane-response).
 	var liveness controller.LivenessProber
 	if cmdDispatcher != nil {
 		liveness = cmdDispatcher
 	}
-	if err = (&controller.RobotReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Audit:    auditRecorder,
-		Liveness: liveness,
-	}).SetupWithManager(mgr); err != nil {
+	// The Robot controller is also where the telemetry projector's per-robot cache is
+	// rebound to the Robot generation it describes (see RobotProjectionResetter). The
+	// projector lives inside the telemetry Router, which is built further down with
+	// the ControlStream server, so the resetter is created here, handed to the
+	// controller, and pointed at the Router once that exists. It stays inert if the
+	// ControlStream is disabled — no ControlStream, no projector to reset.
+	robotProjection := &controller.RobotProjectionResetter{}
+	// Positions is set once the Zone Controller exists, below; reconcilers do not run
+	// before the manager starts.
+	robotReconciler := &controller.RobotReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Audit:      auditRecorder,
+		Liveness:   liveness,
+		Projection: robotProjection,
+		Recorder:   mgr.GetEventRecorderFor("robot"),
+	}
+	if err = robotReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Robot")
 		os.Exit(1)
 	}
 
-	// RobotClass status controller (RFC-0001 §5.2.1): read/aggregate only — reports
+	// RobotClass status controller (RFC-0001 #robotclass): read/aggregate only — reports
 	// status.referencingRobots + the observed (merge) generation. No behavior.
 	if err = (&controller.RobotClassReconciler{
 		Client: mgr.GetClient(),
@@ -282,7 +319,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// DiscoveredRobot TTL/Stale sweeper (RFC-0001 §9.2.5): marks an un-admitted
+	// DiscoveredRobot TTL/Stale sweeper (RFC-0001 #discoveredrobot-state-machine): marks an un-admitted
 	// DiscoveredRobot Stale as it nears its ttlExpiresAt and deletes it once expired.
 	if err = (&controller.DiscoveredRobotReconciler{
 		Client:   mgr.GetClient(),
@@ -293,24 +330,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// FleetAdapter status controller (RFC-0001 §9.1.12): drives status.phase from
+	// FleetAdapter status controller (RFC-0001 #fleetadapter-status-fields-and-phase-machine): drives status.phase from
 	// adapter connectivity. It doubles as the ControlStream presence sink (wired
 	// into the server below) and the liveness-staleness backstop.
 	fleetAdapterReconciler := &controller.FleetAdapterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("fleetadapter-controller"),
 	}
 	if err = fleetAdapterReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FleetAdapter")
 		os.Exit(1)
 	}
 
-	// One shared Traffic Deconfliction Engine (RFC-0001 §9.4, TDE-4 single
+	// One shared Traffic Deconfliction Engine (RFC-0001 #tde-normative-invariants, TDE-4 single
 	// authority): the FleetAction gate reserves through it before committing an
 	// assignment, and the Zone Controller signals zone entry/exit on it — both must
 	// act on the same authoritative reservation state.
 	tdeEngine := tde.New(mgr.GetClient(), tde.DefaultConfig())
-	// Per-namespace TDE tunables (§9.1.11.10): resolve reservation TTLs from the
+	// Per-namespace TDE tunables (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration): resolve reservation TTLs from the
 	// namespace's SwarmadaConfig.spec.trafficDeconfliction. FAIL-SAFE — a read error
 	// or absent config yields DefaultConfig (a zero field never zeroes a TTL). Read
 	// off the hot path (once per reservation/phase change), so a cached-client list
@@ -323,15 +361,34 @@ func main() {
 		td := configs.Items[0].Spec.TrafficDeconfliction
 		return tde.ConfigFromTDE(td.ReservationTTLSeconds, td.DisconnectedReservationTTLSeconds)
 	})
+	// A waiter the engine promotes itself (a deleted Robot's hold released, or recovery)
+	// is pushed its reservation_granted like one promoted by an adapter's release.
+	if cmdDispatcher != nil {
+		tdeEngine.WithGrantNotifier(cmdDispatcher.NotifyReservationGranted)
+	}
+	// Deleting a Robot releases its shared-resource holds at once (TDE-7).
+	robotReconciler.Holds = tdeEngine
 
+	// Each namespace's generation store is kept in the manager's own namespace, where the users of
+	// the namespace it serves cannot write (RFC-0001 #control-plane-scheduler). Without
+	// POD_NAMESPACE each store is kept in the namespace it serves, which any writer of Leases there
+	// can lower, so say so loudly.
+	storeNamespace := os.Getenv("POD_NAMESPACE")
+	if storeNamespace == "" {
+		setupLog.Info("POD_NAMESPACE is not set: each namespace's fencing-token generation store is kept in that " +
+			"namespace, where anyone who can write Leases there can lower it; set POD_NAMESPACE to the manager's namespace")
+	}
 	if err = (&controller.FleetActionReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		TDE:       tdeEngine,
-		Commander: actionCommander,
-		Validator: actionValidator,
-		Audit:     auditRecorder,
-		Recorder:  mgr.GetEventRecorderFor("fleetaction-controller"),
+		Client:                   mgr.GetClient(),
+		APIReader:                mgr.GetAPIReader(),
+		Scheme:                   mgr.GetScheme(),
+		TDE:                      tdeEngine,
+		Commander:                actionCommander,
+		Validator:                actionValidator,
+		Audit:                    auditRecorder,
+		Recorder:                 mgr.GetEventRecorderFor("fleetaction-controller"),
+		GenerationStoreNamespace: storeNamespace,
+		RequireLatchContract:     requireLatchContract,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FleetAction")
 		os.Exit(1)
@@ -349,37 +406,58 @@ func main() {
 		os.Exit(1)
 	}
 
-	// OTA/Model Update Manager (RFC-0001 §9.3.6): drives ModelRollout — batch
+	// TaskTrigger: a semantic event drafts a FleetTask and stops there. The draft
+	// carries spec.draft, which the FleetTask controller holds at phase Draft — so
+	// nothing on this path dispatches until a human clears the flag.
+	if err = (&controller.TaskTriggerReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("tasktrigger-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "TaskTrigger")
+		os.Exit(1)
+	}
+
+	// One ledger of acknowledged model_update pushes, written by the ModelRollout controller
+	// and read by the UpdateProgress ingestor: a failure the robot reports after
+	// acknowledging is recorded before the batch is written (ModelAckLedger).
+	modelAcks := controller.NewModelAckLedger()
+
+	// OTA/Model Update Manager (RFC-0001 #control-plane-ota-model-update-manager): drives ModelRollout — batch
 	// selection under safety constraints, pushes the model_update Command and marks
 	// the model Updating on an acknowledged batch entry (suspending its derived
 	// capabilities), and projects granted capabilities into
 	// Robot.status.modelGrantedCapabilities[] once the model reports Active.
 	if err = (&controller.ModelRolloutReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("modelrollout-controller"),
-		Pusher:   modelPusher,
-		Audit:    auditRecorder,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("modelrollout-controller"),
+		Pusher:    modelPusher,
+		Audit:     auditRecorder,
+		APIReader: mgr.GetAPIReader(),
+		Acks:      modelAcks,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelRollout")
 		os.Exit(1)
 	}
 
-	// RobotProbe controller (RFC-0001 §9.1.6): active verify_* health checks,
+	// RobotProbe controller (RFC-0001 #robotprobe): active verify_* health checks,
 	// binding the proto ProbeStatus into RobotProbe.status. With the command-push
 	// Prober wired, probes run live end-to-end; a probe that cannot confirm health
 	// (unreachable/timeout/unsupported) is never reported Healthy.
 	if err = (&controller.RobotProbeReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Prober: prober,
-		Audit:  auditRecorder,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Prober:    prober,
+		Audit:     auditRecorder,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RobotProbe")
 		os.Exit(1)
 	}
 
-	// ZoneMaintenance controller (RFC-0001 §9.1.11): drives the maintenance-window
+	// ZoneMaintenance controller (RFC-0001 #zonemaintenance): drives the maintenance-window
 	// lifecycle (Scheduled→Active→Completed), pausing Idle robots in scope into the
 	// Maintenance phase and restoring them on auto-resume or deletion (finalizer).
 	if err = (&controller.ZoneMaintenanceReconciler{
@@ -392,7 +470,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// FirmwareRollout controller (RFC-0001 §9.1.7, §9.2.8): verifies the artifact
+	// FirmwareRollout controller (RFC-0001 #firmwarerollout, #fleet-adapter-protocol-fleet-adapter-compliance-checklist): verifies the artifact
 	// signature/checksum against the configured trust roots BEFORE any dispatch and
 	// fails closed — an unverified artifact is never annotated onto a robot.
 	if err = (&controller.FirmwareRolloutReconciler{
@@ -405,14 +483,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ModelPolicy controller (RFC-0001 §9.1.9): evaluates the quality gate on a
+	// ModelPolicy controller (RFC-0001 #modelpolicy): evaluates the quality gate on a
 	// training-completion trigger and auto-creates a ModelRollout when it passes.
 
 	if err = (&controller.ModelPolicyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("modelpolicy-controller"),
-		Audit:    auditRecorder,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("modelpolicy-controller"),
+		Audit:     auditRecorder,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelPolicy")
 		os.Exit(1)
@@ -422,6 +501,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("swarmadaconfig-controller"),
+		Audit:    auditRecorder,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SwarmadaConfig")
 		os.Exit(1)
@@ -435,95 +515,157 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Zone Controller (RFC-0001 §9.3.4): maintains FleetZone topology
+	// Zone Controller (RFC-0001 #control-plane-zone-controller): maintains FleetZone topology
 	// (isLeaf/childZones/robotCount) and derives Robot.status.currentZone from
 	// live position telemetry via point-in-polygon containment. It subscribes to
 	// the telemetry Ingestor's position fan-out below.
 	zoneController := &controller.ZoneController{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("zone-controller"),
-		TDE:      tdeEngine, // same engine the FleetAction gate reserves through
-		// Zone-capacity hold/admit push (§9.3.4); nil when ControlStream is disabled.
+		Client: mgr.GetClient(),
+		// The stop a currentZone move is held on is read uncached (holdZoneMove).
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("zone-controller"),
+		TDE:       tdeEngine, // same engine the FleetAction gate reserves through
+		// Zone-capacity hold/admit push (RFC-0001 #control-plane-zone-controller); nil when ControlStream is disabled.
 		Admission: zoneAdmit,
+		// The operating rules in force where a robot NOW IS (FA-R7, ADR-0059); nil when
+		// ControlStream is disabled, which leaves status.containingZones derived and
+		// published and only the push silent.
+		Constraints: zoneConstraints,
+	}
+	// The ZonePositionOverdue condition reads which robots have sent a position frame.
+	robotReconciler.Positions = zoneController
+	// An adapter process that connects or reconnects holds no zone rule set (FA-R7), and a
+	// robot standing still sends no containment event that would push one, so each
+	// registered ControlStream is sent the rule set of every robot its adapter serves.
+	//
+	// This process's hold on leadership (cmd/manager/leadership.go): the ControlStream server
+	// serves adapter streams, and the dispatcher sends commands stamped with the leader term,
+	// only while it leads.
+	var leaderState *leaderStateT
+	if cmdDispatcher != nil {
+		if leaderState, err = setupLeadership(mgr, enableLeaderElection, leaderElectionID); err != nil {
+			setupLog.Error(err, "unable to add the leadership runnable")
+			os.Exit(1)
+		}
+		cmdDispatcher.Term = leaderState.Term
+		cmdDispatcher.OnStreamRegistered = func(id controlstream.TLSIdentity) {
+			zoneController.ResendConstraintsForAdapter(context.Background(), id.Namespace, id.AdapterName)
+		}
 	}
 	if err = zoneController.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Zone")
 		os.Exit(1)
 	}
 
-	// Shared confirmed-estop dispatcher (§9.6.2) and safety audit log (§9.5.4): one
+	// Shared confirmed-estop dispatcher (RFC-0001 #safety-emergency-stop-protocol) and safety audit log (RFC-0001 #safety-safety-audit-log): one
 	// instance backs both the ControlStream SafetyStream (which registers each
 	// adapter's live stream on it, below) and the zone-estop fan-out. When
 	// ControlStream is disabled the dispatcher has no streams, so a zone estop
 	// reports every robot unconfirmed (escalate) — never a false Stopped.
 	safetyDispatcher := safety.New(mgr.GetClient(), mgr.GetEventRecorderFor("estop"))
-	// Seal ESTOP_LATENCY_VIOLATION into the §9.5.4 chain as well as emitting the Event: an
+	// The estopState write compares against the stored Robot, read past the cache: a
+	// cached read can miss another trigger's outcome written a moment before.
+	safetyDispatcher.APIReader = mgr.GetAPIReader()
+	// The resume confirmation judges a cleared robot on capabilities derived from the
+	// hardware its witnessing frame reported, not on the stored list, which the Robot
+	// reconciler writes later (RFC-0001 #safety-estop-state-machine).
+	safetyDispatcher.DeriveCapabilities = controller.DeriveCapabilities
+	// Seal ESTOP_LATENCY_VIOLATION into the audit chain (RFC-0001 #safety-safety-audit-log) as well as emitting the Event: an
 	// SLA breach is a durable conformance fact about an adapter, and an Event alone is
 	// subject to namespace retention.
 	safetyDispatcher.Audit = auditRecorder
+	// The leader term (cmd/manager/leadership.go): a process that no longer leads writes no
+	// stop outcome and records nothing for a stop's answer.
+	if leaderState != nil {
+		safetyDispatcher.Term = leaderState.Term
+	}
+	// Each stop's fence goes down the robot's ControlStream in order with its AssignActions, and
+	// an AssignAction goes only to a robot no stop in force holds, whose register the stream has
+	// processed (internal/command/fence.go).
+	if cmdDispatcher != nil {
+		// The command dispatcher also sends a cleared stop's fence (safety.ClearedFenceSender), which
+		// answers an adapter's report of a stop whose entry was removed.
+		safetyDispatcher.Fence = cmdDispatcher
+		cmdDispatcher.RequireRegister = true
+		cmdDispatcher.RequireContract = requireLatchContract
+	}
 
-	// Zone-estop fan-out (§9.6.2.5): on a `swarmada.io/estop-triggered` FleetZone
+	// Zone-estop fan-out (RFC-0001 #safety-estop-scopes): on a `swarmada.io/estop-triggered` FleetZone
 	// annotation, confirmed-estop every robot in the zone — and, per
 	// estopPolicy.propagateToChildren, in descendant zones — and notify the parent
 	// (propagateToParent) without auto-estopping it.
 	if err = (&controller.ZoneEstopReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Estopper: safetyDispatcher,
-		Recorder: mgr.GetEventRecorderFor("zone-estop"),
-		Audit:    auditRecorder,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Estopper:  safetyDispatcher,
+		Recorder:  mgr.GetEventRecorderFor("zone-estop"),
+		Audit:     auditRecorder,
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ZoneEstop")
 		os.Exit(1)
 	}
 
-	// Robot-scope estop (§9.6.2 estop scopes): a `swarmada.io/estop-triggered`
+	// Robot-scope estop (RFC-0001 #safety-emergency-stop-protocol estop scopes): a `swarmada.io/estop-triggered`
 	// annotation on a single Robot confirmed-estops that one robot; removing it
 	// clears. SAR-gated at admission by the Robot webhook (EstopAuthz below).
+	// It also owns the second half of the clear: the dispatcher writes Resuming when
+	// the operator clears, and this controller drives ConfirmResume until telemetry
+	// confirms the robot may leave it (RFC-0001 #safety-estop-state-machine).
 	if err = (&controller.RobotEstopReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Estopper: safetyDispatcher,
-		Audit:    auditRecorder,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Estopper:  safetyDispatcher,
+		Resumer:   safetyDispatcher,
+		Audit:     auditRecorder,
+		Recorder:  mgr.GetEventRecorderFor("robotestop"),
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RobotEstop")
 		os.Exit(1)
 	}
 
-	// Namespace-scope estop (§9.6.2 estop scopes): a `swarmada.io/estop-triggered`
+	// Namespace-scope estop (RFC-0001 #safety-emergency-stop-protocol estop scopes): a `swarmada.io/estop-triggered`
 	// annotation on the namespace's SwarmadaConfig confirmed-estops every robot in
 	// the namespace; removing it clears. SAR-gated by the SwarmadaConfig webhook.
 	if err = (&controller.NamespaceEstopReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Estopper: safetyDispatcher,
-		Audit:    auditRecorder,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Estopper:  safetyDispatcher,
+		Audit:     auditRecorder,
+		Recorder:  mgr.GetEventRecorderFor("namespace-estop"),
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NamespaceEstop")
 		os.Exit(1)
 	}
 
-	// ── Telemetry live feed (RFC-0001 §9.3.7) ──────────────────────────────────
+	// ── Telemetry live feed (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split) ──────────────────────────────────
 	// ControlStream server → Ingestor → Projector → StatusSink. The Projector is
 	// the RA-1 gate: it forwards to the StatusSink ONLY on a material transition,
 	// so Robot.status is never written on a per-tick telemetry frame. The
-	// high-cadence TSDB plane defaults to drop (NoopWriter) until the §9.1.11
+	// high-cadence TSDB plane defaults to drop (NoopWriter) until the RFC-0001 #swarmadaconfig
 	// SwarmadaConfig telemetry-sink block (next §E item) selects a real store.
 	//
-	// SECURITY (RFC-0001 §9.2.7, ADR-0025): the ControlStream terminates mTLS when
+	// SECURITY (RFC-0001 #fleet-adapter-protocol-transport-security, ADR-0025): the ControlStream terminates mTLS when
 	// the three --fleet-adapter-tls-* flags are set. If the bind address is set but
 	// no TLS material is provided, the server is registered only under
 	// --fleet-adapter-insecure-authz (dev/demo); otherwise it fails closed (logged,
-	// not served) rather than serving plaintext.
+	// not served) rather than serving plaintext. The flag together with the TLS
+	// material is refused: see controlStreamPosture.
 	if fleetAdapterAddr != "" {
 		var controlStreamTLS *tls.Config
 		if controlStreamTLS, err = buildControlStreamTLS(fleetAdapterTLSCertFile, fleetAdapterTLSKeyFile, fleetAdapterClientCAFile); err != nil {
 			setupLog.Error(err, "invalid ControlStream mTLS configuration")
 			os.Exit(1)
 		}
-		statusSink := &controller.RobotStatusSink{Client: mgr.GetClient()}
-		// Per-namespace telemetry resolution (§9.1.11.7): each frame is routed to the
+		if err = controlStreamPosture(controlStreamTLS, fleetAdapterInsecure); err != nil {
+			setupLog.Error(err, "invalid ControlStream mTLS configuration")
+			os.Exit(1)
+		}
+		statusSink := &controller.RobotStatusSink{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}
+		// Per-namespace telemetry resolution (RFC-0001 #swarmadaconfig-telemetry-pipeline-and-status-projection): each frame is routed to the
 		// TSDB sink and status write-policy configured in its namespace's
 		// SwarmadaConfig.spec.telemetry. Resolution is FAIL-SAFE — an unsynced cache,
 		// a read error, or an absent config yields the zero PlaneConfig (Drop sink +
@@ -542,9 +684,25 @@ func main() {
 				Projector: telemetry.ConfigFromTelemetry(tc.StatusWriteMinIntervalSeconds, tc.MaxStatusWritesPerMinutePerRobot, tc.MaterialBatteryThresholds),
 			}
 		}
-		// Zone derivation consumes the position fan-out upstream of the sink (§9.3.7).
+		// Zone derivation consumes the position fan-out upstream of the sink (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split).
 		ingestor := telemetry.NewRouter(telemetryResolver, statusSink,
 			telemetry.WithPositionObserver(zoneController))
+		// Bind the projector cache to Robot object identity. Without this, a Robot
+		// deleted and recreated under the same swarmada.io/robot-id keeps the previous
+		// generation's projector state, an unchanging telemetry stream matches it, and
+		// the recreated Robot never gets status.batteryPercent or status.hardware again
+		// until this process restarts. Reconciles do not begin until mgr.Start() below,
+		// so the Router is always attached before the first Observe.
+		robotProjection.SetForgetter(ingestor, zoneController)
+		// The Router is also the per-robot last-frame clock: it sees every robot's own
+		// frames, so the Robot reconciler can mark a robot silent behind a live adapter
+		// Offline. Set before mgr.Start(), like the forgetter above.
+		robotReconciler.Frames = ingestor
+		// The same clock is the estop resume witness: a cleared robot leaves Resuming
+		// only on a frame of its own received after the clear, never on adapter
+		// presence (RFC-0001 #safety-estop-state-machine). Without ControlStream there
+		// is no witness, and a cleared robot stays Resuming.
+		safetyDispatcher.Telemetry = ingestor
 		// --fleet-adapter-insecure-authz (dev only): a nil Authorizer activates the
 		// existing dev-mode path in controlstream.Server — every message is
 		// authorized and a loud warning is logged at connect. Off by default; the
@@ -554,52 +712,66 @@ func main() {
 			authorizer = nil
 			setupLog.Info("WARNING: --fleet-adapter-insecure-authz=true — ControlStream authorization " +
 				"is DISABLED. Every connected adapter is authorized for every robot regardless of mTLS " +
-				"identity. This is a dev/demo-only posture (RFC-0001 §9.2.7, §9.5.1.2) and must never be " +
+				"identity. This is a dev/demo-only posture (RFC-0001 #fleet-adapter-protocol-transport-security, RFC-0001 #security-fleet-adapter-authentication-robot-identity) and must never be " +
 				"set in a production deployment.")
+		}
+		// The D1 in-place supersession transition is written by the action-status ingestor rather
+		// than in the reconciler (no cancel_action is sent on that path, so the reconciler never
+		// sees it), which is why the Event recorder and the audit chain are wired onto it too. A
+		// failure report under a stop, and every retained outcome, is decided on the API server's
+		// copy: the API reader is required.
+		actionStatus, asErr := controller.NewActionStatusIngestor(mgr.GetClient(), mgr.GetAPIReader(),
+			mgr.GetEventRecorderFor("actionstatus-ingestor"), auditRecorder)
+		if asErr != nil {
+			setupLog.Error(asErr, "unable to build the action status ingestor")
+			os.Exit(1)
 		}
 		csServer := &controlstream.Server{
 			Ingestor: ingestor,
 			// Robot-reported action state (§9.2.3): advances an assigned FleetAction to
 			// InProgress + startedAt on RUNNING. Terminal transitions are handled by
 			// the reconciler under the single-executor invariant.
-			ActionStatus: &controller.ActionStatusIngestor{Client: mgr.GetClient()},
-			// Advisory per-robot rollout progress (§6.6/§6.7): surfaced as the active
+			ActionStatus: actionStatus,
+			// Advisory per-robot rollout progress (RFC-0001 #firmwarerollout-schema and #modelrollout-schema): surfaced as the active
 			// FirmwareRollout/ModelRollout's currentBatch updatePhase.
-			UpdateProgress: &controller.UpdateProgressIngestor{Client: mgr.GetClient()},
+			UpdateProgress: &controller.UpdateProgressIngestor{Client: mgr.GetClient(), Acks: modelAcks},
 			// Adapter action-catalog projection (§9.2): projects supported_actions
 			// from a CapabilitiesSnapshot onto FleetAdapter.status.supportedActions.
 			Capabilities: &controller.CapabilitiesIngestor{Client: mgr.GetClient()},
-			// Two-phase discovery handshake (§9.2.5, §9.3.1): Discover creates a
+			// Two-phase discovery handshake (RFC-0001 #fleet-adapter-protocol-connection-lifecycle, RFC-0001 #control-plane-swarmada-api-server): Discover creates a
 			// status-only DiscoveredRobot (populating macAddress + reported
 			// inventory) for an unadmitted robot and rejects a malformed robot_id
 			// with INVALID_ROBOT_ID; Register confirms an admitted Robot.
 			Registrar: &registrar.Registrar{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()},
-			// Per-message robot_id authorization (§9.5.1.2): every robot-scoped
+			// Per-message robot_id authorization (RFC-0001 #security-fleet-adapter-authentication-robot-identity): every robot-scoped
 			// message is checked against the adapter's mTLS identity and refused on
 			// failure (fail closed). nil (dev only, --fleet-adapter-insecure-authz)
 			// disables this — see the construction above.
 			Authorizer: authorizer,
-			// Confirmed estop delivery over SafetyStream (§9.6.2): pushes estops and
+			// Confirmed estop delivery over SafetyStream (RFC-0001 #safety-emergency-stop-protocol): pushes estops and
 			// records STOPPED only on an adapter-CONFIRMED EstopAck. Shared with the
 			// zone-estop fan-out so both push over the same live SafetyStreams.
 			Safety: safetyDispatcher,
 			// Server→adapter command-push (§9.2, §E-2): the RobotProbe Prober built
 			// above; registers each live ControlStream and routes CommandResults.
 			Commands: cmdDispatcher,
-			// Adapter-initiated shared-resource reservations (§5.4.5) go through the
+			// Adapter-initiated shared-resource reservations (RFC-0001 #tde-shared-resource-queue-management) go through the
 			// shared TDE engine, so adapter and scheduler act on one authority.
 			Reservations: tdeResourceReserver{tdeEngine},
 			// On a release that promotes a queued waiter, push it the async
-			// reservation_granted Command over its own adapter stream (§5.4.5).
+			// reservation_granted Command over its own adapter stream (RFC-0001 #tde-shared-resource-queue-management).
 			GrantNotifier: cmdDispatcher,
-			// Adapter connectivity → FleetAdapter.status.phase (§9.1.12). NOT driven
+			// Adapter connectivity → FleetAdapter.status.phase (RFC-0001 #fleetadapter-status-fields-and-phase-machine). NOT driven
 			// by telemetry frames (RA-1).
 			Presence: fleetAdapterReconciler,
-			// Tamper-evident safety audit log (§9.5.4): a denied authorization is
+			// Tamper-evident safety audit log (RFC-0001 #security-audit-logging): a denied authorization is
 			// recorded, never silently dropped. Shared with the zone-estop fan-out. An
 			// in-memory sink for now; a durable/external sink is a deployment concern.
 			Audit: auditRecorder,
 			Log:   ctrl.Log.WithName("controlstream"),
+			// Streams are served only while this process leads, and closed when it stops
+			// (RFC-0001 #safety-robot-stop-table).
+			Leadership: leaderState,
 		}
 		// Fail closed: without mTLS material and without the explicit dev opt-in, do
 		// NOT register the server — never serve plaintext by default (ADR-0025).
@@ -615,7 +787,7 @@ func main() {
 		}
 	}
 
-	// ModelPolicy training-completion webhook (§9.1.9.3): verifies the HMAC
+	// ModelPolicy training-completion webhook (RFC-0001 #modelpolicy-training-pipeline-integration-webhook-payload): verifies the HMAC
 	// signature and writes the model-trigger annotation the ModelPolicyReconciler
 	// consumes. Runs on every replica (it must accept POSTs regardless of leadership).
 	if modelWebhookAddr != "" {
@@ -627,10 +799,24 @@ func main() {
 	}
 
 	// Webhooks: the RobotClass admission-time merge (mutating, RFC-0001
-	// §5.2.1.2) runs before the FleetAdapter admission gate (validating,
-	// §5.2.12) so the gate observes the fully-resolved spec.
+	// RFC-0001 #robotclass) runs before the FleetAdapter admission gate (validating,
+	// RFC-0001 #fleetadapter) so the gate observes the fully-resolved spec.
 	// Set ENABLE_WEBHOOKS=false for envtest / local `make run` without serving certs.
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		// The estop-processed marker guard admits marker writes from exactly the principal
+		// this manager runs as, read from its own mounted token, so it follows whatever
+		// ServiceAccount name and namespace the install rendered. Without it every marker
+		// write is refused, the controller's own included, so say so loudly. The same
+		// principal is what exempts the FleetTask cancel fan-out from the FleetAction
+		// webhook's cancel check; without it that fan-out is refused too.
+		if principal, perr := swarmadawebhook.ControllerPrincipalFromToken(swarmadawebhook.InClusterTokenPath); perr != nil {
+			setupLog.Error(perr, "estop guards have no controller principal; every estop-processed marker write and every robots/status write of the estop state or a safety input (the zone, the assigned action, a bound robot's phase, a phase out of Error or into or out of Maintenance or Offline, hardware and model state, capabilities) will be refused, the manager's own included")
+		} else if perr := swarmadawebhook.SetControllerPrincipal(principal); perr != nil {
+			setupLog.Error(perr, "estop guards have no controller principal; every estop-processed marker write and every robots/status write of the estop state or a safety input (the zone, the assigned action, a bound robot's phase, a phase out of Error or into or out of Maintenance or Offline, hardware and model state, capabilities) will be refused, the manager's own included")
+		} else {
+			setupLog.Info("estop guards admit the controller principal", "principal", principal)
+		}
+
 		if err = (&swarmadawebhook.RobotDefaulter{
 			Client: mgr.GetClient(),
 		}).SetupWebhookWithManager(mgr); err != nil {
@@ -659,36 +845,81 @@ func main() {
 			}
 		}
 
+		// The zone reads (existence, leaf, composite) go through the uncached API reader: a
+		// cached list can miss a child zone admitted just before the Robot.
 		if err = (&swarmadawebhook.RobotAdmissionGate{
 			Client:     mgr.GetClient(),
+			APIReader:  mgr.GetAPIReader(),
 			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Robot")
 			os.Exit(1)
 		}
+		// Robot DELETE: refuses the delete of a robot that holds a stop, on its own
+		// webhook with failurePolicy Ignore so that a manager outage does not block a
+		// Robot delete. A namespace delete still waits for a replica while the namespace
+		// holds a FleetZone, FleetTask, FirmwareRollout or ModelRollout, whose DELETE
+		// checks stay failurePolicy=Fail.
+		if err = (&swarmadawebhook.RobotDeleteGuard{
+			APIReader: mgr.GetAPIReader(),
+		}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Robot delete")
+			os.Exit(1)
+		}
+		// FleetAction DELETE: refuses the delete of work a robot under a stop records to anyone
+		// without estop-clear on that stop, on its own webhook with failurePolicy Ignore; the stop
+		// finalizer keeps such work through a manager outage.
+		if err = (&swarmadawebhook.FleetActionDeleteGuard{
+			APIReader:  mgr.GetAPIReader(),
+			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
+		}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "FleetAction delete")
+			os.Exit(1)
+		}
+		// SwarmadaConfig DELETE: refuses the delete of the config that carries the
+		// namespace's emergency stop, outside a terminating namespace, on its own webhook
+		// with failurePolicy Ignore so that this check does not hold a namespace delete
+		// through a manager outage.
+		if err = (&swarmadawebhook.SwarmadaConfigDeleteGuard{
+			APIReader: mgr.GetAPIReader(),
+		}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SwarmadaConfig delete")
+			os.Exit(1)
+		}
+		// robots/status: only the control plane moves status.estopState and
+		// status.estopBaseline, takes a robot out of Error, clears a Failed component or
+		// changes its capabilities. swarmada:admin writes robots/status too; the adapter
+		// role does not.
+		if err = (&swarmadawebhook.RobotStatusEstopGuard{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Robot status estop")
+			os.Exit(1)
+		}
 
-		// SwarmadaConfig cross-field validation (§9.1.11): AfterTimeout⇒timeout,
+		// SwarmadaConfig cross-field validation (RFC-0001 #swarmadaconfig): AfterTimeout⇒timeout,
 		// disconnectedReservationTTLSeconds>disconnectTimeoutSeconds, real-sink⇒endpoint,
 		// requireSignatureVerification⇒trustRoots.
 		if err = (&swarmadawebhook.SwarmadaConfigValidator{
 			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
-			Audit:      auditRecorder,
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "SwarmadaConfig")
 			os.Exit(1)
 		}
 
-		// FleetZone cross-resource validation (§9.3.1): parentZone existence + acyclicity,
-		// simple-polygon boundary, and delete-with-children rejection.
+		// FleetZone cross-resource validation (RFC-0001 #control-plane-swarmada-api-server): parentZone existence + acyclicity,
+		// simple-polygon boundary, and refusing the delete of a zone anything still references
+		// (RFC-0001 #fleetzone-deleting-a-zone). Every check reads through the uncached API
+		// reader: a cached list can miss a robot or action admitted just before the delete, and
+		// a cached parent can miss the write that would make a new parentZone close a cycle.
 		if err = (&swarmadawebhook.FleetZoneValidator{
 			Client:     mgr.GetClient(),
+			APIReader:  mgr.GetAPIReader(),
 			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FleetZone")
 			os.Exit(1)
 		}
 
-		// ZoneMaintenance scope resolution (§9.3.1): a Zone-scoped window must name a
+		// ZoneMaintenance scope resolution (RFC-0001 #control-plane-swarmada-api-server): a Zone-scoped window must name a
 		// FleetZone that exists, or it silently pauses nothing.
 		if err = (&swarmadawebhook.ZoneMaintenanceValidator{
 			Client: mgr.GetClient(),
@@ -697,23 +928,43 @@ func main() {
 			os.Exit(1)
 		}
 
-		// FleetAction cancel-verb SAR enforcement (§9.5.3): writing the
+		// FleetAction cancel-verb SAR enforcement (RFC-0001 #security-authorization-swarmada-rbac-roles): writing the
 		// swarmada.io/cancel-requested annotation requires the `cancel` verb.
 		if err = (&swarmadawebhook.FleetActionValidator{
 			CancelAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 			Reader:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FleetAction")
 			os.Exit(1)
 		}
 
 		// FleetTask append-only validator (RFC-0001 §9.1.5): enforces append-only spec.actions +
-		// immutable policies, gates action appends behind the scoped `append` SAR verb, and refuses
-		// `delete` on a live composite (cancel first — the confirmed-cancel path).
+		// immutable policies, gates action appends behind the scoped `append` SAR verb and a
+		// desiredState change to Cancelled behind the `cancel` SAR verb, gates clearing
+		// spec.draft behind the `activate` SAR verb and refuses it to every ServiceAccount,
+		// and refuses `delete` on a live composite (cancel first — the confirmed-cancel path).
+		// Reader resolves the ComputeEndpoint behind a select subject's producer, so
+		// admission decides the result-versus-event binding from the producer's declared
+		// contract rather than leaving it to the author (check S6).
 		if err = (&swarmadawebhook.FleetTaskValidator{
-			AppendAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
+			AppendAuthz:   &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
+			CancelAuthz:   &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
+			ActivateAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
+			Reader:        mgr.GetClient(),
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FleetTask")
+			os.Exit(1)
+		}
+
+		// ComputeWorkloadTemplate containment: refuses a template whose pod spec could
+		// escape to the node (hostPath, a host namespace, privileged mode, added
+		// capabilities, a host port). This is the container half of the policy; the
+		// pod-level half is CEL on the CRD. It runs failurePolicy=Fail because the
+		// workload it guards is created under THIS manager's ServiceAccount — without
+		// it, create on computeworkloadtemplates would be create on privileged pods.
+		if err = (&swarmadawebhook.ComputeWorkloadTemplateValidator{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "ComputeWorkloadTemplate")
 			os.Exit(1)
 		}
 
@@ -739,7 +990,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TDE recovery (RFC-0001 §9.4.7) runs as a LEADER-ELECTED runnable: reservation
+	// TDE recovery (RFC-0001 #tde-restart-recovery) runs as a LEADER-ELECTED runnable: reservation
 	// state is rebuilt from durable FleetZone.status each time this replica acquires
 	// leadership — at process start AND on a leader failover — so a promoted standby
 	// never serves grants against empty/stale in-memory state. The engine's grant
@@ -753,7 +1004,7 @@ func main() {
 		Mode:   tde.RecoverValidate,
 		// Wait for the Zone Controller to load zone geometry before validating
 		// Occupied reservations against Robot.status.currentZone; on timeout fall back
-		// to the §9.4.7 conservative action (release all). Defaults per §9.1.11.10.
+		// to the conservative action (release all, RFC-0001 #tde-restart-recovery). Defaults per RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration.
 		Ready:        zoneController.Ready,
 		ReadyTimeout: 30 * time.Second,
 		Fallback:     tde.RecoverReleaseAll,
@@ -764,6 +1015,19 @@ func main() {
 		Log:             ctrl.Log.WithName("tde-recovery"),
 	}); err != nil {
 		setupLog.Error(err, "unable to add TDE recovery runnable")
+		os.Exit(1)
+	}
+
+	// RBAC preflight: confirm this ServiceAccount can actually read the
+	// resources the G1 admission gate consults, BEFORE serving admission. A missing
+	// grant would otherwise degrade that gate to a silent no-op rather than failing
+	// visibly — see internal/rbac.Preflight for why the ordinary error path does not
+	// surface it. Uses the uncached API reader deliberately. The check is cluster-wide,
+	// not the manager's own namespace: G1 reads in the namespace of every action it
+	// admits, so a grant confined to POD_NAMESPACE would pass here and leave the gate
+	// open everywhere else. "" is every namespace.
+	if err := rbacpreflight.Preflight(context.Background(), mgr.GetAPIReader(), ""); err != nil {
+		setupLog.Error(err, "RBAC preflight failed")
 		os.Exit(1)
 	}
 
@@ -781,8 +1045,25 @@ func controlStreamShouldServe(tlsCfg *tls.Config, insecure bool) bool {
 	return tlsCfg != nil || insecure
 }
 
+// controlStreamPosture refuses --fleet-adapter-insecure-authz alongside a working
+// ControlStream mTLS configuration. ADR-0025 makes the flag the single switch for the
+// dev posture: no transport identity and no per-message authorization, together. With
+// mTLS configured the identity exists, and the flag would switch off only the check
+// that scopes each adapter to its own robots — a deployment that reads as
+// authenticated while any adapter the CA has issued may act for every robot in the
+// namespace. The manager says so and exits rather than serving it.
+func controlStreamPosture(tlsCfg *tls.Config, insecure bool) error {
+	if tlsCfg != nil && insecure {
+		return errors.New("--fleet-adapter-insecure-authz cannot be combined with ControlStream mTLS " +
+			"(--fleet-adapter-tls-cert-file, --fleet-adapter-tls-key-file, --fleet-adapter-client-ca-file): " +
+			"it would disable the per-robot authorization that the verified adapter identity exists for; " +
+			"drop the flag and list each robot's class in its FleetAdapter's spec.servesRobotClasses")
+	}
+	return nil
+}
+
 // buildControlStreamTLS assembles the server TLS config for ControlStream mTLS
-// (RFC-0001 §9.2.7, ADR-0025). It returns (nil, nil) when none of the three files
+// (RFC-0001 #fleet-adapter-protocol-transport-security, ADR-0025). It returns (nil, nil) when none of the three files
 // is set — the caller then chooses between the dev-insecure path and failing
 // closed. When any file is set, all three are required. The server keypair is
 // served through a GetCertificate closure that re-reads it on each handshake, so a

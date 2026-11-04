@@ -1,7 +1,9 @@
-# swarmada:fleet-manager — full fleet management (RFC-0001 §9.5.3.1): robots,
+# swarmada:fleet-manager — full fleet management (RFC-0001 #security-role-definitions): robots,
 # rollouts, probes, zones, maintenance, and the admit/reject/cancel/estop-trigger
-# custom verbs. Deliberately EXCLUDES estop-clear (admin-only, §9.5.3.2), robots/
-# status writes, and SwarmadaConfig writes. Suitable for fleet operations engineers.
+# custom verbs. estop-trigger is held at robot and zone scope, each with the patch that
+# delivers it. Deliberately EXCLUDES estop-clear (admin-only, RFC-0001 #security-permission-matrix), robots/
+# status writes, SwarmadaConfig writes, and therefore namespace-scope estop. Suitable for
+# fleet operations engineers.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -46,20 +48,27 @@ rules:
     verbs: ["create", "update", "patch", "delete", "cancel"]
   - apiGroups: ["swarmada.io"]
     resources: ["fleettasks"]
-    verbs: ["create", "update", "patch", "delete", "append"]
-  # Zone management incl. the estop-trigger custom verb — but NOT estop-clear.
+    verbs: ["create", "update", "patch", "delete", "append", "cancel", "activate"]
+  # Zone management incl. the estop-trigger custom verb — but NOT estop-clear. `patch` is
+  # the write a zone estop is delivered by: `swarmctl estop trigger` and `kubectl annotate`
+  # merge-patch the swarmada.io/estop-triggered annotation, and RBAC authorizes that write
+  # before the FleetZone webhook's estop-trigger SubjectAccessReview runs. Without it the
+  # verb cannot be exercised.
   - apiGroups: ["swarmada.io"]
     resources: ["fleetzones"]
-    verbs: ["create", "update", "delete", "estop-trigger"]
-  # estop-trigger on individual robots (§9.6.2.3 — robot or FleetZone scope).
+    verbs: ["create", "update", "patch", "delete", "estop-trigger"]
+  # estop-trigger on individual robots (RFC-0001 #safety-estop-state-machine — robot or FleetZone scope).
   - apiGroups: ["swarmada.io"]
     resources: ["robots"]
     verbs: ["estop-trigger"]
+  # No estop verb on swarmadaconfigs. A namespace estop is a write to the namespace's
+  # SwarmadaConfig, and SwarmadaConfig writes are admin-only, so the verb alone would be
+  # refused by RBAC before admission. Namespace-scope estop belongs to swarmada:admin.
   # DiscoveredRobot admit/reject custom verbs, plus the write they actually perform.
   #
   # `admit`/`reject` are SAR-gated virtual verbs: they carry the authorization decision but
   # no API effect of their own. `reject` marks the object with swarmada.io/rejected so the
-  # manager can seal ROBOT_REJECTED (§9.6.5.1) before deleting it, and that mark is a plain
+  # manager can seal ROBOT_REJECTED (RFC-0001 #safety-required-events) before deleting it, and that mark is a plain
   # patch — without this verb the SAR passes and the write is then refused.
   #
   # `patch`, not `delete`: the removal belongs to the control plane, which is what keeps an
@@ -68,7 +77,7 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["discoveredrobots"]
     verbs: ["admit", "reject", "patch"]
-  # policy-reset (§9.1.9.4): an operator override of an AUTOMATED decision — clearing a
+  # policy-reset (RFC-0001 #security-permission-matrix): an operator override of an AUTOMATED decision — clearing a
   # FailedRepeatedly suspension so a ModelPolicy resumes evaluation. Scoped like admit/reject
   # rather than like estop-clear: it is a model-quality call, not a safety one, so it does not
   # need to be admin-only.
@@ -82,7 +91,12 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["firmwarerollouts", "modelrollouts"]
     verbs: ["rollout-resume"]
-  # Safety audit log: read + verify (NOT export — admin only, §9.5.3.2).
+  # Safety audit log: read + verify (NOT export — admin only, RFC-0001 #security-permission-matrix).
   - apiGroups: ["swarmada.io"]
     resources: ["safetyauditlogs"]
     verbs: ["read", "verify"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]

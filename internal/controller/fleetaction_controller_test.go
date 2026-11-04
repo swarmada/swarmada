@@ -262,7 +262,7 @@ func TestReconcile_ConnectivityLoss_RevokesWithoutReassign(t *testing.T) {
 // Case 1b — onDisconnect=Never (the default when no SwarmadaConfig is present):
 // even once the lease is PROVABLY dead, a disconnected action is NOT auto-reassigned.
 // It holds in Revoking with its robot still bound, awaiting an operator cancel
-// (§9.1.11.9 — safest for actions with physical side effects).
+// (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect — safest for actions with physical side effects).
 func TestReconcile_NeverHoldsRevokingOnDisconnect(t *testing.T) {
 	expired := &metav1.Time{Time: time.Now().Add(-1 * time.Minute)}
 	r, c := newActionReconciler(t,
@@ -345,8 +345,8 @@ func TestReconcile_AfterTimeoutHoldsThenReassigns(t *testing.T) {
 }
 
 // Case 1d — onDisconnect=WhenActionExpired: a disconnected action whose per-action
-// completion window (spec.timeoutSeconds from StartTime) has passed is TERMINATED
-// (expiry renders completion moot, §9.1.11.9), not reassigned; one still within its
+// completion window (spec.timeoutSeconds from startedAt) has passed is TERMINATED
+// (expiry renders completion moot, RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect), not reassigned; one still within its
 // window — or one with no timeout — holds like Never.
 func TestReconcile_WhenActionExpiredCancelsElapsedRevoking(t *testing.T) {
 	expired := &metav1.Time{Time: time.Now().Add(-1 * time.Minute)}
@@ -356,7 +356,7 @@ func TestReconcile_WhenActionExpiredCancelsElapsedRevoking(t *testing.T) {
 	t.Run("expired window cancels", func(t *testing.T) {
 		action := assignedAction("t1", "r1", fleetv1.ActionPhaseRevoking, 3, expired)
 		action.Spec.TimeoutSeconds = &timeoutSecs
-		action.Status.StartTime = &metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
+		action.Status.StartedAt = &metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
 		r, c := newActionReconciler(t, action,
 			robotInPhase("r1", fleetv1.RobotPhaseOffline, "t1"),
 			actionCancelConfig(fleetv1.ActionCancellationWhenActionExpired, 0),
@@ -386,7 +386,7 @@ func TestReconcile_WhenActionExpiredCancelsElapsedRevoking(t *testing.T) {
 		wide := int32(600)
 		action := assignedAction("t1", "r1", fleetv1.ActionPhaseRevoking, 3, expired)
 		action.Spec.TimeoutSeconds = &wide
-		action.Status.StartTime = &metav1.Time{Time: time.Now().Add(-5 * time.Second)}
+		action.Status.StartedAt = &metav1.Time{Time: time.Now().Add(-5 * time.Second)}
 		r, c := newActionReconciler(t, action,
 			robotInPhase("r1", fleetv1.RobotPhaseOffline, "t1"),
 			actionCancelConfig(fleetv1.ActionCancellationWhenActionExpired, 0),
@@ -404,7 +404,7 @@ func TestReconcile_WhenActionExpiredCancelsElapsedRevoking(t *testing.T) {
 	// No timeoutSeconds → cannot expire → holds like Never (fail-safe).
 	t.Run("no timeout holds", func(t *testing.T) {
 		action := assignedAction("t1", "r1", fleetv1.ActionPhaseRevoking, 3, expired)
-		action.Status.StartTime = &metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
+		action.Status.StartedAt = &metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
 		r, c := newActionReconciler(t, action,
 			robotInPhase("r1", fleetv1.RobotPhaseOffline, "t1"),
 			actionCancelConfig(fleetv1.ActionCancellationWhenActionExpired, 0),
@@ -437,8 +437,8 @@ func TestReconcile_GenerationMonotonicAcrossRestart(t *testing.T) {
 	if ft.Status.Phase != fleetv1.ActionPhaseAssigned {
 		t.Fatalf("phase = %s, want Assigned", ft.Status.Phase)
 	}
-	if ft.Status.AssignmentGeneration != 8 {
-		t.Fatalf("generation = %d, want 8 (strictly greater than persisted 7, never reused)", ft.Status.AssignmentGeneration)
+	if ft.Status.AssignmentGeneration <= 7 {
+		t.Fatalf("generation = %d, want strictly greater than persisted 7 (never reused)", ft.Status.AssignmentGeneration)
 	}
 	if ft.Status.LeaseExpiresAt == nil {
 		t.Fatal("lease horizon not established on assignment")

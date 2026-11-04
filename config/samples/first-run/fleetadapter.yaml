@@ -1,0 +1,24 @@
+# The FleetAdapter the simulation adapter connects as. Its name and namespace are the
+# identity in the adapter's client certificate (sim-fleet-adapter.warehouse-a.svc.cluster.local),
+# so a connection presenting that certificate is this adapter and no other.
+#
+# It serves one robot class. The ControlStream refuses every robot-scoped message for a
+# robot whose class is not listed here, so this list is the authorization, not a label.
+#
+# The conformance report is the generated ConfigMap in kustomization.yaml. The digest
+# below pins its exact bytes: change the report and the controller reports Failed.
+apiVersion: swarmada.io/v1
+kind: FleetAdapter
+metadata:
+  name: sim-fleet-adapter
+  namespace: warehouse-a
+spec:
+  vendor: simulation
+  simulated: true
+  servesRobotClasses:
+    - simbot-v1
+  heartbeatIntervalSeconds: 10
+  conformanceReport:
+    suiteVersion: "C0-C19"
+    configMapRef: sim-fleet-adapter-conformance
+    digest: "sha256:8a60e567d34ddb8668f4e45798e38df604e4bb691aa5e98bc9b574d5e86a2144"

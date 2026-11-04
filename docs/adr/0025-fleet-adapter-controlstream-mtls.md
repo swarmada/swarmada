@@ -3,21 +3,21 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** API Designer, Security Reviewer, Distributed Systems Reviewer
-- **Related:** RFC-0001 §9.2.7 (transport security / mTLS), §9.5.1.2 (per-message robot authorization), §9.1.12 (FleetAdapter presence phase); backlog §F (transport security); ADR-0021 (fail-closed gate semantics); `internal/controlstream/identity.go` (the SAN identity contract, unchanged by this ADR)
+- **Related:** RFC-0001 "Transport security" (mTLS), "FleetAdapter" (per-message robot authorization and the presence phase); ADR-0021 (fail-closed gate semantics); `internal/controlstream/identity.go` (the SAN identity contract, unchanged by this ADR)
 
 ## Context
 
-RFC-0001 §9.2.7 requires mutual TLS on every Fleet Adapter connection: the
+RFC-0001 "Transport security" requires mutual TLS on every Fleet Adapter connection: the
 ControlStream is the channel over which adapters report robot state and receive
 action assignments, estops, and lease renewals, so it is a security boundary. The
-reference control plane does not yet terminate it.
+reference control plane did not terminate it before this decision.
 
 The facts as built:
 
 1. **The listener is plaintext.** `internal/controlstream/runnable.go` builds the
    server with `grpc.NewServer()` and no transport credentials; `Start` logs a
    prominent "serving ControlStream WITHOUT mTLS (dev mode)" warning. The
-   type doc already records that mTLS is backlog §F.
+   type doc already records that mTLS is deferred.
 
 2. **Identity is derived only from a verified client-certificate chain.**
    `IdentityFromContext` (`identity.go`) returns a `Verified` `TLSIdentity` **only**
@@ -32,15 +32,15 @@ The facts as built:
    server.go:364; the pre-handshake guard at :354 refuses per-robot messages when
    `!identity.Verified`). Because the plaintext listener can never produce a
    verified identity, `AdapterConnected`/`AdapterHeartbeat` are never called, the
-   `FleetAdapter` never advances to `Connected` (§9.1.12), and robots admitted
+   `FleetAdapter` never advances to `Connected` (RFC-0001, "FleetAdapter"), and robots admitted
    through that adapter stay `Discovered`/`Initialising` — the presence→Ready path
-   cannot complete. Transport security is therefore not only a §9.2.7 compliance
+   cannot complete. Transport security is therefore not only a transport-security compliance
    gap; it blocks the core adapter lifecycle.
 
 4. **`--fleet-adapter-insecure-authz` is orthogonal and does not fill the gap.**
    It only sets the `Server.Authorizer` to `nil`, activating the existing dev-mode
    path where every robot-scoped message is authorized regardless of identity
-   (cmd/manager/main.go:476–483). It adds no transport, and it does **not**
+   (cmd/manager/main.go:490–483). It adds no transport, and it does **not**
    synthesize a verified identity, so even with it set, presence stays gated off.
 
 5. **`AdapterHello` is self-reported and is not the boundary.** The adapter names
@@ -84,6 +84,15 @@ default — a plaintext listener becomes an explicit dev-only opt-in.
   thereby becomes the single switch for the whole dev posture (no transport
   identity + no per-message authorization together).
 
+  *Amended 2026-09-25:* the manager now refuses the flag together with the three
+  TLS flags at startup. This follows from the sentence above rather than
+  overturning it. Point 4 of the context calls the flag orthogonal to transport
+  because it supplies no identity. With mTLS configured the identity exists,
+  and the flag would remove only the check that scopes it to its own robots.
+  Every accepted connection would then read as authenticated while acting for any
+  robot in the namespace. The pair is refused, and the dev posture stays the
+  plaintext one.
+
 - **Server-cert hot reload.** The server certificate is served through a
   `GetCertificate` closure that re-reads the keypair, so rotation (cert-manager
   renewal) takes effect without a manager restart — the same reload intent as the
@@ -119,7 +128,8 @@ with no change to `parseAdapterSAN`.
 
 - **Application-layer tokens (bearer/JWT over plaintext).** Authenticates the
   adapter but leaves the channel unencrypted and unintegrity-protected, and is
-  replayable without channel binding; §9.2.7 mandates mTLS specifically. Rejected:
+  replayable without channel binding; RFC-0001's "Transport security" mandates mTLS
+   specifically. Rejected:
   it does not provide the confidential, mutually-authenticated channel the spec
   requires, and adds a second credential system.
 
@@ -131,10 +141,10 @@ with no change to `parseAdapterSAN`.
 
 - **The channel is authenticated and confidential.** Every accepted adapter
   presents a CA-issued client cert with a well-formed SAN; the per-message
-  authorizer (§9.5.1.2) now has a real identity to check against, fail-closed.
+  authorizer (RFC-0001, "FleetAdapter") now has a real identity to check against, fail-closed.
 
 - **Presence→Ready works.** A verified adapter reaches `Connected` and heartbeats
-  (§9.1.12); robots admitted through it can progress to `Ready`. This is the
+  (RFC-0001, "FleetAdapter"); robots admitted through it can progress to `Ready`. This is the
   primary functional win and must be covered by a test (verified-connection →
   `FleetAdapter Connected` + a robot reaching `Ready`).
 
@@ -158,5 +168,5 @@ with no change to `parseAdapterSAN`.
 - **Seams left for the future.** Client-CA rotation still needs a restart (only the
   server keypair hot-reloads); SPIFFE/short-lived-identity issuance and CRL/OCSP
   revocation are out of scope; multi-replica presence coordination is unchanged
-  (still future work). The RA-1 status discipline is unaffected — presence remains
+  (out of scope). The RA-1 status discipline is unaffected — presence remains
   driven by connect/heartbeat/stream-loss, never by telemetry frames.

@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-24
 - **Deciders:** Principal Architect, Kubernetes/controller maintainers
-- **Related:** RFC-0001 §9.4 (Traffic Deconfliction), §9.2.5 (discovery handshake); ADR-0009 (deconfliction gate at the commit site); AGENTS.md RA-1 (status-write discipline)
+- **Related:** RFC-0001 "Traffic Deconfliction Engine", "The ControlStream service" (discovery handshake); ADR-0009 (deconfliction gate at the commit site); AGENTS.md RA-1 (status-write discipline)
 
 ## Context
 
@@ -222,14 +222,14 @@ inventory.
     bug, but consumers must not read absence as "robot lacks the sensor".
 - **Seams left for change.** Manufacturer preference is one resolved bool today;
   a `ScheduleOptions` struct absorbs further soft hints without another interface
-  break. The Tier-B proto extension is the single, well-scoped unblock for full
-  hardware enrichment and is the natural subject of a follow-up ADR/RFC
-  amendment.
+  break. The Tier-B proto extension was the single, well-scoped unblock for full
+  hardware enrichment; `HardwareComponent` carries those optional scalar
+  fields and the registrar maps them.
 - This is a reference-implementation decision; the normative fields live in
   `api/v1` and the RFC. An alternative control plane may enforce the same field
   semantics differently.
 
-## Implementation surface (file-by-file; no controller code written yet)
+## Implementation surface (as planned at acceptance)
 
 - `internal/webhook/fleetaction_webhook.go` — add cap enforcement to
   `ValidateCreate` (zone-scoped, Pending-only), the `PendingActionLimitExceeded`
@@ -250,7 +250,7 @@ inventory.
   are populated today; they are not) to reflect the Tier A/Tier B split. No
   schema change.
 - `proto/fleet_adapter/v1/*` — **Tier B, deferred:** add optional scalar fields
-  to `HardwareComponent`; out of scope for this ADR, tracked as the follow-up.
+  to `HardwareComponent`; out of scope for this ADR; the fields exist as tags 6-13.
 - `docs/adr/README.md` — **existing file, needs your confirmation:** add the
   index row for ADR-0022.
 - Tests to add/update: `internal/webhook/fleetaction_*_test.go`,

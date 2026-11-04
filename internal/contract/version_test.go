@@ -71,12 +71,85 @@ func TestSupportedRange_Derivation(t *testing.T) {
 
 // The current constant's range, spelled out, so a bump is a deliberate, visible test change rather
 // than a silent behaviour shift.
+//
+// IT USED TO SKIP ON A BUMP, WHICH IS THE OPPOSITE OF WHAT THE SENTENCE ABOVE ASKS FOR. A skipped
+// test is a green test: the 1.1.0 -> 1.2.0 bump silenced this file's only statement of the actual
+// window, and the eviction that bump causes (ADR-0032 Amendment 1 §A1.2) went past it unremarked.
+// A bump must now come here and change two strings on purpose.
 func TestSupportedRange_CurrentValue(t *testing.T) {
-	if Version != "1.0.0" {
-		t.Skipf("contract.Version has moved to %s — update this expectation deliberately", Version)
+	// Moved 1.3.0 -> 1.4.0 on 2026-10-04 for one catalog entry per Custom verb
+	// (SupportedAction.custom_type), the verb on AssignAction and ValidateAction
+	// (custom_type), and CANCEL_DISPOSITION_STOP_UNCONFIRMED: additive proto surface, so
+	// MINOR per ADR-0032 A1.1. This window holds at 1.4.0; a later minor moves it, by the
+	// N and N-1 rule.
+	//
+	// WHAT THE NEW WINDOW EVICTS, checked before the bump as A1.2 requires. >=1.3.0 means
+	// anything declaring 1.2.0 or below is refused registration. Of the in-tree adapters, the
+	// simulation adapter moved 1.2.0 -> 1.4.0 (it implements what 1.4.0 added) and
+	// example-noop 1.2.0 -> 1.3.0 (it stays at N-1, so the skew is exercised); the template
+	// ships at N. The three EXTERNAL reference adapters declare 1.0.0 and were already outside
+	// the previous window; they move in their own repositories.
+	//
+	// Moved 1.2.0 -> 1.3.0 on 2026-09-14 for ADR-0059's zone_constraints Command arm and
+	// its ack (FA-R7): additive proto surface, so MINOR per ADR-0032 A1.1.
+	//
+	// WHAT THE NEW WINDOW EVICTS, checked before the bump as A1.2 requires. >=1.2.0 means
+	// anything declaring 1.1.0 or below is refused registration. The three IN-TREE
+	// adapters were moved 1.1.0 -> 1.2.0 in the same change, which is a true claim: they
+	// implement the FA-R5/FA-R6 decline that 1.2.0 added, and they decline the new
+	// OPTIONAL zone_constraints arm with unsupported=true, which is the conformant answer
+	// and the reason that arm is optional. The three EXTERNAL reference adapters declare
+	// 1.0.0 and were already outside the previous window; this bump does not change their
+	// state and does not add a new eviction; that one is already recorded against the
+	// previous bump.
+	const (
+		wantVersion = "1.4.0"
+		wantRange   = ">=1.3.0 <1.5.0"
+	)
+	if Version != wantVersion {
+		t.Fatalf("contract.Version is %s, and this expectation still says %s. Update BOTH lines "+
+			"below deliberately — and check what the new range EVICTS before you do: an adapter "+
+			"falls out of support on the SECOND minor after the version it reports, and is then "+
+			"refused registration (ADR-0032 Amendment 1 §A1.2).", Version, wantVersion)
 	}
-	if got, want := SupportedRange(), ">=1.0.0 <1.1.0"; got != want {
-		t.Errorf("SupportedRange() = %q, want %q", got, want)
+	if got := SupportedRange(); got != wantRange {
+		t.Errorf("SupportedRange() = %q, want %q", got, wantRange)
+	}
+}
+
+// ADR-0032 Amendment 1 §A1.2: a minor bump never invalidates a QUALIFICATION, and never affects an
+// adapter reporting the current or the IMMEDIATELY PRECEDING minor. That is the half of the ADR's
+// original promise which survived; the other half — "patch and minor releases never break an
+// adapter" — is struck, because the N/N-1 window is two minors wide and moves with [Version]:
+// a control plane on the SECOND minor after the version an adapter reports refuses it.
+//
+// This asserts the surviving half rather than assuming it: every adapter at minor N-1 must still
+// pass the handshake gate and therefore the dispatch gate that reads the same [Supports]
+// (robot_webhook.go, adapter_readiness.go). It says NOTHING about minor N-2, which is evicted by
+// design.
+//
+// Guards the two ways a bump goes wrong: bumping the MAJOR instead of the minor, and hand-editing
+// SupportedRange so it no longer reaches back to N-1.
+func TestMinorBump_KeepsEveryPreviousMinorAdapterQualified(t *testing.T) {
+	major, minor := mustParse(Version)
+	if minor == 0 {
+		t.Skipf("contract.Version %s is at minor 0; there is no previous minor to keep qualified", Version)
+	}
+	for _, patch := range []int{0, 1, 2, 17} {
+		prev := fmt.Sprintf("%d.%d.%d", major, minor-1, patch)
+		if ok, reason := Supports(prev); !ok {
+			t.Errorf("Supports(%q) = false (%s); a MINOR bump to %s must not invalidate an adapter "+
+				"qualified against the previous minor (ADR-0032 Decision, as amended by §A1.2)", prev, reason, Version)
+		}
+	}
+	// The patch component is ignored, so the implemented minor's own patches stay in too.
+	for _, cur := range []string{
+		fmt.Sprintf("%d.%d.0", major, minor),
+		fmt.Sprintf("%d.%d.9", major, minor),
+	} {
+		if ok, reason := Supports(cur); !ok {
+			t.Errorf("Supports(%q) = false (%s); the implemented minor must be inside its own range", cur, reason)
+		}
 	}
 }
 

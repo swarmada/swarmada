@@ -1,0 +1,73 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# A static camera watching a floor zone raises "object in zone" events; a trigger turns each
+# one into a DRAFT FleetTask. Nothing moves until a person clears the draft:
+#
+#   kubectl -n warehouse-a patch fleettask look-at-floor-object-<event> --type=merge \
+#     -p '{"spec":{"draft":false}}'
+#
+# Clearing the draft needs the activate verb on fleettasks, and the admission webhook refuses it
+# to every ServiceAccount. The camera's own identity (rbac.yaml) can create SemanticEvents and
+# nothing else.
+#
+# NO STATUS IS DECLARED IN THIS FILE.
+apiVersion: swarmada.io/v1
+kind: SemanticEventSource
+metadata:
+  name: floor-cameras
+  namespace: warehouse-a
+spec:
+  displayName: "Static cameras watching floor zones"
+  # One type per watched zone: a TaskTrigger matches on source and type only, so the zone a
+  # task goes to is chosen by the type, not read from the payload.
+  eventTypes:
+    - object-in-warehouse-a
+---
+apiVersion: swarmada.io/v1
+kind: TaskTrigger
+metadata:
+  name: look-at-floor-object
+  namespace: warehouse-a
+spec:
+  source:
+    semanticEventSource: floor-cameras
+    eventType: object-in-warehouse-a
+  # Drafted as written: the controller substitutes nothing from the event payload. The event
+  # (class, confidence, camera, frame sha256, model and version) is linked from the draft's
+  # swarmada.io/drafted-event label, for the person reviewing it.
+  taskTemplate:
+    completionPolicy: All
+    failurePolicy: FailFast
+    desiredState: Running
+    actions:
+      - name: go-and-look
+        action:
+          type: Navigate
+          zone: warehouse-a
+          priority: Normal
+          requiredCapabilities: [navigation]
+          payload:
+            # {"x": 3.0, "y": 2.0}
+            raw: eyJ4IjogMy4wLCAieSI6IDIuMH0=
+      - name: record-the-zone
+        action:
+          type: Custom
+          customType: capture-clip
+          zone: warehouse-a
+          priority: Normal
+          requiredCapabilities: [camera-view]
+          payload:
+            # {"verb": "capture-clip", "seconds": 10}
+            raw: eyJ2ZXJiIjogImNhcHR1cmUtY2xpcCIsICJzZWNvbmRzIjogMTB9

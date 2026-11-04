@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package rekor is a minimal client for the sigstore Rekor transparency log
-// (RFC-0001 §9.1.12): it checks whether an artifact hash has a log entry, the
+// (RFC-0001 #swarmadaconfig-schema): it checks whether an artifact hash has a log entry, the
 // first-level transparency requirement gating a signed-artifact dispatch.
 //
 // Scope (honest): a presence check via the search-index API. Full cryptographic

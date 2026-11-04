@@ -1,3 +1,10 @@
+# NOTE — these Robot documents assume a control plane with admission webhooks OFF
+# (ENABLE_WEBHOOKS=false), which is what the quickstart overlays and `make deploy-minimal`
+# ship. With webhooks serving, vrobot.swarmada.io refuses a Robot whose FleetAdapter is not already
+# Connected/Passed, and the robot arrives through discovery + `swarmctl admit` instead.
+# config/samples/README.md has both paths and the exact commands; config/samples/first-run
+# is the set for the webhooks-on path.
+
 apiVersion: swarmada.io/v1
 kind: Robot
 metadata:
@@ -13,7 +20,7 @@ spec:
     name: sim-fleet-adapter
     version: "0.1.0"
   zone: warehouse-a
-# Active health checks are configured via the separate RobotProbe CRD (§5.2.6),
+# Active health checks are configured via the separate RobotProbe CRD (RFC-0001 #robotprobe),
 # not inline on the Robot spec.
 ---
 apiVersion: swarmada.io/v1

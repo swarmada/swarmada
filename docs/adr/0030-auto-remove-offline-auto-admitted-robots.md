@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** Control Plane / CRD-controller capability
-- **Related:** ADR-0014 (auto-admit DiscoveredRobots), ADR-0026 (per-robot liveness projection), ADR-0029 (Robot phase state machine), RFC-0001 §9.6.3.5 (lease death / single-executor safety)
+- **Related:** ADR-0014 (auto-admit DiscoveredRobots), ADR-0026 (per-robot liveness projection), ADR-0029 (Robot phase state machine), RFC-0001 "Assignment Lease and the Single-Executor Guarantee" (lease death / single-executor safety)
 
 ## Context
 
@@ -24,8 +24,9 @@ Two forces constrain a fix:
 1. **Warehouse robots must persist.** An operator-provisioned AMR that goes offline
    for a shift change or a charge must **not** be deleted — its identity, config,
    and history are durable. Blanket "remove all Offline robots" is wrong.
-2. **Removal must be safe under the single-executor model (§9.6.3.5).** Deleting a
-   robot that might still be executing an assigned action risks the exact
+2. **Removal must be safe under the single-executor model** (RFC-0001,
+   "Assignment Lease and the Single-Executor Guarantee"). Deleting a robot that
+   might still be executing an assigned action risks the exact
    double-execution the lease machinery exists to prevent. Removal must wait until
    any lease is **provably** dead — and a nil/absent lease horizon is *not* proof of
    death.
@@ -50,11 +51,12 @@ The Robot controller removes a Robot **iff all** of the following hold:
 3. **Adapter presence is gone** — phase `Offline` (heartbeat older than the
    namespace offline threshold, ADR-0026).
 4. **Dwell elapsed** — `now ≥ status.offlineSince + grace`. `offlineSince` is already
-   tracked by the controller (§9.3.8 offline accounting).
+   tracked by the controller (RFC-0001, "Robot Health and Connectivity" — offline accounting).
 5. **Any lease is provably dead** — either `status.assignedAction` is empty (no
    lease), or the named FleetAction is gone (`NotFound`), or its
    `status.leaseExpiresAt` is provably past per **the existing** `leaseProvablyDead`
-   (§9.6.3.5 condition 3: `now ≥ lease + skew`). A nil horizon is **not** death, and
+   (RFC-0001, "Assignment Lease and the Single-Executor Guarantee", condition 3:
+    `now ≥ lease + skew`). A nil horizon is **not** death, and
    a transient lookup error **fails closed** (no removal).
 
 Removal reuses the control plane's own lease-death primitive
@@ -65,7 +67,8 @@ robot has stopped.
 ## Alternatives considered
 
 - **TTL / ownerReference garbage collection.** Rejected: a time/owner GC can't see
-  the lease and would evict a robot mid-action, violating §9.6.3.5.
+  the lease and would evict a robot mid-action, violating RFC-0001's "Assignment Lease
+   and the Single-Executor Guarantee".
 - **Blanket removal of every Offline robot.** Rejected: breaks warehouse
   persistence. The auto-admitted marker + opt-in scope removal to exactly the
   ephemeral fleet.

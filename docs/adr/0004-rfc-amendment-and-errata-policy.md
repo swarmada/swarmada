@@ -80,3 +80,21 @@ historical record, not whether there is oversight.
 - The living spec always reflects the current accepted state, because accepted
   amendment RFCs are folded back into the text rather than left as separate
   documents to reconcile.
+
+## Amendment 1 (2026-11-01): the stage rules and one specification per release
+
+The Decision above is replaced where it differs.
+
+- A substantive normative change to an `alpha` surface is not made in place. It goes
+  through the contract-change process in RFC-0001's Resource model: a new contract
+  version, with release notes and migration notes, specified by an amendment or a new
+  RFC. Off the wire it is a patch bump by default, and a minor bump if it binds adapters. If it
+  binds them for safety, it also raises the lowest supported contract version to the new one.
+- A CRD's schema follows Kubernetes API rules. Within `swarmada.io/v1` only
+  backward-compatible changes are made, at any stage.
+- A change to a safety rule goes through the contract-change process at every stage.
+- An amendment is a drafting tool. Every release folds its accepted amendments into the
+  chapters and assembles one complete specification for that version, published with a
+  "what changed since the previous version" document. The two v0.4 amendments are
+  normative for v0.4 but published as separate files, and the next revision folds them
+  into the chapters.

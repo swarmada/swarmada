@@ -1,0 +1,50 @@
+# The four sources the bridge raises events for, one per kind of outside system.
+#
+# eventTypes is the CLOSED set each may raise. The bridge maps its inbound vocabulary
+# onto these names, and an event naming a type its source does not declare is
+# Rejected by the control plane and fires nothing, whoever created it.
+#
+# The types carry what a TaskTrigger must select on, because a trigger selects on
+# (source, type) alone: it has no condition and substitutes nothing from the payload
+# (ADR-0063). So "after hours" and "which zone" are in the type, not the payload.
+apiVersion: swarmada.io/v1
+kind: SemanticEventSource
+metadata:
+  name: building-doors
+  namespace: warehouse-a
+spec:
+  displayName: "Door controller (through the event bridge)"
+  eventTypes:
+    - door.opened.after-hours
+    - door.opened.in-hours
+---
+apiVersion: swarmada.io/v1
+kind: SemanticEventSource
+metadata:
+  name: work-orders
+  namespace: warehouse-a
+spec:
+  displayName: "Work-order system (through the event bridge)"
+  # One type per zone a work order may name: workorder.<task>.<zone>.
+  eventTypes:
+    - workorder.clean.warehouse-a
+---
+apiVersion: swarmada.io/v1
+kind: SemanticEventSource
+metadata:
+  name: schedules
+  namespace: warehouse-a
+spec:
+  displayName: "Site scheduler (through the event bridge)"
+  eventTypes:
+    - schedule.started.mapping-segment
+---
+apiVersion: swarmada.io/v1
+kind: SemanticEventSource
+metadata:
+  name: static-cameras
+  namespace: warehouse-a
+spec:
+  displayName: "Static cameras (a camera adapter posting through the event bridge)"
+  eventTypes:
+    - camera.detection.warehouse-a

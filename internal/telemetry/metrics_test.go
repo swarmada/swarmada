@@ -93,9 +93,9 @@ func TestProject_TransitionTypeClassification(t *testing.T) {
 
 type countingSink struct{ n int }
 
-func (c *countingSink) ApplyMaterialUpdate(context.Context, telemetry.MaterialUpdate) error {
+func (c *countingSink) ApplyMaterialUpdate(context.Context, telemetry.MaterialUpdate) (bool, error) {
 	c.n++
-	return nil
+	return true, nil
 }
 
 // The status-write counter increments ONLY on a material transition — never per

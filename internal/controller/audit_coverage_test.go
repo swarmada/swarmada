@@ -30,7 +30,7 @@ import (
 	"github.com/swarmada/swarmada/internal/audit"
 )
 
-// §9.6.5.1 audit coverage.
+// RFC-0001 #safety-required-events audit coverage.
 //
 // These tests exist because of a specific failure: the event-name constants for
 // ROBOT_ADMITTED, ROBOT_REJECTED, ESTOP_CLEAR_REJECTED and SWARMADA_CONFIG_MODIFIED

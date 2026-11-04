@@ -45,8 +45,11 @@ func newDeleteRobotCommand(o *options) *cobra.Command {
 		Use:   "robot <name> [--reason <text>]",
 		Short: "Delete an admitted Robot, or reject a discovered one (custom verb: reject|delete)",
 		Long: `Delete resolves the target by what the name names. A DiscoveredRobot is
-rejected — the reject custom verb deletes it and records --reason as a namespace
-Event (RFC-0001 §9.1.2.7). An admitted Robot is a plain delete, gated by the
+rejected: gated by the reject custom verb, it is marked with the swarmada.io/rejected
+annotation carrying --reason. The control plane then seals the reason into a
+ROBOT_REJECTED audit entry, records it in a Normal Rejected Event in the
+namespace, and removes the object (RFC-0001 #discoveredrobot-state-machine).
+An admitted Robot is a plain delete, gated by the
 standard delete RBAC verb. RBAC still distinguishes the two, so "who may reject a
 discovered robot" and "who may delete a live robot" stay separate.`,
 		Example: `  swarmctl delete robot dr-acme-a3f9 --reason "stale test entry"
@@ -56,17 +59,17 @@ discovered robot" and "who may delete a live robot" stay separate.`,
 			return o.runDeleteRobot(cmd.Context(), args[0], reason, yes)
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "Why the robot is being removed (recorded as an Event when rejecting a discovered robot)")
+	cmd.Flags().StringVar(&reason, "reason", "", "Why the robot is being removed (for a discovered robot, recorded in the ROBOT_REJECTED audit entry and the Rejected Event)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
 // runDeleteRobot dispatches on what <name> resolves to: a DiscoveredRobot takes
-// the reject path (reason recorded as an Event), an admitted Robot a plain
+// the reject path (the manager records the reason), an admitted Robot a plain
 // delete. A missing --reason is only advisory, so it warns rather than fails.
 func (o *options) runDeleteRobot(ctx context.Context, name, reason string, yes bool) error {
 	if strings.TrimSpace(reason) == "" {
-		_, _ = fmt.Fprintln(o.streams.Err, "warning: no --reason given; a rejection reason is recorded in the namespace Event trail.")
+		_, _ = fmt.Fprintln(o.streams.Err, "warning: no --reason given; a rejection reason is recorded in the audit entry and the Rejected Event.")
 	}
 	c, cs, ns, err := o.lifecycleClients()
 	if err != nil {

@@ -3,6 +3,8 @@
 #
 #   scripts/check-publication-boundary.sh            # deny-severity findings fail
 #   STRICT=1 scripts/check-publication-boundary.sh   # warnings fail too
+#   git log --format=%B <range> | scripts/check-publication-boundary.sh --messages
+#                                                    # the same rules over commit messages
 #   make check-boundary / make check-boundary-strict
 #
 # WHY THIS WRAPPER EXISTS
@@ -93,12 +95,24 @@ if [ -z "$GUARD" ] || [ ! -x "$GUARD" ]; then
   exit 2
 fi
 
+# COMMIT MESSAGES
+#
+# A message is not a file, so the file list above never reaches one, and a message is
+# published with the history it belongs to. Two in this repository name the authoring tree
+# (c88e7f2, 717987e); they stay, because rewriting a published main breaks every clone.
+# --messages reads message text on stdin (the pre-push hook passes what it is about to
+# push) and hands it to the guard, so the ruleset stays where it is.
+if [ "${1:-}" = "--messages" ]; then
+  rc=0
+  out=$(MODE=message "$GUARD") || rc=$?
+else
 rc=0
 out=$(
   set -o pipefail
   git ls-files --cached --others --exclude-standard \
     | MODE=guard "$GUARD"
 ) || rc=$?
+fi
 
 printf '%s\n' "$out"
 

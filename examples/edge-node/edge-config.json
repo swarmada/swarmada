@@ -1,0 +1,17 @@
+{
+  "zones": [
+    {
+      "name": "warehouse-a",
+      "floor": 0,
+      "polygon": [
+        { "x": 0.0, "y": 0.0 },
+        { "x": 20.0, "y": 0.0 },
+        { "x": 20.0, "y": 20.0 },
+        { "x": 0.0, "y": 20.0 }
+      ]
+    }
+  ],
+  "robotZone": {
+    "amr-1": "warehouse-a"
+  }
+}

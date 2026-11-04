@@ -28,8 +28,17 @@ import (
 	"strings"
 )
 
-// Version is the fleet-adapter contract version this build implements: a semver over the proto
-// surface, the SupportedAction schema (ADR-0019), and the conformance-suite revision.
+// Version is the fleet-adapter contract version this build implements: a semver over TWO things —
+// the proto surface, and the CapabilitiesSnapshot/SupportedAction schema (ADR-0019). RFC-0001 also bumps it off the wire.
+//
+// THE CONFORMANCE-SUITE REVISION IS DELIBERATELY NOT ONE OF THEM (ADR-0032, Decision bullet 1:
+// "a suite change re-attests adapters, it does not move the contract they negotiate"). Folding it
+// in would make every test improvement a protocol change, and would let a result carry forward
+// across a pass bar it never cleared. The suite revision is provenance recorded BESIDE the result,
+// in adapters/REGISTRY.md. This comment said three things until 2026-09-13 and the difference is
+// not editorial: under the three-part reading, adding a conformance profile is a component change,
+// and because a new profile invalidates results earned before it the bump would read as MAJOR —
+// the opposite answer, with re-qualification demanded of every vendor.
 //
 // It is deliberately the ONLY hand-maintained value in this package — [SupportedRange] is derived
 // from it, so bumping the contract cannot leave the advertised range stale.
@@ -39,11 +48,26 @@ import (
 // compatibility) and an adapter's own build version (two builds can implement one contract
 // version; one build can span several).
 //
-// Bump rules (ADR-0032): a MAJOR bump is breaking — adapters re-run `make conformance` and update
-// their adapters/REGISTRY.md row; MINOR and PATCH bumps are compatible and never invalidate an
-// existing qualification. The conformance harness stamps this same value into a report as
-// `contract_version` (adapters/conformance/report.py CONTRACT_VERSION); the two MUST move together.
-const Version = "1.0.0"
+// Bump rules (ADR-0032, as corrected by its Amendment 1 §A1.2):
+//
+//   - A MAJOR bump is breaking — adapters re-run `make conformance` and update their
+//     adapters/REGISTRY.md row.
+//   - MINOR and PATCH bumps never invalidate an existing QUALIFICATION: the conformance result
+//     stands and nothing in the ADR-0007 attestation flow is redone.
+//   - A MINOR BUMP IS NOT THEREFORE HARMLESS. [SupportedRange] is N and N-1, a window two minors
+//     wide, so a bump moves it: an adapter falls out on the SECOND minor after the version it reports
+//     and is then refused RegisterRobot/DiscoverRobot with VERSION_MISMATCH — connected,
+//     streaming telemetry, still receiving estop, and unable to bring a robot under management.
+//     The ADR's original "patch and minor releases never break an adapter" is struck. A
+//     qualification that survives is not the same thing as an adapter that still works.
+//
+// Until RFC-0001 v1.0 a bump goes through the contract-change process (RFC-0001 #resource-model). At
+// 1.4.0 the range is >=1.3.0 <1.5.0: it moves with a minor, and it is not widened for an adapter.
+//
+// The conformance harness stamps this same value into a report as `contract_version`
+// (adapters/conformance/report.py CONTRACT_VERSION); the two MUST move together, and
+// `make spec-contract` fails if only one moves.
+const Version = "1.4.0"
 
 // SupportedRange is the contract-version range this control plane accepts from an adapter: the
 // implemented minor N and its predecessor N-1, within the current major (ADR-0032, "Supported
@@ -124,9 +148,63 @@ func Supports(reported string) (bool, string) {
 	}
 	if minor < low || minor > ourMinor {
 		return false, fmt.Sprintf("contract_version %q is outside the supported range %s "+
-			"(this control plane implements %s)", reported, SupportedRange(), Version)
+			"(this control plane implements %s); move the adapter to a build that declares a "+
+			"contract version in that range", reported, SupportedRange(), Version)
 	}
 	return true, ""
+}
+
+// Negotiate is the contract version agreed for a connection whose adapter reported reported, and
+// whether one was agreed (RFC-0001 #fleet-adapter-protocol-package-and-versioning): Version when the
+// adapter reported a version of Version's minor, and the version it reported otherwise, so a 1.3.x
+// adapter's connection negotiates 1.3.x and is held to it. A version Supports refuses agrees none.
+// The agreed version is written as plain major.minor.patch, whatever form the report took.
+func Negotiate(reported string) (string, bool) {
+	if ok, _ := Supports(reported); !ok {
+		return "", false
+	}
+	v, ok := parseFull(reported)
+	if !ok {
+		return "", false
+	}
+	if ourMajor, ourMinor := mustParse(Version); v[0] == ourMajor && v[1] == ourMinor {
+		return Version, true
+	}
+	return fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2]), true
+}
+
+// Below reports whether a contract version reported by an adapter is below version, a plain
+// major.minor.patch, and whether reported could be read at all. An empty or malformed report is not
+// known (ok false), and the caller decides what an unknown version means.
+func Below(reported, version string) (below, ok bool) {
+	rp, okR := parseFull(reported)
+	vp, okV := parseFull(version)
+	if !okR || !okV {
+		return false, false
+	}
+	for i := range rp {
+		if rp[i] != vp[i] {
+			return rp[i] < vp[i], true
+		}
+	}
+	return false, true
+}
+
+// parseFull is parseStrict with the patch component kept.
+func parseFull(v string) ([3]int, bool) {
+	var out [3]int
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // parseStrict parses a plain numeric major.minor.patch. Unlike mustParse (which guards a

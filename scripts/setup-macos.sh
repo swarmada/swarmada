@@ -24,8 +24,8 @@
 # scripts/deploy-minikube.sh (docs/deploy-minikube.md — minikube-based). Pick
 # whichever one the doc you're following told you to run next.
 #
-# macOS only for now. Linux/Windows equivalents are tracked as follow-up work
-# closer to release.
+# macOS only. On Linux, install the prerequisites with the distro's package manager
+# (docs/quickstart.md); on Windows, run under WSL2 and do the same.
 #
 # Usage:
 #   scripts/setup-macos.sh
@@ -50,7 +50,7 @@
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "This script is macOS-only for now. See docs/deploy-minikube.md." >&2
+  echo "This script is macOS-only. See docs/deploy-minikube.md." >&2
   exit 1
 fi
 
@@ -167,9 +167,8 @@ Homebrew installed mid-session until it re-reads its profile, so running
 Chaining `make setup-macos && make quickstart` in one shell fails for the
 same reason.
 
-Not installed by this script (only needed if you're building Python
-reference adapters, not for the Go controller-manager / docker-build path):
-  pip install grpcio-tools --break-system-packages
-  (Homebrew's Python is "externally managed" per PEP 668; --break-system-packages
-  or a venv are both fine here — see make proto-py.)
+Not installed by this script (only needed to regenerate the committed Python
+stubs after a .proto change, not to build or run an adapter):
+  grpcio-tools 1.64.1: install uv, or pip install '.[codegen]' in a venv,
+  then make proto-py.
 EOF

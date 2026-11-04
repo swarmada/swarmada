@@ -11,13 +11,15 @@ description: |
 type: application
 
 # Chart version — bump on any chart change (SemVer). Independent of appVersion.
-version: 0.2.0
+version: 0.4.0
 # The Swarmada control-plane version this chart deploys (the container image tag
 # default). Alpha per RFC-0001's maturity table.
-appVersion: "0.2.0"
+appVersion: "0.4.0"
 
-# The webhook v1 admission API + CRD structural schemas require a recent API server.
-kubeVersion: ">=1.27.0-0"
+# 1.31 is the floor: it is the oldest API server measured to admit an emergency stop on a
+# zone stored before one of the CRD's validation rules existed (CRD validation ratcheting);
+# v1.29 refuses it.
+kubeVersion: ">=1.31.0-0"
 
 home: https://github.com/swarmada/swarmada
 sources:

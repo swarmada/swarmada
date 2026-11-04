@@ -24,13 +24,13 @@ import (
 	"github.com/swarmada/swarmtop/internal/k8sclient"
 )
 
-// These are the two acceptance tests for the composite FleetTask view — spec
-// §7 criteria 1 and 2. They drive the real screen through the
+// These are the two acceptance tests for the composite FleetTask view.
+// They drive the real screen through the
 // key handler and assert on rendered text, rather than calling a row helper
 // directly, so they keep testing the operator-visible contract when the
 // renderer's internals change.
 
-// equivFleet is the spec §9 reproduction as view types: one standalone
+// equivFleet is the equivalence fixture as view types: one standalone
 // FleetAction and one single-member FleetTask whose member carries an identical
 // FleetActionSpec. Every action-level field is deliberately the same on both —
 // only the name and the owning-task label differ.
@@ -103,10 +103,10 @@ func linesContaining(out, sub string) []string {
 // standalone FleetAction and the single member of a FleetTask carrying an
 // identical spec must render identical action rows.
 //
-// NOTE ON THE CRITERION'S WORDING. §7.1 says the rows must be identical "in
-// every column except name". Taken literally that is unsatisfiable: §3a requires
-// the TASK column to name the owner for a member and show "—" for a standalone,
-// so TASK must differ too — and §3a's own mockup shows exactly that. This test
+// NOTE ON THE CRITERION'S WORDING. The criterion says the rows must be identical
+// "in every column except name". Taken literally that is unsatisfiable: the TASK
+// column names the owner for a member and shows "—" for a standalone, so TASK
+// must differ too. This test
 // therefore holds the action-level lifecycle columns identical (KIND, PHASE,
 // ROBOT, PRIO, PROG, RETRY) and allows NAME and TASK to differ, which is the
 // only coherent reading of the two sections together.
@@ -143,7 +143,7 @@ func TestEquivalentActionRowsRenderIdentically(t *testing.T) {
 		t.Fatalf("could not identify both rows: standalone=%q member=%q", standalone, member)
 	}
 
-	// Per the §3-over-§3a ruling, a member shows its BARE name, not the child
+	// A member shows its BARE name, not the child
 	// object name — the TASK column and the indent already state the owner.
 	if strings.Contains(member, "equiv-task-probe") {
 		t.Fatalf("member row should show the bare member name %q, not the child name:\n%s", "probe", member)
@@ -169,12 +169,12 @@ func TestEquivalentActionRowsRenderIdentically(t *testing.T) {
 // present, the t screen must render what it renders today — every existing
 // quickstart scenario runs with zero composites.
 //
-// NOTE ON WHAT "EXACTLY" MEANS HERE. §3 rule 4 words this as "renders exactly
-// what the t view renders today", but a byte-for-byte golden cannot be the test:
+// NOTE ON WHAT "EXACTLY" MEANS HERE. The criterion is "renders exactly
+// what the t view renders", but a byte-for-byte golden cannot be the test:
 // the approved responsive column layout changes NAME's width and drops DEADLINE,
 // so identical bytes are impossible by construction and a golden would fail on
 // the very change it is meant to permit. The invariant that actually matters is
-// the one rule 4 gives its reason for — empty sections collapse and no
+// the reason the criterion exists for — empty sections collapse and no
 // information is lost — so that is what this pins: no composite chrome appears,
 // and every action still renders with every value it renders today.
 func TestNoTasksRendersAsTodayList(t *testing.T) {

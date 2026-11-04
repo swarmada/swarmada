@@ -38,7 +38,7 @@ func newCapIngestor(t *testing.T, objs ...client.Object) (*CapabilitiesIngestor,
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&fleetv1.FleetAdapter{}).
+		WithStatusSubresource(&fleetv1.FleetAdapter{}, &fleetv1.Robot{}).
 		Build()
 	return &CapabilitiesIngestor{Client: c}, c
 }
@@ -81,6 +81,54 @@ func TestCapabilitiesIngestor_ProjectsCatalog(t *testing.T) {
 	}
 
 	// RA-1: a second identical ingest is idempotent (no error, catalog unchanged).
+	if err := i.IngestCapabilities(context.Background(), ns, snap); err != nil {
+		t.Fatalf("second ingest: %v", err)
+	}
+}
+
+// SensorStream discovery lands on the ROBOT (unlike
+// supported_actions above, which is adapter-wide and lands on FleetAdapter),
+// since a sensor stream is a property of one specific robot.
+func TestCapabilitiesIngestor_ProjectsSensorStreams(t *testing.T) {
+	ns := "yard-west"
+	robot := &fleetv1.Robot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "yard-robot-3", Namespace: ns,
+			Annotations: map[string]string{fleetv1.RobotIDAnnotation: "yard-robot-3"},
+		},
+		Spec: fleetv1.RobotSpec{Adapter: fleetv1.AdapterRef{Name: "sim-adapter"}},
+	}
+	i, c := newCapIngestor(t, robot)
+
+	snap := &fav1.CapabilitiesSnapshot{
+		RobotId: "yard-robot-3",
+		SensorStreams: []*fav1.SensorStream{
+			{
+				StreamId: "front-rgb", MediaType: "image/jpeg", NativeRateHz: 30,
+				RequiredCapabilities: []string{"camera"},
+				ActivationCost:       fav1.ActivationCost_ACTIVATION_COST_ON_DEMAND,
+				SupportsClip:         true, ClipPreSecondsMax: 5,
+			},
+		},
+	}
+	if err := i.IngestCapabilities(context.Background(), ns, snap); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	got := &fleetv1.Robot{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: "yard-robot-3"}, got); err != nil {
+		t.Fatalf("get robot: %v", err)
+	}
+	if len(got.Status.SensorStreams) != 1 {
+		t.Fatalf("want 1 sensor stream, got %d: %+v", len(got.Status.SensorStreams), got.Status.SensorStreams)
+	}
+	entry := got.Status.SensorStreams[0]
+	if entry.StreamID != "front-rgb" || entry.MediaType != "image/jpeg" ||
+		entry.ActivationCost != fleetv1.ActivationCostOnDemand || !entry.SupportsClip ||
+		entry.ClipPreSecondsMax != 5 || len(entry.RequiredCapabilities) != 1 {
+		t.Fatalf("unexpected projection: %+v", entry)
+	}
+
+	// RA-1: a second identical ingest is idempotent (no error, list unchanged).
 	if err := i.IngestCapabilities(context.Background(), ns, snap); err != nil {
 		t.Fatalf("second ingest: %v", err)
 	}

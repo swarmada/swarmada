@@ -29,9 +29,9 @@ import (
 	"github.com/swarmada/swarmada/internal/metrics"
 )
 
-// allRegistered is the exact §9.3.8 metric-name set the chart's alerts and dashboards
+// allRegistered is the exact metrics-contract metric-name set the chart's alerts and dashboards
 // depend on. Registration MUST produce exactly these, no more, no fewer.
-// allRegistered is every §9.3.8 metric Register installs. The name deliberately carries no
+// allRegistered is every metrics-contract metric Register installs. The name deliberately carries no
 // tally: a count baked into an identifier goes stale the moment a metric is added and has to
 // be chased through comments and test names, which is the drift this file exists to catch.
 var allRegistered = []string{
@@ -103,8 +103,9 @@ func gatherFamilies(t *testing.T, ns string) map[string]map[string]bool {
 	return out
 }
 
-// Register installs EXACTLY the §9.3.8 metric set — no more, no fewer. A metric added to
-// the code without a matching row in §9.3.8 now also fails `make spec-check`.
+// Register installs EXACTLY the metrics-contract metric set — no more, no fewer. A metric added to
+// the code without a matching row in metrics-contract now also fails the specification's drift
+// check.
 func TestRegister_ExactlyTheDeclaredMetrics(t *testing.T) {
 	fams := gatherFamilies(t, "reg-test")
 	got := make([]string, 0, len(fams))
@@ -117,7 +118,7 @@ func TestRegister_ExactlyTheDeclaredMetrics(t *testing.T) {
 	want := append([]string(nil), allRegistered...)
 	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("registered §9.3.8 metrics mismatch:\n got:  %v\n want: %v", got, want)
+		t.Fatalf("registered metrics-contract metrics mismatch:\n got:  %v\n want: %v", got, want)
 	}
 }
 
@@ -132,8 +133,8 @@ func TestRegister_IsMultiRegistrySafe(t *testing.T) {
 }
 
 // InitNamespace seeds the phase/estop gauges to 0 for a namespace — a not-yet-seen
-// phase reads 0, not absent (§9.3.8 registration requirement). Critically the
-// Revoking phase, which §9.3.8 calls out explicitly.
+// phase reads 0, not absent (metrics-contract registration requirement). Critically the
+// Revoking phase, which metrics-contract calls out explicitly.
 func TestInitNamespace_ZeroesGaugesIncludingRevoking(t *testing.T) {
 	ns := "init-zero-ns" // unique so no other test's emissions perturb it
 	metrics.InitNamespace(ns)
@@ -155,7 +156,7 @@ func TestInitNamespace_ZeroesGaugesIncludingRevoking(t *testing.T) {
 	}
 }
 
-// alertExprs are the §9.3.8 "minimum alert expressions" the Helm chart ships. This
+// alertExprs are the RFC-0001 #control-plane-observability-prometheus-metrics-contract "minimum alert expressions" the Helm chart ships. This
 // test is the correctness contract between the chart's PromQL and the registered
 // metric surface: every metric name and label selector the alerts reference MUST
 // exist in the registered metrics, or the alerts silently never fire.

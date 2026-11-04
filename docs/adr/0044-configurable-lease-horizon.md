@@ -3,9 +3,10 @@
 - **Status:** accepted
 - **Date:** 2026-08-20
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.6.3.5 (assignment lease and the single-executor guarantee),
-  §9.6.3.2 (control-plane response timeline), §9.6.3.3 item 1 (adapter local behaviour),
-  §9.2.8 (Fleet Adapter compliance checklist — "Task-lease self-stop"), §9.3.8 (metrics and the
+- **Related:** RFC-0001 "Assignment Lease and the Single-Executor Guarantee",
+  "Control Plane Response" (the response timeline), "Fleet Adapter Local Behaviour During
+  Connectivity Loss" item 1, the "Fleet Adapter compliance checklist" row "Task-lease
+  self-stop", and "Observability: Prometheus Metrics Contract" (metrics and the
   stuck-`Revoking` alert); ADR-0011 (the per-namespace connectivity thresholds this mirrors),
   ADR-0012 (when a resolved field must be a nil-able pointer instead), ADR-0030 (fail-closed lease
   reads in the Robot controller)
@@ -16,10 +17,12 @@ The task-lease horizon is the load-bearing number in the single-executor guarant
 timers are derived from it, on opposite sides of the wire:
 
 1. The control plane writes `now + duration` to `FleetAction.status.leaseExpiresAt` and refuses to
-   reassign an action until `now ≥ leaseExpiresAt + skew` (§9.6.3.5 condition 3).
+   reassign an action until `now ≥ leaseExpiresAt + skew` ("Assignment Lease and
+   the Single-Executor Guarantee", condition 3).
 2. The robot's Fleet Adapter receives the same number as `Command.lease_duration_ms` and arms a
    self-stop timer from it. When the lease is not renewed in time the adapter MUST bring the action
-   to a safe stop on its own (§9.2.8 "Task-lease self-stop", §9.6.3.3 item 1).
+   to a safe stop on its own (the "Fleet Adapter compliance checklist" row "Task-lease
+    self-stop", and "Fleet Adapter Local Behaviour During Connectivity Loss" item 1).
 
 The guarantee holds only because those two timers are the same quantity. The robot has provably
 halted before the control plane hands the action to anyone else.
@@ -31,12 +34,12 @@ a standing TODO to source them from `SwarmadaConfig.spec.scheduling`. That left 
 - **No operator control.** 30s is right for a warehouse AMR on good Wi-Fi. It is wrong for a robot
   on a link with multi-second round trips, or for a long-running action whose safe-stop procedure
   itself takes tens of seconds. Operators had no way to say so.
-- **Phantom configuration in the spec.** §9.3.8 carried a normative requirement that a `Revoking`
+- **Phantom configuration in the spec.** The metrics contract carried a normative requirement that a `Revoking`
   count persisting longer than `leaseDurationMs + clockSkewMarginMs` MUST trigger an alert, and the
   shipped `PrometheusRule` repeated the phrase to operators. Neither symbol existed as a field
   anywhere in the tree, and `clockSkewMarginMs` had no defined value at all, so an operator could not
   compute the threshold the MUST told them to alert on.
-- **Two spellings, one quantity.** §9.6.3.2's timeline said `leaseDuration + clockSkewMargin`, §9.3.8
+- **Two spellings, one quantity.** "Control Plane Response"'s timeline said `leaseDuration + clockSkewMargin`, the metrics contract
   said `leaseDurationMs + clockSkewMarginMs`, and the wire says `lease_duration_ms`. Nothing stated
   which was authoritative or how they converted.
 
@@ -69,7 +72,7 @@ wire.**
    lease death by the same number; a second copy of the resolution logic is exactly the drift this
    ADR exists to prevent.
 
-3. **The renewal interval stays derived.** `renew` is always `duration / 3` (§9.3.2) and is not a
+3. **The renewal interval stays derived.** `renew` is always `duration / 3` (RFC-0001, "Scheduler") and is not a
    field. A separately configurable interval would let an operator widen the horizon without renewing
    any sooner, which is the one combination that makes a long horizon dangerous rather than only
    slow.
@@ -81,8 +84,9 @@ wire.**
 
 5. **One spelling in the spec.** `spec.scheduling.leaseDurationSeconds` and `clockSkewMarginSeconds`
    are the normative names, in seconds; `lease_duration_ms` is the wire encoding of the first, in
-   milliseconds, converted at the wire boundary. §9.6.3.5 states the conversion; `leaseDurationMs`
-   and `clockSkewMarginMs` are retired from normative prose.
+   milliseconds, converted at the wire boundary. "Assignment Lease and the
+   Single-Executor Guarantee" states the conversion; `leaseDurationMs` and
+   `clockSkewMarginMs` are retired from normative prose.
 
 6. **No per-`FleetAction` override.** The horizon is set per namespace, not per action (see
    Alternatives considered).
@@ -115,7 +119,7 @@ tuning knob, and it is the only field in `spec.scheduling` of which that is true
 - **Leave both as constants and only document the values.** Fixes the phantom-configuration defect in
   the spec at zero risk, and was tempting for exactly that reason. Rejected: it leaves operators with
   a safety-relevant timer they cannot match to their link quality or their robots' stopping distance,
-  and the §9.3.8 MUST-alert threshold stays uncomputable in any deployment that is not at defaults.
+  and the metrics contract's MUST-alert threshold stays uncomputable in any deployment that is not at defaults.
 - **Make the renewal interval a third field.** Rejected under item 3 above — it exists only to enable
   the dangerous combination.
 - **Per-`FleetAction` override (`spec.leaseDurationSeconds`).** Genuinely attractive: a slow docking
@@ -133,7 +137,7 @@ tuning knob, and it is the only field in `spec.scheduling` of which that is true
 
 ## Consequences
 
-- **Good.** The §9.3.8 stuck-`Revoking` alert threshold is now computable from two real fields, so the
+- **Good.** The metrics contract's stuck-`Revoking` alert threshold is now computable from two real fields, so the
   normative MUST is satisfiable. The TODO in `fleetaction_controller.go` is discharged.
 - **Good.** `leaseTimings` is the single resolution point for both controllers and for the wire, so
   "the robot and the control plane disagree about the lease" is now one function's responsibility

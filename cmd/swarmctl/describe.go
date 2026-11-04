@@ -22,6 +22,7 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
@@ -71,17 +72,17 @@ func (o *options) runDescribe(ctx context.Context, resource string, names []stri
 			_, _ = fmt.Fprintln(o.streams.Out)
 		}
 		if r, ok := obj.(*fleetv1.Robot); ok {
-			o.describeRobot(r)
+			o.describeRobot(ctx, c, r)
 			continue
 		}
-		o.describeGeneric(def, obj)
+		o.describeGeneric(ctx, c, def, obj)
 	}
 	return nil
 }
 
 // describeGeneric renders the shared describe layout for any kind: metadata
 // header, API version/kind, the kind's detail lines, conditions, and events.
-func (o *options) describeGeneric(def *resourceDef, obj client.Object) {
+func (o *options) describeGeneric(ctx context.Context, c client.Client, def *resourceDef, obj client.Object) {
 	w := o.streams.Out
 	cli.DescribeHeader(w, obj)
 	_, _ = fmt.Fprintf(w, "API Version:  %s\n", fleetv1.GroupVersion.String())
@@ -92,7 +93,7 @@ func (o *options) describeGeneric(def *resourceDef, obj client.Object) {
 	if def.conditions != nil {
 		cli.DescribeConditions(w, o.colorStdout, def.conditions(obj))
 	}
-	_, _ = fmt.Fprintln(w, "Events:  <none>")
+	o.describeEvents(ctx, c, def.kind, obj)
 }
 
 // describeRobot renders the Robot describe view: the CLI style guide's
@@ -100,7 +101,7 @@ func (o *options) describeGeneric(def *resourceDef, obj client.Object) {
 // every value sourced from real Robot CRD fields (the reference mock's "Fleet
 // Adapter Endpoint" is not a Robot field, so the real spec.adapter reference is
 // shown instead).
-func (o *options) describeRobot(r *fleetv1.Robot) {
+func (o *options) describeRobot(ctx context.Context, c client.Client, r *fleetv1.Robot) {
 	w := o.streams.Out
 	color := o.colorStdout
 	cli.DescribeHeader(w, &r.ObjectMeta)
@@ -140,7 +141,46 @@ func (o *options) describeRobot(r *fleetv1.Robot) {
 	}
 
 	cli.DescribeConditions(w, color, r.Status.Conditions)
-	_, _ = fmt.Fprintln(w, "Events:  <none>")
+	o.describeEvents(ctx, c, "Robot", r)
+}
+
+// describeEvents writes the Events block for obj, read from the cluster. A list
+// that fails (forbidden included) renders as unavailable, never as empty.
+func (o *options) describeEvents(ctx context.Context, c client.Client, kind string, obj client.Object) {
+	events, err := objectEvents(ctx, c, kind, obj)
+	cli.DescribeEvents(o.streams.Out, events, err)
+}
+
+// objectEvents lists the core/v1 Events whose involvedObject is obj: same kind,
+// name and namespace, and same UID when obj has one, so an Event about a
+// same-named object of another kind, or about an earlier object of the same
+// name, is not shown as this one's.
+func objectEvents(ctx context.Context, c client.Client, kind string, obj client.Object) ([]corev1.Event, error) {
+	fields := client.MatchingFields{
+		"involvedObject.kind": kind,
+		"involvedObject.name": obj.GetName(),
+	}
+	if uid := obj.GetUID(); uid != "" {
+		fields["involvedObject.uid"] = string(uid)
+	}
+	var list corev1.EventList
+	if err := c.List(ctx, &list, client.InNamespace(obj.GetNamespace()), fields); err != nil {
+		return nil, err
+	}
+	// The field selector is the server's filter; this one is ours, so the block
+	// cannot show another object's Event whatever the server does with it.
+	events := make([]corev1.Event, 0, len(list.Items))
+	for _, e := range list.Items {
+		ref := e.InvolvedObject
+		if ref.Kind != kind || ref.Name != obj.GetName() || ref.Namespace != obj.GetNamespace() {
+			continue
+		}
+		if uid := obj.GetUID(); uid != "" && ref.UID != "" && ref.UID != uid {
+			continue
+		}
+		events = append(events, e)
+	}
+	return events, nil
 }
 
 // robotBatteryLine renders "45% [█████████░░░░░░░░░░░]" colored by level, or the

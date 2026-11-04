@@ -230,3 +230,25 @@ func TestPrintError(t *testing.T) {
 		t.Errorf("colored prefix wrong: %q", b.String())
 	}
 }
+
+// TestIsTerminalReader pins the semantics `swarmctl get audit` depends on: a pipe or a
+// test buffer is DATA and must be read; only a real interactive terminal means
+// "the operator gave me no input", which is the case that has to fail loudly rather than
+// print an empty table. Note the deliberate opposite of stdinIsTerminal, which Confirm
+// uses and which treats a test buffer as interactive.
+func TestIsTerminalReader(t *testing.T) {
+	if IsTerminalReader(bytes.NewBufferString("{}")) {
+		t.Error("a bytes.Buffer must not read as a terminal; piped data would be refused")
+	}
+	if IsTerminalReader(nil) {
+		t.Error("nil must not read as a terminal")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	if IsTerminalReader(r) {
+		t.Error("an *os.File pipe must not read as a terminal; `cmd | swarmctl` would be refused")
+	}
+}

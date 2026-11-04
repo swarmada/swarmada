@@ -21,30 +21,48 @@
 # the REAL scheduler assign the tasks. The end-state assertion (Step 7) then
 # waits for that outcome and prints ✅/❌.
 #
-# Readiness note (honest): TWO paths exist, chosen automatically.
+# Readiness note (honest): TWO paths exist. LIVE is the DEFAULT — this is what a
+# reviewer or a first-time reader gets by just running the script, and a
+# quickstart whose own south side is hand-typed status does not demonstrate the
+# spec it ships with (B3).
 #
-#   - healthy-fleet (default) or CI ($CI=true, e.g. `make quickstart-test`):
-#     status-projected — robots are driven Ready by patching Robot.status.phase
-#     directly (kubectl patch --subresource=status phase=Idle). Writing status is
-#     the RA-1 anti-pattern the spec reserves to controllers (RFC-0001 §9.1.3,
-#     RFC-0001 Terminology). It is here because THESE robots have no Fleet Adapter:
-#     the Robot reconciler advances Discovered->Idle from fresh adapter liveness
-#     (ADR-0029), and a robot nothing is connected to never becomes live. The patch
-#     stands in for an adapter in a simulated fleet — it is NOT a workaround for a
-#     missing transition. See docs/quickstart.md, Honest notes. Deterministic and fast; CI gates on it.
-#     (The old `make demo-b` targets that did the same thing were removed for
+#   - LIVE (default, any scenario, CI included): one robot (sim-robot-001) is
+#     driven by a real, running adapters/simulation/sim_adapter.py process
+#     talking to the real ControlStream over a port-forward, so the chosen
+#     scenario's fault/battery/comms/estop behaviour actually happens, live, on
+#     that robot — AND its readiness (Robot.status.phase, FleetAdapter.status.
+#     phase) is real too: the Robot reconciler advances a live robot's phase
+#     Discovered->{Idle,InProgress} on its own from fresh adapter liveness
+# (ADR-0029, RFC-0001 #control-plane-robot-health-and-connectivity), and FleetAdapter.status.phase reaches
+#     Connected from a verified mTLS identity (AdapterPresence). This script
+#     WAITS for both rather than writing either. This deploys via
+#     config/overlays/quickstart-mtls (DEV/DEMO ONLY — self-signed cert-manager
+#     CA, no production certificate lifecycle) instead of config/default.
+#     The other two robots have no Fleet Adapter at all, so nothing can ever
+#     drive their readiness the real way; their Robot.status.phase is
+#     projected (kubectl patch --subresource=status phase=Idle) — the same
+#     honest stand-in-for-an-absent-adapter projection the fully-projected
+#     path below uses, not a workaround for a missing transition. See
+#     docs/quickstart.md, Honest notes.
+#
+#     The two scenarios that move work from one robot to another, battery-handoff
+#     and hardware-fault, need a spare that can really take it, so there EVERY
+#     robot is live: one sim_adapter.py process and one FleetAdapter identity per
+#     robot, deployed via config/overlays/demo-ab-live (quickstart-mtls plus a
+#     client certificate for each spare's adapter) — the pattern
+#     examples/demo-ab-live/run.sh explains in its header. Nothing about any
+#     robot's readiness is projected in those two.
+#
+#   - Projected (the explicit --projected flag): no adapter process runs at all, and EVERY
+#     robot's readiness is projected the same way the two non-live robots
+#     above are. Writing status is otherwise the RA-1 anti-pattern the spec
+#     reserves to controllers (RFC-0001 §9.1.3, RFC-0001 Terminology); this
+#     path exists for an environment that cannot run a live adapter process
+#     (no python3, a sandboxed runner) but still wants the rest of the
+#     quickstart. CI takes the LIVE path: its job installs Python so the
+#     adapter can run. (The old `make demo-b`
+#     targets that did the same thing unconditionally were removed for
 #     exactly this reason — see the Makefile comment above the Demo section.)
-#
-#   - any other scenario, chosen interactively or via --scenario, and NOT in
-#     CI: LIVE — one robot (sim-robot-001) is driven by a real, running
-#     adapters/simulation/sim_adapter.py process talking to the real
-#     ControlStream over a port-forward, so the chosen scenario's fault/
-#     battery/comms/estop behaviour actually happens, live, on that robot.
-#     The other two robots stay status-projected so the 3-robot scheduler
-#     story is unaffected. This deploys via config/overlays/quickstart-dev
-#     (DEV/DEMO ONLY — disables ControlStream per-robot authorization; see
-#     that overlay's README comment and cmd/manager/main.go's
-#     --fleet-adapter-insecure-authz flag help) instead of config/default.
 #
 # Either way, capabilities are declared in the sample robots' spec and derived
 # Active by the Capability Controller — that part is always fully real, and so
@@ -56,10 +74,12 @@
 # so you can explore it; a teardown command is printed at the end.
 #
 # Usage:
-#   examples/warehouse-quickstart/run.sh                      bring up + assert; interactive
+#   examples/warehouse-quickstart/run.sh                      bring up + assert LIVE; interactive
 #                                                             scenario picker on a TTY
-#   examples/warehouse-quickstart/run.sh --scenario NAME      non-interactive (CI / video);
+#   examples/warehouse-quickstart/run.sh --scenario NAME      non-interactive LIVE (CI / video);
 #                                                             NAME is a simulated-fleet scenario
+#   examples/warehouse-quickstart/run.sh --projected          force the status-projected path
+#                                                             (no live adapter process)
 #   examples/warehouse-quickstart/run.sh --robots N           fleet size for the printed sim-adapter command
 #   examples/warehouse-quickstart/run.sh --pace keypress|timed|off   pacing before the LIVE scenario
 #                                                             actually starts (see below); default:
@@ -80,12 +100,20 @@
 #
 # Env knobs:
 #   QUICKSTART_CLUSTER  kind cluster name        (default: swarmada-quickstart)
-#   QUICKSTART_IMG      controller image tag     (default: swarmada-controller:dev)
+#   QUICKSTART_IMG      controller image tag     (default: swarmada-controller:dev). Only the
+#                       default is supported: the deploy runs swarmada-controller:dev whatever
+#                       this is set to. On a cluster this run creates, another value fails at
+#                       step 4/7 (ImagePullBackOff). On a reused cluster that already holds :dev,
+#                       it exits 0, but the manager runs that earlier :dev image, not the one
+#                       built. Delete the cluster first (--clean) and leave this unset.
 #   QUICKSTART_READY_TIMEOUT   secs to wait for robots Idle    (default: 15)
 #   QUICKSTART_ASSIGN_TIMEOUT  secs to wait for a task Assigned (default: 15)
+#   QUICKSTART_COMPLETE_TIMEOUT secs to wait for a task Succeeded (live healthy-fleet only, default: 45)
+#   QUICKSTART_REROUTE_COMPLETE_TIMEOUT secs to wait for the moved task to be Succeeded on the spare
+#                              (live battery-handoff / hardware-fault, default: 90)
 #   QUICKSTART_CS_PORT  local port for the ControlStream port-forward (live path only, default: 19443)
 #   QUICKSTART_PAUSE_SECONDS   duration for --pace timed        (default: 8)
-#   CI=true             forces the status-projected path (and disables pacing) regardless of --scenario/--pace
+#   CI=true             disables pacing regardless of --pace; the path stays LIVE
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -93,13 +121,17 @@ cd "$REPO_ROOT"
 
 CLUSTER="${QUICKSTART_CLUSTER:-swarmada-quickstart}"
 # Must match the image tag config/default/kustomization.yaml pins (swarmada-controller:dev),
-# so `make deploy` / the quickstart-dev overlay schedules the image we build and load below.
+# so `make deploy` / the quickstart-mtls or quickstart-projected overlay schedules the image
+# we build and load below.
 IMG="${QUICKSTART_IMG:-swarmada-controller:dev}"
 NS="warehouse-a"
 SAMPLE="config/samples/demo_a.yaml"
 MANAGER_NS="system"
 MANAGER_DEPLOY="swarmada-controller-manager"
 ROBOTS=(sim-robot-001 sim-robot-002 sim-robot-003)
+# Index-aligned with ROBOTS: the FleetAdapter identity that serves each robot when every
+# robot is live (all_live). Otherwise only the first is used, by $LIVE_ROBOT.
+ADAPTERS=(sim-fleet-adapter sim-fleet-adapter-2 sim-fleet-adapter-3)
 # 15s defaults are tuned for THIS quickstart's fleet, which is 100% simulated
 # (status-projection, or adapters/simulation/sim_adapter.py on the LIVE path)
 # — no real robot hardware, no real network, no real controller boot time in
@@ -118,6 +150,8 @@ ROBOTS=(sim-robot-001 sim-robot-002 sim-robot-003)
 # add one.
 READY_TIMEOUT="${QUICKSTART_READY_TIMEOUT:-15}"
 ASSIGN_TIMEOUT="${QUICKSTART_ASSIGN_TIMEOUT:-15}"
+COMPLETE_TIMEOUT="${QUICKSTART_COMPLETE_TIMEOUT:-45}"
+REROUTE_COMPLETE_TIMEOUT="${QUICKSTART_REROUTE_COMPLETE_TIMEOUT:-90}"
 LOCAL_CS_PORT="${QUICKSTART_CS_PORT:-19443}"
 LIVE_ROBOT="sim-robot-001"
 PIDFILE="/tmp/swq-${CLUSTER}.pids"
@@ -130,9 +164,14 @@ SCENARIOS=(healthy-fleet battery-edge battery-handoff hardware-fault comms-flaky
 SCENARIO=""              # set by --scenario or the picker
 ROBOTS_N=3                # --robots: fleet size for the printed sim-adapter command (informational)
 LIVE=0                    # set by determine_live_mode
+PROJECTED_REQUESTED=0      # set by --projected: force the status-projected path (opt out of the LIVE default)
 LIVE_PIDS=()               # background PIDs started by this run (port-forward, adapter)
 PACE=""                    # set by --pace; "" means "resolve the default in determine_live_mode"
 PAUSE_SECONDS="${QUICKSTART_PAUSE_SECONDS:-8}"
+# The estop drill pauses after its action lands, and the robot drives on while it waits: on the
+# sample's long route it reaches Succeeded about 32s after it starts, and a stop sent after that
+# stops nothing. So that one pause lasts at most this long on every pace, keypress included.
+ESTOP_DRILL_MAX_PAUSE=8
 CLEAN_REQUESTED=0          # set by --clean or the picker's "clean everything" choice
 CLUSTER_HINT_SHOWN=0       # guards remind_to_clean_cluster against printing twice
 
@@ -197,13 +236,14 @@ usage() {
 warehouse-quickstart — the 5-minute simulated-fleet quickstart.
 
 Usage: run.sh [--scenario NAME] [--robots N] [--pace keypress|timed|off]
-              [--pause-seconds N] [--clean] [-h|--help]
+              [--pause-seconds N] [--projected] [--clean] [-h|--help]
 
   --scenario NAME    simulated-fleet scenario; one of:
                        ${SCENARIOS[*]}
-                     (default: healthy-fleet). Passing a non-default scenario
-                     outside CI takes the LIVE path (see the header note) —
-                     for CI or a fully scripted/deterministic run, set CI=true.
+                     (default: healthy-fleet). Every scenario takes the LIVE
+                     path by default (see the header note), CI included;
+                     CI=true only turns pacing off. To force the
+                     status-projected path, pass --projected.
   --robots N         fleet size for the printed sim-adapter command (default: 3).
   --pace MODE        pacing before the LIVE scenario's real payoff starts:
                        keypress (default on the LIVE path) — wait for Enter
@@ -211,6 +251,10 @@ Usage: run.sh [--scenario NAME] [--robots N] [--pace keypress|timed|off]
                        off                                  — no pause
                      Always off under CI=true regardless of this flag.
   --pause-seconds N  duration for --pace timed (default: 8, or \$QUICKSTART_PAUSE_SECONDS).
+  --projected        force the status-projected path (no live sim_adapter.py
+                     process) — for an environment that cannot run a live
+                     adapter (no python3, a sandboxed runner, etc.).
+                     Overrides the LIVE default for every scenario.
   --clean            tear down the '$CLUSTER' kind cluster, kill any live/stale
                      port-forward or adapter processes, remove local pidfile/log
                      state, and exit — does not bring anything up. Same as
@@ -218,8 +262,13 @@ Usage: run.sh [--scenario NAME] [--robots N] [--pace keypress|timed|off]
   -h, --help         show this help and exit.
 
 Env knobs: QUICKSTART_CLUSTER, QUICKSTART_IMG, QUICKSTART_CS_PORT,
-           QUICKSTART_READY_TIMEOUT, QUICKSTART_ASSIGN_TIMEOUT,
+           QUICKSTART_READY_TIMEOUT, QUICKSTART_ASSIGN_TIMEOUT, QUICKSTART_COMPLETE_TIMEOUT,
            QUICKSTART_PAUSE_SECONDS, CI.
+           QUICKSTART_IMG: only the default (swarmada-controller:dev) is supported; the
+           deploy runs that tag whatever the knob says. On a cluster this run creates,
+           another value fails at step 4/7. On a reused cluster that already holds :dev,
+           it exits 0 but runs that earlier :dev image, not the one built. Delete the
+           cluster first (--clean) and leave it unset.
 EOF
 }
 
@@ -240,6 +289,7 @@ parse_args() {
       --pace=*) PACE="${1#*=}"; shift ;;
       --pause-seconds) PAUSE_SECONDS="${2:-}"; shift 2 ;;
       --pause-seconds=*) PAUSE_SECONDS="${1#*=}"; shift ;;
+      --projected) PROJECTED_REQUESTED=1; shift ;;
       --clean) CLEAN_REQUESTED=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; fail "unknown argument: $1" ;;
@@ -266,7 +316,7 @@ pick_scenario() {
   echo
   echo "Pick a scenario to run against your local Swarmada cluster:"
   echo "  1) healthy-fleet     — 3 robots, nothing goes wrong (default)"
-  echo "  2) battery-edge      — watch the scheduler avoid a dying robot"
+  echo "  2) battery-edge      — a robot's battery drains while it keeps its task"
   echo "  3) battery-handoff   — a working robot's battery drops mid-task; watch its"
   echo "                         task get safely handed off to a healthy robot"
   echo "  4) hardware-fault    — camera fails mid-task, watch it reroute and recover"
@@ -289,16 +339,25 @@ pick_scenario() {
 }
 
 # determine_live_mode: LIVE=1 drives $LIVE_ROBOT with a real sim_adapter.py
-# process against the real ControlStream; LIVE=0 keeps the original
-# status-projection path. CI always forces LIVE=0 regardless of scenario, so
-# `make quickstart-test` stays exactly as deterministic as before this change.
+# process against the real ControlStream; LIVE=0 keeps the status-projection
+# path. LIVE is the DEFAULT for every scenario: this is the path a first-time
+# reader (including a spec reviewer) hits by just running the script, and a
+# quickstart that fakes the one thing — a real adapter — its own core spec
+# exists to standardize does not demonstrate the spec (B3). Only the explicit
+# --projected flag forces LIVE=0, for an environment that cannot run a live
+# adapter process (no python3, a sandboxed runner, etc.) but still wants the
+# rest of the quickstart. $CI=true does not: CI runs the LIVE path, because the
+# projected path has no position telemetry, so no robot gets a status.currentZone
+# and dispatch filter 2 assigns nothing. --projected is checked first: it beats even a
+# scenario whose whole story IS the live wire (hardware-fault, comms-flaky,
+# estop-drill) if a caller asks for it explicitly.
 #
 # Also resolves PACE's default when --pace wasn't given: keypress on the LIVE
 # path (there's an actual payoff worth a beat before it starts), off
 # otherwise (nothing to pace on the status-projected path). CI forces off
 # either way — see pause_for_demo.
 determine_live_mode() {
-  if [[ "$SCENARIO" != "healthy-fleet" && "${CI:-}" != "true" ]]; then
+  if [[ "$PROJECTED_REQUESTED" != 1 ]]; then
     LIVE=1
   fi
   if [[ -z "$PACE" ]]; then
@@ -318,26 +377,31 @@ determine_live_mode() {
   return 0
 }
 
-# pause_for_demo MESSAGE: the one deliberate pacing point in this script,
-# called only right before the LIVE scenario's real payoff (see
+# pause_for_demo MESSAGE [MAX_SECONDS]: the one deliberate pacing point in this
+# script, called only right before the LIVE scenario's real payoff (see
 # run_live_scenario). Never blocks CI. "keypress" falls back to a short fixed
 # sleep if stdin isn't a TTY (e.g. --pace keypress under a pipe) so the script
-# can't hang forever waiting for input nobody can give it.
+# can't hang forever waiting for input nobody can give it. With MAX_SECONDS no
+# pace waits longer than that: the keypress wait gives up and continues, and a
+# longer --pause-seconds is cut to it.
 pause_for_demo() {
-  local message="$1"
+  local message="$1" max="${2:-}" seconds="$PAUSE_SECONDS"
+  [[ -n "$max" ]] && (( seconds > max )) && seconds="$max"
   [[ "${CI:-}" == "true" || "$PACE" == "off" ]] && return 0
   echo
   echo "    $message"
   if [[ "$PACE" == "timed" ]]; then
-    echo "    continuing in ${PAUSE_SECONDS}s…"
-    sleep "$PAUSE_SECONDS"
+    echo "    continuing in ${seconds}s…"
+    sleep "$seconds"
     return 0
   fi
-  if [[ -t 0 ]]; then
+  if [[ -t 0 && -n "$max" ]]; then
+    read -rt "$max" -p "    press Enter to continue (continuing on its own in ${max}s)... " _ || echo
+  elif [[ -t 0 ]]; then
     read -rp "    press Enter to continue... " _ || true
   else
-    echo "    no TTY for --pace keypress; pausing ${PAUSE_SECONDS}s instead"
-    sleep "$PAUSE_SECONDS"
+    echo "    no TTY for --pace keypress; pausing ${seconds}s instead"
+    sleep "$seconds"
   fi
 }
 
@@ -352,27 +416,31 @@ scenario_payoff_description() {
     healthy-fleet)
       echo "$LIVE_ROBOT will report a steady battery and go Idle — nothing goes wrong." ;;
     battery-edge)
-      echo "$LIVE_ROBOT's reported battery will drain on the scenario's curve — watch the" \
-           "scheduler steer new task assignments away from it as it gets low." ;;
+      echo "$LIVE_ROBOT's reported battery will drain on the scenario's curve while it" \
+           "works, and it keeps the task: the other two robots report no position, so it is" \
+           "the only candidate the scheduler has, and this run compares no robots by battery." \
+           "battery-handoff is the scenario that stages that comparison." ;;
     battery-handoff)
-      echo "$LIVE_ROBOT will drain and stay excluded, same as battery-edge. The real payoff" \
-           "comes after: once things settle, watch whichever robot is holding the sample" \
-           "task get its battery cut and its task safely handed off to the other one." ;;
+      echo "$LIVE_ROBOT comes online alone and takes the delivery task, while its reported battery" \
+           "drains on the battery-edge curve. The two spares then come online, each driven by its" \
+           "own live adapter. This script requests a safe hand-off; the control plane stops" \
+           "$LIVE_ROBOT, and the scheduler gives the task to the spare with the most battery," \
+           "which completes it." ;;
     hardware-fault)
-      echo "$LIVE_ROBOT comes online with its camera capability Inactive (no camera hardware yet), so" \
-           "the camera task stays Pending. Its camera_front hardware is then marked Healthy — the" \
-           "capability derives Active and the scheduler assigns it the camera task. You'll then be" \
-           "prompted ONCE MORE to degrade the camera (this script drives the hardware status, same as" \
-           "battery-handoff drives the battery): the capability degrades, and the control plane" \
-           "automatically safe-stops the task and REROUTES it to the idle spare camera robot," \
-           "sim-robot-002." ;;
+      echo "All three robots come online, each driven by its own live adapter. $LIVE_ROBOT is the" \
+           "only camera robot, so it takes the camera task. Its adapter reports camera_front" \
+           "DEGRADED about 20s after it starts: the capability degrades, and the control plane" \
+           "automatically safe-stops the task and REROUTES it to the spare camera robot," \
+           "sim-robot-002, which completes it." ;;
     comms-flaky)
-      echo "$LIVE_ROBOT's ControlStream will drop and reconnect on a timer. This is a" \
-           "distributed-systems payoff, NOT a status-field one: the robot's Kubernetes status" \
-           "does not change (per-robot liveness is kept off the status write path, RA-1), so" \
-           "swarmtop correctly shows nothing moving. Watch the ADAPTER + manager LOGS instead" \
-           "— the stream drops, the adapter self-stops its task on lease expiry (C4), reconnects" \
-           "with a fresh Hello/Register, and its fencing token + lease survive the outage (C3)." ;;
+      echo "$LIVE_ROBOT's ControlStream will drop for about 15s and reconnect. The adapter" \
+           "view moves: FleetAdapter.status.phase goes Connected → Disconnected → Connected" \
+           "(swarmtop's adapter-health view, 'a'). The robot's own status does not: 15s is" \
+           "shorter than the 30s default offline threshold, so the robot never goes Offline," \
+           "and status.connectivity.lastSeenAt is written at most once per half that threshold." \
+           "The rest is in the ADAPTER + manager LOGS — the stream drops, the adapter self-stops" \
+           "its task on lease expiry (C4), reconnects with a fresh Hello/Register, and its" \
+           "fencing token + lease survive the outage (C3)." ;;
     estop-drill)
       echo "$LIVE_ROBOT will trigger a real, confirmed emergency stop once — watch the" \
            "EstopAck and the task get dropped to a safe hold." ;;
@@ -388,7 +456,7 @@ scenario_payoff_description() {
 # scenario_watch_command NAME — a suggested command to run in a SEPARATE
 # terminal while this scenario plays out, so the field that actually matters
 # is visible instead of buried. Robot's printer columns are Phase/Zone/
-# Battery/Task/Class/Age only (api/v1/robot_types.go) — status.hardware[],
+# Battery/Action/Age, plus Class with -o wide (api/v1/robot_types.go) — status.hardware[],
 # status.capabilities[], status.estopState, and status.connectivity are NOT
 # columns, so `kubectl get robots` alone can't show them.
 #
@@ -400,11 +468,12 @@ scenario_payoff_description() {
 # build`), and otherwise falls back to the field-specific `-o json | jq`
 # one-liner. comms-flaky is deliberately NOT in that set: its payoff is stream
 # lifecycle (drop/reconnect, lease self-stop C4, fencing-token survival C3),
-# which is a LOGS story — the robot's status does not change (per-robot liveness
-# is kept off the status write path, RA-1), so status.connectivity is never
-# written and neither swarmtop nor a kubectl field would show anything move; it
-# points at the adapter + manager logs instead. The remaining scenarios keep
-# plain `watch kubectl get`, since Battery/Phase/Task already have printer
+# which is a LOGS story — the robot's status does not show the outage: it is
+# shorter than the offline threshold, so the robot never goes Offline, and
+# status.connectivity.lastSeenAt is written at most once per half that threshold.
+# Only FleetAdapter.status.phase moves, and the payoff text names it; the watch
+# command points at the adapter + manager logs. The remaining scenarios keep
+# plain `watch kubectl get`, since Battery/Phase/Action already have printer
 # columns. swarmtop is strictly OPTIONAL — nothing here requires it to be installed.
 
 # swarmtop_bin — absolute path to a usable swarmtop binary, or empty when none
@@ -427,9 +496,9 @@ scenario_watch_command() {
       echo "watch -n1 kubectl get robots,fleetactions -n $NS" ;;
     comms-flaky)
       # comms-flaky's payoff is stream lifecycle (drop→reconnect→re-register with
-      # fencing/lease intact), which lives in the LOGS, not a status field —
-      # status.connectivity is never written (RA-1), so neither swarmtop nor a
-      # `kubectl -o json` field would show anything move.
+      # fencing/lease intact), which lives in the LOGS. The robot's status does not
+      # show the outage (it is shorter than the offline threshold), so a robot view
+      # or a `kubectl -o json` field would show nothing move.
       echo "tail -f $ADAPTER_LOG   # control plane: kubectl logs -n $MANAGER_NS deploy/$MANAGER_DEPLOY -f" ;;
     hardware-fault|estop-drill|full-surface)
       local st; st="$(swarmtop_bin)"
@@ -479,23 +548,49 @@ announce_scenario() {
   fi
   if [[ "$LIVE" == 1 ]]; then
     info ""
-    info "LIVE mode: $LIVE_ROBOT will be driven by a real sim_adapter.py process"
-    info "against the real ControlStream (--scenario $SCENARIO). The other two"
-    info "robots stay status-projected so the scheduler still has a 3-robot fleet."
-    info "NOTE: $LIVE_ROBOT's connection, registration and telemetry are real, but its"
-    info "status.phase=Idle is projected by this script too — no code path moves a Robot"
-    info "from Discovered to Idle. See docs/quickstart.md, Honest notes."
-    info "This deploys via config/overlays/quickstart-dev (DEV/DEMO ONLY — see"
-    info "that overlay and cmd/manager/main.go's --fleet-adapter-insecure-authz)."
+    if all_live; then
+      info "LIVE mode (default): every robot will be driven by its own real sim_adapter.py"
+      info "process against the real ControlStream, under its own FleetAdapter identity, so"
+      info "the spare that takes the work over is as real as the robot it leaves."
+    else
+      info "LIVE mode (default): $LIVE_ROBOT will be driven by a real sim_adapter.py process"
+      info "against the real ControlStream (--scenario $SCENARIO). The other two"
+      info "robots stay status-projected — they have no Fleet Adapter, so nothing can"
+      info "ever drive their readiness the real way."
+    fi
+    info "$LIVE_ROBOT's connection, registration, telemetry, AND phase are all real:"
+    info "the Robot reconciler advances a live robot Discovered->Idle on its own"
+    info "(ADR-0029). See docs/quickstart.md, Honest notes."
+    if all_live; then
+      info "This deploys via config/overlays/demo-ab-live: quickstart-mtls (DEV/DEMO ONLY —"
+      info "see that overlay's own header comment) plus the two spares' client certificates."
+    else
+      info "This deploys via config/overlays/quickstart-mtls (DEV/DEMO ONLY — see"
+      info "that overlay's own header comment)."
+    fi
   else
     info ""
-    info "status-projected mode: readiness is projected (kubectl patch), not"
-    info "adapter-driven — see the Honest notes in README.md. To watch '$SCENARIO'"
-    info "live yourself, run:"
+    info "status-projected mode (--projected): readiness is projected"
+    info "(kubectl patch), not adapter-driven — see the Honest notes in README.md."
+    info "To watch '$SCENARIO' live yourself, run:"
     info "    python3 adapters/simulation/sim_adapter.py --endpoint <fleet-adapter-endpoint> \\"
     info "      --namespace $NS --robot-id sim-robot-001 --scenario $SCENARIO"
   fi
 }
+
+# all_live: true when EVERY robot runs its own live adapter — the LIVE path of the two
+# scenarios that move work to a spare (battery-handoff, hardware-fault). A spare with no
+# adapter reports no position, so the Zone Controller never derives its
+# status.currentZone and dispatch filter 2 excludes it: the work would have nowhere to
+# go. Everywhere else only $LIVE_ROBOT is live.
+all_live() {
+  [[ "$LIVE" == 1 && ( "$SCENARIO" == "battery-handoff" || "$SCENARIO" == "hardware-fault" ) ]]
+}
+
+# adapter_tls_dir INDEX / adapter_log INDEX — where ROBOTS[INDEX]'s adapter keeps its
+# client keypair and its log. Index 0 is $LIVE_ROBOT's, at the paths it always used.
+adapter_tls_dir() { if (($1 == 0)); then echo "$ADAPTER_TLS_DIR"; else echo "${ADAPTER_TLS_DIR}-$(($1 + 1))"; fi; }
+adapter_log() { if (($1 == 0)); then echo "$ADAPTER_LOG"; else echo "/tmp/swq-${CLUSTER}-adapter-$(($1 + 1)).log"; fi; }
 
 # preflight checks the tools every scenario needs, regardless of which one
 # gets picked — kind/kubectl/docker/make/go and a reachable Docker daemon.
@@ -643,30 +738,45 @@ install_cert_manager() {
   until kubectl get crd certificates.cert-manager.io >/dev/null 2>&1 || [ "$waited" -ge 60 ]; do
     sleep 2; waited=$((waited + 2))
   done
+  # The CRD existing does not mean the webhook answers: on a fresh cluster the
+  # step-4 apply was often refused with "failed calling webhook
+  # webhook.cert-manager.io … connection refused". Ask the webhook itself, with a
+  # server-side dry run of an Issuer, until it answers. The dry run creates nothing.
+  info "waiting for the cert-manager webhook to answer (a Certificate applied before it does is refused)…"
+  waited=0
+  until printf 'apiVersion: cert-manager.io/v1\nkind: Issuer\nmetadata:\n  name: swq-webhook-probe\n  namespace: cert-manager\nspec:\n  selfSigned: {}\n' \
+      | kubectl create --dry-run=server -f - >/dev/null 2>&1; do
+    [ "$waited" -ge 180 ] && fail "the cert-manager webhook did not answer in 180s; re-run the same command, which reuses the cluster"
+    sleep 2; waited=$((waited + 2))
+  done
+  info "cert-manager webhook answering after ${waited}s ✓"
 }
 
 # wait_for_adapter_client_cert: block until cert-manager has issued the adapter's
 # client keypair, then write it where the adapter can read it. The SAN in this
 # certificate is what the control plane treats as the adapter's name.
 wait_for_adapter_client_cert() {
-  info "waiting for cert-manager to issue the adapter client certificate…"
+  # ADAPTER and DIR default to $LIVE_ROBOT's adapter and $ADAPTER_TLS_DIR.
+  local adapter="${1:-sim-fleet-adapter}" dir="${2:-$ADAPTER_TLS_DIR}"
+  local secret="${adapter}-client-tls"
+  info "waiting for cert-manager to issue the $adapter client certificate…"
   local waited=0
-  until kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls >/dev/null 2>&1; do
-    [ "$waited" -ge 120 ] && fail "cert-manager never issued sim-fleet-adapter-client-tls"
+  until kubectl -n "$MANAGER_NS" get secret "$secret" >/dev/null 2>&1; do
+    [ "$waited" -ge 120 ] && fail "cert-manager never issued $secret"
     sleep 2; waited=$((waited + 2))
   done
-  kubectl -n "$MANAGER_NS" wait --for=condition=Ready certificate/sim-fleet-adapter-client --timeout=120s >/dev/null 2>&1 || true
-  rm -rf "$ADAPTER_TLS_DIR"; mkdir -p "$ADAPTER_TLS_DIR"; chmod 700 "$ADAPTER_TLS_DIR"
-  kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls \
-    -o jsonpath='{.data.tls\.crt}' | base64 -d > "$ADAPTER_TLS_DIR/tls.crt"
-  kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls \
-    -o jsonpath='{.data.tls\.key}' | base64 -d > "$ADAPTER_TLS_DIR/tls.key"
-  kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls \
-    -o jsonpath='{.data.ca\.crt}' | base64 -d > "$ADAPTER_TLS_DIR/ca.crt"
-  chmod 600 "$ADAPTER_TLS_DIR"/*
-  [ -s "$ADAPTER_TLS_DIR/tls.crt" ] && [ -s "$ADAPTER_TLS_DIR/tls.key" ] && [ -s "$ADAPTER_TLS_DIR/ca.crt" ] \
-    || fail "adapter client certificate material is incomplete in $ADAPTER_TLS_DIR"
-  info "adapter client certificate ready ✓ ($ADAPTER_TLS_DIR)"
+  kubectl -n "$MANAGER_NS" wait --for=condition=Ready "certificate/${adapter}-client" --timeout=120s >/dev/null 2>&1 || true
+  rm -rf "$dir"; mkdir -p "$dir"; chmod 700 "$dir"
+  kubectl -n "$MANAGER_NS" get secret "$secret" \
+    -o jsonpath='{.data.tls\.crt}' | base64 -d > "$dir/tls.crt"
+  kubectl -n "$MANAGER_NS" get secret "$secret" \
+    -o jsonpath='{.data.tls\.key}' | base64 -d > "$dir/tls.key"
+  kubectl -n "$MANAGER_NS" get secret "$secret" \
+    -o jsonpath='{.data.ca\.crt}' | base64 -d > "$dir/ca.crt"
+  chmod 600 "$dir"/*
+  [ -s "$dir/tls.crt" ] && [ -s "$dir/tls.key" ] && [ -s "$dir/ca.crt" ] \
+    || fail "adapter client certificate material is incomplete in $dir"
+  info "$adapter client certificate ready ✓ ($dir)"
 }
 
 install_control_plane() {
@@ -681,12 +791,27 @@ install_control_plane() {
     # assigned. That is why this path cannot use the plaintext quickstart-dev
     # overlay.
     install_cert_manager
-    info "LIVE mode — deploying via config/overlays/quickstart-mtls (DEV/DEMO ONLY)"
-    kubectl apply -k config/overlays/quickstart-mtls
-    wait_for_adapter_client_cert
+    # --server-side: these overlays include config/crd/bases/, whose
+    # computeworkloadtemplates.swarmada.io CRD (~526KB) breaks client-side apply's
+    # last-applied-configuration annotation (262144-byte cap).
+    if all_live; then
+      # One client certificate per robot's adapter: demo-ab-live is quickstart-mtls plus
+      # the two spares' certificates. One adapter identity per live robot, because the
+      # command dispatcher keys live streams by adapter name alone.
+      info "LIVE mode, every robot live — deploying via config/overlays/demo-ab-live (DEV/DEMO ONLY)"
+      kubectl apply -k config/overlays/demo-ab-live --server-side --force-conflicts
+      local i
+      for i in "${!ADAPTERS[@]}"; do
+        wait_for_adapter_client_cert "${ADAPTERS[$i]}" "$(adapter_tls_dir "$i")"
+      done
+    else
+      info "LIVE mode — deploying via config/overlays/quickstart-mtls (DEV/DEMO ONLY)"
+      kubectl apply -k config/overlays/quickstart-mtls --server-side --force-conflicts
+      wait_for_adapter_client_cert
+    fi
   else
     # Projected mode runs NO adapter process, so the manager must run with
-    # ControlStream OFF. config/default (what `make deploy` applies) leaves it
+    # ControlStream OFF. config/default (what `make deploy-minimal` applies) leaves it
     # on, which makes cmd/manager wire up a non-nil ActionValidator; ADR-0019's
     # validate_action probe then asks the fabricated sim-fleet-adapter whether
     # it can serve each action, finds no stream behind it, and drops every
@@ -694,7 +819,8 @@ install_control_plane() {
     # config/overlays/quickstart-projected is config/default plus that one flag;
     # it carries the same CRDs + RBAC + manager and still needs no cert-manager.
     info "projected mode — deploying via config/overlays/quickstart-projected (ControlStream off)"
-    kubectl apply -k config/overlays/quickstart-projected
+    # --server-side: same oversized-CRD issue as the LIVE branch above.
+    kubectl apply -k config/overlays/quickstart-projected --server-side --force-conflicts
   fi
   info "waiting for the controller-manager to become Available…"
   kubectl -n "$MANAGER_NS" rollout status "deployment/$MANAGER_DEPLOY" --timeout=180s
@@ -758,15 +884,27 @@ for doc in open(path).read().split("\n---\n"):
 PY
 }
 
+# long_route: send FleetAction $1 to the far corner of warehouse-a, (25, 20), about 32 m from
+# the spawn point. The live adapter reports SUCCEEDED on arrival, and to the sample's nominal
+# target (10 m, ~10 s) a task finishes before a mid-task event can act on it: the battery
+# hand-off, the capability-loss reroute and the estop drill all need work still in progress. Called from
+# apply_fleet, before any adapter is up, so the scheduler never sees the short route.
+# payload.raw is bytes, so base64: {"x":25.0,"y":20.0}
+long_route() {
+  kubectl patch "fleetaction/$1" -n "$NS" --type=merge \
+    -p '{"spec":{"payload":{"raw":"eyJ4IjoyNS4wLCJ5IjoyMC4wfQ=="}}}' >/dev/null
+  info "$1 routed to (25, 20), ~32 s of driving, so the mid-task event meets it en route"
+}
+
 apply_fleet() {
   step "5/7 — Apply the sample fleet (reuses $SAMPLE)"
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
   if [[ "$SCENARIO" == "battery-handoff" ]]; then
-    # Apply only ONE of the two sample FleetActions. With both applied, both
-    # non-dying robots (sim-robot-002/003) claim one task each immediately —
-    # leaving no spare healthy robot for the mid-task hand-off to land on.
-    # See handle_battery_handoff for where this plays out.
+    # Apply only ONE of the two sample FleetActions. With both applied, the second
+    # task would take one of the spares, leaving fewer for the mid-task hand-off to
+    # land on. See handle_battery_handoff for where this plays out.
     sample_docs_excluding FleetAction inspect-receiving-dock | kubectl apply -f -
+    long_route deliver-pallet-001
     info "applied 1 FleetZone, ${#ROBOTS[@]} Robots, and 1 of 2 sample FleetActions"
     info "(inspect-receiving-dock is intentionally not applied this scenario — see Step 6)"
   elif [[ "$SCENARIO" == "estop-drill" ]]; then
@@ -778,9 +916,16 @@ apply_fleet() {
     # $LIVE_ROBOT with spec.preferredRobot (ADR-0034 — a soft preference the
     # scheduler honours when that robot is eligible), so the one task on screen
     # is the one that gets stopped.
+    #
+    # The long route, too: the stop has to meet the task en route. On the sample's own
+    # 10 m target the robot arrives in about 10 s, and the drill pauses 8 s (or waits for
+    # a keypress) after assignment before it triggers, so the action could reach
+    # Succeeded before the estop existed, and the drill then failed with "never
+    # paused".
     sample_docs_excluding FleetAction deliver-pallet-001 | kubectl apply -f -
     kubectl patch fleetaction/inspect-receiving-dock -n "$NS" --type=merge \
       -p "{\"spec\":{\"preferredRobot\":\"$LIVE_ROBOT\"}}"
+    long_route inspect-receiving-dock
     info "applied 1 FleetZone, ${#ROBOTS[@]} Robots, and 1 of 2 sample FleetActions"
     info "(deliver-pallet-001 is intentionally not applied; inspect-receiving-dock prefers $LIVE_ROBOT)"
   elif [[ "$SCENARIO" == "hardware-fault" ]]; then
@@ -793,6 +938,7 @@ apply_fleet() {
     # re-adds camera_front to sim-robot-002 as the idle spare once $LIVE_ROBOT
     # holds the task.
     sample_docs_excluding FleetAction deliver-pallet-001 | kubectl apply -f -
+    long_route inspect-receiving-dock
     local nav_only='[{"op":"replace","path":"/spec/capabilities","value":[{"name":"navigation","type":"hardware-native","pauseable":false}]}]'
     kubectl patch robot/sim-robot-002 -n "$NS" --type=json -p "$nav_only"
     kubectl patch robot/sim-robot-003 -n "$NS" --type=json -p "$nav_only"
@@ -802,8 +948,9 @@ apply_fleet() {
     # camera fault would degrade only status.hardware and never the capability the
     # Scheduler reads — no reroute. Declaring the hardware component and pointing
     # the capability's requiredHardware at it makes the derivation degrade the
-    # capability when the adapter reports camera_front DEGRADED (T+30s), which is
-    # what triggers Capability-loss reassignment. The adapter reports camera_front
+    # capability when the adapter reports camera_front DEGRADED (T+20s on the LIVE
+    # path, see run_live_scenario), which is what triggers Capability-loss
+    # reassignment. The adapter reports camera_front
     # HEALTHY before the fault, so the capability is Active pre-fault (the task can
     # land on $LIVE_ROBOT) and Degraded only during the window.
     kubectl patch "robot/$LIVE_ROBOT" -n "$NS" --type=json -p '[
@@ -879,46 +1026,81 @@ spec:
       type: Drop
 EOF
 
-  # A REAL digest-verified conformance report: the FleetAdapter controller hashes the ConfigMap
-  # body and compares it to spec.conformanceReport.digest, so status.conformance reaches Passed
-  # through the production path rather than being projected.
+  # A digest-verified conformance report the conformance harness wrote: the FleetAdapter
+  # controller hashes the ConfigMap body and compares it to spec.conformanceReport.digest, so
+  # status.conformance comes from the production path and the verdict from a harness run.
+  # hack/sim-conformance-report.sh runs the harness when it can and otherwise uses the report
+  # recorded in test/samples/testdata/recorded-sim-adapter-report.json, and says which on stderr.
   local report digest
-  report='{"adapter":"simulation","conformant":true,"contract_version":"1.0.0"}'
-  digest="sha256:$(printf '%s' "$report" | shasum -a 256 | awk '{print $1}')"
+  report="$(mktemp)"
+  bash hack/sim-conformance-report.sh "$report" || fail "could not produce a conformance report for the simulation adapter"
+  digest="sha256:$(shasum -a 256 <"$report" | awk '{print $1}')"
   kubectl create configmap sim-adapter-conformance -n "$NS" \
-    --from-literal=report.json="$report" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --from-file=report.json="$report" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  rm -f "$report"
 
-  kubectl apply -f - >/dev/null <<EOF
+  # One FleetAdapter per live adapter process: all three when every robot is live, with
+  # each spare bound to its own (spec.adapter.name, and the robot-id annotation
+  # RobotStatusSink maps telemetry by — spec and metadata, never status).
+  local n=1 i adapter
+  all_live && n=${#ADAPTERS[@]}
+  for ((i = 0; i < n; i++)); do
+    adapter="${ADAPTERS[$i]}"
+    if ((i > 0)); then
+      kubectl patch "robot/${ROBOTS[$i]}" -n "$NS" --type=json \
+        -p "[{\"op\":\"replace\",\"path\":\"/spec/adapter/name\",\"value\":\"$adapter\"}]" >/dev/null
+      kubectl annotate "robot/${ROBOTS[$i]}" -n "$NS" "swarmada.io/robot-id=${ROBOTS[$i]}" --overwrite >/dev/null
+    fi
+    kubectl apply -f - >/dev/null <<EOF
 apiVersion: swarmada.io/v1
 kind: FleetAdapter
-metadata: {name: sim-fleet-adapter, namespace: $NS}
+metadata: {name: $adapter, namespace: $NS}
 spec:
   vendor: simulation
+  # The class config/samples/demo_a.yaml gives the sample Robots. The ControlStream
+  # authorizer refuses every robot-scoped message from this adapter unless the robot's
+  # class is listed here.
+  servesRobotClasses: [simbot-v1]
   # Where the live sim adapter connects on the live path; inert on the projected path. Required by
   # the CRD, so it is always set.
   endpoint: "127.0.0.1:${LOCAL_CS_PORT}"
-  # Long, because nothing refreshes lastHeartbeat here: this runner is insecure, so ControlStream
-  # sees no verified mTLS identity and AdapterPresence never fires. A short interval would let the
-  # staleness backstop demote the projected Connected mid-run and silently stop dispatch.
+  # Long: in projected mode nothing ever refreshes lastHeartbeat, so a short interval would let
+  # the staleness backstop demote the projected Connected mid-run and silently stop dispatch. In
+  # LIVE mode a real heartbeat refreshes this on its own well inside 600s, so the long ceiling
+  # costs nothing there — it only widens how long a genuine disconnect takes to notice.
   heartbeatIntervalSeconds: 600
   conformanceReport:
     suiteVersion: "C1-C15"
     configMapRef: sim-adapter-conformance
     digest: "$digest"
 EOF
+  done
 
-  # phase=Connected CANNOT be reached the real way here (see the heartbeat note above), so it is
-  # projected — the same honest projection this runner already uses for the non-live robots.
-  kubectl patch fleetadapter/sim-fleet-adapter -n "$NS" --subresource=status --type=merge \
-    -p "{\"status\":{\"phase\":\"Connected\",\"lastHeartbeat\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" >/dev/null
-  info "FleetAdapter sim-fleet-adapter ready (digest-verified conformance; phase projected Connected)"
+  if all_live; then
+    info "FleetAdapters ${ADAPTERS[*]} ready (digest-verified conformance; each becomes"
+    info "Connected for real once its own live adapter registers below)"
+  elif [[ "$LIVE" == 1 ]]; then
+    # phase=Connected is reached FOR REAL on the LIVE path: config/overlays/quickstart-mtls
+    # gives the live sim adapter a verified mTLS client identity, and AdapterPresence derives
+    # Connected from that identity registering on the real ControlStream. run_live_scenario
+    # waits for the real transition once the adapter process is up — nothing here writes it.
+    info "FleetAdapter sim-fleet-adapter ready (digest-verified conformance; phase becomes"
+    info "Connected for real once the live adapter registers below)"
+  else
+    # phase=Connected cannot be reached the real way in projected mode — no adapter process
+    # ever runs here — so it is projected, the same honest projection this runner already
+    # uses for the fully-projected robots (project_readiness, below).
+    kubectl patch fleetadapter/sim-fleet-adapter -n "$NS" --subresource=status --type=merge \
+      -p "{\"status\":{\"phase\":\"Connected\",\"lastHeartbeat\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" >/dev/null
+    info "FleetAdapter sim-fleet-adapter ready (digest-verified conformance; phase projected Connected)"
+  fi
 }
 
 project_readiness() {
   step "6/7 — Project status.phase=Idle for the adapter-less robots (simulation stand-in)"
   info "these robots have NO Fleet Adapter, so nothing ever reports liveness for them. The Robot"
   info "reconciler advances Discovered->Idle from fresh adapter liveness (ADR-0029, RFC-0001"
-  info "§9.3.3) — with no adapter that never fires, and scheduler filter 1 admits only Idle"
+  info "RFC-0001 #control-plane-robot-health-and-connectivity) — with no adapter that never fires, and scheduler filter 1 admits only Idle"
   info "robots. Writing status directly is reserved to controllers (RFC-0001 §9.1.3, RA-1 in"
   info "RFC-0001 Terminology); this patch substitutes for an adapter, not for a missing"
   info "control-plane feature. See docs/quickstart.md, Honest notes."
@@ -939,35 +1121,33 @@ portforward_ready() {
 }
 
 # run_live_scenario: LIVE path. $LIVE_ROBOT is driven by a real sim_adapter.py
-# process against the real ControlStream (port-forwarded from the
-# quickstart-dev overlay's Service); the other two robots stay
+# process against the real ControlStream (port-forwarded from
+# config/overlays/quickstart-mtls's Service); the other two robots stay
 # status-projected (with a healthy baseline battery, so a battery-edge/
 # hardware-fault story on the live robot reads as a real contrast, not an
 # artifact of the other two having no battery reported at all).
 #
-# Phase honesty note: connection, registration, and telemetry for $LIVE_ROBOT
-# are all genuinely real. Phase itself is NOT — as of this writing the control
-# plane has no code path anywhere that moves a Robot from Discovered to Idle
-# on its own. internal/controller/robot_controller.go's reconciler only ever
-# writes Discovered (default) or Offline (heartbeat timeout); the Health
-# Monitor (RFC-0001 §9.3.3) is documented to write phase only to Offline
-# ("no further phase transition"); internal/controller/robot_status_sink.go
-# explicitly refuses to write Phase at all. The only writer of Idle anywhere
-# in the codebase is fleetaction_controller.go, on task completion — which
-# presupposes the robot was already Idle. So below, once real telemetry from
-# $LIVE_ROBOT is observed (proof the live handshake actually worked), this
-# script projects Idle itself, exactly like the other two robots — there is
-# currently no other way to get there. This is a real product gap (a
-# first-registration/heartbeat → Idle admission transition), not a
-# quickstart shortcut; track it before calling the live path "real".
+# Phase honesty note: connection, registration, telemetry, AND phase are all
+# genuinely real for $LIVE_ROBOT. internal/controller/robot_controller.go's
+# reconciler advances a live robot's phase Discovered->{Idle,InProgress} from
+# fresh adapter liveness on its own (ADR-0029, RFC-0001 #control-plane-robot-health-and-connectivity) — this was a
+# real product gap as of an earlier revision of this runner, closed since. So
+# below, once real telemetry from $LIVE_ROBOT is observed (proof the live
+# handshake actually worked), this script WAITS for that real transition
+# rather than projecting it; only the other two robots (no adapter at all,
+# so nothing can ever drive them) are projected.
 run_live_scenario() {
   step "6/7 — Drive the robots ready: $LIVE_ROBOT is LIVE (scenario '$SCENARIO')"
   local r
-  for r in "${ROBOTS[@]}"; do
-    [[ "$r" == "$LIVE_ROBOT" ]] && continue
-    kubectl patch "robot/$r" -n "$NS" --subresource=status --type=merge \
-      -p '{"status":{"phase":"Idle","batteryPercent":85}}'
-  done
+  # When every robot is live (all_live) nothing is projected: each spare's readiness comes
+  # from its own adapter.
+  if ! all_live; then
+    for r in "${ROBOTS[@]}"; do
+      [[ "$r" == "$LIVE_ROBOT" ]] && continue
+      kubectl patch "robot/$r" -n "$NS" --subresource=status --type=merge \
+        -p '{"status":{"phase":"Idle","batteryPercent":85}}'
+    done
+  fi
 
   # RobotStatusSink (internal/controller/robot_status_sink.go) only projects
   # telemetry onto a Robot that carries this annotation matching the wire
@@ -977,9 +1157,9 @@ run_live_scenario() {
   # included.
   kubectl annotate "robot/$LIVE_ROBOT" -n "$NS" "swarmada.io/robot-id=$LIVE_ROBOT" --overwrite >/dev/null
 
-  info "port-forwarding to the ControlStream Service (127.0.0.1:$LOCAL_CS_PORT -> service/swarmada-controlstream:9443)…"
+  info "port-forwarding to the ControlStream Service (127.0.0.1:$LOCAL_CS_PORT -> service/swarmada-controlstream:9445)…"
   : > "$PF_LOG"
-  kubectl -n "$MANAGER_NS" port-forward service/swarmada-controlstream "${LOCAL_CS_PORT}:9443" \
+  kubectl -n "$MANAGER_NS" port-forward service/swarmada-controlstream "${LOCAL_CS_PORT}:9445" \
     >"$PF_LOG" 2>&1 &
   local pf_pid=$!
   LIVE_PIDS+=("$pf_pid")
@@ -996,6 +1176,13 @@ run_live_scenario() {
 
   local adapter_scenario
   adapter_scenario="$(adapter_scenario_preset "$SCENARIO")"
+  # hardware-fault's camera fault fires on the adapter's own clock. At the preset's T+30s it
+  # would meet a task that is nearly done; T+20s meets it mid-route (long_route), and T+80s
+  # keeps the preset's 60s window before recovery.
+  local fault_args=()
+  if [[ "$SCENARIO" == "hardware-fault" ]]; then
+    fault_args=(--fault-component camera_front --fault-at 20 --recover-at 80)
+  fi
 
   # The one deliberate pause in this script (see pause_for_demo): everything
   # before this point is setup: cluster, image, control plane, fleet. This is
@@ -1043,11 +1230,18 @@ run_live_scenario() {
       --tls-ca "$ADAPTER_TLS_DIR/ca.crt" \
       --tls-cert "$ADAPTER_TLS_DIR/tls.crt" \
       --tls-key "$ADAPTER_TLS_DIR/tls.key" \
-      --tls-server-name "swarmada-controlstream.${MANAGER_NS}.svc"
+      --tls-server-name "swarmada-controlstream.${MANAGER_NS}.svc" \
+      ${fault_args[@]+"${fault_args[@]}"}
   ) >"$ADAPTER_LOG" 2>&1 &
   local adapter_pid=$!
   LIVE_PIDS+=("$adapter_pid")
   echo "$adapter_pid" >> "$PIDFILE"
+  # hardware-fault: the spares start with $LIVE_ROBOT, so every clock starts together.
+  # battery-handoff starts them later, in its handler, once $LIVE_ROBOT holds the task.
+  if all_live && [[ "$SCENARIO" == "hardware-fault" ]]; then
+    launch_spare_adapter 1
+    launch_spare_adapter 2
+  fi
 
   info ""
   info "watch it live, in another terminal:"
@@ -1062,21 +1256,28 @@ run_live_scenario() {
   # project anyway (so the scheduler story isn't blocked on this known gap)
   # but say so plainly; check $ADAPTER_LOG for why the handshake didn't land.
   info "waiting up to 20s for real telemetry from $LIVE_ROBOT (proves the live handshake worked)…"
-  if wait_until "$LIVE_ROBOT real telemetry" 20 live_robot_telemetry_seen; then
-    info "real telemetry confirmed (battery reported by the live adapter) ✓"
-  else
-    info "no telemetry observed from $LIVE_ROBOT within 20s — projecting Idle anyway;"
-    info "check $ADAPTER_LOG and the port-forward log if this persists"
+  if ! wait_until "$LIVE_ROBOT real telemetry" 20 live_robot_telemetry_seen; then
+    diagnostics
+    fail "$LIVE_ROBOT never reported real telemetry within 20s — check $ADAPTER_LOG and the port-forward log"
   fi
-  info ""
-  info "belt-and-braces: patching $LIVE_ROBOT status.phase=Idle, which should already be Idle."
-  info "  $LIVE_ROBOT HAS a live adapter, so the Robot reconciler advances it Discovered->Idle"
-  info "  on its own once fresh liveness arrives (ADR-0026/0029, RFC-0001 §9.3.3). Expect this"
-  info "  patch to report 'no change'. It stays only to cover a slow first heartbeat."
-  info "  Writing status is otherwise reserved to controllers (RFC-0001 §9.1.3, RA-1 in"
-  info "  RFC-0001 Terminology). See docs/quickstart.md, Honest notes."
-  kubectl patch "robot/$LIVE_ROBOT" -n "$NS" --subresource=status --type=merge \
-    -p '{"status":{"phase":"Idle"}}'
+  info "real telemetry confirmed (battery reported by the live adapter) ✓"
+
+  info "waiting up to ${READY_TIMEOUT}s for $LIVE_ROBOT to leave Discovered for real (ADR-0029,"
+  info "RFC-0001 #control-plane-robot-health-and-connectivity — not patched: the Robot reconciler advances a live robot's phase"
+  info "Discovered->{Idle,InProgress} on its own once fresh liveness arrives)…"
+  if ! wait_until "$LIVE_ROBOT left Discovered" "$READY_TIMEOUT" live_robot_left_discovered; then
+    diagnostics
+    fail "$LIVE_ROBOT never left Discovered for real within ${READY_TIMEOUT}s"
+  fi
+  info "$LIVE_ROBOT phase=$(kubectl get "robot/$LIVE_ROBOT" -n "$NS" -o jsonpath='{.status.phase}') (real) ✓"
+
+  info "waiting up to ${READY_TIMEOUT}s for FleetAdapter sim-fleet-adapter to reach Connected"
+  info "for real (verified mTLS identity — not patched)…"
+  if ! wait_until "sim-fleet-adapter Connected" "$READY_TIMEOUT" adapter_connected; then
+    diagnostics
+    fail "FleetAdapter sim-fleet-adapter never reached Connected for real within ${READY_TIMEOUT}s"
+  fi
+  info "FleetAdapter sim-fleet-adapter phase=Connected (real) ✓"
 
   if [[ "$SCENARIO" == "battery-handoff" ]]; then
     handle_battery_handoff
@@ -1089,6 +1290,84 @@ run_live_scenario() {
   fi
 }
 
+# launch_spare_adapter INDEX — start the real, unmodified sim_adapter.py for spare
+# ROBOTS[INDEX], under its own FleetAdapter identity and client certificate, on the
+# healthy-fleet preset. exec'd for the same reason as $LIVE_ROBOT's adapter above.
+launch_spare_adapter() {
+  local i="$1" py robot dir log
+  robot="${ROBOTS[$i]}"; dir="$(adapter_tls_dir "$i")"; log="$(adapter_log "$i")"
+  py="$(command -v python3 || command -v python)"
+  : > "$log"
+  (
+    cd "$REPO_ROOT"
+    exec env PYTHONUNBUFFERED=1 PYTHONPATH="proto${PYTHONPATH:+:${PYTHONPATH}}" \
+    "$py" adapters/simulation/sim_adapter.py \
+      --endpoint "127.0.0.1:${LOCAL_CS_PORT}" --namespace "$NS" \
+      --robot-id "$robot" --zone warehouse-a --vendor simulation \
+      --scenario healthy-fleet \
+      --tls-ca "$dir/ca.crt" --tls-cert "$dir/tls.crt" --tls-key "$dir/tls.key" \
+      --tls-server-name "swarmada-controlstream.${MANAGER_NS}.svc"
+  ) >"$log" 2>&1 &
+  local pid=$!
+  LIVE_PIDS+=("$pid")
+  echo "$pid" >> "$PIDFILE"
+  info "launched the live adapter for $robot (FleetAdapter ${ADAPTERS[$i]}, log: $log)"
+}
+
+robot_battery_seen() {
+  [[ -n "$(kubectl get "robot/$1" -n "$NS" -o jsonpath='{.status.batteryPercent}' 2>/dev/null || true)" ]]
+}
+robot_left_discovered() {
+  local p
+  p=$(kubectl get "robot/$1" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  [[ -n "$p" && "$p" != "Discovered" && "$p" != "Offline" ]]
+}
+named_adapter_connected() {
+  [[ "$(kubectl get "fleetadapter/$1" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)" == "Connected" ]]
+}
+
+# wait_spares_live: every spare's readiness, awaited and never written: real telemetry,
+# the Robot reconciler's own Discovered->Idle (ADR-0029), and its FleetAdapter Connected
+# from a verified identity.
+wait_spares_live() {
+  local i r
+  for ((i = 1; i < ${#ROBOTS[@]}; i++)); do
+    r="${ROBOTS[$i]}"
+    wait_until "$r telemetry" 30 robot_battery_seen "$r" ||
+      { diagnostics; fail "$r never reported real telemetry within 30s"; }
+    wait_until "$r left Discovered" "$READY_TIMEOUT" robot_left_discovered "$r" ||
+      { diagnostics; fail "$r never left Discovered for real within ${READY_TIMEOUT}s"; }
+    wait_until "${ADAPTERS[$i]} Connected" "$READY_TIMEOUT" named_adapter_connected "${ADAPTERS[$i]}" ||
+      { diagnostics; fail "FleetAdapter ${ADAPTERS[$i]} never reached Connected for real within ${READY_TIMEOUT}s"; }
+    info "$r live ✓ (phase=$(kubectl get "robot/$r" -n "$NS" -o jsonpath='{.status.phase}'), battery=$(kubectl get "robot/$r" -n "$NS" -o jsonpath='{.status.batteryPercent}')%, reported by its own adapter)"
+  done
+}
+
+# action_succeeded_on ACTION ROBOT — ACTION is Succeeded and was completed by ROBOT. Only
+# the adapter's report of arrival moves a FleetAction to Succeeded; nothing here writes it.
+action_succeeded_on() {
+  local phase robot
+  phase=$(kubectl get "fleetaction/$1" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  robot=$(kubectl get "fleetaction/$1" -n "$NS" -o jsonpath='{.status.assignedRobot}' 2>/dev/null || true)
+  [[ "$phase" == "Succeeded" && "$robot" == "$2" ]]
+}
+
+# wait_moved_task_succeeded ACTION HOLDER — the task a reroute scenario moved completes on
+# the spare that took it, and the spare's own adapter log says so.
+wait_moved_task_succeeded() {
+  local action="$1" holder="$2" i log=""
+  info "waiting up to ${REROUTE_COMPLETE_TIMEOUT}s for $holder to complete $action (its adapter"
+  info "reports SUCCEEDED on arrival at (25, 20))…"
+  if ! wait_until "$action Succeeded on $holder" "$REROUTE_COMPLETE_TIMEOUT" action_succeeded_on "$action" "$holder"; then
+    diagnostics
+    fail "$action was moved to $holder but did not reach Succeeded there within ${REROUTE_COMPLETE_TIMEOUT}s"
+  fi
+  for i in "${!ROBOTS[@]}"; do [[ "${ROBOTS[$i]}" == "$holder" ]] && log="$(adapter_log "$i")"; done
+  info "$action Succeeded on $holder ✓ — its adapter: $(grep -m1 "ACTION_SUCCEEDED robot=$holder action=$action" "$log" 2>/dev/null || echo "(no ACTION_SUCCEEDED line in $log)")"
+  MOVED_TASK="$action"
+  MOVED_TO="$holder"
+}
+
 # live_robot_telemetry_seen: true once $LIVE_ROBOT's status carries a
 # batteryPercent — the one field RobotStatusSink projects from real ingested
 # telemetry (see run_live_scenario's header note on why phase itself can't be
@@ -1099,86 +1378,90 @@ live_robot_telemetry_seen() {
   [[ -n "$pct" ]]
 }
 
+# live_robot_left_discovered: true once ADR-0029's real Discovered->{Idle,InProgress}
+# transition has happened, from EITHER resulting phase. Checking for literal "Idle"
+# alone races the real scheduler: assignment can land in the same reconcile tick real
+# liveness arrives, moving phase straight through Idle into InProgress/Assigned before
+# a 3s poll ever samples it. Any phase other than the pre-liveness set is equally valid
+# proof the real transition already fired.
+live_robot_left_discovered() {
+  local phase
+  phase=$(kubectl get "robot/$LIVE_ROBOT" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  [[ -n "$phase" && "$phase" != "Discovered" && "$phase" != "Offline" ]]
+}
+
 # BATTERY_HANDOFF_ORIGINAL_ROBOT: set by handle_battery_handoff, read by its
 # wait predicate battery_handoff_reassigned.
 BATTERY_HANDOFF_ORIGINAL_ROBOT=""
+# MOVED_TASK / MOVED_TO: set by wait_moved_task_succeeded once the task a reroute scenario
+# moved has completed on the spare; read by assert_end_state.
+MOVED_TASK=""
+MOVED_TO=""
 
-# handle_battery_handoff: battery-handoff scenario only. deliver-pallet-001
-# (the only sample task applied this scenario — see apply_fleet) is already
-# held by one of sim-robot-002/sim-robot-003; the other is healthy, Idle, and
-# genuinely spare (that's the point of holding inspect-receiving-dock back).
+# handle_battery_handoff: battery-handoff scenario only. Every robot is live
+# (all_live). $LIVE_ROBOT came online alone, on the battery-edge preset, so it is the only
+# robot that can take deliver-pallet-001 (the only sample task applied this scenario, on
+# long_route), and its adapter reports its battery draining toward 0 while it drives. The
+# spares then come online, each on its own live adapter, at full battery.
 #
-# This simulates that working robot's battery collapsing and triggers the
-# REAL, existing, safe hand-off mechanism — the same one ZoneMaintenance's
-# Immediate mode uses: annotating the FleetAction with
-# swarmada.io/requeue-requested makes fleetaction_controller.go push a real
-# cancel_task and wait for a CONFIRMED stop before reassigning. Since the
-# robot being cut is status-projected (no live wire), "confirmed" here falls
-# back to the assignment lease provably expiring — leaseDuration is a fixed
-# 30s in internal/controller/fleetaction_controller.go, so this genuinely
-# takes up to ~30s, same as it would for an actually-disconnected robot.
+# The hand-off itself uses the REAL, existing, safe mechanism ZoneMaintenance's Immediate
+# mode uses: annotating the FleetAction with swarmada.io/requeue-requested makes
+# fleetaction_controller.go push a real cancel_task down the holder's live ControlStream
+# and wait for a CONFIRMED stop (the sim adapter acks STOPPED_SAFELY) before releasing the
+# task. The scheduler then assigns it like any Pending task, and its battery-descending
+# order sends it to a spare rather than back to the drained robot.
 #
-# Honesty note: deciding WHICH robot's battery to cut, and WHEN, is this
-# script's call — there is no controller anywhere that watches battery and
-# triggers a hand-off on its own (that would be real, unbuilt product work).
-# Patching the battery number is purely cosmetic for this demo; it is the
-# requeue-requested annotation that does the actual work, and everything
-# from that annotation onward — the cancel push, the confirmed-stop wait,
-# the release, the re-assignment — is real, unmodified control-plane code.
+# Honesty note: deciding WHEN to hand off is this script's call — there is no controller
+# anywhere that watches battery and triggers a hand-off on its own (that would be real,
+# unbuilt product work). Everything from the annotation onward — the cancel push, the
+# confirmed stop, the release, the reassignment, the spare's completion — is real,
+# unmodified control-plane code, and every battery value shown is reported by an adapter.
 handle_battery_handoff() {
-  step "6.5/7 — battery-handoff: simulate a working robot's battery collapsing"
-  local holder
-  holder=$(kubectl get fleetaction deliver-pallet-001 -n "$NS" -o jsonpath='{.status.assignedRobot}' 2>/dev/null || true)
-  if [[ -z "$holder" ]]; then
-    info "deliver-pallet-001 has no assignedRobot yet — waiting up to 15s for the scheduler…"
-    if ! wait_until "deliver-pallet-001 assigned" 15 deliver_pallet_assigned; then
-      diagnostics
-      fail "deliver-pallet-001 was never assigned — nothing to hand off"
-    fi
-    holder=$(kubectl get fleetaction deliver-pallet-001 -n "$NS" -o jsonpath='{.status.assignedRobot}')
+  step "6.5/7 — battery-handoff: hand a working robot's task to a live spare"
+  local holder new_holder
+  info "waiting up to 20s for deliver-pallet-001 to land on $LIVE_ROBOT (the only live robot so far)…"
+  if ! wait_until "deliver-pallet-001 assigned" 20 deliver_pallet_assigned; then
+    diagnostics
+    fail "deliver-pallet-001 was never assigned — nothing to hand off"
   fi
+  holder=$(kubectl get fleetaction deliver-pallet-001 -n "$NS" -o jsonpath='{.status.assignedRobot}')
   BATTERY_HANDOFF_ORIGINAL_ROBOT="$holder"
-  info "deliver-pallet-001 is currently held by $holder"
+  info "deliver-pallet-001 is held by $holder ✓"
 
-  # No second pause here on purpose — this script keeps to exactly ONE
-  # deliberate keypress (see pause_for_demo's header note and the one already
-  # taken before $LIVE_ROBOT's adapter launched). Once you've pressed Enter,
-  # everything through the hand-off runs on its own.
-  info "cutting $holder's battery mid-task and requesting a safe hand-off…"
-  info "patching $holder's battery down (simulated — $holder is not the live robot)…"
-  kubectl patch "robot/$holder" -n "$NS" --subresource=status --type=merge \
-    -p '{"status":{"batteryPercent":8}}'
+  info "bringing the spares online, each on its own live adapter…"
+  launch_spare_adapter 1
+  launch_spare_adapter 2
+  wait_spares_live
 
-  info "requesting a safe hand-off (swarmada.io/requeue-requested) — this is the same"
-  info "real, confirmed-stop mechanism ZoneMaintenance's Immediate mode uses; the battery"
-  info "value above does NOT itself trigger anything — this annotation does…"
+  info "$holder's battery is now $(kubectl get "robot/$holder" -n "$NS" -o jsonpath='{.status.batteryPercent}')%, reported by its adapter"
+  info "requesting a safe hand-off (swarmada.io/requeue-requested) — the same real,"
+  info "confirmed-stop mechanism ZoneMaintenance's Immediate mode uses…"
   kubectl annotate fleetaction deliver-pallet-001 -n "$NS" \
-    "swarmada.io/requeue-requested=battery critically low (simulated by this script)" --overwrite >/dev/null
+    "swarmada.io/requeue-requested=battery low (hand-off requested by this script)" --overwrite >/dev/null
 
-  info "waiting up to 40s for the confirmed stop and reassignment — $holder has no live"
-  info "wire, so this waits out the real ~30s assignment-lease expiry, the same safe"
-  info "fallback path a genuinely disconnected robot goes through…"
-  if wait_until "deliver-pallet-001 reassigned off $holder" 40 battery_handoff_reassigned; then
-    local new_holder
-    new_holder=$(kubectl get fleetaction deliver-pallet-001 -n "$NS" -o jsonpath='{.status.assignedRobot}')
-    info "hand-off confirmed ✓ — deliver-pallet-001 moved from $holder to $new_holder"
-  else
+  info "waiting up to 40s for the confirmed stop and the reassignment to a spare…"
+  if ! wait_until "deliver-pallet-001 reassigned off $holder" 40 battery_handoff_reassigned; then
     diagnostics
     fail "deliver-pallet-001 was never reassigned off $holder within 40s"
   fi
+  new_holder=$(kubectl get fleetaction deliver-pallet-001 -n "$NS" -o jsonpath='{.status.assignedRobot}')
+  info "hand-off confirmed ✓ — deliver-pallet-001 moved from $holder to $new_holder"
+  info "  $holder's adapter: $(grep -m1 "CANCEL_HONOURED robot=$holder" "$ADAPTER_LOG" 2>/dev/null || echo "(no CANCEL_HONOURED line in $ADAPTER_LOG)")"
+  wait_moved_task_succeeded deliver-pallet-001 "$new_holder"
 }
 
-# handle_hardware_fault: hardware-fault scenario only. Unlike battery-handoff,
-# the reroute here is NOT script-triggered — the control plane detects it. The
-# live robot ($LIVE_ROBOT) holds the camera task (inspect-receiving-dock; it is
-# the only camera-capable robot, apply_fleet having stripped 002/003). When its
-# camera degrades at ~30s (real adapter fault), the Capability Controller marks
-# status.capabilities[camera_front]=Degraded, and fleetaction_controller.go's
-# Capability-loss reassignment (RFC-0001) automatically pushes a real cancel_task,
-# the sim adapter acks STOPPED_SAFELY, and the task requeues. This function only
-# stages the reroute target: it re-adds camera_front to sim-robot-002 (an idle
-# spare) so the automatic reassignment has somewhere to land. Everything from the
-# capability degrading onward is real, unmodified control-plane code.
+# handle_hardware_fault: hardware-fault scenario only (defined further down). Unlike
+# battery-handoff, the reroute here is NOT script-triggered — the control plane
+# detects it. The live robot ($LIVE_ROBOT) holds the camera task
+# (inspect-receiving-dock; it is the only camera-capable robot, apply_fleet having
+# stripped 002/003). When its camera degrades at ~20s (real adapter fault), the
+# Capability Controller marks status.capabilities[camera_front]=Degraded, and
+# fleetaction_controller.go's Capability-loss reassignment (RFC-0001) automatically
+# pushes a real cancel_task, the sim adapter acks STOPPED_SAFELY, and the task
+# requeues. The function only stages the reroute target: it re-adds camera_front to
+# sim-robot-002 (a live, idle spare) so the automatic reassignment has somewhere to
+# land. Everything from the capability degrading onward is real, unmodified
+# control-plane code.
 # handle_comms_flaky: the option-5 payoff — the adapter's ControlStream really
 # drops and really re-registers, and the control plane NOTICES both.
 #
@@ -1234,7 +1517,7 @@ adapter_connected() { [[ "$(adapter_phase)" == "Connected" ]]; }
 # unmodified control-plane code: the estop goes out over $LIVE_ROBOT's LIVE
 # ControlStream, the sim adapter confirms it via safety.confirm_estop from
 # simulator ground truth, and the FleetAction controller pauses the held action
-# (§9.6.2.4 — estop takes precedence over the lease).
+# (RFC-0001 #safety-fleetaction-behaviour-during-estop — estop takes precedence over the lease).
 handle_estop_drill() {
   step "6.5/7 — estop-drill: stop a working robot and confirm the stop"
 
@@ -1247,7 +1530,7 @@ handle_estop_drill() {
   ESTOP_ACTION=$(live_robot_action)
   info "$LIVE_ROBOT is holding $ESTOP_ACTION ✓"
 
-  pause_for_demo "$LIVE_ROBOT is executing $ESTOP_ACTION. Press Enter to TRIGGER an emergency stop — the control plane sends it over the live ControlStream, the robot CONFIRMS it from simulator ground truth, and $ESTOP_ACTION is paused."
+  pause_for_demo "$LIVE_ROBOT is executing $ESTOP_ACTION. Press Enter to TRIGGER an emergency stop — the control plane sends it over the live ControlStream, the robot CONFIRMS it from simulator ground truth, and $ESTOP_ACTION is paused. The stop goes out on its own after ${ESTOP_DRILL_MAX_PAUSE}s, while $LIVE_ROBOT is still driving." "$ESTOP_DRILL_MAX_PAUSE"
 
   info "triggering the estop (swarmada.io/estop-triggered on $LIVE_ROBOT — the operator-facing path)…"
   kubectl annotate "robot/$LIVE_ROBOT" -n "$NS" \
@@ -1262,7 +1545,7 @@ handle_estop_drill() {
   info "estop CONFIRMED ✓ — $LIVE_ROBOT reported estopState=Stopped from simulator ground truth"
 
   if wait_until "$ESTOP_ACTION paused by estop" 60 estop_action_paused; then
-    info "safe hold confirmed ✓ — $ESTOP_ACTION was paused by the estop (§9.6.2.4)"
+    info "safe hold confirmed ✓ — $ESTOP_ACTION was paused by the estop (RFC-0001 #safety-fleetaction-behaviour-during-estop)"
   else
     diagnostics
     fail "$ESTOP_ACTION was never paused after $LIVE_ROBOT was emergency-stopped"
@@ -1296,19 +1579,18 @@ estop_action_paused() {
 }
 
 handle_hardware_fault() {
-  step "6.5/7 — hardware-fault: drive the camera capability and let the control plane reroute"
-  # $LIVE_ROBOT's camera_front CAPABILITY is gated on a camera_front HARDWARE
-  # component (apply_fleet). In a status-projected quickstart the live adapter's
-  # hardware telemetry does not reach status.hardware (battery doesn't either) —
-  # so, exactly as battery-handoff scripts the battery, this drives status.hardware
-  # directly: Healthy so the capability derives Active and the task lands on
-  # $LIVE_ROBOT, then Degraded to make its capability degrade. Everything from the
-  # capability degrading onward is real, unmodified control-plane code — including
-  # a real cancel_task over $LIVE_ROBOT's LIVE ControlStream (the sim adapter acks
-  # STOPPED_SAFELY), the requeue, and the reassignment.
-  info "marking $LIVE_ROBOT's camera_front hardware Healthy so its capability derives Active…"
-  kubectl patch "robot/$LIVE_ROBOT" -n "$NS" --subresource=status --type=merge \
-    -p '{"status":{"hardware":[{"name":"camera_front","status":"Healthy"}]}}'
+  step "6.5/7 — hardware-fault: the camera fails on the adapter's clock; the control plane reroutes"
+  # Every robot is live (all_live); nothing below writes any status. $LIVE_ROBOT's
+  # camera_front CAPABILITY is gated on its camera_front HARDWARE (apply_fleet), and its
+  # adapter reports that hardware HEALTHY until --fault-at, then DEGRADED.
+  wait_spares_live
+
+  info "waiting up to ${READY_TIMEOUT}s for $LIVE_ROBOT's camera_front capability to derive Active"
+  info "from its own pre-fault hardware telemetry…"
+  if ! wait_until "$LIVE_ROBOT camera_front Active" "$READY_TIMEOUT" camera_capability_is "$LIVE_ROBOT" Active; then
+    diagnostics
+    fail "$LIVE_ROBOT's camera_front capability never derived Active"
+  fi
 
   info "waiting up to 20s for the camera task to land on ${LIVE_ROBOT}…"
   if ! wait_until "inspect-receiving-dock assigned to $LIVE_ROBOT" 20 inspect_assigned_to_live; then
@@ -1317,31 +1599,27 @@ handle_hardware_fault() {
   fi
   info "inspect-receiving-dock is held by $LIVE_ROBOT ✓"
 
-  info "restoring camera_front on sim-robot-002 (idle spare, ungated so Active) as the reroute target…"
+  info "restoring camera_front on sim-robot-002 (spec, ungated so Active) as the reroute target…"
   kubectl patch robot/sim-robot-002 -n "$NS" --type=json -p \
     '[{"op":"add","path":"/spec/capabilities/-","value":{"name":"camera_front","type":"hardware-native","pauseable":false}}]'
 
-  # Second, deliberate pause: everything is staged ($LIVE_ROBOT holds the camera
-  # task, sim-robot-002 is an idle camera spare). Pressing Enter now degrades the
-  # camera and triggers the reroute — so a presenter can show the before/after.
-  # Honors --pace (timed/off) and CI like the first pause; the message is explicit
-  # so it never reads as "hung".
-  pause_for_demo "$LIVE_ROBOT now holds the camera task; sim-robot-002 is staged as the idle camera spare. Press Enter to DEGRADE $LIVE_ROBOT's camera — the control plane will safe-stop the task and reroute it to sim-robot-002."
-
-  info "degrading $LIVE_ROBOT's camera_front → its capability degrades → the FleetAction controller"
-  info "AUTOMATICALLY safe-stops and reroutes the task (no annotation, no script trigger — a real"
-  info "cancel_task over the live ControlStream, acked STOPPED_SAFELY, then reassignment)…"
-  kubectl patch "robot/$LIVE_ROBOT" -n "$NS" --subresource=status --type=merge \
-    -p '{"status":{"hardware":[{"name":"camera_front","status":"Degraded"}]}}'
-
-  if wait_until "inspect-receiving-dock reassigned off $LIVE_ROBOT" 60 inspect_reassigned_off_live; then
-    local new_holder
-    new_holder=$(kubectl get fleetaction inspect-receiving-dock -n "$NS" -o jsonpath='{.status.assignedRobot}')
-    info "reroute confirmed ✓ — inspect-receiving-dock moved from $LIVE_ROBOT to $new_holder on capability loss"
-  else
+  info "waiting up to 60s for the REAL camera fault (adapter clock, ~T+20s from $LIVE_ROBOT's"
+  info "adapter start) to degrade the capability and for the control plane to AUTOMATICALLY"
+  info "safe-stop and reroute the task — no annotation, no script trigger, no patch…"
+  if ! wait_until "inspect-receiving-dock reassigned off $LIVE_ROBOT" 60 inspect_reassigned_off_live; then
     diagnostics
     fail "inspect-receiving-dock was never rerouted off $LIVE_ROBOT within 60s"
   fi
+  local new_holder
+  new_holder=$(kubectl get fleetaction inspect-receiving-dock -n "$NS" -o jsonpath='{.status.assignedRobot}')
+  info "reroute confirmed ✓ — inspect-receiving-dock moved from $LIVE_ROBOT to $new_holder on capability loss"
+  info "  $LIVE_ROBOT capabilities[camera_front]=$(kubectl get "robot/$LIVE_ROBOT" -n "$NS" -o jsonpath="{.status.capabilities[?(@.name=='camera_front')].status}")"
+  wait_moved_task_succeeded inspect-receiving-dock "$new_holder"
+}
+
+# camera_capability_is ROBOT STATUS — ROBOT's derived camera_front capability status.
+camera_capability_is() {
+  [[ "$(kubectl get "robot/$1" -n "$NS" -o jsonpath="{.status.capabilities[?(@.name=='camera_front')].status}" 2>/dev/null || true)" == "$2" ]]
 }
 
 # inspect_assigned_to_live: true once inspect-receiving-dock is held by $LIVE_ROBOT.
@@ -1409,20 +1687,28 @@ robots_ready() {
 }
 
 # task_assigned: at least one FleetAction has a non-empty status.assignedRobot —
-# i.e. the REAL scheduler bound a task to a robot. (A terminal Succeeded is not
-# reachable here: the reference sim adapter never reports task completion, so
-# assignment by the scheduler is the honest, verifiable end state.)
+# i.e. the REAL scheduler bound a task to a robot. On the LIVE path the run then
+# also waits for the live robot to complete it (the sim adapter reports completion).
 task_assigned() {
   local vals
   vals=$(kubectl get fleetactions -n "$NS" -o jsonpath='{.items[*].status.assignedRobot}' 2>/dev/null || true)
   [[ -n "${vals// /}" ]]
 }
 
-# wait_until DESC TIMEOUT PREDICATE — poll PREDICATE until true or TIMEOUT secs.
+# task_succeeded: some FleetAction reached Succeeded. Only the adapter's own report of
+# arrival moves a FleetAction there; nothing in this script writes that phase.
+task_succeeded() {
+  local phases
+  phases=$(kubectl get fleetactions -n "$NS" -o jsonpath='{.items[*].status.phase}' 2>/dev/null || true)
+  [[ " $phases " == *" Succeeded "* ]]
+}
+
+# wait_until DESC TIMEOUT PREDICATE [ARGS...] — poll PREDICATE ARGS until true or TIMEOUT secs.
 wait_until() {
   local desc="$1" timeout="$2" pred="$3" elapsed=0 interval=3
+  shift 3
   while true; do
-    if "$pred"; then return 0; fi
+    if "$pred" "$@"; then return 0; fi
     (( elapsed >= timeout )) && return 1
     sleep "$interval"; elapsed=$((elapsed + interval))
   done
@@ -1436,6 +1722,13 @@ diagnostics() {
   if [[ "$LIVE" == 1 ]]; then
     echo "---- live adapter log ($ADAPTER_LOG) ----" >&2
     tail -n 50 "$ADAPTER_LOG" >&2 2>&1 || true
+    if all_live; then
+      local i
+      for ((i = 1; i < ${#ROBOTS[@]}; i++)); do
+        echo "---- live adapter log for ${ROBOTS[$i]} ($(adapter_log "$i")) ----" >&2
+        tail -n 30 "$(adapter_log "$i")" >&2 2>&1 || true
+      done
+    fi
     echo "---- port-forward log ($PF_LOG) ----" >&2
     tail -n 20 "$PF_LOG" >&2 2>&1 || true
   fi
@@ -1498,6 +1791,28 @@ assert_end_state() {
   fi
   info "a FleetAction was assigned by the scheduler ✓"
 
+  # Assignment is half the loop. On the live healthy-fleet path nothing interrupts the
+  # work, so the robot must also finish it: the adapter reports arrival, and the control
+  # plane moves the FleetAction to Succeeded. The other scenarios interrupt work on
+  # purpose and assert their own payoff below; the projected path has no adapter.
+  if [[ "$LIVE" == 1 && "$SCENARIO" == "healthy-fleet" ]]; then
+    info "waiting up to ${COMPLETE_TIMEOUT}s for the live robot to complete its FleetAction…"
+    if ! wait_until "task succeeded" "$COMPLETE_TIMEOUT" task_succeeded; then
+      diagnostics
+      echo "❌ Quickstart FAILED: no FleetAction reached Succeeded within ${COMPLETE_TIMEOUT}s" >&2
+      echo "   (the live adapter reports SUCCEEDED when the robot arrives at its target)." >&2
+      exit 1
+    fi
+    info "a FleetAction was completed by the live robot ✓"
+  fi
+
+  # The reroute scenarios' own payoff, re-asserted: the moved task completed on the spare.
+  if all_live && ! action_succeeded_on "$MOVED_TASK" "$MOVED_TO"; then
+    diagnostics
+    echo "❌ Quickstart FAILED: ${MOVED_TASK:-the moved task} is not Succeeded on ${MOVED_TO:-a spare}." >&2
+    exit 1
+  fi
+
   # A scenario that silently never ran must not report success. The generic
   # checks above ("robots healthy, something got assigned") are true whether or
   # not the drill happened — which is exactly how estop-drill passed green while
@@ -1528,6 +1843,13 @@ assert_end_state() {
     echo "✅ Quickstart end state reached: $LIVE_ROBOT was emergency-stopped while holding"
     echo "   work, CONFIRMED the stop from simulator ground truth, and its action was"
     echo "   paused; the rest of the fleet stayed healthy and scheduling continued."
+  elif [[ "$LIVE" == 1 && "$SCENARIO" == "healthy-fleet" ]]; then
+    echo "✅ Quickstart end state reached: all robots Idle, the real scheduler"
+    echo "   assigned a FleetAction in warehouse-a, and the live robot completed one."
+  elif all_live; then
+    echo "✅ Quickstart end state reached: every robot live on its own adapter; $MOVED_TASK"
+    echo "   was taken off $LIVE_ROBOT mid-route, reassigned by the real scheduler to"
+    echo "   $MOVED_TO, and completed there (its adapter reported SUCCEEDED)."
   else
     echo "✅ Quickstart end state reached: all robots Idle and the real scheduler"
     echo "   assigned a FleetAction to a robot in warehouse-a."
@@ -1568,4 +1890,8 @@ main() {
   fi
 }
 
-main "$@"
+# Executed, run. Sourced, only define the functions: a test calls them with
+# kubectl stubbed (tests/python/test_warehouse_quickstart_run_sh.py).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

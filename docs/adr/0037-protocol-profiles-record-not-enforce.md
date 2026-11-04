@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-08-12 (accepted 2026-08-13)
 - **Deciders:** API Designer, Kubernetes Expert, Distributed Systems Reviewer
-- **Related:** ADR-0032 (contract versioning and conformance gating), ADR-0019 (`status.supportedActions` as discovery), ADR-0007 (conformance is self-certified), ADR-0005 (reference adapter policy), RFC-0001 §9.6 (Fleet Adapter protocol), RFC-0001 {{ref:fleetadapter}}
+- **Related:** ADR-0032 (contract versioning and conformance gating), ADR-0019 (`status.supportedActions` as discovery), ADR-0007 (conformance is self-certified), ADR-0005 (reference adapter policy), RFC-0001 "Fleet Adapter Protocol", RFC-0001 {{ref:fleetadapter}}
 
 > **Implementation note (2026-08-21).** The rename this ADR mandates has landed: *capability
 > profile* no longer occurs anywhere in RFC-0001, and *capability set* is the term in use. The
@@ -103,7 +103,7 @@ standard a Fleet Adapter speaks. It is recorded, not enforced.
    protocol: `type:310` admits only `hardware-native`, `model-driven` or `manual`;
    `pauseable:316`, `requiredHardware:324` and `providingModel:329` have no meaning for
    a protocol; and a capability's defining property is that it is active or inactive as
-   a function of hardware health (RFC-0001 §6.10.1), which a protocol never is.
+   a function of hardware health (RFC-0001, "Hardware-Native Capabilities"), which a protocol never is.
    Capabilities state what a robot can do. A protocol profile states what language it is
    addressed in.
 
@@ -114,12 +114,12 @@ standard a Fleet Adapter speaks. It is recorded, not enforced.
    tick (RA-1).
 
 5. **Recording and enforcement stay separate concerns**, as ADR-0032 already states for
-   `conformanceContractVersion` (RFC-0001 §9.1.13). Specifically:
+   `conformanceContractVersion` (RFC-0001, "FleetAdapter"). Specifically:
    - **Dispatch is never gated on a protocol profile.** Following ADR-0019
-     (RFC-0001 §9.1.13), a declaration may inform or pre-filter and must never
+     (RFC-0001, "FleetAdapter"), a declaration may inform or pre-filter and must never
      cause a wrong dispatch or a silent non-dispatch.
    - **Admission is not gated on it.** The admission gate
-     (RFC-0001 §9.1.13) is scalar and fail-closed; a scalar condition cannot
+     (RFC-0001, "FleetAdapter") is scalar and fail-closed; a scalar condition cannot
      represent an adapter declaring two profiles of which one passes and one fails.
    - **No condition, no event, no status message is raised on a `spec`/`status`
      mismatch.** The two values are recorded and may be compared by a reader or an

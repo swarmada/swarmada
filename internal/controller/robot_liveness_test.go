@@ -212,7 +212,7 @@ func TestRobotController_LivenessDrivesReadyAndOffline(t *testing.T) {
 // NOT write connectivity/lastSeenAt — that is the presence path's job alone.
 func TestTelemetry_NeverWritesLastSeenAt(t *testing.T) {
 	sink, c := newSink(t, robotWithID("sim-robot-001", faNS, "rid-live"))
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
 		RobotID: "rid-live", BatteryPct: i32(77),
 	}); err != nil {
 		t.Fatalf("apply: %v", err)

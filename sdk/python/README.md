@@ -2,7 +2,7 @@
 
 The shared building blocks for writing a Swarmada **Fleet Adapter** in Python.
 
-Its purpose is to provide **one audited implementation of the safety-critical
+Its purpose is to provide **one tested implementation of the safety-critical
 behaviours every adapter must get right**, so that reference and vendor adapters
 depend on the same correct code instead of each re-deriving it. The vendor
 adapter template (`adapters/template`) generates an adapter already wired to this
@@ -15,7 +15,7 @@ pip install -e sdk/python
 # On a Homebrew-managed macOS Python, add --break-system-packages
 ```
 
-Requires Python 3.12+. The package ships type information (PEP 561), so `mypy`
+Requires Python 3.10+ (the interpreter ROS 2 Humble ships). The package ships type information (PEP 561), so `mypy`
 sees the full API.
 
 ## What it provides
@@ -96,9 +96,10 @@ a robot does not stop when it should. Implementing them once, here, means:
 
 - one place to audit and fix, rather than N diverging copies across adapters;
 - the conformance harness's C3/C4/C5 checks verify the same code everywhere;
-- a vendor generating an adapter from `adapters/template` starts conformant on the
-  safety MUSTs, and can decline optional commands (`unsupported=true`) without
-  weakening them.
+- a vendor generating an adapter from `adapters/template` starts with these three
+  wired rather than hand-rolled, and can decline optional commands
+  (`unsupported=true`) without weakening them. Whether the adapter conforms is
+  what the harness establishes, against the vendor's own binding.
 
 ## Versioning
 

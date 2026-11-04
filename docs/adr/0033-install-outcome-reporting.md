@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-31
 - **Deciders:** Principal Software Architect, API Designer, Distributed Systems Reviewer, Security Reviewer
-- **Related:** ADR-0019 (adapter action discovery and validation), ADR-0026 (robot liveness projection), ADR-0032 (contract versioning and conformance gating), RFC-0001 §9.1.3 (Robot) / §9.1.8 (FirmwareRollout) / §9.1.9 (ModelRollout) / §9.2 (Fleet Adapter Protocol) / §9.6.5.1 (Required Events); `proto/fleet_adapter/v1/fleet_adapter.proto` (`UpdateProgress`, `InstalledModel`, `FirmwareResult`, `ModelUpdateResult`, `CapabilitiesSnapshot`), `adapters/CONFORMANCE.md`
+- **Related:** ADR-0019 (adapter action discovery and validation), ADR-0026 (robot liveness projection), ADR-0032 (contract versioning and conformance gating), RFC-0001 "Robot" / "FirmwareRollout" / "ModelRollout" / "Fleet Adapter Protocol" / "Required Events"; `proto/fleet_adapter/v1/fleet_adapter.proto` (`UpdateProgress`, `InstalledModel`, `FirmwareResult`, `ModelUpdateResult`, `CapabilitiesSnapshot`), `adapters/CONFORMANCE.md`
 
 ## Context
 
@@ -41,7 +41,7 @@ findings, each verified against the tree:
 
 3. **`FIRMWARE_INSTALL_FAILED` has no signal to key on**, and `status.failedRobots` is never populated.
 
-Two of those audit rows are marked `emitted` in §9.6.5.1. They pass the mechanical Status check
+Two of those audit rows are marked `emitted` in RFC-0001's "Required Events". They pass the mechanical Status check
 because it verifies that a production writer *references* the event constant — a weaker property than the
 writer being *reachable*. The column has drifted again, in a way the existing gate is blind to.
 
@@ -126,7 +126,7 @@ jobs, and project it onto `Robot.status` so both rollout controllers and the aud
 - **Stream only (no snapshot).** Timely but lossy, and loses exactly when it matters most — a control-plane
   restart mid-rollout, which is the failure this ADR exists to close.
 
-## Follow-up / known limitations
+## Known limitations
 
 This is a correct, in-force fix for firmware and model install outcomes, but it is
 deliberately scoped. Three follow-ups are tracked as separate work rather than folded
@@ -137,7 +137,7 @@ in here:
    firmware/model install (bespoke terminal enum on `UpdateProgress`, bespoke snapshot
    fields). A general async-operation-outcome mechanism is proposed in **ADR-0035**;
    if adopted it supersedes the carriers introduced here.
-2. **The reachability gate is not yet closed.** The Status/Required-Events check still
+2. **The reachability gate is not closed.** The Status/Required-Events check still
    verifies that a writer *references* an event constant, not that it is *reachable* —
    the weakness that let `MODEL_UPDATE_SUCCEEDED`/`_FAILED` ship marked `emitted` while
    unreachable. Making the gate reachability-aware is proposed in **ADR-0036**.

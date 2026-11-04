@@ -1,7 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Developer/prototype deploy overlay (`make deploy` / `make undeploy`) — the
+# Minimal developer/prototype deploy overlay (`make deploy-minimal` /
+# `make undeploy-minimal`; it serves no adapters) — the
 # single-cluster, single-namespace topology from
 # rfcs/rfc-0001-core-spec/architecture.md's "Developer / Prototype" row.
 #

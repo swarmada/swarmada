@@ -1,0 +1,20 @@
+# Plain-language convention guard: a non-normative note is a blockquote of ONE
+# paragraph. The rules' "~blockquote" scope (Vale 3.23) exempts only the first
+# block of a blockquote; a second paragraph or a list inside the same quote is
+# linted as normative text. Flags a blank quote line (">"), a
+# list, a nested quote or a code fence inside a quote. To write a longer note,
+# end the quote with a truly blank line and start a new "> " blockquote.
+# Lines inside fenced code are not flagged (the trailing lookbehind requires
+# an even number of fence lines before the match).
+# Each match carries the rest of its line so that Vale, which places a raw
+# alert by searching for the matched text, reports the right line.
+extends: existence
+message: "A non-normative note must be a single-paragraph blockquote. End the quote with an empty line (no '>') and open a new '> ' blockquote for the next paragraph; keep lists out of notes."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?m)^[ \t]*>[ \t]*\n[ \t]*>[^\n]*(?<=\A(?:(?![ \t]*(?:```|~~~))[^\n]*\n|[ \t]*(?:```|~~~)[^\n]*\n(?:(?![ \t]*(?:```|~~~))[^\n]*\n)*[ \t]*(?:```|~~~)[^\n]*\n)*[^\n]*)'
+  - '(?m)^[ \t]*>[ \t]*(?:[-*+]|\d+[.)])[ \t][^\n]*(?<=\A(?:(?![ \t]*(?:```|~~~))[^\n]*\n|[ \t]*(?:```|~~~)[^\n]*\n(?:(?![ \t]*(?:```|~~~))[^\n]*\n)*[ \t]*(?:```|~~~)[^\n]*\n)*[^\n]*)'
+  - '(?m)^[ \t]*>[ \t]*>[^\n]*(?<=\A(?:(?![ \t]*(?:```|~~~))[^\n]*\n|[ \t]*(?:```|~~~)[^\n]*\n(?:(?![ \t]*(?:```|~~~))[^\n]*\n)*[ \t]*(?:```|~~~)[^\n]*\n)*[^\n]*)'
+  - '(?m)^[ \t]*>[ \t]*(?:```|~~~)[^\n]*(?<=\A(?:(?![ \t]*(?:```|~~~))[^\n]*\n|[ \t]*(?:```|~~~)[^\n]*\n(?:(?![ \t]*(?:```|~~~))[^\n]*\n)*[ \t]*(?:```|~~~)[^\n]*\n)*[^\n]*)'

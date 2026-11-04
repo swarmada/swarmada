@@ -1,0 +1,97 @@
+# What each outside event proposes. Every trigger here ends in a DRAFT: the TaskTrigger
+# controller forces spec.draft true on what it creates, whatever the template says, so
+# nothing moves until a person clears the draft (ADR-0062). The templates below write
+# `draft: true` anyway, so a reader does not have to know that.
+#
+# A draft is named <trigger>-<event>. The bridge names an event after the caller and
+# the caller's own id, so the same occurrence delivered twice is one event and one
+# draft.
+---
+# A door opening after hours: send the patrol robot round the zone.
+apiVersion: swarmada.io/v1
+kind: TaskTrigger
+metadata:
+  name: door-after-hours-patrol
+  namespace: warehouse-a
+spec:
+  source:
+    semanticEventSource: building-doors
+    eventType: door.opened.after-hours
+  taskTemplate:
+    draft: true
+    actions:
+      - name: patrol
+        action:
+          type: Patrol
+          zone: warehouse-a
+          priority: High
+---
+# A work order naming a zone: a clean of that zone by the robot vacuum.
+#
+# The draft is written whether or not the vacuum is connected: a trigger checks nothing
+# about robots, and a draft holds no robot. What the vacuum's absence changes is what
+# happens when a person clears the draft (see the example's README).
+apiVersion: swarmada.io/v1
+kind: TaskTrigger
+metadata:
+  name: workorder-clean-warehouse-a
+  namespace: warehouse-a
+spec:
+  source:
+    semanticEventSource: work-orders
+    eventType: workorder.clean.warehouse-a
+  taskTemplate:
+    draft: true
+    actions:
+      - name: clean
+        action:
+          type: Clean
+          zone: warehouse-a
+          robotSelector: vacuum-01
+          priority: Normal
+---
+# The mapping schedule starting: one explore-floor segment.
+#
+# The payload is written as `raw:` (base64 of the JSON beside it), the spelling the
+# floor-mapping samples use; a plain-key payload reaches the adapter too. See
+# examples/floor-mapping/tasks/explore-floor.yaml.
+apiVersion: swarmada.io/v1
+kind: TaskTrigger
+metadata:
+  name: schedule-mapping-segment
+  namespace: warehouse-a
+spec:
+  source:
+    semanticEventSource: schedules
+    eventType: schedule.started.mapping-segment
+  taskTemplate:
+    draft: true
+    actions:
+      - name: explore
+        action:
+          type: Custom
+          customType: explore-floor
+          zone: warehouse-a
+          priority: Normal
+          payload:
+            # {"operation":"explore-floor","bound_ref":"room-1","max_speed_mps":0.2,"resume":false}
+            raw: eyJvcGVyYXRpb24iOiJleHBsb3JlLWZsb29yIiwiYm91bmRfcmVmIjoicm9vbS0xIiwibWF4X3NwZWVkX21wcyI6MC4yLCJyZXN1bWUiOmZhbHNlfQ==
+---
+# A static camera's detection in the zone: go and look.
+apiVersion: swarmada.io/v1
+kind: TaskTrigger
+metadata:
+  name: camera-detection-look
+  namespace: warehouse-a
+spec:
+  source:
+    semanticEventSource: static-cameras
+    eventType: camera.detection.warehouse-a
+  taskTemplate:
+    draft: true
+    actions:
+      - name: look
+        action:
+          type: Navigate
+          zone: warehouse-a
+          priority: Normal

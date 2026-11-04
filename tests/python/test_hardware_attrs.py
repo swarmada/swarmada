@@ -46,12 +46,13 @@ def _by_name(components):
 def _emit(scenario_name: str, t: float = 0.0):
     """Run a preset through the engine and the sim's component builder — the real path."""
     eng = ScenarioEngine(load_scenario(scenario_name))
-    return _by_name([
-        _hw_component(pb, hs, pb.HARDWARE_STATUS_HEALTHY) for hs in eng.hardware_at(t)
-    ])
+    return _by_name(
+        [_hw_component(pb, hs, pb.HARDWARE_STATUS_HEALTHY) for hs in eng.hardware_at(t)]
+    )
 
 
 # ── the manifest -> engine hop ────────────────────────────────────────────────
+
 
 def test_manifest_attrs_parse_with_absence_preserved():
     sc = load_scenario("full-surface")
@@ -87,6 +88,7 @@ def test_engine_carries_attrs_through_a_fault():
 
 # ── the engine -> wire hop ────────────────────────────────────────────────────
 
+
 def test_declared_attrs_are_set_on_the_wire():
     comps = _emit("full-surface")
     lidar, cam = comps["lidar_top"], comps["camera_front"]
@@ -102,8 +104,14 @@ def test_undeclared_attrs_are_absent_on_the_wire():
     comps = _emit("full-surface")
     lidar = comps["lidar_top"]
 
-    for f in ("resolution_mp", "frame_rate_fps", "depth_capable", "max_payload_kg",
-              "platform_length_mm", "platform_width_mm"):
+    for f in (
+        "resolution_mp",
+        "frame_rate_fps",
+        "depth_capable",
+        "max_payload_kg",
+        "platform_length_mm",
+        "platform_width_mm",
+    ):
         assert not lidar.HasField(f), (
             f"lidar_top sent {f} that the manifest never declared; an unknown attribute must be "
             f"OMITTED, never sent as {getattr(lidar, f)!r}"

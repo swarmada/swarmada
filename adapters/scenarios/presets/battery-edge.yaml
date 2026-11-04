@@ -1,21 +1,23 @@
 # Copyright 2026 The Swarmada Authors. Apache-2.0.
 #
-# battery-edge — one robot starts low and drains fast to 0. Shows the
-# scheduler's existing highest-battery-wins tie-break (DefaultScheduler.
-# SelectRobot, internal/scheduler/scheduler.go): among Idle, capability-
-# matching candidates it sorts by battery descending and picks the
-# healthiest, so this robot loses every NEW-task selection to any healthy
-# Idle robot. Drives TelemetryPayload.battery.
+# battery-edge — one robot starts low and drains fast to 0 while it keeps
+# its task. Drives TelemetryPayload.battery.
 #
-# NOTE: FleetAction has no minBatteryPct field and there is no logic anywhere
-# that pulls an ALREADY-assigned task off a robot because its battery drops
-# mid-task — this scenario demonstrates the low-battery robot never getting
-# picked in the first place, not a live hand-off of in-progress work.
+# What a run shows: the robot takes the task and is still InProgress as
+# its battery falls through the teens. In the quickstart it is the only
+# candidate (the two other robots report no position), so the scheduler's
+# battery-descending tie-break (DefaultScheduler.SelectRobot,
+# internal/scheduler/scheduler.go) is not exercised; the quickstart's
+# battery-handoff scenario stages that comparison.
+#
+# NOTE: FleetAction.spec.minBatteryPct exists, but it is a filter on NEW
+# assignments (scheduler candidate filter 4), and this scenario's actions do
+# not set it. Nothing pulls an ALREADY-assigned task off a robot because its
+# battery drops mid-task.
 name: battery-edge
 description: >
-  One robot starts at low battery and drains fast to 0; the scheduler's
-  highest-battery-wins tie-break means it is never selected for a new task
-  while a healthier Idle robot is available.
+  One robot starts at low battery and drains fast to 0 while it keeps its
+  task: it is the only candidate, so no comparison between robots is made.
 
 fleet:
   size: 1

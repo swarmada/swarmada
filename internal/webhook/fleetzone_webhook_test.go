@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,11 +35,13 @@ const zoneNS = "warehouse-a"
 func newZoneValidator(t *testing.T, objs ...client.Object) *FleetZoneValidator {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := fleetv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add scheme: %v", err)
+	for _, add := range []func(*runtime.Scheme) error{fleetv1.AddToScheme, corev1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatalf("add scheme: %v", err)
+		}
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	return &FleetZoneValidator{Client: c}
+	return &FleetZoneValidator{Client: c, APIReader: c}
 }
 
 func zoneWithParent(name, parent string) *fleetv1.FleetZone {

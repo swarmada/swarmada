@@ -30,8 +30,8 @@ import pytest
 from simulation.fault_injection import camera_fault
 from simulation.scenarios.warehouse_demo import WarehouseScenario
 
-
 # ── warehouse scenario lifecycle ────────────────────────────────────────────────
+
 
 def test_setup_spawns_requested_fleet() -> None:
     scenario = WarehouseScenario(robot_count=4, zone="warehouse-a")
@@ -54,6 +54,7 @@ def test_run_honours_duration_and_tears_down() -> None:
 
 
 # ── camera-fault injector round-trip (isolated dir) ─────────────────────────────
+
 
 @pytest.fixture()
 def isolated_fault_dir(tmp_path, monkeypatch):
@@ -83,9 +84,7 @@ def test_cli_inject_then_clear(isolated_fault_dir) -> None:
     assert camera_fault.main(["--robot", "sim-robot-002", "--component", "camera_front"]) == 0
     assert p.exists()
     assert (
-        camera_fault.main(
-            ["--robot", "sim-robot-002", "--component", "camera_front", "--clear"]
-        )
+        camera_fault.main(["--robot", "sim-robot-002", "--component", "camera_front", "--clear"])
         == 0
     )
     assert not p.exists()

@@ -1,0 +1,89 @@
+# TaskTrigger: a semantic event drafts a FleetTask, and a human activates it.
+#
+# This sample runs with NO vendor adapter and no robot. That is the point: the
+# other semantic-event sources are execution-bound (a robot
+# capability, a resident executor, a request/response executor), so none of them
+# can be demonstrated from a public repository, and none can raise an event when
+# nothing is running. A SemanticEventSource is the adapter-free ingress, so the
+# whole path is exercisable with kubectl alone.
+#
+# Apply this file, then raise an event (step 3 below) and watch what happens —
+# and, more importantly, what does not.
+#
+# It lives in warehouse-a, the namespace every other file in this directory uses, so
+# `kubectl apply -f config/samples/` needs only that one namespace to exist.
+---
+apiVersion: swarmada.io/v1
+kind: SemanticEventSource
+metadata:
+  name: yard-sensors
+  namespace: warehouse-a
+spec:
+  displayName: "Perimeter sensors — yard west"
+  # The CLOSED set of types this source may raise. An event naming anything else
+  # is REJECTED and fires nothing: an undeclared type must not be able to trigger
+  # work, for the same reason an undeclared robot capability cannot. Without this
+  # list a typo and a type nobody has written a trigger for are indistinguishable
+  # — both silently do nothing.
+  eventTypes:
+    - IntruderDetected
+    - ShiftStarted
+---
+apiVersion: swarmada.io/v1
+kind: TaskTrigger
+metadata:
+  name: intruder-response
+  namespace: warehouse-a
+spec:
+  source:
+    semanticEventSource: yard-sensors
+    eventType: IntruderDetected
+  # Drafted as written. This controller performs no parameter substitution from
+  # the event payload — a half-done substitution would produce a task that looks
+  # parameterised and is not, so the human reviewing the draft fills values in.
+  taskTemplate:
+    completionPolicy: All
+    actions:
+      - name: investigate
+        action:
+          type: Navigate
+          zone: warehouse-a
+          priority: High
+---
+# 3. Raise the event. Anything that can reach the API server can create this —
+#    a curl in a CI job, a building-management bridge, an operator with kubectl:
+#
+#      kubectl apply -f config/samples/tasktrigger_demo.yaml
+#
+# 4. Then look at what was produced:
+#
+#      swarmctl get semanticevents -n warehouse-a
+#      # NAME    SOURCE         TYPE              PHASE      DRAFTED
+#      # ev-1    yard-sensors   IntruderDetected  Accepted   intruder-response-ev-1
+#
+#      swarmctl get fleettasks -n warehouse-a
+#      # the drafted task is at phase Draft — composed, holding, dispatching nothing
+#
+#      kubectl get fleetactions -n warehouse-a
+#      # EMPTY. No child action exists. No robot has been asked to do anything.
+#
+# 5. A human activates it, and only then does it dispatch:
+#
+#      kubectl patch fleettask intruder-response-ev-1 -n warehouse-a \
+#        --type=merge -p '{"spec":{"draft":false}}'
+#
+#    That patch is the moment a machine is permitted to move, so it needs the
+#    `activate` verb on fleettasks (operator, fleet-manager and admin hold it),
+#    and the admission webhook refuses it to every ServiceAccount.
+apiVersion: swarmada.io/v1
+kind: SemanticEvent
+metadata:
+  name: ev-1
+  namespace: warehouse-a
+spec:
+  source: yard-sensors
+  type: IntruderDetected
+  occurredAt: "2026-09-15T02:14:07Z"
+  payload:
+    camera: "cam-07"
+    confidence: "0.94"

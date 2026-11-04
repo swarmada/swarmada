@@ -27,6 +27,16 @@ The `Makefile` is the source of truth for every task (`make help` lists them).
   regenerated stubs.
 - After any code change: `make test` and `go build ./...` must pass.
 - Before opening a pull request: `make lint` must pass.
+- **A target existing is not a target running.** Several gates this project's assurance
+  claims rest on — the whole `spec-*` family among them — are invoked by no job and no
+  hook: they run when a person types them. Read
+  [`docs/gate-invocation.md`](docs/gate-invocation.md) before citing a gate as enforced,
+  and run `make gate-integrity` to have the answer computed for the checkout you are in.
+- A check that exits 0 without running is not a pass. `make gate-integrity` enforces that:
+  a checker that cannot fail, is invoked by nothing, skips without being named in
+  `scripts/gate-integrity-register.txt`, or reports a graded obligation away, fails it.
+  When you add a checker, give it a target; when you add a skip, register it with the
+  reason it is legitimate.
 
 ## Invariants that must not be broken
 

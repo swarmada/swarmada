@@ -35,7 +35,7 @@ import (
 )
 
 // DiscoveredRobotReconciler sweeps un-admitted DiscoveredRobots toward their TTL
-// (RFC-0001 §9.2.5): it marks one Stale as it approaches expiry and deletes it
+// (RFC-0001 #discoveredrobot-state-machine): it marks one Stale as it approaches expiry and deletes it
 // once expired. Admission (`swarmctl admit`) and rejection delete the resource, so
 // a DiscoveredRobot that reaches its TTL was never acted on and is reaped.
 //
@@ -51,7 +51,7 @@ type DiscoveredRobotReconciler struct {
 	// the record of intent matters. Nil is tolerated (unit tests, no-op).
 	Recorder record.EventRecorder
 
-	// Audit seals ROBOT_REJECTED (§9.6.5.1) into the tamper-evident chain when an
+	// Audit seals ROBOT_REJECTED (RFC-0001 #safety-required-events) into the tamper-evident chain when an
 	// operator rejects a staged robot. Nil disables recording; the rejection proceeds.
 	Audit audit.Recorder
 
@@ -83,7 +83,7 @@ func (r *DiscoveredRobotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Operator rejection (§9.1.2.7). `swarmctl reject` marks the object rather than
+	// Operator rejection (RFC-0001 #discoveredrobot-state-machine). `swarmctl delete robot` marks the object rather than
 	// deleting it, and the deletion happens HERE, after the chain entry is sealed.
 	//
 	// That indirection is the whole point. A rejection and a TTL sweep both end in the
@@ -93,6 +93,7 @@ func (r *DiscoveredRobotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// discriminating signal: only the SAR-gated `reject` verb writes it.
 	if reason, rejected := dr.Annotations[annRobotRejected]; rejected {
 		r.recordRejected(ctx, dr, reason)
+		r.emitRejected(dr, reason)
 		if err := r.Delete(ctx, dr); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
@@ -100,7 +101,7 @@ func (r *DiscoveredRobotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	// Operator admission (§9.1.2.5). `swarmctl admit` records the operator's parameters
+	// Operator admission (RFC-0001 #discoveredrobot-controller-behavior-on-admit). `swarmctl admit` records the operator's parameters
 	// here rather than creating the Robot itself, so promotion from discovered to
 	// schedulable happens in exactly one place for both admission paths.
 	//
@@ -220,11 +221,13 @@ func (r *DiscoveredRobotReconciler) maybeAutoAdmit(ctx context.Context, dr *flee
 		return false, fmt.Errorf("auto-admit: getting fleetzone: %w", err)
 	}
 
-	robot := buildAutoAdmitRobot(dr, class, prov.AutoAdmitZone)
-	if robot == nil {
-		// Unreachable given the baseAdapter check above; skipping leaves the robot for the
-		// operator path rather than admitting one the class failed to configure.
-		logger.Info("auto-admit could not build a robot from the class; skipping", "class", class.Name, "robot", dr.Name)
+	robot, err := buildAutoAdmitRobot(dr, class, prov.AutoAdmitZone)
+	if err != nil {
+		// Reached when the resolved adapter version is one the Robot CRD refuses: the class
+		// pins none and the adapter reported a pre-release. Skipping leaves the robot for the
+		// operator path rather than sending a create the schema must refuse.
+		logger.Info("auto-admit could not build a robot from the class; skipping",
+			"class", class.Name, "robot", dr.Name, "reason", err.Error())
 		return false, nil
 	}
 	if err := r.Create(ctx, robot); err != nil {
@@ -246,7 +249,7 @@ func (r *DiscoveredRobotReconciler) maybeAutoAdmit(ctx context.Context, dr *flee
 }
 
 // completeOperatorAdmit creates the Robot an operator's admission decided on, then removes
-// the staging object (§9.1.2.5).
+// the staging object (RFC-0001 #discoveredrobot-controller-behavior-on-admit).
 //
 // Returns handled=false when the mark cannot be acted on, so the caller falls through to the
 // rest of Reconcile. That matters: a corrupt annotation must not shield the object from the
@@ -283,6 +286,15 @@ func (r *DiscoveredRobotReconciler) completeOperatorAdmit(ctx context.Context, d
 	}
 
 	if err := r.Create(ctx, robot); err != nil && !apierrors.IsAlreadyExists(err) {
+		// Recorded as well as retried. The CLI has already told the operator the admission
+		// succeeded, so a refusal that only reaches the manager log is invisible to them.
+		//
+		// Retried because what reaches here can change without the admission changing: the
+		// Robot admission gate refuses while the adapter is not Connected or the zone is not yet
+		// there, and admission is level-triggered on exactly those. A refusal that depends on
+		// the admission alone — a version the CRD pattern refuses — is caught by BuildRobot
+		// above and never sent.
+		r.recordAdmitFailed(dr, err)
 		return false, fmt.Errorf("operator-admit: creating robot: %w", err)
 	}
 	// AlreadyExists is success, not a conflict: it means a previous attempt created the
@@ -326,7 +338,7 @@ func (r *DiscoveredRobotReconciler) recordAdmitFailed(dr *fleetv1.DiscoveredRobo
 // sets it, which is what keeps a reaped robot from being recorded as a refused one.
 const annRobotRejected = "swarmada.io/rejected"
 
-// recordRejected seals ROBOT_REJECTED (§9.6.5.1) before the staging object is removed.
+// recordRejected seals ROBOT_REJECTED (RFC-0001 #safety-required-events) before the staging object is removed.
 //
 // Sealed here rather than in `swarmctl` because the chain is single-writer by
 // construction: audit.Log carries the per-namespace sequence number and previous hash in
@@ -358,6 +370,22 @@ func (r *DiscoveredRobotReconciler) recordRejected(ctx context.Context, dr *flee
 	}
 }
 
+// emitRejected records the Normal `Rejected` Event carrying the operator's reason
+// (RFC-0001 #discoveredrobot-state-machine). The manager emits it, not
+// `swarmctl`: the manager already holds `create` on events, and granting it to the
+// human roles that hold `reject` would let them write any Event in the namespace,
+// which RBAC cannot narrow to this one. Emitted before the delete, so it names an
+// object that existed; the Event outlives it until it expires.
+func (r *DiscoveredRobotReconciler) emitRejected(dr *fleetv1.DiscoveredRobot, reason string) {
+	if r.Recorder == nil {
+		return
+	}
+	if reason == "" {
+		reason = "no reason recorded by the operator"
+	}
+	r.Recorder.Eventf(dr, corev1.EventTypeNormal, "Rejected", "rejected by operator: %s", reason)
+}
+
 // recordAutoAdmit emits a namespace Event capturing a zero-touch admission (ADR-0014).
 // Best-effort and nil-safe: a missing recorder (unit tests) or events RBAC gap costs
 // only the record of intent, not the admission itself.
@@ -372,24 +400,23 @@ func (r *DiscoveredRobotReconciler) recordAutoAdmit(dr *fleetv1.DiscoveredRobot,
 // buildAutoAdmitRobot constructs the schedulable Robot for an auto-admit (ADR-0014).
 //
 // It delegates to the same builder the operator path uses, so the two admission routes cannot
-// drift: when they were separate implementations of §9.1.2.5 they had already diverged, both
+// drift: when they were separate implementations of RFC-0001 #discoveredrobot-controller-behavior-on-admit they had already diverged, both
 // dropping the robot's reported hardware in favour of the class template. The only difference
 // that belongs here is the AutoAdmitted marker.
-func buildAutoAdmitRobot(dr *fleetv1.DiscoveredRobot, class *fleetv1.RobotClass, zone string) *fleetv1.Robot {
-	// Cannot fail: the class is checked for a baseAdapter before this is reached, which is
-	// the builder's only error. Falling back to the un-templated robot would be worse than
-	// skipping — it would admit a robot the class was supposed to configure.
+func buildAutoAdmitRobot(dr *fleetv1.DiscoveredRobot, class *fleetv1.RobotClass, zone string) (*fleetv1.Robot, error) {
+	// An error is never answered by falling back to the un-templated robot: that would admit
+	// a robot the class was supposed to configure. The caller skips instead.
 	robot, err := admission.BuildRobot(dr, admission.Params{
 		Zone:       zone,
 		RobotClass: class.Name,
 	}, class, dr.Namespace)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// AutoAdmitted marks this Robot as auto-created, the eligibility gate for opt-in offline
 	// auto-removal (ADR-0030) — operator-created robots lack it.
 	robot.Annotations[fleetv1.AutoAdmittedAnnotation] = "true"
-	return robot
+	return robot, nil
 }
 
 // SetupWithManager registers the DiscoveredRobot sweeper.

@@ -33,10 +33,10 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// §9.1.12 status.connectedRobots — the count of Robots this adapter currently drives.
+// RFC-0001 #fleetadapter-status-fields-and-phase-machine status.connectedRobots — the count of Robots this adapter currently drives.
 //
 // "Driven through this adapter" means BOUND to it via spec.adapter.name, not "its class appears in
-// spec.servesRobotClasses". Authority follows the named binding (§9.5), so a robot bound elsewhere
+// spec.servesRobotClasses". Authority follows the named binding (RFC-0001 #security-fleet-adapter-authentication-robot-identity), so a robot bound elsewhere
 // is not this adapter's to count even when the two adapters serve overlapping classes — counting by
 // class would double-count a shared class and inflate every adapter in the namespace.
 

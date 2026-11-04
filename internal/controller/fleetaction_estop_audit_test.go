@@ -27,7 +27,7 @@ import (
 	"github.com/swarmada/swarmada/internal/audit"
 )
 
-// ACTION_PAUSED_BY_ESTOP (§9.6.5.1). An emergency stop halting in-flight work is the
+// ACTION_PAUSED_BY_ESTOP (RFC-0001 #safety-required-events). An emergency stop halting in-flight work is the
 // event a safety review reaches for first, and the two Paused edges leave the fleet in
 // materially different states — which is why prior_phase is a required detail field and
 // not decoration.

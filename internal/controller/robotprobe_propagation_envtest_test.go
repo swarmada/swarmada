@@ -27,7 +27,7 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// §9.1.6.5 end to end against a real API server: a sustained probe failure degrades the component,
+// RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream end to end against a real API server: a sustained probe failure degrades the component,
 // and the §6.10 derivation reacts by dropping the capability that requires it — the whole point of
 // the propagation. Recovery reverses both.
 //
@@ -99,7 +99,7 @@ func TestEnvtest_ProbeFailureDegradesHardwareAndDropsCapability(t *testing.T) {
 		t.Fatalf("precondition: capability = %s, want Active on healthy hardware", s)
 	}
 
-	// The probe crosses failureThreshold → §9.1.6.5 step 2.
+	// The probe crosses failureThreshold → RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream step 2.
 	if err := probeR.propagateHardwareStatus(ctx, &got, "camera-front",
 		fleetv1.HardwareDegraded, "frame_rate_pct=48 (threshold 80)", nil); err != nil {
 		t.Fatalf("propagate degrade: %v", err)

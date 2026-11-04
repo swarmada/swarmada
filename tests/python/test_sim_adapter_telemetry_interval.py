@@ -46,7 +46,8 @@ def _adapter() -> SimAdapter:
 
 def _register_ack(seconds: int):
     return pb.ControlPlaneMessage(
-        register_ack=pb.RegisterAck(accepted=True, telemetry_interval_seconds=seconds))
+        register_ack=pb.RegisterAck(accepted=True, telemetry_interval_seconds=seconds)
+    )
 
 
 def test_adopts_the_advertised_interval() -> None:

@@ -37,7 +37,7 @@ func aaDiscovered(name, suggestedClass string) *fleetv1.DiscoveredRobot {
 			SuggestedRobotClass: suggestedClass,
 			Manufacturer:        "Acme",
 			Model:               "X1",
-			AdapterVersion:      "1.0",
+			AdapterVersion:      "1.0.0",
 		},
 	}
 }
@@ -153,7 +153,7 @@ func TestAutoAdmit_MissingClassNoAdmit(t *testing.T) {
 	}
 }
 
-// Auto-admit runs through the same builder as the operator path (§9.1.2.5), so the hardware
+// Auto-admit runs through the same builder as the operator path (RFC-0001 #discoveredrobot-controller-behavior-on-admit), so the hardware
 // union applies here too. This path had no hardware coverage at all while it was a separate
 // implementation, which is how it came to silently discard the robot's reported inventory.
 func TestAutoAdmit_UnionsReportedHardwareWithTheClassTemplate(t *testing.T) {

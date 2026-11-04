@@ -114,7 +114,7 @@ func TestEnvtest_FleetActionRequeueOnLostRobot(t *testing.T) {
 	r := &FleetActionReconciler{Client: envK8s, Scheme: envScheme, Scheduler: scheduler.NewDefaultScheduler()}
 
 	// Default onDisconnect=Never would HOLD a Revoking action; AfterTimeout lets a
-	// provably-dead lease past the ceiling auto-requeue (§9.1.11.9).
+	// provably-dead lease past the ceiling auto-requeue (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect).
 	cfg := &fleetv1.SwarmadaConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "swarmada-config", Namespace: ns},
 		Spec: fleetv1.SwarmadaConfigSpec{
@@ -126,6 +126,25 @@ func TestEnvtest_FleetActionRequeueOnLostRobot(t *testing.T) {
 	}
 	if err := envK8s.Create(ctx, cfg); err != nil {
 		t.Fatalf("create config: %v", err)
+	}
+
+	// z-a must exist as a reconciled FleetZone. Before ADR-0058 an action could name a
+	// zone with no FleetZone object and simply stay Pending; candidate filter 11 now
+	// refuses that as ZoneUnknown, because "a name that resolves to nothing is a name
+	// whose restrictions cannot be evaluated" (§6). Seeding an UNRESTRICTED,
+	// fully-resolved zone keeps this test testing what it was written to test — lost-robot
+	// requeue and idempotency — rather than the new filter.
+	zone := &fleetv1.FleetZone{ObjectMeta: metav1.ObjectMeta{Name: "z-a", Namespace: ns}}
+	if err := envK8s.Create(ctx, zone); err != nil {
+		t.Fatalf("create zone: %v", err)
+	}
+	zone.Status.Restrictions = &fleetv1.ZoneRestrictionsStatus{}
+	zone.Status.Conditions = []metav1.Condition{{
+		Type: fleetv1.ZoneCondRestrictionsResolved, Status: metav1.ConditionTrue,
+		Reason: "Resolved", Message: "no restrictions", LastTransitionTime: metav1.Now(),
+	}}
+	if err := envK8s.Status().Update(ctx, zone); err != nil {
+		t.Fatalf("seed zone status: %v", err)
 	}
 
 	robot := envtestValidRobot(ns, "r-lost", "z-a")

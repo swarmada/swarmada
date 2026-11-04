@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** API Designer, Kubernetes Expert
-- **Related:** RFC-0001 §9.1.11.11 (coordinate system), FleetZone/Robot schemas,
+- **Related:** RFC-0001 "Coordinate System", FleetZone/Robot schemas,
   ADR-0006 (north side is the Kubernetes API)
 
 ## Context

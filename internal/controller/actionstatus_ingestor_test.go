@@ -18,15 +18,19 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
+	"github.com/swarmada/swarmada/internal/controlstream"
 	fav1 "github.com/swarmada/swarmada/proto/fleet_adapter/v1"
 )
 
@@ -35,6 +39,21 @@ func newActionStatusIngestor(t *testing.T, objs ...client.Object) (*ActionStatus
 	scheme := runtime.NewScheme()
 	if err := fleetv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add scheme: %v", err)
+	}
+	// The ingestor reads the Robot an action is assigned to, and authorizes the report by
+	// that Robot's wire robot_id. A fixture that assigns an action to a robot it does not
+	// supply gets a plain Robot of that name, whose robot_id is its name.
+	have := map[string]bool{}
+	for _, o := range objs {
+		if r, ok := o.(*fleetv1.Robot); ok {
+			have[r.Name] = true
+		}
+	}
+	for _, o := range objs {
+		if a, ok := o.(*fleetv1.FleetAction); ok && a.Status.AssignedRobot != "" && !have[a.Status.AssignedRobot] {
+			have[a.Status.AssignedRobot] = true
+			objs = append(objs, &fleetv1.Robot{ObjectMeta: metav1.ObjectMeta{Name: a.Status.AssignedRobot, Namespace: a.Namespace}})
+		}
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -48,7 +67,7 @@ func u64(v uint64) *uint64 { return &v }
 
 func ingest(t *testing.T, i *ActionStatusIngestor, u *fav1.ActionStatusUpdate) {
 	t.Helper()
-	if err := i.IngestActionStatus(context.Background(), actionNS, u); err != nil {
+	if err := i.IngestActionStatus(context.Background(), actionNS, allowAnyRobot, u); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 }
@@ -70,15 +89,63 @@ func TestIngest_Running_AssignedToInProgress(t *testing.T) {
 	}
 }
 
-// A nil fencing token is treated as current (adapters may omit it).
-func TestIngest_NilFencingToken_TreatedAsCurrent(t *testing.T) {
-	i, c := newActionStatusIngestor(t, assignedAction("t1", "r1", fleetv1.ActionPhaseAssigned, 5, nil))
-
-	ingest(t, i, &fav1.ActionStatusUpdate{ActionId: "t1", State: fav1.ActionState_ACTION_STATE_RUNNING})
-
-	if getAction(t, c, "t1").Status.Phase != fleetv1.ActionPhaseInProgress {
-		t.Fatal("nil fencing token should be treated as current and advance the task")
+// A report without a fencing token is refused like a stale one: it names no robot, so nothing ties
+// it to the run it came from (conformance C6.4 requires the echo). A Warning Event on the adapter's
+// own FleetAdapter says so for every terminal report, and once per connection for running reports.
+func TestIngest_NilFencingToken_Refused(t *testing.T) {
+	adapter := &fleetv1.FleetAdapter{ObjectMeta: metav1.ObjectMeta{Name: "acme", Namespace: actionNS}}
+	i, c := newActionStatusIngestor(t, assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 5, nil), adapter)
+	rec := &eventTargets{}
+	i.Recorder = rec
+	defer func(prev func(context.Context) controlstream.TLSIdentity) { streamIdentity = prev }(streamIdentity)
+	streamIdentity = func(context.Context) controlstream.TLSIdentity {
+		return controlstream.TLSIdentity{AdapterName: "acme", Namespace: actionNS, Verified: true}
 	}
+
+	for _, s := range []fav1.ActionState{fav1.ActionState_ACTION_STATE_RUNNING, fav1.ActionState_ACTION_STATE_RUNNING,
+		fav1.ActionState_ACTION_STATE_CANCELLED, fav1.ActionState_ACTION_STATE_FAILED, fav1.ActionState_ACTION_STATE_SUCCEEDED} {
+		ingest(t, i, &fav1.ActionStatusUpdate{ActionId: "t1", State: s})
+	}
+
+	if ft := getAction(t, c, "t1"); ft.Status.Phase != fleetv1.ActionPhaseInProgress {
+		t.Fatalf("phase = %s, want InProgress: a report without a fencing token must not move the action", ft.Status.Phase)
+	}
+	if len(rec.got) != 4 {
+		t.Fatalf("%d Events (%v), want 4: one for the connection's running reports, one per terminal report", len(rec.got), rec.got)
+	}
+	for _, e := range rec.got {
+		if e.kind != "FleetAdapter" || e.name != "acme" || e.uid != adapter.UID || e.reason != EventAdapterOmitsFencingToken ||
+			!strings.Contains(e.msg, "C6.4") {
+			t.Errorf("Event %+v, want %s on the FleetAdapter acme itself, naming conformance C6.4", e, EventAdapterOmitsFencingToken)
+		}
+	}
+}
+
+// eventTargets records which object each Event was given.
+type eventTargets struct {
+	got []recordedEvent
+}
+
+type recordedEvent struct {
+	kind, name, reason, msg string
+	uid                     types.UID
+}
+
+func (o *eventTargets) Event(obj runtime.Object, _, reason, msg string) {
+	m, _ := obj.(client.Object)
+	kind := fmt.Sprintf("%T", obj)
+	if _, ok := obj.(*fleetv1.FleetAdapter); ok {
+		kind = "FleetAdapter"
+	}
+	o.got = append(o.got, recordedEvent{kind: kind, name: m.GetName(), uid: m.GetUID(), reason: reason, msg: msg})
+}
+
+func (o *eventTargets) Eventf(obj runtime.Object, typ, reason, format string, args ...interface{}) {
+	o.Event(obj, typ, reason, fmt.Sprintf(format, args...))
+}
+
+func (o *eventTargets) AnnotatedEventf(obj runtime.Object, _ map[string]string, typ, reason, format string, args ...interface{}) {
+	o.Eventf(obj, typ, reason, format, args...)
 }
 
 // A superseded assignment (stale fencing token) must not move the current action.
@@ -101,7 +168,7 @@ func TestIngest_StaleFencingToken_Ignored(t *testing.T) {
 // A status update for an unknown action is stale, not an error.
 func TestIngest_UnknownAction_NoError(t *testing.T) {
 	i, _ := newActionStatusIngestor(t)
-	if err := i.IngestActionStatus(context.Background(), actionNS,
+	if err := i.IngestActionStatus(context.Background(), actionNS, allowAnyRobot,
 		&fav1.ActionStatusUpdate{ActionId: "ghost", State: fav1.ActionState_ACTION_STATE_RUNNING}); err != nil {
 		t.Fatalf("unknown task should be a no-op, got error: %v", err)
 	}

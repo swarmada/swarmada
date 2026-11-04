@@ -197,7 +197,7 @@ func TestZoneObserver_ConcurrentFrames(t *testing.T) {
 }
 
 // Integration: the ZoneController's currentZone transition drives the SHARED TDE
-// engine's Reserved→Occupied (§9.4.2), off the existing position signal — no
+// engine's Reserved→Occupied (RFC-0001 #tde-reservation-state), off the existing position signal — no
 // second position path.
 func TestZoneObserver_EntrySignalsTDEOccupied(t *testing.T) {
 	robot := robotAt("r1", "rid1", "") // currentZone empty; will enter "z"

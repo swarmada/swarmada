@@ -12,8 +12,8 @@ simulated robots (or a Fleet Adapter connecting over `localhost`/in-cluster).
 It is not the single-site or multi-site production topology — no Zone
 Controller edge node or Jetson-hosted Fleet Adapter is involved here.
 
-> **OS scope:** macOS only at v0.3 (Apple Silicon and Intel). Linux and
-> Windows setup scripts are planned closer to release. The `make`
+> **OS scope:** macOS only at v0.3 (Apple Silicon and Intel). No Linux or
+> Windows setup script exists. The `make`
 > targets themselves (`docker-build`, `install`, `deploy`, ...) are
 > OS-agnostic; only `scripts/setup-macos.sh` and `scripts/deploy-minikube.sh`
 > are macOS-specific (mainly the Homebrew-based installs).
@@ -50,19 +50,19 @@ before acting:
    first time, macOS pops up a GUI installer dialog; accept it, then re-run
    `scripts/setup-macos.sh` (the script exits after triggering this since the
    GUI install runs asynchronously).
-3. **Go** (`brew install go`) — 1.22+.
+3. **Go** (`brew install go`) — 1.25+ (the `go` directive in `go.mod`; the
+   `Dockerfile` builder stage uses Go 1.26).
 4. **kubectl** (`brew install kubectl`).
 5. **minikube** (`brew install minikube`).
 6. **Docker Desktop** (`brew install --cask docker`) — installed but not
    started; you must open it once yourself (`open -a Docker`) and wait for
    the whale icon to show "running" before deploying, since minikube's
    Docker driver needs the daemon up.
-7. **protoc**, the Protocol Buffers compiler (`brew install protobuf`) — the
-   controller-manager imports generated proto stubs
-   (`internal/controlstream` → `proto/fleet_adapter/v1`), which are
-   `.gitignored` and must be regenerated locally before every container
-   build. `make docker-build` regenerates them for you (via the `proto-go`
-   target), but `protoc` itself must already be on your machine.
+7. **protoc**, the Protocol Buffers compiler — needed only to regenerate the
+   proto stubs after editing a `.proto`. The controller-manager imports the
+   generated stubs (`internal/controlstream` → `proto/fleet_adapter/v1`), which
+   are committed, so building the image does not need `protoc`. `make proto-go`
+   refuses any version other than the Makefile's `PROTOC_VERSION`.
 8. **protoc-gen-go** / **protoc-gen-go-grpc** — the Go codegen plugins,
    version-pinned to match the gRPC runtime in `go.mod` (see the Makefile's
    comment on `PROTOC_GEN_GO_VERSION`/`PROTOC_GEN_GO_GRPC_VERSION` — a
@@ -72,9 +72,9 @@ before acting:
 for adapter development, not for the Go controller-manager/Docker path).
 Homebrew's `python3` is "externally managed" (PEP 668) and refuses a plain
 `pip install`; the script won't silently choose `--break-system-packages` or
-a virtualenv on your behalf. If you need it later: `pip install grpcio-tools
---break-system-packages`, or `make proto-py` after making that same call
-yourself.
+a virtualenv on your behalf. The stubs are committed under `proto/`, so you need
+it only to regenerate them after a `.proto` change: install uv, or run
+`pip install '.[codegen]'` in an environment you own, then `make proto-py`.
 
 ## Manual walkthrough (what the scripts automate)
 
@@ -98,17 +98,15 @@ make docker-build IMG=swarmada-controller:dev
 local dev loop, tagging it something like `swarmada-controller:dev` avoids
 any confusion with a real registry image.
 
-`docker-build` depends on the `proto-go` target (Go stubs only — no Python
-toolchain needed), so it regenerates `proto/fleet_adapter/v1/*.pb.go` before
-invoking `docker build` — the Dockerfile's builder stage `COPY proto/
-proto/`s that in and needs the generated files to exist (they're
-`.gitignored`, not checked in; `.dockerignore` deliberately does **not**
-exclude `proto/`, unlike most non-Go directories, for the same reason). If
-this step fails with `protoc: command not found`, install it first
-(`brew install protobuf` on macOS) and install the Go plugins
-(`go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11` and
+The Dockerfile's builder stage `COPY proto/ proto/`s the committed Go stubs
+(`proto/fleet_adapter/v1/*.pb.go`), so `docker-build` needs no codegen
+toolchain; `.dockerignore` deliberately does **not** exclude `proto/`, unlike
+most non-Go directories, for that reason. After editing a `.proto`, regenerate
+with `make proto-go` (protoc at the Makefile's `PROTOC_VERSION`, plus
+`go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11` and
 `google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1` — versions must match
-the Makefile's pinned `PROTOC_GEN_GO_VERSION`/`PROTOC_GEN_GO_GRPC_VERSION`).
+the Makefile's pinned `PROTOC_GEN_GO_VERSION`/`PROTOC_GEN_GO_GRPC_VERSION`)
+and commit the result.
 `scripts/setup-macos.sh` does all of this for you.
 
 ## 3. Load the image into minikube
@@ -131,16 +129,23 @@ happening and is what these instructions assume.)
 make install
 ```
 
-This applies the thirteen CRD manifests in `config/crd/bases/` directly
-(no kustomize overlay needed for CRDs alone).
+This applies the 21 CRD manifests in `config/crd/bases/` directly
+(`kubectl apply -k config/crd/bases/ --server-side`; no overlay needed for CRDs
+alone). Server-side apply is required: the `ComputeWorkloadTemplate` CRD is too
+large for the annotation client-side apply writes.
 
 ## 5. Deploy the controller-manager
 
 ```bash
-make deploy IMG=swarmada-controller:dev
+make deploy-minimal
 ```
 
-This runs `kubectl apply -k config/default/`, which:
+This guide uses the minimal deploy: no admission webhooks and no `ControlStream`, so
+no adapter can connect. `make deploy` is the deploy that serves adapters; it needs
+cert-manager (see the end of this guide), and `make first-run` runs that posture end
+to end on kind.
+
+`make deploy-minimal` runs `kubectl apply -k config/default/ --server-side --force-conflicts`, which:
 
 - creates the `system` namespace and a `swarmada-manager` ServiceAccount
   (`config/manager/manager.yaml`),
@@ -162,7 +167,7 @@ kubectl logs -n system deployment/swarmada-controller-manager
 
 ```bash
 kubectl create namespace warehouse-a
-kubectl apply -f config/samples/
+kubectl apply -f config/samples/ -l 'swarmada.io/sample-posture!=webhooks-on'
 kubectl get robots,fleettasks -n warehouse-a
 ```
 
@@ -220,24 +225,36 @@ remains. There is no separate cleanup step for the Docker image loaded via
 ## Known limitation: admission webhooks are disabled in this overlay
 
 `config/default/kustomization.yaml` deliberately **excludes**
-`config/webhook/` and runs the manager with `ENABLE_WEBHOOKS=false`. The two
-admission webhooks (`RobotDefaulter`, `RobotAdmissionGate` and friends) need
-real TLS serving certs — normally provisioned by `cert-manager` issuing a
-`Certificate` and injecting the CA bundle into the
-`MutatingWebhookConfiguration`/`ValidatingWebhookConfiguration` objects in
-`config/webhook/manifests.yaml`. That wiring doesn't exist yet in this repo
-(no `config/certmanager/` overlay, no CA-injection annotations on the webhook
-manifests). This quickstart keeps `make deploy` usable in the meantime by
-running without webhooks — meaning `RobotClass`-to-`Robot` field merging and
-the adapter-conformance admission gate do not run in this deployment mode.
-`make run` (local process) has the same `ENABLE_WEBHOOKS=false` escape hatch
-for the same reason, so this isn't a new limitation — it's the same one,
-made honest for the in-cluster path too. Wiring `cert-manager` for a real
-webhook-enabled deployment is tracked as follow-up work, not covered here.
+`config/webhook/` and runs the manager with `ENABLE_WEBHOOKS=false`, because it
+provisions no serving certificates. `config/webhook/manifests.yaml` declares
+eighteen admission webhooks — five mutating (`FirmwareRollout`, `FleetZone`,
+`ModelRollout`, `Robot`, `SwarmadaConfig`) and thirteen validating
+(`ComputeWorkloadTemplate`, `FirmwareRollout`, `FleetAction`, `FleetAction` delete, `FleetTask`,
+`FleetZone`, `ModelRollout`, `Robot`, `Robot` delete, `Robot` status, `SwarmadaConfig`,
+`SwarmadaConfig` delete, `ZoneMaintenance`). Without them none of their rules runs. That includes the
+estop checks (`estop-trigger` and `estop-clear` on the estop annotation), the
+`cancel`, `append` and `activate` verb checks, the `robots/status` guard (`vrobotstatus`),
+which is what stops a principal allowed to write `robots/status` from setting a
+stopped robot's `estopState` to `Normal`, the refusal to delete a `Robot` that
+holds a stop, the refusal to delete work a robot under a stop holds, the refusal to delete the `SwarmadaConfig` that carries a namespace stop, `RobotClass`-to-`Robot` field merging and the adapter-conformance
+admission gate (`RobotAdmissionGate`). `make run` (local process) defaults to the
+same `ENABLE_WEBHOOKS=false`, the quickstart overlays install no webhooks either,
+and neither does the Helm chart with `webhooks.enabled=false`. See
+[Known limitations](known-limitations.md#an-install-without-admission-webhooks-checks-nothing-at-admission).
+
+The webhook-enabled deployment exists as a separate overlay, and `make deploy`
+applies it. `config/controlstream-tls` layers on `config/default` and adds the webhooks with a
+cert-manager serving `Certificate`, CA-bundle injection
+(`cert-manager.io/inject-ca-from`), `ENABLE_WEBHOOKS=true`, and mTLS material for
+the `ControlStream`. It assumes cert-manager is installed.
+`config/overlays/demo-webhooks` composes that overlay with adapter client
+certificates for the webhook demos. The Helm chart (`deploy/swarmada`) serves the
+webhooks by default, with cert-manager or a caller-supplied certificate.
 
 ## What was missing before this guide
 
-`make deploy`/`make undeploy` referenced `config/default/` before this
+`make deploy`/`make undeploy` (now `make deploy-minimal`/`make undeploy-minimal`)
+referenced `config/default/` before this
 change, but that overlay — and `config/manager/` (the Deployment manifest
 itself) and a `ClusterRoleBinding` tying the manager's ServiceAccount to its
 `ClusterRole` — did not exist. Only `make run` (local process) worked. This
@@ -247,15 +264,15 @@ validating this path: the `Dockerfile` didn't `COPY proto/` despite the
 manager needing it, and `.dockerignore` excluded `proto/` from the build
 context even after that fix — both are corrected now, and `docker-build`'s
 proto dependency was narrowed to `proto-go` so it no longer requires the
-Python toolchain.
+Python toolchain. It was later dropped altogether once the stubs were committed.
 
 ## Other operating systems
 
 This guide and `scripts/setup-macos.sh`/`scripts/deploy-minikube.sh` are
-macOS-only right now. The underlying `make` targets
+macOS-only. The underlying `make` targets
 (`docker-build`, `install`, `deploy`, `proto-go`, ...) have no macOS-specific
 logic — a Linux or Windows (WSL2) developer can follow the "Manual
 walkthrough" section above directly, substituting their platform's package
 manager for the `brew install` calls (e.g. `apt install`/`choco install`).
-Dedicated `scripts/setup-linux.sh` and Windows/WSL2 instructions are planned
-before public release, not yet written.
+There is no `scripts/setup-linux.sh` and there are no Windows/WSL2
+instructions.

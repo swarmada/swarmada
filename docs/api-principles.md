@@ -103,20 +103,67 @@ declares an empty spec struct rather than an untyped map.
 
 ## Versioning and compatibility
 
-- **Additive within a version.** New optional fields may be added to `swarmada.io/v1`
-  without a version bump. Changing the meaning of a field, removing a field, or
-  tightening validation is breaking.
-- **Breaking changes get a new version.** A breaking API change introduces
-  `swarmada.io/v2` with conversion, rather than mutating `v1` in place. The Fleet
-  Adapter protocol follows the same rule at the proto layer: field numbers are
-  stable and never reused, and a breaking change moves to a new package
-  (`fleet_adapter.v2`), negotiated at connect time.
+- **The contract is frozen at RFC-0001 v1.0.** The freeze covers the fleet-adapter
+  wire contract version and the CRD API versions published with RFC-0001 v1.0. It does
+  not mean wire contract `1.0`. Until then, `0.x` revisions keep refining the contract
+  and keep changes to existing contracts to a minimum.
+- **The contract-change process.** A change is a new contract version, with release
+  notes and migration notes, specified by an amendment or a new RFC
+  ([`rfcs/README.md`](../rfcs/README.md#amending-an-accepted-rfc)). No change is made in
+  place to the proto definitions, a CRD's rules and semantics, or the normative text of
+  RFC-0001. A change that does not touch the wire is a patch bump by default. A change
+  that binds adapters is a minor bump, and the supported range moves. A change binds
+  adapters if it adds, changes or removes an obligation for adapters. A
+  conformance check that tests an obligation already stated moves the suite revision
+  only. The contract version does not change. A change that binds adapters for safety
+  also raises the lowest supported contract version to the new one. Normative text is a
+  sentence with an RFC 2119 keyword, a schema block, a state table such a sentence
+  cites, and the RBAC matrix. Maturity notes, paragraphs that describe what holds
+  "at v0.4", Known-gaps cells, examples, citations and errata are informative and
+  can still change. The policy is stated in RFC-0001
+  [Resource model](../rfcs/dist/RFC-0001-core-spec.md#resource-model).
+- **The fleet-adapter window.** At RFC-0001 v0.4 the contract is `1.4.0`, and the
+  supported range is `>=1.3.0 <1.5.0`. An adapter outside it moves to a version
+  inside it, in its own repository; the window is not widened.
+- **What lands without a contract change.** Code that brings the reference
+  implementation into line with the text. A conformance check that tests an obligation
+  the text already states, as a suite revision, which does not move the contract
+  version. A check that adds an obligation binds adapters, so it goes through the
+  contract-change process.
+- **Safety rules, at every stage.** A change to a safety rule (stops, the action table,
+  the robot stop table, the invariants) goes through the contract-change process, and the
+  conformance suite is updated in the same version. A change that weakens a guarantee says
+  so first. Every unmet rule keeps its Not-met note.
+- **Names scripts depend on are part of the contract.** Annotation names and labels are
+  inside it. Event reasons, metrics, CLI flags, printer columns, doc comments and
+  message strings are outside it, and a change to one is recorded in `CHANGELOG.md`.
+- **CRD versions follow Kubernetes API rules.** Within `swarmada.io/v1` only
+  backward-compatible changes are made, such as a new optional field. An incompatible
+  schema change introduces a new API version (`v2`), served alongside `v1` for at least
+  one revision, with conversion and a migration note.
+- **`stage:` describes maturity and semantics, not schema compatibility.** On `alpha`,
+  rules and semantics change only through the contract-change process, and a CRD never
+  takes an incompatible schema change within `v1`. On `beta`, a resource changes by
+  addition, and any other change needs a deprecation announced at least one revision
+  ahead. A `stable` resource does not change before the next major revision. Each revision
+  states which resources changed stage. At RFC-0001 v1.0 the core resources are declared
+  `stable` in `v1`. The core resources are the thirteen original kinds: `Robot`,
+  `RobotClass`, `DiscoveredRobot`, `FleetAction`, `FleetTask`, `FleetZone`, `FleetAdapter`,
+  `RobotProbe`, `SwarmadaConfig`, `ModelPolicy`, `ModelRollout`, `FirmwareRollout` and
+  `ZoneMaintenance`.
+- **The rules the contract was built under.** A new optional field
+  is added to `swarmada.io/v1` without a version bump, and changing the meaning of a
+  field, removing a field, or tightening validation is breaking. The Fleet Adapter
+  protocol keeps its field numbers stable and never reuses one. These rules still
+  describe the API's shape, and the principles in this document still govern code
+  that implements it.
 
 ## Discoverability
 
 - **Short names.** Every kind declares a `+kubebuilder:resource:shortName` (`rob`,
-  `fact`, `ft`, `fz`, `rc`, `fa`, `dr`, `rp`, `sc`, `mp`, `mr`, `fwr`, `zm`) for CLI
-  economy — thirteen kinds, thirteen short names.
+  `fact`, `ft`, `fz`, `rc`, `fadapt`, `dr`, `rp`, `sc`, `mp`, `mr`, `fwr`, `zm`, `en`,
+  `cep`, `cwt`, `rs`, `as`, `sev`, `ses`, `tt`) for CLI economy — twenty-one kinds,
+  twenty-one short names.
 - **Print columns.** Kinds declare `+kubebuilder:printcolumn` for the fields an
   operator scans in `kubectl get` — phase, key spec values, and age.
 

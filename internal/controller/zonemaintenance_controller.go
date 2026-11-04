@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -44,7 +45,7 @@ import (
 
 // zoneMaintenanceFinalizer keeps a ZoneMaintenance around on delete just long
 // enough to restore every robot it paused (the "deleting it resumes all robots"
-// contract, §9.1.11).
+// contract, RFC-0001 #zonemaintenance-resume-behavior).
 const zoneMaintenanceFinalizer = "swarmada.io/zonemaintenance-resume"
 
 // zmReconcileInterval is the poll cadence while a maintenance is Active — it
@@ -55,6 +56,11 @@ const zmReconcileInterval = 30 * time.Second
 // chain the FleetZone webhook would normally reject).
 const zmAncestorWalkCap = 64
 
+// zmExpansionDepthCap is the 8-edge bound on the composition graph (RFC-0001 FZ-C3).
+// Admission rejects deeper graphs; expansion enforces it again because admission
+// cannot see a graph deepened by a zone created concurrently.
+const zmExpansionDepthCap = 8
+
 // defaultGracefulDrainTimeout is the fail-safe bound on Graceful-mode wind-down
 // (ADR-0013): a robot still executing this long after activation is force-paused.
 // The live value comes from
@@ -63,21 +69,24 @@ const zmAncestorWalkCap = 64
 const defaultGracefulDrainTimeout = 300 * time.Second
 
 // ZoneMaintenanceReconciler drives the ZoneMaintenance lifecycle (RFC-0001
-// §9.1.11): Scheduled → Active → Completed. While Active it pauses Idle robots in
+// RFC-0001 #zonemaintenance): Scheduled → Active → Completed. While Active it pauses Idle robots in
 // scope into the Maintenance phase and lets InProgress robots wind down; on
 // resume (auto-resume deadline or deletion) it restores them to Idle.
 //
-// It is the third and only other writer of Robot.status.phase besides the Robot
-// controller (Offline/Discovered) and the FleetAction controller (InProgress). The
-// three do not fight: the Robot controller never clobbers a Maintenance phase on a
-// live heartbeat, the scheduler only assigns to Idle robots, and this controller
-// only pauses an Idle+unassigned robot — so a just-assigned robot is handled as
-// wind-down, self-correcting on the next reconcile. Writes are transition-driven,
-// never per telemetry tick (RA-1).
+// It is one of four writers of Robot.status.phase, with the Robot controller
+// (Offline/Discovered), the FleetAction controller (InProgress) and the telemetry
+// status sink (Error, which only the robot reports, and back out of it). They do not
+// fight: the Robot controller never clobbers a Maintenance phase on a live heartbeat,
+// the scheduler only assigns to Idle robots, this controller only pauses an
+// Idle+unassigned robot — so a just-assigned robot is handled as wind-down,
+// self-correcting on the next reconcile — and the sink writes Error under the
+// resourceVersion it read. A robot that reports Error while paused leaves Maintenance
+// for Error, and is paused again once it reports otherwise and is Idle. Writes are
+// transition-driven, never per telemetry tick (RA-1).
 type ZoneMaintenanceReconciler struct {
 	client.Client
 
-	// Audit records ESTOP_CLEAR_REJECTED (§9.6.5.1) when the resume gate refuses a
+	// Audit records ESTOP_CLEAR_REJECTED (RFC-0001 #safety-required-events) when the resume gate refuses a
 	// robot. Nil disables the record; the gate itself is unaffected.
 	Audit    audit.Recorder
 	Scheme   *runtime.Scheme
@@ -154,8 +163,15 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	now := r.clock()
 	original := zm.DeepCopy()
 
+	// The operator's close intent, resolved before anything else branches on time:
+	// a window whose scheduledStart is still in the future would otherwise return at
+	// the Scheduled guard below and never see the request, so an operator could
+	// close an Active window but not call off a Scheduled one — the same
+	// "unreachable state" this field exists to remove, moved one branch earlier.
+	operatorClose := zm.Spec.DesiredState == fleetv1.ZoneMaintenanceDesiredStateCompleted
+
 	// ── Scheduled: not yet time to activate ─────────────────────────────────────
-	if zm.Spec.ScheduledStart != nil && now.Before(zm.Spec.ScheduledStart.Time) {
+	if !operatorClose && zm.Spec.ScheduledStart != nil && now.Before(zm.Spec.ScheduledStart.Time) {
 		zm.Status.Phase = fleetv1.ZoneMaintenancePhaseScheduled
 		if err := r.patchStatusIfChanged(ctx, original, zm); err != nil {
 			return ctrl.Result{}, err
@@ -164,8 +180,36 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// ── Activate on first entry ─────────────────────────────────────────────────
-	justActivated := zm.Status.Phase != fleetv1.ZoneMaintenancePhaseActive
+	// Not while a close is requested: activating a window in order to close it in the
+	// same reconcile would pause robots that are immediately resumed, which is a real
+	// disturbance to a fleet (an InProgress action requeued in Immediate mode) in
+	// service of a window the operator has already called off.
+	justActivated := !operatorClose && zm.Status.Phase != fleetv1.ZoneMaintenancePhaseActive
 	if justActivated {
+		// All-or-nothing: a scope that does not fully resolve does not activate. A pause
+		// that silently skips a room is a technician entering a zone they were told was
+		// drained, so the window stays unactivated, says why, and is retried.
+		scope, err := r.resolveScope(ctx, zm)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if len(scope.unresolved) > 0 {
+			msg := "not activated: composite scope " + zm.Spec.Scope.ZoneName +
+				" does not fully resolve (" + describeUnresolved(scope.unresolved) + "); no robot is paused"
+			upsertCondition(&zm.Status.Conditions, zmCondScopeResolved, metav1.ConditionFalse,
+				"CompositionUnresolved", msg)
+			if err := r.patchStatusIfChanged(ctx, original, zm); err != nil {
+				return ctrl.Result{}, err
+			}
+			if r.Recorder != nil {
+				r.Recorder.Event(zm, corev1.EventTypeWarning, "CompositionUnresolved", msg)
+			}
+			return ctrl.Result{RequeueAfter: zmReconcileInterval}, nil
+		}
+		if apimeta.FindStatusCondition(zm.Status.Conditions, zmCondScopeResolved) != nil {
+			upsertCondition(&zm.Status.Conditions, zmCondScopeResolved, metav1.ConditionTrue,
+				"Resolved", "every member of the composite scope resolved")
+		}
 		zm.Status.Phase = fleetv1.ZoneMaintenancePhaseActive
 		zm.Status.ActivatedAt = &metav1.Time{Time: now}
 		if zm.Spec.AutoResumeAfterMinutes > 0 {
@@ -181,10 +225,23 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// never a safety stop (the hardware estop path is separate and authoritative).
 	// If any robot is held, the maintenance stays Active and requeues; it completes
 	// on its own once the estops clear (or on delete, which resumes ungated).
-	if zm.Status.AutoResumeAt != nil && !now.Before(zm.Status.AutoResumeAt.Time) {
+	//
+	// An OPERATOR CLOSE takes the same branch. spec.desiredState: Completed is a
+	// request to close now rather than at the deadline, and it is deliberately
+	// routed through this identical code rather than given its own: the estop gate,
+	// the held-robot accounting, the CompletedAt stamp and the audit seal are
+	// properties of closing a window, not of the deadline. A second close path would
+	// be a second set of them to keep in step, and the one that strands a draining
+	// robot would be whichever was written second.
+	deadlineReached := zm.Status.AutoResumeAt != nil && !now.Before(zm.Status.AutoResumeAt.Time)
+	if deadlineReached || operatorClose {
+		trigger := "auto-resume"
+		if operatorClose && !deadlineReached {
+			trigger = "operator-close"
+		}
 		blocked, err := r.resumeAll(ctx, zm, true)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("auto-resume: %w", err)
+			return ctrl.Result{}, fmt.Errorf("%s: %w", trigger, err)
 		}
 		if blocked > 0 {
 			upsertCondition(&zm.Status.Conditions, zmCondResumeBlockedByEstop, metav1.ConditionTrue,
@@ -202,15 +259,17 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			if err := r.patchStatusIfChanged(ctx, original, zm); err != nil {
 				return ctrl.Result{}, err
 			}
-			logger.Info("auto-resume held by estop; staying Active", "heldRobots", len(held))
+			logger.Info("close held by estop; staying Active",
+				"trigger", trigger, "heldRobots", len(held))
 			return ctrl.Result{RequeueAfter: zmReconcileInterval}, nil
 		}
 		zm.Status.Phase = fleetv1.ZoneMaintenancePhaseCompleted
 		// Stamped on the edge (RA-1). Write-once comes from the terminal guard at the top of
 		// Reconcile, which returns before this branch once the phase is Completed — this is
-		// the only path that reaches Completed, so the field is written exactly once. That
-		// matters because the timestamp is what an outage is measured against; a later
-		// reconcile moving it would silently shorten the window it records.
+		// the only BRANCH that reaches Completed (the deadline and an operator close share
+		// it), so the field is written exactly once. That matters because the timestamp is
+		// what an outage is measured against; a later reconcile moving it would silently
+		// shorten the window it records.
 		zm.Status.CompletedAt = &metav1.Time{Time: now}
 		zm.Status.PausedRobots = nil
 		zm.Status.WindingDownRobots = nil
@@ -224,13 +283,13 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		// After the patch, not before: the window is Completed only once that write lands,
 		// and a seal ahead of it would record a closure that a failed patch then undid.
-		r.recordMaintenanceDeactivated(ctx, zm, "auto-resume")
-		logger.Info("maintenance auto-resumed")
+		r.recordMaintenanceDeactivated(ctx, zm, trigger)
+		logger.Info("maintenance window closed", "trigger", trigger)
 		return ctrl.Result{}, nil
 	}
 
 	// ── Active: pause Idle robots, track wind-down of InProgress robots ──────────
-	robots, err := r.robotsInScope(ctx, zm)
+	robots, leftScope, err := r.robotsInScopeAndPausedOutside(ctx, zm)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -265,7 +324,7 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 			pausedRobots = append(pausedRobots, fleetv1.PausedRobotEntry{Name: robot.Name, PausedAt: metav1.Time{Time: at}})
 			// Record the non-pauseable capabilities still running on this paused
-			// robot (§9.1.11). Computed only for an already-Maintenance robot, whose
+			// robot (RFC-0001 #zonemaintenance-schema). Computed only for an already-Maintenance robot, whose
 			// status.capabilities the Robot controller has already re-derived — a
 			// just-paused robot is picked up on the next reconcile (Robot is watched).
 			if caps := continuousCapabilities(robot); len(caps) > 0 {
@@ -294,16 +353,40 @@ func (r *ZoneMaintenanceReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// forcibly requeued: the FleetAction controller confirmed-stops the robot
 			// (single-executor safe) and returns the action to Pending, freeing the robot
 			// to be paused.
+			//
+			// Not while a stop governs the robot's work (estopHoldsWork), or covers the robot
+			// issued and not yet written onto it: estop takes precedence over a window
+			// (RFC-0001 #safety-zonemaintenance-vs-estop-explicit-separation), and work an estop
+			// interrupted waits for an operator. The robot stays on windingDownRobots meanwhile.
 			forceRequeue := zm.Spec.Mode == fleetv1.ZoneMaintenanceModeImmediate || drainExpired
-			if forceRequeue && robot.Status.AssignedAction != "" {
-				if err := r.requeueAction(ctx, robot.Namespace, robot.Status.AssignedAction, zm.Spec.Reason, zm.Name); err != nil {
+			if forceRequeue && robot.Status.AssignedAction != "" && !estopHoldsWork(robot) {
+				stops, err := stopNames(ctx, r.Client, robot)
+				if err != nil {
 					return ctrl.Result{}, err
+				}
+				if len(stops) == 0 {
+					if err := r.requeueAction(ctx, robot.Namespace, robot.Status.AssignedAction, zm.Spec.Reason, zm.Name); err != nil {
+						return ctrl.Result{}, err
+					}
 				}
 			}
 			windingDown = append(windingDown, fleetv1.WindingDownRobot{Name: robot.Name, AssignedAction: robot.Status.AssignedAction})
 		}
 		// Offline/Error/Charging/Discovered: not pausable now; a later reconcile
 		// converges once the robot returns to Idle.
+	}
+	// A robot this window paused stays on its record after it leaves the scope (its
+	// member removed from spec.memberZones, the robot re-homed, its currentZone moved),
+	// for as long as it is still in Maintenance. The record is what the close and the
+	// delete resume; dropping the entry here would leave the robot paused after the
+	// window completes, with nothing naming why. The entry keeps its pausedAt, so an
+	// unchanged record compares equal and writes nothing (RA-1).
+	for i := range leftScope {
+		robot := &leftScope[i]
+		if robot.Status.Phase != fleetv1.RobotPhaseMaintenance {
+			continue
+		}
+		pausedRobots = append(pausedRobots, fleetv1.PausedRobotEntry{Name: robot.Name, PausedAt: metav1.Time{Time: paused[robot.Name]}})
 	}
 	sort.Slice(pausedRobots, func(i, j int) bool { return pausedRobots[i].Name < pausedRobots[j].Name })
 	sort.Slice(windingDown, func(i, j int) bool { return windingDown[i].Name < windingDown[j].Name })
@@ -341,9 +424,20 @@ func (r *ZoneMaintenanceReconciler) gracefulDrainTimeoutFor(ctx context.Context,
 // operational status signal on the administrative transition, not a safety state.
 const zmCondResumeBlockedByEstop = "ResumeBlockedByEstop"
 
-// resumeAll restores every robot this maintenance paused (currently in the
-// Maintenance phase and in scope) back to Idle — UNLESS another Active
-// ZoneMaintenance still covers it, so overlapping windows never un-pause early.
+// zmCondScopeResolved reports whether a zone scope naming a composite zone expanded
+// completely. It is written False (reason CompositionUnresolved) when a declared
+// member does not resolve — the window then does not activate and pauses nobody
+// (RFC-0001 #fleetzone-composite-zones-and-zone-expansion, ADR-0064: an operational hold is all-or-nothing) — and True
+// once a window that was held for that reason resolves. A scope that never held
+// carries no such condition.
+const zmCondScopeResolved = "ScopeResolved"
+
+// resumeAll restores every robot this maintenance paused back to Idle — UNLESS
+// another Active ZoneMaintenance still covers it, so overlapping windows never
+// un-pause early. "Paused by this window" is every robot in the Maintenance phase
+// that the window's current scope covers or that status.pausedRobots names: the
+// record carries a robot that has left the scope since it was paused, and the scope
+// covers one paused in a pass whose status write did not land.
 //
 // When gated is true (the auto-resume path) it additionally honours the
 // operational requireEstopClearBeforeResume gate: a robot whose estop is not Clear
@@ -353,7 +447,7 @@ const zmCondResumeBlockedByEstop = "ResumeBlockedByEstop"
 // gated=false so the finalizer always releases. Returns the number of robots held
 // by the gate.
 func (r *ZoneMaintenanceReconciler) resumeAll(ctx context.Context, zm *fleetv1.ZoneMaintenance, gated bool) (int, error) {
-	robots, err := r.robotsInScope(ctx, zm)
+	robots, err := r.robotsPausedByWindow(ctx, zm)
 	if err != nil {
 		return 0, err
 	}
@@ -405,11 +499,15 @@ func (r *ZoneMaintenanceReconciler) requireEstopClearBeforeResume(ctx context.Co
 }
 
 // estopClear reports whether a robot may be administratively resumed under the
-// gate: its own estop is Normal (or unset) AND its zone's estop is Clear (or
-// unset). It reads the OBSERVED estop projections only to decide a phase flip — it
-// is not part of the hardware estop path (§9.6.2) and never stops or holds a robot.
+// gate: no stop it records holds it (its own trigger, or a zone's or the namespace's
+// stop in status.estopHeldBy), its own estop is Normal (or unset) AND its zone's estop
+// is Clear (or unset). It reads the OBSERVED estop projections only to decide a phase flip — it
+// is not part of the hardware estop path (RFC-0001 #safety-emergency-stop-protocol) and never stops or holds a robot.
 // A missing zone is treated as nothing to gate on (Clear).
 func (r *ZoneMaintenanceReconciler) estopClear(ctx context.Context, namespace string, robot *fleetv1.Robot) (bool, error) {
+	if robotUnderEstop(robot) {
+		return false, nil
+	}
 	if robot.Status.EstopState != "" && robot.Status.EstopState != fleetv1.RobotEstopNormal {
 		return false, nil
 	}
@@ -440,7 +538,7 @@ func (r *ZoneMaintenanceReconciler) estopClear(ctx context.Context, namespace st
 // estop-blocked auto-resume keeps the maintenance Active, so the status lists and
 // counts reflect only the robots still held.
 func (r *ZoneMaintenanceReconciler) heldPaused(ctx context.Context, zm *fleetv1.ZoneMaintenance) ([]fleetv1.PausedRobotEntry, error) {
-	robots, err := r.robotsInScope(ctx, zm)
+	robots, err := r.robotsPausedByWindow(ctx, zm)
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +560,8 @@ func (r *ZoneMaintenanceReconciler) heldPaused(ctx context.Context, zm *fleetv1.
 }
 
 // coveredByOtherActive reports whether any OTHER Active, non-deleting
-// ZoneMaintenance in the namespace also scopes this robot.
+// ZoneMaintenance in the namespace also scopes this robot, or has it on its record
+// of robots it paused (which that window will resume when it closes).
 func (r *ZoneMaintenanceReconciler) coveredByOtherActive(ctx context.Context, self *fleetv1.ZoneMaintenance, robot *fleetv1.Robot) (bool, error) {
 	var list fleetv1.ZoneMaintenanceList
 	if err := r.List(ctx, &list, client.InNamespace(self.Namespace)); err != nil {
@@ -476,7 +575,14 @@ func (r *ZoneMaintenanceReconciler) coveredByOtherActive(ctx context.Context, se
 		if !other.DeletionTimestamp.IsZero() || other.Status.Phase != fleetv1.ZoneMaintenancePhaseActive {
 			continue
 		}
-		in, err := r.robotInScope(ctx, other, robot)
+		if _, recorded := existingPauseTimes(other.Status.PausedRobots)[robot.Name]; recorded {
+			return true, nil
+		}
+		scope, err := r.resolveScope(ctx, other)
+		if err != nil {
+			return false, err
+		}
+		in, err := r.robotInScope(ctx, other.Namespace, scope, robot)
 		if err != nil {
 			return false, err
 		}
@@ -487,34 +593,136 @@ func (r *ZoneMaintenanceReconciler) coveredByOtherActive(ctx context.Context, se
 	return false, nil
 }
 
-// robotsInScope lists the robots the maintenance targets.
-func (r *ZoneMaintenanceReconciler) robotsInScope(ctx context.Context, zm *fleetv1.ZoneMaintenance) ([]fleetv1.Robot, error) {
+// robotsInScopeAndPausedOutside lists, in one read, the robots the maintenance's
+// current scope targets, and separately the robots its status.pausedRobots names
+// that the scope no longer covers. A robot that no longer exists is in neither.
+func (r *ZoneMaintenanceReconciler) robotsInScopeAndPausedOutside(ctx context.Context, zm *fleetv1.ZoneMaintenance) (inScope, pausedOutside []fleetv1.Robot, err error) {
 	var all fleetv1.RobotList
 	if err := r.List(ctx, &all, client.InNamespace(zm.Namespace)); err != nil {
-		return nil, fmt.Errorf("listing robots: %w", err)
+		return nil, nil, fmt.Errorf("listing robots: %w", err)
 	}
-	out := make([]fleetv1.Robot, 0, len(all.Items))
+	scope, err := r.resolveScope(ctx, zm)
+	if err != nil {
+		return nil, nil, err
+	}
+	recorded := existingPauseTimes(zm.Status.PausedRobots)
+	inScope = make([]fleetv1.Robot, 0, len(all.Items))
 	for i := range all.Items {
-		in, err := r.robotInScope(ctx, zm, &all.Items[i])
+		in, err := r.robotInScope(ctx, zm.Namespace, scope, &all.Items[i])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if in {
-			out = append(out, all.Items[i])
+			inScope = append(inScope, all.Items[i])
+		} else if _, ok := recorded[all.Items[i].Name]; ok {
+			pausedOutside = append(pausedOutside, all.Items[i])
 		}
 	}
-	return out, nil
+	return inScope, pausedOutside, nil
 }
 
-// robotInScope reports whether a robot falls under a maintenance's scope. A
-// namespace scope covers every robot in the namespace; a zone scope covers robots
-// whose zone is the target or any descendant of it (bounded parentZone walk).
-func (r *ZoneMaintenanceReconciler) robotInScope(ctx context.Context, zm *fleetv1.ZoneMaintenance, robot *fleetv1.Robot) (bool, error) {
+// robotsPausedByWindow is the set a close or a delete resumes: the robots in scope
+// and the robots on the window's record that have left it.
+func (r *ZoneMaintenanceReconciler) robotsPausedByWindow(ctx context.Context, zm *fleetv1.ZoneMaintenance) ([]fleetv1.Robot, error) {
+	in, outside, err := r.robotsInScopeAndPausedOutside(ctx, zm)
+	if err != nil {
+		return nil, err
+	}
+	return append(in, outside...), nil
+}
+
+// zmScope is a ZoneMaintenance's scope, resolved once per pass.
+type zmScope struct {
+	// namespaceWide covers every robot in the namespace.
+	namespaceWide bool
+	// zones is the target zone plus every zone reached from it through
+	// spec.memberZones. A robot is in scope when its zone, or any containment
+	// ancestor of it, is in this set — so a member that is itself a containment
+	// parent covers its subtree, exactly as naming it directly would.
+	zones map[string]bool
+	// unresolved lists the declared members expansion could not resolve.
+	unresolved []fleetv1.UnresolvedMember
+}
+
+// resolveScope expands a maintenance's scope. A composite target is expanded through
+// spec.memberZones (RFC-0001 FZ-C2: a ZoneMaintenance scope MAY name a composite and
+// is expanded); composition edges are followed for this targeting only, never for
+// inheritance or propagation (FZ-C4). The walk is per path, so a zone reached twice
+// through a DAG is not a cycle, and it is bounded at zmExpansionDepthCap edges.
+func (r *ZoneMaintenanceReconciler) resolveScope(ctx context.Context, zm *fleetv1.ZoneMaintenance) (*zmScope, error) {
+	s := &zmScope{}
 	if zm.Spec.Scope.Type == fleetv1.MaintenanceScopeNamespace {
+		s.namespaceWide = true
+		return s, nil
+	}
+	s.zones = map[string]bool{}
+	if zm.Spec.Scope.ZoneName == "" {
+		return s, nil
+	}
+	if err := r.expandMembers(ctx, zm.Namespace, zm.Spec.Scope.ZoneName, nil, 0, s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (r *ZoneMaintenanceReconciler) expandMembers(ctx context.Context, namespace, name string, path map[string]bool, depth int, s *zmScope) error {
+	if path[name] {
+		s.unresolved = append(s.unresolved, fleetv1.UnresolvedMember{Name: name, Reason: fleetv1.MemberCycle})
+		return nil
+	}
+	if depth > zmExpansionDepthCap {
+		s.unresolved = append(s.unresolved, fleetv1.UnresolvedMember{Name: name, Reason: fleetv1.MemberDepthExceeded})
+		return nil
+	}
+	// Recorded before the lookup: a robot whose zone carries this name stays in scope
+	// even while the FleetZone object itself is missing, as it always has for the target.
+	s.zones[name] = true
+	fz := &fleetv1.FleetZone{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, fz); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("resolving zone %q: %w", name, err)
+		}
+		if depth > 0 {
+			// A declared member that does not exist. The target itself being absent is
+			// not a composition failure: it simply names no zone with members.
+			s.unresolved = append(s.unresolved, fleetv1.UnresolvedMember{Name: name, Reason: fleetv1.MemberNotFound})
+		}
+		return nil
+	}
+	if len(fz.Spec.MemberZones) == 0 {
+		return nil
+	}
+	next := make(map[string]bool, len(path)+1)
+	for k := range path {
+		next[k] = true
+	}
+	next[name] = true
+	for _, m := range fz.Spec.MemberZones {
+		if err := r.expandMembers(ctx, namespace, m, next, depth+1, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// describeUnresolved renders unresolved members for a condition message.
+func describeUnresolved(members []fleetv1.UnresolvedMember) string {
+	parts := make([]string, 0, len(members))
+	for _, m := range members {
+		parts = append(parts, m.Name+": "+string(m.Reason))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// robotInScope reports whether a robot falls under a resolved scope. A namespace
+// scope covers every robot in the namespace; a zone scope covers robots whose zone,
+// or a containment ancestor of it (bounded parentZone walk), is in the scope's set.
+func (r *ZoneMaintenanceReconciler) robotInScope(ctx context.Context, namespace string, scope *zmScope, robot *fleetv1.Robot) (bool, error) {
+	if scope.namespaceWide {
 		return true, nil
 	}
-	target := zm.Spec.Scope.ZoneName
-	if target == "" {
+	if len(scope.zones) == 0 {
 		return false, nil
 	}
 	robotZone := robot.Status.CurrentZone
@@ -524,16 +732,15 @@ func (r *ZoneMaintenanceReconciler) robotInScope(ctx context.Context, zm *fleetv
 	if robotZone == "" {
 		return false, nil
 	}
-	// Walk up from the robot's zone; a match against the target means the target is
-	// that zone or one of its ancestors (so a parent-zone maintenance covers the
-	// subtree).
+	// Walk up from the robot's zone; a match means an in-scope zone is that zone or one
+	// of its ancestors (so a parent-zone maintenance covers the subtree).
 	zone := robotZone
 	for depth := 0; zone != "" && depth < zmAncestorWalkCap; depth++ {
-		if zone == target {
+		if scope.zones[zone] {
 			return true, nil
 		}
 		fz := &fleetv1.FleetZone{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: zm.Namespace, Name: zone}, fz); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: zone}, fz); err != nil {
 			if apierrors.IsNotFound(err) {
 				return false, nil // chain end / missing ancestor
 			}
@@ -546,13 +753,20 @@ func (r *ZoneMaintenanceReconciler) robotInScope(ctx context.Context, zm *fleetv
 
 // setRobotPhase writes a material Robot.status.phase transition (RA-1: only on a
 // real change, never a per-tick write).
+//
+// The write carries the resourceVersion it read, and never replaces Error. The robot is
+// read from the cache: a view taken before the status sink wrote the robot's reported
+// Error still says Maintenance, and a plain merge from it would flip the Error to Idle
+// when the window closes. Only the robot's own next report takes it out of Error
+// (RFC-0001 #safety-scope-and-responsibility-boundary, Layer 3). A conflict is returned,
+// and the requeue re-reads.
 func (r *ZoneMaintenanceReconciler) setRobotPhase(ctx context.Context, robot *fleetv1.Robot, phase fleetv1.RobotPhase) error {
-	if robot.Status.Phase == phase {
+	if robot.Status.Phase == phase || robot.Status.Phase == fleetv1.RobotPhaseError {
 		return nil
 	}
 	base := robot.DeepCopy()
 	robot.Status.Phase = phase
-	if err := r.Status().Patch(ctx, robot, client.MergeFrom(base)); err != nil {
+	if err := r.Status().Patch(ctx, robot, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("setting robot %q phase to %s: %w", robot.Name, phase, err)
 	}
 	return nil
@@ -574,6 +788,11 @@ func (r *ZoneMaintenanceReconciler) patchStatusIfChanged(ctx context.Context, or
 // controller consumes — which confirmed-stops the robot and returns the action to
 // Pending (single-executor safe). Idempotent: a no-op when the annotation (or the
 // terminal-action cases) already apply; a missing/terminal action is skipped.
+//
+// A Paused action is skipped too: a held action is never auto-requeued, whichever intake
+// paused it — an estop or spec.desiredState (RFC-0001 #fleetaction-state-machine). Only an
+// operator moves it out. The annotation is written under an optimistic lock, so a cached read
+// that predates a pause cannot mark the action; a conflict waits for the next reconcile.
 func (r *ZoneMaintenanceReconciler) requeueAction(ctx context.Context, namespace, actionName, reason, maintenanceName string) error {
 	action := &fleetv1.FleetAction{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: actionName}, action); err != nil {
@@ -585,6 +804,8 @@ func (r *ZoneMaintenanceReconciler) requeueAction(ctx context.Context, namespace
 	switch action.Status.Phase {
 	case fleetv1.ActionPhaseSucceeded, fleetv1.ActionPhaseFailed, fleetv1.ActionPhaseCancelled, fleetv1.ActionPhasePending:
 		return nil // terminal or already unassigned — no requeue needed
+	case fleetv1.ActionPhasePaused:
+		return nil // held; an operator decides
 	}
 	if _, set := action.Annotations[annRequeueRequested]; set {
 		return nil // already requested
@@ -597,7 +818,10 @@ func (r *ZoneMaintenanceReconciler) requeueAction(ctx context.Context, namespace
 		reason = "zone maintenance"
 	}
 	action.Annotations[annRequeueRequested] = reason
-	if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+	if err := r.Patch(ctx, action, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil // the action changed since it was read; the next reconcile reads it again
+		}
 		return fmt.Errorf("requesting task requeue: %w", err)
 	}
 	// Sealed only when the annotation is newly set: every path above returns early when it
@@ -610,7 +834,7 @@ func (r *ZoneMaintenanceReconciler) requeueAction(ctx context.Context, namespace
 // recordActionRequeued seals ACTION_REQUEUED_BY_MAINTENANCE when a maintenance window
 // interrupts in-flight work.
 //
-// The event is named for what happens, not for what §9.6.4 once said: the action is
+// The event is named for what happens, not for what zone-maintenance once said: the action is
 // returned to Pending and is re-schedulable on another robot, which is a different fact
 // from an estop Pause — that keeps the action bound to the robot it was taken from and
 // waits for an operator. An entry claiming the action was "paused" would send a reviewer
@@ -639,7 +863,7 @@ func (r *ZoneMaintenanceReconciler) recordActionRequeued(ctx context.Context, na
 // capabilities that are still running. On a Maintenance-phase robot the Robot
 // controller has already paused the pauseable capabilities (Paused=true), so a
 // capability with Paused=false that is not Inactive is a non-pauseable one still
-// operating (Active or Degraded). Sorted for a stable status write (§9.1.11).
+// operating (Active or Degraded). Sorted for a stable status write (RFC-0001 #zonemaintenance-schema).
 func continuousCapabilities(robot *fleetv1.Robot) []string {
 	var out []string
 	for _, c := range robot.Status.Capabilities {
@@ -689,7 +913,7 @@ func (r *ZoneMaintenanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// sealMaintenanceEvent appends one §9.6.5.1 entry about a maintenance window. Best-effort
+// sealMaintenanceEvent appends one RFC-0001 #safety-required-events entry about a maintenance window. Best-effort
 // and nil-safe: the window opens or closes either way, and an audit sink must never be able
 // to hold robots in maintenance because it could not record that they were.
 func (r *ZoneMaintenanceReconciler) sealMaintenanceEvent(ctx context.Context, zm *fleetv1.ZoneMaintenance, eventType, action string, detail map[string]string) {
@@ -753,7 +977,7 @@ func (r *ZoneMaintenanceReconciler) recordMaintenanceDeactivated(ctx context.Con
 //
 // This is an OPERATIONAL hold, not a safety stop: the estop itself is untouched and
 // nothing here clears or re-triggers it. Best-effort, like every other audit write.
-// recordClearRejected writes ESTOP_CLEAR_REJECTED (§9.6.5.1): a resume was attempted
+// recordClearRejected writes ESTOP_CLEAR_REJECTED (RFC-0001 #safety-required-events): a resume was attempted
 // but the requireEstopClearBeforeResume precondition was not met, so the robot stays
 // paused. Recorded per blocked robot because that is the granularity an operator
 // needs — "which robot held the window open" — and the outcome is Denied, since the

@@ -25,7 +25,7 @@ import (
 	"github.com/swarmada/swarmada/internal/audit"
 )
 
-// ROBOT_REJECTED (§9.6.5.1). An operator refusing a robot admission and a TTL sweep
+// ROBOT_REJECTED (RFC-0001 #safety-required-events). An operator refusing a robot admission and a TTL sweep
 // reaping a stale one both end with the DiscoveredRobot gone, so the disappearance is
 // not evidence of anything on its own. The rejection annotation written by
 // `swarmctl admit reject` is the discriminating signal, and these tests exist mainly to

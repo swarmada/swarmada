@@ -32,12 +32,12 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// The confirming heartbeat exchange (RFC-0001 §9.6.3.2). Before this, the Offline
+// The confirming heartbeat exchange (RFC-0001 #safety-control-plane-response). Before this, the Offline
 // transition was driven by elapsed time since lastSeenAt alone: a robot whose telemetry
 // stalled while its stream was still live was declared Offline without ever being asked.
 //
 // That is not a cosmetic distinction. Offline is the single trigger for in-flight action
-// revocation (§9.6.3.5), so a false Offline takes work away from a robot that is still
+// revocation (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee), so a false Offline takes work away from a robot that is still
 // doing it. The tests below therefore care about two things in opposite directions: that a
 // robot which answers is NOT declared Offline, and that one which cannot answer still IS.
 

@@ -3,7 +3,7 @@
 - **Status:** proposed
 - **Date:** 2026-08-16
 - **Deciders:** _(pending)_
-- **Related:** ADR-0032 (contract versioning and conformance gating — the bump rules applied below), RFC-0001 §9 (capability rescan), `adapters/CONFORMANCE.md` C6.2 (explicit presence on safety scalars) and C12.1 (`scan`)
+- **Related:** ADR-0032 (contract versioning and conformance gating — the bump rules applied below), RFC-0001 "The scan Command and capabilityRescanInterval in Practice", `adapters/CONFORMANCE.md` C6.2 (explicit presence on safety scalars) and C12.1 (`scan`)
 
 ## Context
 
@@ -20,7 +20,7 @@ window must answer something. Both available answers are wrong in a different wa
 
 | answer | consequence |
 |---|---|
-| **empty list** (what the adapter does) | RFC-0001 §9 has the Zone Controller compare the response **field-by-field** against stored `Robot.status.hardware[]` and write back discrepancies. An empty snapshot is a diff against everything, so it can **clear a previously-good inventory** for a robot whose hardware is fine. The next scan then reads as hardware appearing from nowhere. |
+| **empty list** (what the adapter does) | RFC-0001's "The scan Command and capabilityRescanInterval in Practice" has the Zone Controller compare the response **field-by-field** against stored `Robot.status.hardware[]` and write back discrepancies. An empty snapshot is a diff against everything, so it can **clear a previously-good inventory** for a robot whose hardware is fine. The next scan then reads as hardware appearing from nowhere. |
 | **a fabricated healthy inventory** | writes components into `Robot.status.hardware[]` that nobody measured, with a status nobody read, which every future scan is then compared against. Fiction, recorded as fact. |
 
 The adapter chose empty and documents why: an invented inventory is unfalsifiable and
@@ -109,7 +109,7 @@ adapter sets it; it does not need to be universal to be worth having.
 ## Consequences
 
 - **The control plane can stop guessing.** An empty `hardware` with `hardware_observed = false`
-  is unambiguously "no information", so the RFC-0001 §9 comparison can skip the write-back
+  is unambiguously "no information", so that comparison can skip the write-back
   instead of clearing a good inventory. That rule becomes one place in the Zone Controller
   rather than a convention every consumer reimplements.
 - **A cold-start conformance case becomes writable.** Today no check issues `scan` before any
@@ -134,7 +134,7 @@ adapter sets it; it does not need to be universal to be worth having.
   puts the workaround in every consumer instead of on the wire.
 - **Have the adapter withhold the `scan` reply until it has observed hardware.** Rejected:
   `scan` is a required command (C12.1) and not answering is precisely what that check forbids;
-  it also re-creates the `ScanCapabilitiesTimeout` warning loop RFC-0001 §9 describes.
+  it also re-creates the `ScanCapabilitiesTimeout` warning loop that section describes.
 - **Have the adapter block briefly waiting for the first observation.** Hides a data question
   behind latency, converts it into a timeout question, and still has to answer something if
   nothing arrives.

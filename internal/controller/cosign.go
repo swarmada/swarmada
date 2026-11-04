@@ -25,7 +25,7 @@ import (
 	"github.com/swarmada/swarmada/internal/registry"
 )
 
-// Cosign signature support (RFC-0001 §9.1.7.3).
+// Cosign signature support (RFC-0001 #firmwarerollout).
 //
 // Swarmada's NATIVE signature form is a detached signature over the artifact checksum string: the
 // blob IS the signature, and signing.Verify runs it against []byte(checksum).

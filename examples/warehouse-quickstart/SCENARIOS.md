@@ -1,88 +1,89 @@
 # warehouse-quickstart — scenario reference
 
-Working document for reviewing and updating each scenario `examples/warehouse-quickstart/run.sh`
-offers. Source of truth for the *code* is `run.sh` plus `adapters/scenarios/presets/*.yaml` — this
-file exists so the set of scenarios, what each one is supposed to prove, and what's real vs.
-simulated in each can be reviewed as a whole instead of re-derived from the script each time.
-
-Last synced with `run.sh`: 2026-07-11. If you change a scenario's behavior, update its section here
-in the same change.
+Reference for each scenario `examples/warehouse-quickstart/run.sh` offers: what each one is meant
+to prove, and what is real and what is simulated in it. The source of truth for the behaviour is
+`run.sh` plus `adapters/scenarios/presets/*.yaml`; if you change a scenario's behaviour, update its
+section here in the same change.
 
 ## At a glance
 
 | # | Scenario | Picker text | LIVE? | Adapter preset used | Fleet-wide "real" | What's simulated |
 |---|----------|-------------|-------|----------------------|--------------------|-------------------|
-| 1 | `healthy-fleet` | 3 robots, nothing goes wrong (default) | No | — | Control plane, CRDs, scheduler | All 3 robots' readiness (`kubectl patch phase=Idle`) |
-| 2 | `battery-edge` | watch the scheduler avoid a dying robot | Yes | `battery-edge` | `sim-robot-001`'s connection, registration, telemetry, battery drain | `sim-robot-002`/`003`'s readiness + battery (`85`, patched) |
-| 3 | `battery-handoff` | a working robot's battery drops mid-task; watch its task get safely handed off | Yes | `battery-edge` (reused) | `sim-robot-001`'s telemetry; the cancel/confirm-stop/release/reassign mechanics once triggered | Which robot's battery is cut, when, and the battery number itself — no controller decides this on its own |
-| 4 | `hardware-fault` | camera fails mid-task, watch it reroute and recover | Yes | `hardware-fault` | `sim-robot-001`'s fault delta + capability re-derivation + reroute | `sim-robot-002`/`003`'s readiness + battery |
+| 1 | `healthy-fleet` | 3 robots, nothing goes wrong (default) | Yes | `healthy-fleet` | `sim-robot-001`'s connection, telemetry, assignment and completion; control plane, CRDs, scheduler | `sim-robot-002`/`003`'s readiness (patched); they report no position, so they get no work |
+| 2 | `battery-edge` | a robot's battery drains while it keeps its task | Yes | `battery-edge` | `sim-robot-001`'s connection, registration, telemetry, battery drain | `sim-robot-002`/`003`'s readiness + battery (`85`, patched) |
+| 3 | `battery-handoff` | a working robot's battery drops mid-task; watch its task get safely handed off | Yes | `battery-edge` (reused) for `sim-robot-001`, `healthy-fleet` for each spare | All three robots, each on its own live adapter; the cancel/confirm-stop/release/reassign mechanics once triggered; the spare's completion | When to hand off — no controller decides this on its own |
+| 4 | `hardware-fault` | camera fails mid-task, watch it reroute and recover | Yes | `hardware-fault` for `sim-robot-001`, `healthy-fleet` for each spare | All three robots, each on its own live adapter; the fault on the adapter's clock, capability re-derivation, reroute, the spare's completion | Nothing |
 | 5 | `comms-flaky` | a robot drops and reconnects | Yes | `comms-flaky` | `sim-robot-001`'s real stream drop/reconnect, fencing + lease behavior | `sim-robot-002`/`003`'s readiness + battery |
 | 6 | `estop-drill` | trigger and confirm an emergency stop | Yes | `estop-drill` | `sim-robot-001`'s confirmed estop via `safety.confirm_estop` (ground truth, never inferred) | `sim-robot-002`/`003`'s readiness + battery |
 | 7 | clean everything | tear down the cluster, kill any live processes, and exit | — | — | — | — |
 
 "LIVE?" — whether the scenario drives `sim-robot-001` with a real, running `sim_adapter.py` process
-against the real ControlStream (as opposed to `healthy-fleet`'s pure `kubectl patch` status
-projection). Every LIVE scenario deploys via `config/overlays/quickstart-dev` (DEV/DEMO ONLY —
-disables ControlStream per-robot authorization; see that overlay and
-`cmd/manager/main.go --fleet-adapter-insecure-authz`). CI (`CI=true`, what `make quickstart-test`
-uses) always forces the `healthy-fleet` status-projected path regardless of `--scenario`, so none of
-1–7 above run LIVE in CI.
+against the real ControlStream. Every scenario, `healthy-fleet` included, is LIVE unless
+`--projected` selects the status-projected path, which runs no adapter and writes robot
+readiness with `kubectl patch`. `battery-handoff` and `hardware-fault` drive every robot with a
+live adapter, each under its own `FleetAdapter` identity, and deploy via
+`config/overlays/demo-ab-live` (`quickstart-mtls` plus the spares' client certificates). Every
+LIVE scenario deploys via `config/overlays/quickstart-mtls` (DEV/DEMO ONLY — self-signed
+certificates, admission webhooks off; per-robot authorization on, against the `simbot-v1` class
+the sample robots carry and `sim-fleet-adapter` serves). CI runs
+`make quickstart-test` with no `--scenario`, so it runs `healthy-fleet`, LIVE (`CI=true` only turns
+pacing off). The status-projected path (`--projected`) exits 1 at this release with `no FleetAction
+was assigned`: no projected robot reports a position, so candidate filter 2 withholds every action.
 
 Most scenarios need exactly **one** Enter press (`--pace keypress`, the LIVE default) — see
 `pause_for_demo` in `run.sh`. Pauses are deliberately not scattered across steps; `battery-handoff`
 briefly had a second pause mid-scenario, which turned out confusing (looked hung) and was removed.
-**Exception: `hardware-fault` has a second, deliberate pause** — after the camera task lands on the
-live robot and the spare is staged, so a presenter can show the before-state, then press Enter to
-degrade the camera and watch the reroute. Its prompt is explicit ("Press Enter to DEGRADE …") so it
-doesn't read as hung. Both pauses honor `--pace timed`/`off` and `CI=true`.
+`hardware-fault` no longer has a second pause either: its camera fault fires on the adapter's own
+clock, so nothing waits for a key press between the task landing and the fault. The pause honors
+`--pace timed`/`off` and `CI=true`.
 
 ---
 
 ## 1. `healthy-fleet`
 
-**Status: reviewed.**
+What it proves: the control plane, CRDs, capability derivation and scheduler are real end to end —
+the live `sim-robot-001` is assigned an action by the real `DefaultScheduler` and completes it.
 
-What it proves: the control plane, CRDs, capability derivation, and scheduler are real end to end —
-3 robots go `Idle`, the real `DefaultScheduler` assigns both sample `FleetAction`s.
-
-- Real: control plane, CRD reconciliation, capability derivation, scheduler assignment.
-- Simulated: readiness. `project_readiness()` patches all 3 robots' `status.phase=Idle` directly —
-  no adapter runs at all.
-- This is the only scenario CI ever exercises (`make quickstart-test` forces it via `CI=true`
-  regardless of `--scenario`), so it's the one gate that can never silently rot.
+- Real: `sim-robot-001`'s connection, telemetry, assignment and completion; control plane, CRD
+  reconciliation, capability derivation, scheduler assignment.
+- Simulated: `sim-robot-002`/`003`'s readiness (`status.phase=Idle` patched). They run no adapter and
+  report no position, so their `status.currentZone` stays empty and candidate filter 2 withholds them:
+  of the two sample `FleetAction`s and the runner's one-step `FleetTask`, the live robot takes one
+  action and the other two stay `Pending`.
+- This is the scenario CI runs (`make quickstart-test` with no `--scenario`), on the LIVE path,
+  so CI guards it.
 
 ## 2. `battery-edge`
 
-**Status: reviewed** (root-caused a stale/incorrect comment in the preset file; fixed).
-
-What it proves: the scheduler's real battery-descending tie-break
-(`DefaultScheduler.SelectRobot`, `internal/scheduler/scheduler.go`) keeps a low-battery robot from
-winning new task assignments while a healthier Idle candidate exists.
+What the run shows: `sim-robot-001`'s real battery drains while it keeps its task. It takes the
+delivery action and is still `InProgress` with its battery in the teens, while `sim-robot-002` and
+`003` sit `Idle` at 85%. It keeps the task because it is the only candidate, not because the
+scheduler compared batteries: the other two report no position (see the known limitation below).
+The scheduler's battery-descending tie-break (`DefaultScheduler.SelectRobot`,
+`internal/scheduler/scheduler.go`) is real, but this run does not exercise it; `battery-handoff` is
+the scenario that stages that comparison.
 
 - Real: `sim-robot-001`'s connection, Hello/Register handshake, and telemetry — its battery
   genuinely starts at 22% and drains to 0 (`battery-edge.yaml`: `drain_per_second: 1.0`).
 - Simulated: `sim-robot-002`/`003` are patched to `Idle` + `batteryPercent: 85` directly — a healthy
   baseline so the contrast against `sim-robot-001` is real, not an artifact of the other two
   reporting no battery at all.
-- **Known limitation, not yet fixed**: with the fixed 2-task, 3-robot sample fleet,
-  `sim-robot-002`/`003` typically claim both sample tasks before `sim-robot-001`'s real handshake
-  even finishes (patching Idle is instant; a real network round-trip isn't) — so in practice
-  `sim-robot-001` is excluded because it isn't Idle *yet*, not because of a genuine live battery
-  comparison. The scheduler mechanism this scenario is meant to showcase is real, but this specific
-  demo doesn't reliably stage a head-to-head to prove it. (A staged version was built and reverted
+- **Known limitation**: `sim-robot-002`/`003` report no position, so candidate filter 2 withholds
+  them from every action in the zone and `sim-robot-001` is the only candidate — this run does not
+  stage a live battery comparison between robots. (A staged version was built and reverted
   in this repo's history — it depended on FleetAction-controller reconcile timing that turned out
   less immediate than assumed, and produced a confusing result. `battery-handoff` below is the
   scenario that actually stages a reliable, provable comparison.)
 - Corrected: `adapters/scenarios/presets/battery-edge.yaml`'s comment used to claim the mechanism
-  was `FleetAction.spec.minBatteryPct`-based requeueing — that field doesn't exist anywhere in the
-  codebase. Comment now correctly describes the battery-descending tie-break.
+  was `FleetAction.spec.minBatteryPct`-based requeueing. The field exists (scheduler candidate
+  filter 4 refuses a robot below it), but it only filters new assignments; it never
+  requeues an action a robot already holds, and this scenario's actions do not set it. The
+  comment now says what the run shows: the draining robot keeps its task as the only candidate,
+  and the battery-descending tie-break is not exercised.
 
 ## 3. `battery-handoff`
 
-**Status: reviewed, confirmed working end-to-end on a fresh cluster (2026-07-11).**
-
-An earlier test against a `kind` cluster that had been reused across many manual re-runs this
-session showed `sim-robot-002` still carrying a stale `status.assignedTask` after the hand-off, and
+An earlier test against a `kind` cluster that had been reused across many manual re-runs showed `sim-robot-002` still carrying a stale `status.assignedTask` after the hand-off, and
 the real reassignment landing on the low-battery live robot instead of the intended spare — looked
 like a genuine double-assignment bug. Rerunning `--clean` (fresh cluster) then the scenario once
 produced the correct result: hand-off landed on the healthy spare robot, no stale state on the
@@ -92,36 +93,32 @@ on a fresh cluster (`run.sh --clean` first) before treating it as a real bug** �
 only deletes `Robots`/`FleetActions` between runs, not the whole cluster.
 
 What it proves: a task can be safely moved off a robot mid-execution and onto a healthy one, using
-the real confirmed-stop discipline (RA-4 single-executor guarantee) — not an instant "unreachable ⇒
+the real confirmed-stop discipline (the single-executor guarantee) — not an instant "unreachable ⇒
 reassign" shortcut, which the codebase deliberately avoids as a double-execution hazard.
 
 - Real, once triggered: setting the `swarmada.io/requeue-requested` annotation on a `FleetAction`
   (`internal/controller/fleetaction_controller.go`'s `handleRequeue`) is the exact mechanism
-  `ZoneMaintenance`'s Immediate mode uses in production — it pushes a real `cancel_task`, waits for
-  a **confirmed** stop (adapter ack, or here, provable lease expiry — `leaseDuration = 30s`), then
-  releases the robot and returns the task to `Pending` for real re-scheduling.
-- Simulated / script-decided: **which** robot's battery drops, **when**, and the battery number
-  itself (patched to `8`). There is no controller anywhere that watches battery and decides to
-  trigger a hand-off on its own — that would be new product work (a real "battery below X while
-  InProgress → auto-requeue" feature), not built here. The annotation is what does the real work;
-  the battery patch is cosmetic narrative.
-- `sim-robot-001` runs the real `battery-edge` preset underneath (there's no
-  `battery-handoff.yaml` — `sim_adapter.py` hard-errors on an unknown `--scenario` name), so it
-  stays low-battery and excluded throughout, exactly like scenario 2. It exists in this scenario
-  purely so the fleet still has its usual 3-robot shape; it plays no role in the hand-off itself.
-- Setup: only `deliver-pallet-001` is applied (`apply_fleet`, scoped to this scenario) —
-  `inspect-receiving-dock` is intentionally never applied, so one of `sim-robot-002`/`003` stays
-  genuinely spare (Idle, healthy) to receive the hand-off instead of also holding a task.
-- Timing: expect up to ~40s after the single Enter press for the full sequence (telemetry confirm →
-  battery patch → annotate → confirmed-stop wait, gated on the real 30s lease expiry since the
-  demoted robot has no live wire → reassignment). `handle_battery_handoff()` blocks and `fail()`s
-  loudly (with diagnostics) if the hand-off doesn't complete in that window — this is treated as a
-  genuine failure, not a soft warning.
-- **Open question for review**: should this scenario also cover the *live-wire* confirmed-cancel
-  path (cutting `sim-robot-001`'s task instead of a projected robot's) to get a near-instant
-  hand-off instead of the ~30s lease-expiry fallback? Would need `sim-robot-001` to actually hold a
-  task at some point first, which conflicts with its current "always excluded" role in every other
-  battery scenario — deliberately not built yet, flagged here for a decision.
+  `ZoneMaintenance`'s Immediate mode uses in production — it pushes a real `cancel_task` down the
+  holder's live ControlStream, waits for a **confirmed** stop (the sim adapter acks
+  `STOPPED_SAFELY`), then releases the robot and returns the task to `Pending` for real
+  re-scheduling. The scheduler sorts eligible robots by battery, descending, so the task goes to a
+  spare rather than back to the drained robot, and the spare completes it (its adapter reports
+  `SUCCEEDED` on arrival).
+- Script-decided: **when** to hand off. There is no controller anywhere that watches battery and
+  decides to trigger a hand-off on its own — that would be new product work (a real "battery below
+  X while InProgress → auto-requeue" feature), not built here. No battery value is written: every
+  one shown comes from an adapter.
+- `sim-robot-001` runs the real `battery-edge` preset (there's no `battery-handoff.yaml` —
+  `sim_adapter.py` hard-errors on an unknown `--scenario` name). It comes online alone, so it is the
+  only robot that can take the task, and its reported battery drains toward 0 while it drives.
+- Setup: only `deliver-pallet-001` is applied (`apply_fleet`, scoped to this scenario), sent to the
+  far corner of the zone so it is still driving when the hand-off is requested;
+  `inspect-receiving-dock` is intentionally never applied. Once `sim-robot-001` holds the task,
+  `sim-robot-002`/`003` come online, each on its own live adapter, and wait Idle to receive it.
+- Timing: the hand-off itself takes a few seconds (a confirmed stop over a live wire, then a
+  reassignment); the spare then drives the route, about 32 s. `handle_battery_handoff()` blocks
+  and `fail()`s loudly (with diagnostics) if the reassignment or the spare's completion doesn't
+  happen in its window — this is treated as a genuine failure, not a soft warning.
 
 ## 4. `hardware-fault`
 
@@ -134,19 +131,17 @@ to a spare camera-capable robot.
   reassignment. The reroute is **not** script-triggered: the FleetAction controller detects the
   capability loss itself (unlike `battery-handoff`, which the script triggers with a
   `requeue-requested` annotation).
-- Script-driven (honesty note, same as `battery-handoff`'s battery): the *capability degradation* is
-  driven by `run.sh`, not the adapter. In a status-projected quickstart the live adapter's hardware
-  telemetry does not reach `status.hardware` (battery doesn't either), so `handle_hardware_fault`
-  patches `sim-robot-001.status.hardware[camera_front]` Healthy (→ capability Active, task lands) then
-  Degraded (→ capability Degraded, reroute). Everything from the capability degrading onward is real,
-  unmodified control-plane code.
+- Real too: the fault. `sim-robot-001`'s adapter reports `camera_front` HEALTHY (→ capability
+  Active, task lands) and then, about 20 s after it starts (`--fault-at 20`), DEGRADED (→ capability
+  Degraded, reroute). The task is sent to the far corner of the zone, so it is still driving when
+  the fault fires. The spare runs its own live adapter and completes the rerouted task.
 - Deterministic setup, all in `run.sh` (`config/samples/demo_a.yaml` untouched): only the camera task
   (`inspect-receiving-dock`) is applied (`deliver-pallet-001` held back); `sim-robot-002`/`003` are
   stripped to nav-only so the camera task can only land on the live robot; `sim-robot-001`'s
   `camera_front` capability is gated on a `camera_front` hardware component so a Degraded hardware
   status degrades the *capability* the scheduler reads (the sample's ungated capability would not);
   and `handle_hardware_fault` re-adds `camera_front` to the idle `sim-robot-002` as the reroute target.
-- Simulated: `sim-robot-002`/`003` readiness, as in every LIVE scenario.
+- Simulated: nothing. `sim-robot-002`/`003` are live here, each on its own adapter.
 - **Best watched with swarmtop.** The fault/reroute/recover arc lives in `status.hardware[]`/
   `status.capabilities[]` and the task's `assignedRobot`, which `kubectl get` can't column-ize — see
   "Companion tool: swarmtop" below. `run.sh` prints a `swarmtop -n warehouse-a --robot sim-robot-001`
@@ -168,25 +163,25 @@ checks still passed.
 - Simulated: `sim-robot-002`/`003` readiness + battery, as usual.
 - This is explicitly called out in the preset's own comment as "the least pretty demo, the most
   relevant for a distributed-systems reviewer" — worth keeping that framing when presenting it.
-- **The adapter-health view now DOES move — this is no longer logs-only.** `FleetAdapter.status.phase`
-  flips `Connected → Disconnected → Connected` across the outage, so swarmtop's adapter-health (`a`)
-  view is the place to watch. That path is keyed on a *verified mTLS* identity, which the LIVE
-  quickstart now presents (`config/overlays/quickstart-mtls`); under the older plaintext overlay it
-  could never move, which is why this scenario used to be described as logs-only.
-  The **robot** views still do not flip: per-robot liveness is deliberately kept off the status
-  write path (RA-1), so `robot_controller.go`'s heartbeat-timeout → `Offline` path stays quiet. The payoff is in the **adapter + manager logs** — the stream drops, the adapter
-  self-stops its task on lease expiry (C4), reconnects with a fresh Hello/Register, and its fencing
-  token + lease survive (C3). `scenario_watch_command()` therefore points comms-flaky at
-  `tail -f /tmp/swq-…-adapter.log` (and `kubectl logs -n system deploy/swarmada-controller-manager -f`),
-  NOT at swarmtop. Closing an honest signal here (robot-Offline on silence, or adapter connectivity
-  for a plaintext adapter) would need real control-plane/mTLS work — see the CHANGELOG entry.
+- **The adapter-health view moves.** `FleetAdapter.status.phase` flips
+  `Connected → Disconnected → Connected` across the outage, so swarmtop's adapter-health (`a`)
+  view shows it. That path is keyed on a *verified mTLS* identity, which the LIVE quickstart
+  presents (`config/overlays/quickstart-mtls`).
+  The **robot** views do not flip. The outage (15 s) is shorter than the namespace offline
+  threshold (`spec.health.connectivityOfflineThresholdSeconds`, 30 s by default), so the Robot
+  reconciler's `Offline` path does not fire, and `status.connectivity.lastSeenAt` is written at
+  most once per half that threshold, so it does not show the drop either. The rest of the payoff
+  is in the **adapter + manager logs**: the stream drops, the adapter self-stops its task on lease
+  expiry (C4), reconnects with a fresh Hello/Register, and its fencing token + lease survive (C3).
+  `scenario_watch_command()` therefore points comms-flaky at `tail -f /tmp/swq-…-adapter.log`
+  (and `kubectl logs -n system deploy/swarmada-controller-manager -f`), not at swarmtop.
 
 ## 6. `estop-drill`
 
 What it proves: a robot that is **actually holding work** is emergency-stopped, CONFIRMS the stop
 itself (`safety.confirm_estop` — simulator ground truth, never inferred) reported over the
 `SafetyStream` as an `EstopAck`, and the control plane pauses the action it was executing
-(§9.6.2.4 — estop takes precedence over the lease).
+(RFC-0001 #safety-fleetaction-behaviour-during-estop — estop takes precedence over the lease).
 
 The drill is driven by the `swarmada.io/estop-triggered` annotation (the operator-facing path,
 `internal/controller/robotestop_controller.go`) once a FleetAction has landed on `sim-robot-001`,
@@ -222,16 +217,13 @@ bringing anything up. Reminder to run this (or `kind delete cluster`) is printed
 
 These apply to every LIVE scenario, not only one:
 
-- **No automatic `Discovered` → `Idle` admission transition exists in the control plane.**
-  `sim-robot-001` reaching `Idle` in every LIVE scenario is `run.sh` projecting it (gated on real
-  observed telemetry, not a blind timer) — not a real control-plane feature. See the project memory
-  `project_swarmada_no_discovered_to_idle_transition.md` for the full trace. This is the single
-  biggest thing that would change if/when the real Health Monitor admission path gets built.
-- **`sim-robot-002`/`003` are never live.** Every scenario's "healthy baseline" is a status
-  projection. If a future scenario needs two genuinely live robots (e.g., a true head-to-head
-  battery race, or `battery-handoff` over a live wire — see its open question above), that's new
-  `run.sh` plumbing (a second adapter process, a second port-forward), not something any current
-  scenario does.
+- **A live robot leaves `Discovered` on its own.** The Robot reconciler advances a live robot from
+  `Discovered` to `Idle` (or `InProgress` when it holds an action) once fresh liveness arrives
+  (`internal/controller/robot_controller.go`, `steadyPhaseForLive`); `run.sh` waits for that
+  transition and does not patch it.
+- **`sim-robot-002`/`003` are live only in `battery-handoff` and `hardware-fault`.** Everywhere
+  else their "healthy baseline" is patched status, with no adapter behind it. Those two run one adapter process per robot,
+  each under its own `FleetAdapter` identity, over the one port-forward.
 - **Timeouts are simulator-tuned.** `QUICKSTART_READY_TIMEOUT`/`QUICKSTART_ASSIGN_TIMEOUT` default
   to 15s each — fine for an all-simulated fleet, too tight for real hardware. `battery-handoff`'s
   own internal wait (up to 40s) is intentionally separate from these.
@@ -242,7 +234,7 @@ These apply to every LIVE scenario, not only one:
 
 ## Watching fields `kubectl get` can't show
 
-`Robot`'s printer columns are Phase/Zone/Battery/Task/Class/Age only
+`Robot`'s printer columns are Phase, Zone, Battery, Action and Age, plus Class with `-o wide`
 (`api/v1/robot_types.go`) — `status.hardware[]`, `status.capabilities[]`, and
 `status.estopState` aren't columns, so plain `kubectl get robots` can't surface
 them at all. This matters most for `hardware-fault` (§4): its entire payoff —
@@ -250,9 +242,11 @@ camera degrades → `perception.camera` capability degrades → task reroutes �
 camera recovers → capability recovers — happens entirely inside
 `status.hardware[]`/`status.capabilities[]`, invisible without `-o yaml`/`-o
 jsonpath` mid-demo. `estop-drill` (§6, `status.estopState`) has the same problem,
-only less central to its story. `comms-flaky` (§5) does NOT belong here: its
-payoff never reaches any status field — `status.connectivity` is never written
-(RA-1) — so it's a logs story, watched via the adapter/manager logs.
+only less central to its story. `comms-flaky` (§5) does NOT belong here: apart
+from the `FleetAdapter` phase, its payoff does not reach a status field. The one
+per-robot liveness field, `status.connectivity.lastSeenAt`, is written at most
+once per half the namespace's offline threshold, so it does not show the drop
+and reconnect; it's a logs story, watched via the adapter/manager logs.
 `battery-edge`/`battery-handoff` don't need this either — `Battery` is already a
 real printer column.
 
@@ -275,15 +269,3 @@ plain `watch kubectl get robots`. `comms-flaky` is intentionally excluded — it
 a logs story (§5), so its watch command is `tail -f` on the adapter + manager
 logs, not swarmtop. swarmtop is therefore strictly optional — never a hard
 dependency.
-
-## Review checklist
-
-Use this when walking the list end to end:
-
-- [ ] `healthy-fleet` — reviewed 2026-07-11
-- [ ] `battery-edge` — reviewed 2026-07-11 (known limitation documented above)
-- [x] `battery-handoff` — confirmed working end-to-end on a clean cluster 2026-07-11 (open question above still stands)
-- [ ] `hardware-fault` — capability-loss reassignment landed (genuine reroute); needs a live run to confirm current behavior
-- [ ] `comms-flaky` — rewritten as a logs story 2026-07-11 (no swarmtop/status signal); needs a live run to confirm reconnect
-- [ ] `estop-drill` — ControlStream reconnect-resilience fix landed 2026-07-11; needs a live run to confirm current behavior
-- [ ] `--clean` / option 7 — reviewed 2026-07-11

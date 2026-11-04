@@ -19,7 +19,7 @@ limitations under the License.
 // It exists because two callers need the same answer and must not diverge: `swarmctl admit`
 // validates the operator's parameters before writing them down, and the DiscoveredRobot
 // controller builds the real Robot from those parameters afterwards. When the merge order
-// of §9.1.2.5 lived only in the CLI, the operator path and the controller's auto-admit path
+// of RFC-0001 #discoveredrobot-controller-behavior-on-admit lived only in the CLI, the operator path and the controller's auto-admit path
 // were two independent implementations of one specification.
 package admission
 
@@ -27,6 +27,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -42,9 +44,16 @@ import (
 // through the controller that seals it.
 const AdmitAnnotation = "swarmada.io/admit"
 
+// AdapterVersionPattern is the pattern the Robot CRD applies to spec.adapter.version (the
+// kubebuilder marker on api/v1 AdapterRef.Version). BuildRobot applies it too, and a test pins
+// the two together against the generated CRD.
+const AdapterVersionPattern = `^\d+\.\d+\.\d+$`
+
+var adapterVersionRE = regexp.MustCompile(AdapterVersionPattern)
+
 // Params are the operator's overrides for an admission, as carried by AdmitAnnotation.
 //
-// Every field is optional except Zone: a Robot is not schedulable without one, so §9.1.2.5
+// Every field is optional except Zone: a Robot is not schedulable without one, so RFC-0001 #discoveredrobot-controller-behavior-on-admit
 // makes it the single always-required input. The empty values are meaningful — they mean
 // "take the discovered value or the class default", not "set this to empty".
 type Params struct {
@@ -82,7 +91,7 @@ func DecodeParams(v string) (Params, error) {
 	return p, nil
 }
 
-// BuildRobot constructs the Robot spec using the admission merge order of RFC-0001 §9.1.2.5:
+// BuildRobot constructs the Robot spec using the admission merge order of RFC-0001 #discoveredrobot-controller-behavior-on-admit:
 // discovered values, then the RobotClass template (when given), then operator overrides, then
 // the always-required zone. It sets only fields with a real source — capabilities/models are
 // populated solely from a class template (which carries their full typed form), never
@@ -110,7 +119,27 @@ func BuildRobot(dr *fleetv1.DiscoveredRobot, p Params, class *fleetv1.RobotClass
 		}
 	}
 	if adapter.Name == "" {
-		return nil, fmt.Errorf("no adapter for admitted robot: pass --adapter or a --robot-class whose baseAdapter names one")
+		return nil, fmt.Errorf("no adapter for admitted robot: pass --adapter, or --class naming a RobotClass whose spec.baseAdapter names one")
+	}
+	// Checked here rather than left to the API server, because both callers act on this
+	// builder's answer. The CLI validates through it before writing the admission down, so a
+	// version the Robot CRD refuses is refused at the command the operator is watching instead of
+	// after it has reported success. The controller builds through it before Create, so it never
+	// sends a Robot the schema refuses identically on every attempt.
+	//
+	// Refused, not normalised. The adapter-reported value can be a pre-release, as the
+	// simulation adapter's 0.1.0-sim is; cutting it to 0.1.0 would make the Robot claim a
+	// release build the adapter never reported. A class that pins a release version is the
+	// lossless route.
+	if !adapterVersionRE.MatchString(adapter.Version) {
+		source := "the version the adapter reported at discovery (status.adapterVersion)"
+		hint := "; pass --class naming a RobotClass whose spec.baseAdapter.version sets a release version"
+		if class != nil && class.Spec.BaseAdapter.Version != "" {
+			source = fmt.Sprintf("robotclass/%s spec.baseAdapter.version", class.Name)
+			hint = ""
+		}
+		return nil, fmt.Errorf("spec.adapter.version %q does not match the Robot CRD's pattern %s: it is %s%s",
+			adapter.Version, AdapterVersionPattern, source, hint)
 	}
 
 	spec := fleetv1.RobotSpec{
@@ -168,17 +197,20 @@ func BuildRobot(dr *fleetv1.DiscoveredRobot, p Params, class *fleetv1.RobotClass
 }
 
 // ResolveConstraintsFromHardware settles the payload constraint against the resolved hardware
-// (§9.1.2.5 — "the class value is overridden by resolved hardware ... to match actual
+// (RFC-0001 #discoveredrobot-controller-behavior-on-admit — "the class value is overridden by resolved hardware ... to match actual
 // hardware"). It does two things, and they answer different questions:
 //
 //   - CLAMP: a declared cap the hardware cannot support is lowered to what it can.
 //   - DERIVE: when nothing declares a cap at all, the hardware's own rating becomes one.
 //
-// This is the constraint the scheduler reads when deciding what a robot may be assigned, so
-// getting spec.hardware right achieves nothing if the number consulted at dispatch still says
-// 45 kg for a robot that reported a 40 kg platform — or says nothing at all, which reads as
-// unlimited. An undeclared cap is the worse of the two: an overstated one is at least bounded
-// by the class author's intent, whereas an absent one bounds the robot by nothing.
+// No v0.4 controller reads the stored constraint: the scheduler compares a FleetAction's
+// spec.constraints with capability resolvedParameters (robotMeetsConstraint,
+// internal/scheduler), which a capability may source from a spec.hardware component, and the
+// Robot webhook warns that this limit is neither enforced nor sent to the adapter. It is
+// resolved here so the stored value does not contradict the hardware — 45 kg for a robot that
+// reported a 40 kg platform, or nothing at all, which reads as unlimited to any reader. An
+// undeclared cap is the worse of the two: an overstated one is at least bounded by the class
+// author's intent, whereas an absent one bounds the robot by nothing.
 //
 // It never raises a declared cap. A class constraint BELOW the physical capacity is deliberate
 // policy — a fleet may cap a 40 kg platform at 25 kg for its own reasons — and lifting it to
@@ -215,8 +247,8 @@ func ResolveConstraintsFromHardware(c *fleetv1.ClassConstraints, hw []fleetv1.Ha
 // reports whether any component rated one at all.
 //
 // The MAXIMUM, not the sum. Two 40 kg platforms are not an 80 kg robot unless a load can be
-// split across both, which nothing in the spec establishes — and this number gates what the
-// scheduler will hand the robot, so overstating it is the direction that drops a payload.
+// split across both, which nothing in the spec establishes — and overstating a cap is the
+// direction that would drop a payload for any reader that enforces it.
 func payloadCapacity(hw []fleetv1.HardwareComponent) (float64, bool) {
 	var largest float64
 	var found bool
@@ -233,7 +265,7 @@ func payloadCapacity(hw []fleetv1.HardwareComponent) (float64, bool) {
 }
 
 // MergeHardware unions the robot's reported inventory with a RobotClass template, keyed by
-// component name (§9.1.2.5 Step 2, and the union-by-name rules of the RobotClass merge).
+// component name (RFC-0001 #discoveredrobot-controller-behavior-on-admit Step 2, and the union-by-name rules of the RobotClass merge).
 //
 // Where a name appears in both, the REPORTED entry wins entirely — real hardware over class
 // template. That direction is the safety-relevant one: a class claiming a component the robot
@@ -348,6 +380,36 @@ func MergeCharging(def *fleetv1.ClassChargingConfig, dock string) *fleetv1.Robot
 		cc.TargetBatteryPct = def.TargetBatteryPct
 	}
 	return cc
+}
+
+// CheckAdapterServes applies the FleetAdapter's spec.servesRobotClasses to a Robot's class: the
+// rule the Robot admission gate enforces at create (RFC-0001 #fleetadapter-admission-gating). An
+// adapter that lists no classes serves any class, including none; one that lists classes serves
+// only those, so a Robot with no class is refused by it.
+//
+// It exists so `swarmctl admit` can refuse a parameter set the gate will refuse, naming the flag
+// to change, instead of recording an admission the control plane can never complete.
+func CheckAdapterServes(a *fleetv1.FleetAdapter, class string) error {
+	served := a.Spec.ServesRobotClasses
+	if len(served) == 0 {
+		return nil
+	}
+	for _, c := range served {
+		if c == class {
+			return nil
+		}
+	}
+	list := strings.Join(served, ", ")
+	if class == "" {
+		hint := "pass --class naming one of them"
+		if len(served) == 1 {
+			hint = "pass --class " + served[0]
+		}
+		return fmt.Errorf("--class is required: fleetadapter/%s serves only RobotClass %s (spec.servesRobotClasses), "+
+			"and a Robot with no class is admitted only by an adapter that serves any class; %s", a.Name, list, hint)
+	}
+	return fmt.Errorf("fleetadapter/%s does not serve RobotClass %q (spec.servesRobotClasses: %s); pass --class naming one it serves, or --adapter naming an adapter that serves %s",
+		a.Name, class, list, class)
 }
 
 func firstNonEmpty(a, b string) string {

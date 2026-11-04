@@ -63,7 +63,7 @@ func zoneWithCapacity(name string, maxRobots int32) *fleetv1.FleetZone {
 	}
 }
 
-// §9.3.4: a robot entering a leaf zone already at maxConcurrentRobots is HELD at the
+// RFC-0001 #control-plane-zone-controller: a robot entering a leaf zone already at maxConcurrentRobots is HELD at the
 // boundary (zone_admission admit=false); when a slot frees (another robot leaves),
 // the held robot is ADMITTED (admit=true). Enforcement is advisory — the control
 // plane pushes; the adapter honours.

@@ -19,6 +19,7 @@ package safety
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,18 +44,21 @@ func identity(adapter string) controlstream.TLSIdentity {
 }
 
 // scriptedSender routes a canned set of EstopAcks (echoing the estop_id) inline on
-// each Send, so TriggerEstop resolves deterministically with no timing.
+// each Send, so TriggerEstop resolves deterministically with no timing. Send may be
+// called concurrently, as a stream's is: a held stop goes out beside a trigger.
 type scriptedSender struct {
 	d     *Dispatcher
 	reply func(estopID string) []*fav1.EstopAck
-	sent  int
+	sent  atomic.Int64
 }
 
 func (s *scriptedSender) Send(m *fav1.ControlPlaneSafetyMessage) error {
-	s.sent++
+	s.sent.Add(1)
 	if s.reply != nil {
+		// Replied as the stream the estop went down would: every fixture registers
+		// "acme", and the envelope names the robot the estop was sent for.
 		for _, ack := range s.reply(m.GetEstop().GetEstopId()) {
-			s.d.RouteAck(ack)
+			_ = s.d.RouteAck(identity("acme"), s, m.GetRobotId(), ack)
 		}
 	}
 	return nil
@@ -71,13 +75,16 @@ func newDispatcher(t *testing.T, adapter string) (*Dispatcher, client.Client, *r
 		t.Fatalf("scheme: %v", err)
 	}
 	robot := &fleetv1.Robot{
-		ObjectMeta: metav1.ObjectMeta{Name: "amr-1", Namespace: ns},
-		Spec:       fleetv1.RobotSpec{Adapter: fleetv1.AdapterRef{Name: adapter, Version: "1.0.0"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "amr-1", Namespace: ns,
+			Annotations: map[string]string{fleetv1.RobotIDAnnotation: "amr-1"}},
+		Spec: fleetv1.RobotSpec{Adapter: fleetv1.AdapterRef{Name: adapter, Version: "1.0.0"}},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(robot).
-		WithStatusSubresource(&fleetv1.Robot{}).Build()
+	c := atomicFake(fake.NewClientBuilder().WithScheme(scheme).WithObjects(robot).
+		WithStatusSubresource(&fleetv1.Robot{}).Build())
 	rec := record.NewFakeRecorder(10)
 	d := New(c, rec)
+	d.Telemetry = &testFrames{}
+	d.DeriveCapabilities = testDerivation
 	d.deliveryTimeout = 60 * time.Millisecond // keep the dropped-estop test fast
 	d.confirmTimeout = 60 * time.Millisecond
 	return d, c, rec
@@ -100,7 +107,7 @@ func TestTriggerEstop_ConfirmedStopped(t *testing.T) {
 	}}
 	d.RegisterStream(identity("acme"), sender)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || !res.Confirmed || res.State != fleetv1.RobotEstopStopped {
 		t.Fatalf("res=%+v err=%v; want confirmed Stopped", res, err)
 	}
@@ -120,7 +127,7 @@ func TestTriggerEstop_StoppingThenStopped(t *testing.T) {
 	}}
 	d.RegisterStream(identity("acme"), sender)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || !res.Confirmed || res.State != fleetv1.RobotEstopStopped {
 		t.Fatalf("res=%+v err=%v; want confirmed Stopped", res, err)
 	}
@@ -136,7 +143,7 @@ func TestTriggerEstop_DroppedNeverStopped(t *testing.T) {
 	sender := &scriptedSender{d: d, reply: nil} // never acks
 	d.RegisterStream(identity("acme"), sender)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if res.Confirmed || res.State == fleetv1.RobotEstopStopped {
 		t.Fatalf("SECURITY: dropped estop reported as stopped: %+v", res)
 	}
@@ -151,7 +158,7 @@ func TestTriggerEstop_DroppedNeverStopped(t *testing.T) {
 // No connected SafetyStream: undelivered, robot Failed (escalate), never Stopped.
 func TestTriggerEstop_NoStreamFailsSafe(t *testing.T) {
 	d, c, _ := newDispatcher(t, "acme") // nothing registered
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if !errors.Is(err, ErrUndelivered) || res.State != fleetv1.RobotEstopFailed {
 		t.Fatalf("res=%+v err=%v; want Failed + ErrUndelivered", res, err)
 	}
@@ -168,7 +175,7 @@ func TestTriggerEstop_StoppingOnlyTimesOutToFailed(t *testing.T) {
 	}}
 	d.RegisterStream(identity("acme"), sender)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -197,7 +204,7 @@ func TestTriggerEstop_LatencyViolation(t *testing.T) {
 	}}
 	d.RegisterStream(identity("acme"), sender)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || !res.LatencyViolation || res.Latency != 600*time.Millisecond {
 		t.Fatalf("res=%+v err=%v; want LatencyViolation at 600ms", res, err)
 	}

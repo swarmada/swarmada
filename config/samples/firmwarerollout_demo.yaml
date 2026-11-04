@@ -1,0 +1,121 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Demonstrates the FirmwareRollout CRD and the two gates that can stop a rollout
+# before any robot is touched. The three stages are independent and each shows one
+# behaviour: `signature-gate` is refused by the control plane for carrying no
+# firmwareSignatureRef while the namespace enforces signing; `battery-hold` is
+# admitted but holds robots below `safetyConstraints.minBatteryPct` out of the
+# batch; `rollout` is the well-formed case that progresses one robot at a time
+# under `strategy.rollingUpdate`. Apply one stage at a time:
+#
+#     kubectl apply -f config/samples/firmwarerollout_demo.yaml -l swarmada.io/demo-step=<step>
+#
+# NO STATUS IS DECLARED ANYWHERE IN THIS FILE. Every field below is spec; every
+# phase and count the runbook displays is written by the FirmwareRollout
+# controller.
+#
+# NO REAL FIRMWARE IMAGE IS REQUIRED, and none is fetched. firmwareUri names a
+# registry that does not exist on purpose: the control-plane verification gate
+# (internal/controller/firmwarerollout_controller.go verifyArtifact) checks the
+# DIGEST and its signature, never the bytes, and PullOnIdle delivery hands the
+# URI to the robot rather than dereferencing it here. A demo that needs a
+# registry is a demo nobody re-runs.
+#
+# The checksums are the digests adapters/simulation/sim_adapter.py computes for
+# its stand-in artifact — sha256("firmware:<newVersion>") — so a robot-side
+# re-verification (C7.2) would accept them. See the runbook's Findings for why
+# no robot ever receives one at v0.4.
+---
+# STEP: signature-gate. Identical to the rollout below except that it carries no
+# firmwareSignatureRef. Applied while the namespace enforces signing
+# (SwarmadaConfig.spec.signing.requireSignatureVerification, default true), the
+# controller refuses it BEFORE any robot is dispatched to.
+apiVersion: swarmada.io/v1
+kind: FirmwareRollout
+metadata:
+  name: fleet-firmware-1-5-0-unsigned
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: signature-gate
+spec:
+  # An empty selector matches every Robot in the namespace.
+  targetSelector: {}
+  newVersion: "1.5.0"
+  firmwareUri: "oci://registry.invalid/swarmada/simbot-firmware:1.5.0"
+  firmwareChecksum: "sha256:6e2c2731e0b6b2c852a3adb265d302532b3e56546b5d195819197369c7c629ab"
+  # firmwareSignatureRef: deliberately absent — this is the whole point of the step.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "1"
+      pauseOnError: true
+  safetyConstraints:
+    minBatteryPct: 30
+    requireIdleState: true
+---
+# STEP: rollout. The plan's steps (2)/(3): one robot at a time, never more than
+# one unavailable, halt on the first failure.
+apiVersion: swarmada.io/v1
+kind: FirmwareRollout
+metadata:
+  name: fleet-firmware-1-5-0
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: rollout
+spec:
+  targetSelector: {}
+  newVersion: "1.5.0"
+  firmwareUri: "oci://registry.invalid/swarmada/simbot-firmware:1.5.0"
+  firmwareChecksum: "sha256:6e2c2731e0b6b2c852a3adb265d302532b3e56546b5d195819197369c7c629ab"
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "1"
+      pauseOnError: true
+  safetyConstraints:
+    minBatteryPct: 30
+    requireIdleState: true
+---
+# STEP: battery-hold. A battery floor no robot in the sample fleet meets. Every
+# target is held back as skipped and NOTHING is dispatched — the safety
+# constraint, not the batch size, is what stops the rollout.
+#
+# newVersion is 1.6.0, NOT 1.5.0, and that is load bearing. Dispatch is recorded
+# on the ROBOT as swarmada.io/pending-firmware-version, and the classifier reads
+# it back with `annotations[pending-firmware-version] == spec.newVersion`. Two
+# rollouts naming the SAME version therefore share one annotation: the robot the
+# `rollout` step dispatched to classifies as "updating" for this rollout too,
+# which is a robot this rollout never touched. Distinct versions keep the two
+# demos independent. See the runbook's Findings.
+apiVersion: swarmada.io/v1
+kind: FirmwareRollout
+metadata:
+  name: fleet-firmware-1-6-0-battery-hold
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: battery-hold
+spec:
+  targetSelector: {}
+  newVersion: "1.6.0"
+  firmwareUri: "oci://registry.invalid/swarmada/simbot-firmware:1.6.0"
+  firmwareChecksum: "sha256:d72a31f46be63f5d091d996b02690a0701e898b497a6fc060b41b184379af1da"
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "1"
+      pauseOnError: true
+  safetyConstraints:
+    minBatteryPct: 100
+    requireIdleState: true

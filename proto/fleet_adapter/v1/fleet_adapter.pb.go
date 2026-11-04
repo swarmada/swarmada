@@ -17,13 +17,14 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.35.1
-// source: proto/fleet_adapter/v1/fleet_adapter.proto
+// source: fleet_adapter/v1/fleet_adapter.proto
 
 package fleetadapterv1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -39,9 +40,9 @@ const (
 type RegistrationRejection int32
 
 const (
-	RegistrationRejection_REGISTRATION_REJECTION_UNSPECIFIED        RegistrationRejection = 0
+	RegistrationRejection_REGISTRATION_REJECTION_UNSPECIFIED        RegistrationRejection = 0 // no code: on a RegisterAck, the robot is not this adapter's (RFC-0001 #fleet-adapter-protocol-the-stop-latch)
 	RegistrationRejection_REGISTRATION_REJECTION_NOT_ADMITTED       RegistrationRejection = 1 // Register: no Robot CRD exists
-	RegistrationRejection_REGISTRATION_REJECTION_ALREADY_EXISTS     RegistrationRejection = 2 // Discover: Robot/DiscoveredRobot exists
+	RegistrationRejection_REGISTRATION_REJECTION_ALREADY_EXISTS     RegistrationRejection = 2 // Discover: an admitted Robot exists (reconnect via Register)
 	RegistrationRejection_REGISTRATION_REJECTION_VERSION_MISMATCH   RegistrationRejection = 3 // incompatible adapter version
 	RegistrationRejection_REGISTRATION_REJECTION_NAMESPACE_MISMATCH RegistrationRejection = 4 // robot not in adapter's namespace
 	RegistrationRejection_REGISTRATION_REJECTION_INVALID_ROBOT_ID   RegistrationRejection = 5 // robot_id malformed / empty / not a valid identifier
@@ -78,11 +79,11 @@ func (x RegistrationRejection) String() string {
 }
 
 func (RegistrationRejection) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[0].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[0].Descriptor()
 }
 
 func (RegistrationRejection) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[0]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[0]
 }
 
 func (x RegistrationRejection) Number() protoreflect.EnumNumber {
@@ -91,16 +92,16 @@ func (x RegistrationRejection) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RegistrationRejection.Descriptor instead.
 func (RegistrationRejection) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{0}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{0}
 }
 
 type RobotActionPhase int32
 
 const (
 	RobotActionPhase_ROBOT_ACTION_PHASE_UNSPECIFIED RobotActionPhase = 0
-	RobotActionPhase_ROBOT_ACTION_PHASE_IDLE        RobotActionPhase = 1 // no action assigned; robot should be idle
+	RobotActionPhase_ROBOT_ACTION_PHASE_IDLE        RobotActionPhase = 1 // no action to execute (none assigned, or held: RFC-0001 row A13); halt
 	RobotActionPhase_ROBOT_ACTION_PHASE_IN_PROGRESS RobotActionPhase = 2 // action active under a live lease; continue
-	RobotActionPhase_ROBOT_ACTION_PHASE_REVOKING    RobotActionPhase = 3 // lease renewal stopped; self-stop on expiry
+	RobotActionPhase_ROBOT_ACTION_PHASE_REVOKING    RobotActionPhase = 3 // lease renewal stopped; self-stop on expiry; never sent for stop-held work
 	RobotActionPhase_ROBOT_ACTION_PHASE_CANCELLED   RobotActionPhase = 4 // cancelled during disconnect; halt immediately
 	RobotActionPhase_ROBOT_ACTION_PHASE_UNKNOWN     RobotActionPhase = 5 // no record; halt and report
 )
@@ -136,11 +137,11 @@ func (x RobotActionPhase) String() string {
 }
 
 func (RobotActionPhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[1].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[1].Descriptor()
 }
 
 func (RobotActionPhase) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[1]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[1]
 }
 
 func (x RobotActionPhase) Number() protoreflect.EnumNumber {
@@ -149,7 +150,7 @@ func (x RobotActionPhase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RobotActionPhase.Descriptor instead.
 func (RobotActionPhase) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{1}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{1}
 }
 
 type AssignActionRejection int32
@@ -161,6 +162,21 @@ const (
 	AssignActionRejection_ASSIGN_ACTION_REJECTION_ROBOT_BUSY            AssignActionRejection = 3 // on a different live action
 	AssignActionRejection_ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE     AssignActionRejection = 4 // faulted / estopped / offline
 	AssignActionRejection_ASSIGN_ACTION_REJECTION_INVALID_ACTION        AssignActionRejection = 5 // unparseable / unsupported
+	// The assignment carries an operating constraint this adapter cannot honour, or
+	// one whose subject it does not recognise (FA-R5, FA-R6). The adapter MUST
+	// decline rather than accept and ignore the rule, and MUST name the subjects in
+	// AssignActionResult.unhonourable_subjects — naming the subject is the whole of
+	// what makes this obligation testable.
+	//
+	// AN UNRECOGNISED SUBJECT IS NOT AN ABSENT SUBJECT. Treating one as absent would
+	// make the namespaced extension form a universal bypass: any site could silence
+	// a constraint by namespacing it.
+	//
+	// Declining costs the adapter nothing: the action returns to Pending and the
+	// Scheduler tries the next candidate. The control plane records it as
+	// FleetAction.status.failureReason ZoneOperatingConstraintUnmet, the CANNOT
+	// half of that reason's "distinguishing cannot honour from did not".
+	AssignActionRejection_ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET AssignActionRejection = 6
 )
 
 // Enum value maps for AssignActionRejection.
@@ -172,14 +188,16 @@ var (
 		3: "ASSIGN_ACTION_REJECTION_ROBOT_BUSY",
 		4: "ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE",
 		5: "ASSIGN_ACTION_REJECTION_INVALID_ACTION",
+		6: "ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET",
 	}
 	AssignActionRejection_value = map[string]int32{
-		"ASSIGN_ACTION_REJECTION_UNSPECIFIED":           0,
-		"ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN":   1,
-		"ASSIGN_ACTION_REJECTION_MISSING_FENCING_TOKEN": 2,
-		"ASSIGN_ACTION_REJECTION_ROBOT_BUSY":            3,
-		"ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE":     4,
-		"ASSIGN_ACTION_REJECTION_INVALID_ACTION":        5,
+		"ASSIGN_ACTION_REJECTION_UNSPECIFIED":                0,
+		"ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN":        1,
+		"ASSIGN_ACTION_REJECTION_MISSING_FENCING_TOKEN":      2,
+		"ASSIGN_ACTION_REJECTION_ROBOT_BUSY":                 3,
+		"ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE":          4,
+		"ASSIGN_ACTION_REJECTION_INVALID_ACTION":             5,
+		"ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET": 6,
 	}
 )
 
@@ -194,11 +212,11 @@ func (x AssignActionRejection) String() string {
 }
 
 func (AssignActionRejection) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[2].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[2].Descriptor()
 }
 
 func (AssignActionRejection) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[2]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[2]
 }
 
 func (x AssignActionRejection) Number() protoreflect.EnumNumber {
@@ -207,7 +225,123 @@ func (x AssignActionRejection) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AssignActionRejection.Descriptor instead.
 func (AssignActionRejection) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{2}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{2}
+}
+
+// OperatingConstraintMode is the resolved mode of one effective operating rule
+// (ADR-0058 §2). There is deliberately no ALLOWED value at any axis: a rule exists
+// only to narrow, absence of a rule is permission, and so a zone that takes no
+// position sends nothing. That is what makes A HOLE UNWRITABLE.
+type OperatingConstraintMode int32
+
+const (
+	OperatingConstraintMode_OPERATING_CONSTRAINT_MODE_UNSPECIFIED OperatingConstraintMode = 0
+	OperatingConstraintMode_OPERATING_CONSTRAINT_MODE_DENIED      OperatingConstraintMode = 1 // the subject is forbidden here
+	OperatingConstraintMode_OPERATING_CONSTRAINT_MODE_LIMITED     OperatingConstraintMode = 2 // permitted only within max, or only among allowed
+	OperatingConstraintMode_OPERATING_CONSTRAINT_MODE_REQUIRED    OperatingConstraintMode = 3 // the subject MUST be running (the inspection-zone mirror case)
+)
+
+// Enum value maps for OperatingConstraintMode.
+var (
+	OperatingConstraintMode_name = map[int32]string{
+		0: "OPERATING_CONSTRAINT_MODE_UNSPECIFIED",
+		1: "OPERATING_CONSTRAINT_MODE_DENIED",
+		2: "OPERATING_CONSTRAINT_MODE_LIMITED",
+		3: "OPERATING_CONSTRAINT_MODE_REQUIRED",
+	}
+	OperatingConstraintMode_value = map[string]int32{
+		"OPERATING_CONSTRAINT_MODE_UNSPECIFIED": 0,
+		"OPERATING_CONSTRAINT_MODE_DENIED":      1,
+		"OPERATING_CONSTRAINT_MODE_LIMITED":     2,
+		"OPERATING_CONSTRAINT_MODE_REQUIRED":    3,
+	}
+)
+
+func (x OperatingConstraintMode) Enum() *OperatingConstraintMode {
+	p := new(OperatingConstraintMode)
+	*p = x
+	return p
+}
+
+func (x OperatingConstraintMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (OperatingConstraintMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[3].Descriptor()
+}
+
+func (OperatingConstraintMode) Type() protoreflect.EnumType {
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[3]
+}
+
+func (x OperatingConstraintMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use OperatingConstraintMode.Descriptor instead.
+func (OperatingConstraintMode) EnumDescriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{3}
+}
+
+// CancelCause is WHY the control plane is cancelling, machine-readable
+// (RFC-0001 Directive supersession on the wire). CancelAction.reason is free text
+// for a human: it cannot be parsed and MUST NOT be used to classify an event.
+// Additive; UNSPECIFIED preserves the pre-existing untyped cancel and MUST NOT be
+// read as any specific cause.
+type CancelCause int32
+
+const (
+	CancelCause_CANCEL_CAUSE_UNSPECIFIED     CancelCause = 0 // legacy/untyped cancel — no cause stated
+	CancelCause_CANCEL_CAUSE_OPERATOR        CancelCause = 1 // swarmada.io/cancel-requested, under the `cancel` verb
+	CancelCause_CANCEL_CAUSE_SUPERSEDED      CancelCause = 2 // a newer directive for this robot replaces this action
+	CancelCause_CANCEL_CAUSE_CAPABILITY_LOSS CancelCause = 3 // required capability degraded
+	CancelCause_CANCEL_CAUSE_REVOCATION      CancelCause = 4 // lease revocation after connectivity loss
+)
+
+// Enum value maps for CancelCause.
+var (
+	CancelCause_name = map[int32]string{
+		0: "CANCEL_CAUSE_UNSPECIFIED",
+		1: "CANCEL_CAUSE_OPERATOR",
+		2: "CANCEL_CAUSE_SUPERSEDED",
+		3: "CANCEL_CAUSE_CAPABILITY_LOSS",
+		4: "CANCEL_CAUSE_REVOCATION",
+	}
+	CancelCause_value = map[string]int32{
+		"CANCEL_CAUSE_UNSPECIFIED":     0,
+		"CANCEL_CAUSE_OPERATOR":        1,
+		"CANCEL_CAUSE_SUPERSEDED":      2,
+		"CANCEL_CAUSE_CAPABILITY_LOSS": 3,
+		"CANCEL_CAUSE_REVOCATION":      4,
+	}
+)
+
+func (x CancelCause) Enum() *CancelCause {
+	p := new(CancelCause)
+	*p = x
+	return p
+}
+
+func (x CancelCause) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CancelCause) Descriptor() protoreflect.EnumDescriptor {
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[4].Descriptor()
+}
+
+func (CancelCause) Type() protoreflect.EnumType {
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[4]
+}
+
+func (x CancelCause) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CancelCause.Descriptor instead.
+func (CancelCause) EnumDescriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{4}
 }
 
 // CancelDisposition reports how the robot handled a cancel_action issued for
@@ -222,6 +356,15 @@ const (
 	CancelDisposition_CANCEL_DISPOSITION_STOPPED_SAFELY CancelDisposition = 1 // action halted at a safe point → control plane requeues (→ Pending)
 	CancelDisposition_CANCEL_DISPOSITION_COMPLETED      CancelDisposition = 2 // robot finished the action (lost cap not needed to finish) → cancel is a no-op
 	CancelDisposition_CANCEL_DISPOSITION_RECOVERED      CancelDisposition = 3 // could not safely finish/hand off; robot recovered (load returned / to base) → action Failed
+	// The stop was commanded and the robot's rest could not be witnessed: the platform has
+	// no motion channel independent of the command path (ADR-0071), so the adapter does not
+	// claim STOPPED_SAFELY (contract 1.4.0). Meaningful only with acknowledged = true. An
+	// adapter sends it only to a control plane that negotiated 1.4.0 or later; to an older
+	// one it answers acknowledged = false. It does not prove the lease dead: RFC-0001's
+	// action table (#safety-action-table) states what follows (row A3 for a requeue, a
+	// held Revoking action's included; the lease alone for any other cancel).
+	// A compute runtime does not send it (compute.v1 reuses this enum; a run has no motion).
+	CancelDisposition_CANCEL_DISPOSITION_STOP_UNCONFIRMED CancelDisposition = 4
 )
 
 // Enum value maps for CancelDisposition.
@@ -231,12 +374,14 @@ var (
 		1: "CANCEL_DISPOSITION_STOPPED_SAFELY",
 		2: "CANCEL_DISPOSITION_COMPLETED",
 		3: "CANCEL_DISPOSITION_RECOVERED",
+		4: "CANCEL_DISPOSITION_STOP_UNCONFIRMED",
 	}
 	CancelDisposition_value = map[string]int32{
-		"CANCEL_DISPOSITION_UNSPECIFIED":    0,
-		"CANCEL_DISPOSITION_STOPPED_SAFELY": 1,
-		"CANCEL_DISPOSITION_COMPLETED":      2,
-		"CANCEL_DISPOSITION_RECOVERED":      3,
+		"CANCEL_DISPOSITION_UNSPECIFIED":      0,
+		"CANCEL_DISPOSITION_STOPPED_SAFELY":   1,
+		"CANCEL_DISPOSITION_COMPLETED":        2,
+		"CANCEL_DISPOSITION_RECOVERED":        3,
+		"CANCEL_DISPOSITION_STOP_UNCONFIRMED": 4,
 	}
 )
 
@@ -251,11 +396,11 @@ func (x CancelDisposition) String() string {
 }
 
 func (CancelDisposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[3].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[5].Descriptor()
 }
 
 func (CancelDisposition) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[3]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[5]
 }
 
 func (x CancelDisposition) Number() protoreflect.EnumNumber {
@@ -264,14 +409,14 @@ func (x CancelDisposition) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CancelDisposition.Descriptor instead.
 func (CancelDisposition) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{3}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{5}
 }
 
 type EstopState int32
 
 const (
 	EstopState_ESTOP_STATE_UNSPECIFIED EstopState = 0
-	EstopState_ESTOP_STATE_STOPPING    EstopState = 1 // command received; robot is decelerating
+	EstopState_ESTOP_STATE_STOPPING    EstopState = 1 // received and braking; rest not yet confirmed — never a stop
 	EstopState_ESTOP_STATE_STOPPED     EstopState = 2 // CONFIRMED halted in a safe state
 	EstopState_ESTOP_STATE_FAILED      EstopState = 3 // could not confirm a stop — escalate immediately
 )
@@ -303,11 +448,11 @@ func (x EstopState) String() string {
 }
 
 func (EstopState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[4].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[6].Descriptor()
 }
 
 func (EstopState) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[4]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[6]
 }
 
 func (x EstopState) Number() protoreflect.EnumNumber {
@@ -316,7 +461,7 @@ func (x EstopState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EstopState.Descriptor instead.
 func (EstopState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{4}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{6}
 }
 
 type ActionState int32
@@ -328,8 +473,10 @@ const (
 	ActionState_ACTION_STATE_FAILED      ActionState = 3
 	ActionState_ACTION_STATE_PAUSED      ActionState = 4
 	ActionState_ACTION_STATE_CANCELLED   ActionState = 5
-	ActionState_ACTION_STATE_STOPPED     ActionState = 6 // clean commanded stop (reconnect IDLE/REVOKING-expired, edge estop); NOT a failure
-	ActionState_ACTION_STATE_UNKNOWN     ActionState = 7 // no control-plane record (reconnect UNKNOWN phase); robot halts and reports
+	// Commanded stop; NOT terminal. After any stop (edge, fence, Estop) the adapter follows it
+	// with the terminal report RFC-0001 #fleet-adapter-protocol-the-stop-latch requires.
+	ActionState_ACTION_STATE_STOPPED ActionState = 6
+	ActionState_ACTION_STATE_UNKNOWN ActionState = 7 // no control-plane record (reconnect UNKNOWN phase); robot halts and reports
 )
 
 // Enum value maps for ActionState.
@@ -367,11 +514,11 @@ func (x ActionState) String() string {
 }
 
 func (ActionState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[5].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[7].Descriptor()
 }
 
 func (ActionState) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[5]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[7]
 }
 
 func (x ActionState) Number() protoreflect.EnumNumber {
@@ -380,7 +527,177 @@ func (x ActionState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ActionState.Descriptor instead.
 func (ActionState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{5}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{7}
+}
+
+// ActionEndCause is HOW an action ended, as reported by the adapter. It exists
+// separately from CancelCause because in-place preemption sends no cancel_action at
+// all: there the terminal ActionStatusUpdate is the only report of why the action
+// ended. An enum rather than free text because the value feeds a safety audit entry
+// and an operator-facing distinction between work a person stopped and work the
+// fleet replaced; neither can rest on a string.
+type ActionEndCause int32
+
+const (
+	ActionEndCause_ACTION_END_CAUSE_UNSPECIFIED           ActionEndCause = 0 // no cause stated — NOT a claim of any cause
+	ActionEndCause_ACTION_END_CAUSE_SUPERSEDED            ActionEndCause = 1 // replaced by a newer directive for this robot
+	ActionEndCause_ACTION_END_CAUSE_CANCELLED_BY_OPERATOR ActionEndCause = 2 // ended on a cancel carrying CANCEL_CAUSE_OPERATOR
+	ActionEndCause_ACTION_END_CAUSE_CAPABILITY_LOSS       ActionEndCause = 3
+	ActionEndCause_ACTION_END_CAUSE_LEASE_EXPIRED         ActionEndCause = 4 // self-stop on an unrenewed lease
+	ActionEndCause_ACTION_END_CAUSE_ESTOP                 ActionEndCause = 5 // halted by an emergency stop
+	ActionEndCause_ACTION_END_CAUSE_EXECUTION_FAILURE     ActionEndCause = 6 // the robot could not complete the action
+)
+
+// Enum value maps for ActionEndCause.
+var (
+	ActionEndCause_name = map[int32]string{
+		0: "ACTION_END_CAUSE_UNSPECIFIED",
+		1: "ACTION_END_CAUSE_SUPERSEDED",
+		2: "ACTION_END_CAUSE_CANCELLED_BY_OPERATOR",
+		3: "ACTION_END_CAUSE_CAPABILITY_LOSS",
+		4: "ACTION_END_CAUSE_LEASE_EXPIRED",
+		5: "ACTION_END_CAUSE_ESTOP",
+		6: "ACTION_END_CAUSE_EXECUTION_FAILURE",
+	}
+	ActionEndCause_value = map[string]int32{
+		"ACTION_END_CAUSE_UNSPECIFIED":           0,
+		"ACTION_END_CAUSE_SUPERSEDED":            1,
+		"ACTION_END_CAUSE_CANCELLED_BY_OPERATOR": 2,
+		"ACTION_END_CAUSE_CAPABILITY_LOSS":       3,
+		"ACTION_END_CAUSE_LEASE_EXPIRED":         4,
+		"ACTION_END_CAUSE_ESTOP":                 5,
+		"ACTION_END_CAUSE_EXECUTION_FAILURE":     6,
+	}
+)
+
+func (x ActionEndCause) Enum() *ActionEndCause {
+	p := new(ActionEndCause)
+	*p = x
+	return p
+}
+
+func (x ActionEndCause) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ActionEndCause) Descriptor() protoreflect.EnumDescriptor {
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[8].Descriptor()
+}
+
+func (ActionEndCause) Type() protoreflect.EnumType {
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[8]
+}
+
+func (x ActionEndCause) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ActionEndCause.Descriptor instead.
+func (ActionEndCause) EnumDescriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{8}
+}
+
+// EventSubjectKind is the execution kind an event was raised by. One value today
+// (a robot-dispatched FleetAction); reserved so a later execution kind is an
+// additive enum value, not a reinterpretation of `seq`'s scope.
+type EventSubjectKind int32
+
+const (
+	EventSubjectKind_EVENT_SUBJECT_KIND_UNSPECIFIED EventSubjectKind = 0 // a receiver MUST read this as ACTION
+	EventSubjectKind_EVENT_SUBJECT_KIND_ACTION      EventSubjectKind = 1 // the FleetAction identified by action_id
+)
+
+// Enum value maps for EventSubjectKind.
+var (
+	EventSubjectKind_name = map[int32]string{
+		0: "EVENT_SUBJECT_KIND_UNSPECIFIED",
+		1: "EVENT_SUBJECT_KIND_ACTION",
+	}
+	EventSubjectKind_value = map[string]int32{
+		"EVENT_SUBJECT_KIND_UNSPECIFIED": 0,
+		"EVENT_SUBJECT_KIND_ACTION":      1,
+	}
+)
+
+func (x EventSubjectKind) Enum() *EventSubjectKind {
+	p := new(EventSubjectKind)
+	*p = x
+	return p
+}
+
+func (x EventSubjectKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EventSubjectKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[9].Descriptor()
+}
+
+func (EventSubjectKind) Type() protoreflect.EnumType {
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[9]
+}
+
+func (x EventSubjectKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EventSubjectKind.Descriptor instead.
+func (EventSubjectKind) EnumDescriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{9}
+}
+
+// ActivationCost classifies whether ActivateStream has a real power/bandwidth
+// cost for this stream (ON_DEMAND — the duty cycle below exists for this
+// case) or the sensor is already powered regardless of activation (ALWAYS_ON,
+// e.g. a mic array that is never switched off). Advisory to the control
+// plane; it changes no admission or scheduling decision.
+type ActivationCost int32
+
+const (
+	ActivationCost_ACTIVATION_COST_UNSPECIFIED ActivationCost = 0
+	ActivationCost_ACTIVATION_COST_ALWAYS_ON   ActivationCost = 1
+	ActivationCost_ACTIVATION_COST_ON_DEMAND   ActivationCost = 2
+)
+
+// Enum value maps for ActivationCost.
+var (
+	ActivationCost_name = map[int32]string{
+		0: "ACTIVATION_COST_UNSPECIFIED",
+		1: "ACTIVATION_COST_ALWAYS_ON",
+		2: "ACTIVATION_COST_ON_DEMAND",
+	}
+	ActivationCost_value = map[string]int32{
+		"ACTIVATION_COST_UNSPECIFIED": 0,
+		"ACTIVATION_COST_ALWAYS_ON":   1,
+		"ACTIVATION_COST_ON_DEMAND":   2,
+	}
+)
+
+func (x ActivationCost) Enum() *ActivationCost {
+	p := new(ActivationCost)
+	*p = x
+	return p
+}
+
+func (x ActivationCost) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ActivationCost) Descriptor() protoreflect.EnumDescriptor {
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[10].Descriptor()
+}
+
+func (ActivationCost) Type() protoreflect.EnumType {
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[10]
+}
+
+func (x ActivationCost) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ActivationCost.Descriptor instead.
+func (ActivationCost) EnumDescriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{10}
 }
 
 type ReservationState int32
@@ -419,11 +736,11 @@ func (x ReservationState) String() string {
 }
 
 func (ReservationState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[6].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[11].Descriptor()
 }
 
 func (ReservationState) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[6]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[11]
 }
 
 func (x ReservationState) Number() protoreflect.EnumNumber {
@@ -432,7 +749,7 @@ func (x ReservationState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ReservationState.Descriptor instead.
 func (ReservationState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{6}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{11}
 }
 
 type ProbeStatus int32
@@ -471,11 +788,11 @@ func (x ProbeStatus) String() string {
 }
 
 func (ProbeStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[7].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[12].Descriptor()
 }
 
 func (ProbeStatus) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[7]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[12]
 }
 
 func (x ProbeStatus) Number() protoreflect.EnumNumber {
@@ -484,7 +801,7 @@ func (x ProbeStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProbeStatus.Descriptor instead.
 func (ProbeStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{7}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{12}
 }
 
 // InstallOutcome is the terminal result of a firmware or model install.
@@ -525,11 +842,11 @@ func (x InstallOutcome) String() string {
 }
 
 func (InstallOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[8].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[13].Descriptor()
 }
 
 func (InstallOutcome) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[8]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[13]
 }
 
 func (x InstallOutcome) Number() protoreflect.EnumNumber {
@@ -538,7 +855,7 @@ func (x InstallOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InstallOutcome.Descriptor instead.
 func (InstallOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{8}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{13}
 }
 
 // UpdateKind disambiguates which rollout an UpdateProgress belongs to.
@@ -575,11 +892,11 @@ func (x UpdateKind) String() string {
 }
 
 func (UpdateKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[9].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[14].Descriptor()
 }
 
 func (UpdateKind) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[9]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[14]
 }
 
 func (x UpdateKind) Number() protoreflect.EnumNumber {
@@ -588,7 +905,7 @@ func (x UpdateKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UpdateKind.Descriptor instead.
 func (UpdateKind) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{9}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{14}
 }
 
 type HardwareStatus int32
@@ -632,11 +949,11 @@ func (x HardwareStatus) String() string {
 }
 
 func (HardwareStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[10].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[15].Descriptor()
 }
 
 func (HardwareStatus) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[10]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[15]
 }
 
 func (x HardwareStatus) Number() protoreflect.EnumNumber {
@@ -645,7 +962,7 @@ func (x HardwareStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use HardwareStatus.Descriptor instead.
 func (HardwareStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{10}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{15}
 }
 
 type ModelStatus int32
@@ -687,11 +1004,11 @@ func (x ModelStatus) String() string {
 }
 
 func (ModelStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[11].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[16].Descriptor()
 }
 
 func (ModelStatus) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[11]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[16]
 }
 
 func (x ModelStatus) Number() protoreflect.EnumNumber {
@@ -700,7 +1017,7 @@ func (x ModelStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelStatus.Descriptor instead.
 func (ModelStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{11}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{16}
 }
 
 type RobotPhase int32
@@ -754,11 +1071,11 @@ func (x RobotPhase) String() string {
 }
 
 func (RobotPhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[12].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[17].Descriptor()
 }
 
 func (RobotPhase) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[12]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[17]
 }
 
 func (x RobotPhase) Number() protoreflect.EnumNumber {
@@ -767,7 +1084,7 @@ func (x RobotPhase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RobotPhase.Descriptor instead.
 func (RobotPhase) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{12}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{17}
 }
 
 type FirmwareInstallStatus int32
@@ -808,11 +1125,11 @@ func (x FirmwareInstallStatus) String() string {
 }
 
 func (FirmwareInstallStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[13].Descriptor()
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[18].Descriptor()
 }
 
 func (FirmwareInstallStatus) Type() protoreflect.EnumType {
-	return &file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes[13]
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[18]
 }
 
 func (x FirmwareInstallStatus) Number() protoreflect.EnumNumber {
@@ -821,7 +1138,59 @@ func (x FirmwareInstallStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FirmwareInstallStatus.Descriptor instead.
 func (FirmwareInstallStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{13}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{18}
+}
+
+type ClipWindowMode int32
+
+const (
+	ClipWindowMode_CLIP_WINDOW_MODE_UNSPECIFIED ClipWindowMode = 0
+	ClipWindowMode_CLIP_WINDOW_MODE_CONTINUOUS  ClipWindowMode = 1 // stream continuously at rate_hz
+	ClipWindowMode_CLIP_WINDOW_MODE_SNAPSHOT    ClipWindowMode = 2 // exactly one frame
+	ClipWindowMode_CLIP_WINDOW_MODE_CLIP        ClipWindowMode = 3 // pre/post-roll window around a trigger; requires supports_clip
+)
+
+// Enum value maps for ClipWindowMode.
+var (
+	ClipWindowMode_name = map[int32]string{
+		0: "CLIP_WINDOW_MODE_UNSPECIFIED",
+		1: "CLIP_WINDOW_MODE_CONTINUOUS",
+		2: "CLIP_WINDOW_MODE_SNAPSHOT",
+		3: "CLIP_WINDOW_MODE_CLIP",
+	}
+	ClipWindowMode_value = map[string]int32{
+		"CLIP_WINDOW_MODE_UNSPECIFIED": 0,
+		"CLIP_WINDOW_MODE_CONTINUOUS":  1,
+		"CLIP_WINDOW_MODE_SNAPSHOT":    2,
+		"CLIP_WINDOW_MODE_CLIP":        3,
+	}
+)
+
+func (x ClipWindowMode) Enum() *ClipWindowMode {
+	p := new(ClipWindowMode)
+	*p = x
+	return p
+}
+
+func (x ClipWindowMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ClipWindowMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[19].Descriptor()
+}
+
+func (ClipWindowMode) Type() protoreflect.EnumType {
+	return &file_fleet_adapter_v1_fleet_adapter_proto_enumTypes[19]
+}
+
+func (x ClipWindowMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ClipWindowMode.Descriptor instead.
+func (ClipWindowMode) EnumDescriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{19}
 }
 
 // Adapter → control plane. `seq` is a per-stream monotonic counter for gap
@@ -848,7 +1217,7 @@ type AdapterMessage struct {
 
 func (x *AdapterMessage) Reset() {
 	*x = AdapterMessage{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[0]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -860,7 +1229,7 @@ func (x *AdapterMessage) String() string {
 func (*AdapterMessage) ProtoMessage() {}
 
 func (x *AdapterMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[0]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -873,7 +1242,7 @@ func (x *AdapterMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdapterMessage.ProtoReflect.Descriptor instead.
 func (*AdapterMessage) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{0}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *AdapterMessage) GetSeq() uint64 {
@@ -1056,6 +1425,7 @@ type ControlPlaneMessage struct {
 	//	*ControlPlaneMessage_Command
 	//	*ControlPlaneMessage_Heartbeat
 	//	*ControlPlaneMessage_ResourceResponse
+	//	*ControlPlaneMessage_OutcomeAck
 	Payload       isControlPlaneMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1063,7 +1433,7 @@ type ControlPlaneMessage struct {
 
 func (x *ControlPlaneMessage) Reset() {
 	*x = ControlPlaneMessage{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[1]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1075,7 +1445,7 @@ func (x *ControlPlaneMessage) String() string {
 func (*ControlPlaneMessage) ProtoMessage() {}
 
 func (x *ControlPlaneMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[1]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1088,7 +1458,7 @@ func (x *ControlPlaneMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlPlaneMessage.ProtoReflect.Descriptor instead.
 func (*ControlPlaneMessage) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{1}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ControlPlaneMessage) GetSeq() uint64 {
@@ -1159,6 +1529,15 @@ func (x *ControlPlaneMessage) GetResourceResponse() *ResourceResponse {
 	return nil
 }
 
+func (x *ControlPlaneMessage) GetOutcomeAck() *ActionOutcomeAck {
+	if x != nil {
+		if x, ok := x.Payload.(*ControlPlaneMessage_OutcomeAck); ok {
+			return x.OutcomeAck
+		}
+	}
+	return nil
+}
+
 type isControlPlaneMessage_Payload interface {
 	isControlPlaneMessage_Payload()
 }
@@ -1187,6 +1566,13 @@ type ControlPlaneMessage_ResourceResponse struct {
 	ResourceResponse *ResourceResponse `protobuf:"bytes,7,opt,name=resource_response,json=resourceResponse,proto3,oneof"` // decision for an adapter ResourceRequest
 }
 
+type ControlPlaneMessage_OutcomeAck struct {
+	// Contract 1.4.0: acknowledges an outcome the adapter reported with
+	// ActionStatusUpdate.retained = true (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation,
+	// The retained outcome). An adapter below 1.4.0 ignores this arm.
+	OutcomeAck *ActionOutcomeAck `protobuf:"bytes,8,opt,name=outcome_ack,json=outcomeAck,proto3,oneof"`
+}
+
 func (*ControlPlaneMessage_HelloAck) isControlPlaneMessage_Payload() {}
 
 func (*ControlPlaneMessage_RegisterAck) isControlPlaneMessage_Payload() {}
@@ -1199,29 +1585,37 @@ func (*ControlPlaneMessage_Heartbeat) isControlPlaneMessage_Payload() {}
 
 func (*ControlPlaneMessage_ResourceResponse) isControlPlaneMessage_Payload() {}
 
+func (*ControlPlaneMessage_OutcomeAck) isControlPlaneMessage_Payload() {}
+
 type AdapterHello struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Vendor          string                 `protobuf:"bytes,1,opt,name=vendor,proto3" json:"vendor,omitempty"`                                          // matches FleetAdapter.spec.vendor
 	AdapterVersion  string                 `protobuf:"bytes,2,opt,name=adapter_version,json=adapterVersion,proto3" json:"adapter_version,omitempty"`    // adapter build / semver
 	ProtocolVersion string                 `protobuf:"bytes,3,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // e.g. "fleet_adapter.v1"
-	Namespace       string                 `protobuf:"bytes,4,opt,name=namespace,proto3" json:"namespace,omitempty"`                                    // Swarmada namespace (also bound by mTLS)
-	// Semver of the fleet-adapter CONTRACT this adapter targets (e.g. "1.0.0") — the proto surface,
-	// the SupportedAction schema, and the conformance-suite revision, versioned together (ADR-0032).
+	// Swarmada namespace. When the adapter presents a verified client certificate, its SAN
+	// (<adapter>.<namespace>.svc.cluster.local) binds the namespace: an empty value is served in
+	// the certificate's namespace, and a value that differs from it is refused at the handshake
+	// (HelloAck.accepted = false). Without a verified certificate nothing is checked and the value
+	// is used as declared.
+	Namespace string `protobuf:"bytes,4,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	// Semver of the fleet-adapter CONTRACT this adapter targets (e.g. "1.4.0") — the proto surface
+	// and the SupportedAction schema, versioned together (ADR-0032). The conformance-suite revision
+	// is not part of it.
 	//
 	// Three version fields sit side by side here and are NOT interchangeable:
-	//
-	//	adapter_version  — the adapter's own BUILD (vendor cadence; two builds may implement one
-	//	                   contract, one build may span several)
-	//	protocol_version — the wire-package IDENTITY ("fleet_adapter.v1"); an identity string, not a
-	//	                   semver, so it cannot express compatibility within a range
-	//	contract_version — THIS: what compatibility is judged on
+	// adapter_version — the adapter's own BUILD (vendor cadence; two builds may implement one
+	// contract, one build may span several)
+	// protocol_version — the wire-package IDENTITY ("fleet_adapter.v1"); an identity string, not a
+	// semver, so it cannot express compatibility within a range
+	// contract_version — THIS: what compatibility is judged on
 	//
 	// The control plane intersects it with the range it advertises on
 	// SwarmadaConfig.status.supportedContractRange (N and N-1 minor within the major). Out of range,
 	// absent, or unparseable is incompatible — REGISTRATION_REJECTION_VERSION_MISMATCH, fail closed;
 	// an empty value is never an implicit pass. An adapter built before this field existed therefore
-	// sends nothing and is treated as incompatible for WORK, while registration, telemetry,
-	// heartbeats and estop are unaffected.
+	// sends nothing and is treated as incompatible: RegisterRobot and DiscoverRobot on that
+	// connection are refused REGISTRATION_REJECTION_VERSION_MISMATCH, so it is given no work,
+	// while telemetry, heartbeats and estop are unaffected.
 	ContractVersion string `protobuf:"bytes,5,opt,name=contract_version,json=contractVersion,proto3" json:"contract_version,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -1229,7 +1623,7 @@ type AdapterHello struct {
 
 func (x *AdapterHello) Reset() {
 	*x = AdapterHello{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[2]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1241,7 +1635,7 @@ func (x *AdapterHello) String() string {
 func (*AdapterHello) ProtoMessage() {}
 
 func (x *AdapterHello) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[2]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1254,7 +1648,7 @@ func (x *AdapterHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdapterHello.ProtoReflect.Descriptor instead.
 func (*AdapterHello) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{2}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *AdapterHello) GetVendor() string {
@@ -1301,7 +1695,7 @@ type HelloAck struct {
 	// adapter to, echoed so the adapter can confirm what was negotiated rather than assume its own
 	// request was honoured. Set only when the reported contract_version is within the control
 	// plane's supported range; left empty otherwise (ADR-0032). This is independent of `accepted`
-	// above: `accepted` reflects the protocol-level (wire package) handshake only, so a stream with
+	// above: `accepted` reflects the wire package and the namespace only, so a stream with
 	// `accepted = true` can still carry an empty `negotiated_contract_version` — that combination
 	// means the connection stands (telemetry, heartbeat, and estop all work) but the contract
 	// version is incompatible, so RegisterRobot/DiscoverRobot on it are refused
@@ -1313,7 +1707,7 @@ type HelloAck struct {
 
 func (x *HelloAck) Reset() {
 	*x = HelloAck{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[3]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1325,7 +1719,7 @@ func (x *HelloAck) String() string {
 func (*HelloAck) ProtoMessage() {}
 
 func (x *HelloAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[3]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1338,7 +1732,7 @@ func (x *HelloAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloAck.ProtoReflect.Descriptor instead.
 func (*HelloAck) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{3}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *HelloAck) GetAccepted() bool {
@@ -1370,16 +1764,24 @@ func (x *HelloAck) GetNegotiatedContractVersion() string {
 }
 
 // First-time connection: a robot with no Robot CRD. The control plane creates a
-// DiscoveredRobot (RFC-0001 #discoveredrobot). Rejected ALREADY_EXISTS if one already exists.
+// DiscoveredRobot (RFC-0001 #discoveredrobot), or refreshes the existing one: a
+// re-announce while a DiscoveredRobot exists is accepted and updates it. Rejected
+// ALREADY_EXISTS only when a Robot with this robot_id is already admitted in the
+// namespace; that robot must reconnect with RegisterRobot.
 type DiscoverRobot struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	RobotId              string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"` // globally unique (serial / MAC)
-	Manufacturer         string                 `protobuf:"bytes,2,opt,name=manufacturer,proto3" json:"manufacturer,omitempty"`
-	Model                string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
-	FirmwareVersion      string                 `protobuf:"bytes,4,opt,name=firmware_version,json=firmwareVersion,proto3" json:"firmware_version,omitempty"`
-	Hardware             []*HardwareComponent   `protobuf:"bytes,5,rep,name=hardware,proto3" json:"hardware,omitempty"`
-	InstalledModels      []*InstalledModel      `protobuf:"bytes,6,rep,name=installed_models,json=installedModels,proto3" json:"installed_models,omitempty"`
-	ReportedCapabilities []string               `protobuf:"bytes,7,rep,name=reported_capabilities,json=reportedCapabilities,proto3" json:"reported_capabilities,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Typically taken from the robot's serial number or MAC, which are unique as a fact about
+	// the hardware. The control plane does not enforce robot_id uniqueness across namespaces
+	// and does not rely on it: the same robot_id may identify a Robot in each of two
+	// namespaces (RFC-0001 #discoveredrobot-conflict-handling-duplicate-robot-id, Case 3).
+	// Within one namespace it identifies at most one Robot; admission rejects a duplicate.
+	RobotId              string               `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
+	Manufacturer         string               `protobuf:"bytes,2,opt,name=manufacturer,proto3" json:"manufacturer,omitempty"`
+	Model                string               `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	FirmwareVersion      string               `protobuf:"bytes,4,opt,name=firmware_version,json=firmwareVersion,proto3" json:"firmware_version,omitempty"`
+	Hardware             []*HardwareComponent `protobuf:"bytes,5,rep,name=hardware,proto3" json:"hardware,omitempty"`
+	InstalledModels      []*InstalledModel    `protobuf:"bytes,6,rep,name=installed_models,json=installedModels,proto3" json:"installed_models,omitempty"`
+	ReportedCapabilities []string             `protobuf:"bytes,7,rep,name=reported_capabilities,json=reportedCapabilities,proto3" json:"reported_capabilities,omitempty"`
 	// Hardware MAC address, when the robot exposes one. optional for proto3 explicit
 	// presence: an absent MAC ("unset") is distinct from a reported-empty string.
 	Mac           *string `protobuf:"bytes,8,opt,name=mac,proto3,oneof" json:"mac,omitempty"`
@@ -1389,7 +1791,7 @@ type DiscoverRobot struct {
 
 func (x *DiscoverRobot) Reset() {
 	*x = DiscoverRobot{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[4]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1401,7 +1803,7 @@ func (x *DiscoverRobot) String() string {
 func (*DiscoverRobot) ProtoMessage() {}
 
 func (x *DiscoverRobot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[4]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1414,7 +1816,7 @@ func (x *DiscoverRobot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscoverRobot.ProtoReflect.Descriptor instead.
 func (*DiscoverRobot) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{4}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DiscoverRobot) GetRobotId() string {
@@ -1481,7 +1883,10 @@ type DiscoverAck struct {
 	Rejection           RegistrationRejection  `protobuf:"varint,4,opt,name=rejection,proto3,enum=fleet_adapter.v1.RegistrationRejection" json:"rejection,omitempty"` // set when accepted=false
 	// Effective DiscoveredRobot TTL for the announcing adapter's refresh cadence:
 	// the adapter sets its announce interval I = min(ttl_seconds/2, 300); 0 = TTL
-	// disabled (I defaults to 60s). Sourced from SwarmadaConfig discovery TTL.
+	// disabled (I defaults to 60s). The reference control plane does not set this
+	// field at this version, so an adapter reads 0 and announces every 60s; the TTL
+	// it applies to the DiscoveredRobot (SwarmadaConfig
+	// spec.provisioning.discoveredRobotTTLMinutes) is not sent.
 	TtlSeconds    int64 `protobuf:"varint,5,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1489,7 +1894,7 @@ type DiscoverAck struct {
 
 func (x *DiscoverAck) Reset() {
 	*x = DiscoverAck{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[5]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1501,7 +1906,7 @@ func (x *DiscoverAck) String() string {
 func (*DiscoverAck) ProtoMessage() {}
 
 func (x *DiscoverAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[5]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1514,7 +1919,7 @@ func (x *DiscoverAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiscoverAck.ProtoReflect.Descriptor instead.
 func (*DiscoverAck) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{5}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DiscoverAck) GetAccepted() bool {
@@ -1566,7 +1971,7 @@ type RegisterRobot struct {
 
 func (x *RegisterRobot) Reset() {
 	*x = RegisterRobot{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[6]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1578,7 +1983,7 @@ func (x *RegisterRobot) String() string {
 func (*RegisterRobot) ProtoMessage() {}
 
 func (x *RegisterRobot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[6]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1591,7 +1996,7 @@ func (x *RegisterRobot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterRobot.ProtoReflect.Descriptor instead.
 func (*RegisterRobot) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{6}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RegisterRobot) GetRobotId() string {
@@ -1625,18 +2030,18 @@ func (x *RegisterRobot) GetReportedHardware() []*HardwareComponent {
 type RegisterAck struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Accepted  bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	Rejection RegistrationRejection  `protobuf:"varint,2,opt,name=rejection,proto3,enum=fleet_adapter.v1.RegistrationRejection" json:"rejection,omitempty"` // set when accepted=false
+	Rejection RegistrationRejection  `protobuf:"varint,2,opt,name=rejection,proto3,enum=fleet_adapter.v1.RegistrationRejection" json:"rejection,omitempty"` // set when accepted=false, except for a robot that is not this adapter's
 	Message   string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	// Authoritative action state for this robot as of this moment on the control
 	// plane. Set on every RegisterAck (first-time and reconnect); the adapter
-	// uses it on reconnect to detect divergence from local state (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation, RA-2).
+	// uses it on reconnect to detect divergence from local state (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation).
 	AuthoritativeActionState *RobotActionState `protobuf:"bytes,4,opt,name=authoritative_action_state,json=authoritativeActionState,proto3" json:"authoritative_action_state,omitempty"`
 	// Robot.spec values the adapter needs to configure itself:
 	TelemetryIntervalSeconds int32    `protobuf:"varint,10,opt,name=telemetry_interval_seconds,json=telemetryIntervalSeconds,proto3" json:"telemetry_interval_seconds,omitempty"`
 	AssignedZone             string   `protobuf:"bytes,11,opt,name=assigned_zone,json=assignedZone,proto3" json:"assigned_zone,omitempty"`
 	ActiveCapabilities       []string `protobuf:"bytes,12,rep,name=active_capabilities,json=activeCapabilities,proto3" json:"active_capabilities,omitempty"`
 	// Edge nodes the adapter MUST dial for this robot's zone chain
-	// (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream). Empty when no FleetZone in the chain declares one.
+	// (RFC-0001 #fleet-adapter-protocol-the-edge-stream). Empty when no FleetZone in the chain declares one.
 	EdgeEndpoints []*EdgeEndpoint `protobuf:"bytes,13,rep,name=edge_endpoints,json=edgeEndpoints,proto3" json:"edge_endpoints,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1644,7 +2049,7 @@ type RegisterAck struct {
 
 func (x *RegisterAck) Reset() {
 	*x = RegisterAck{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[7]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1656,7 +2061,7 @@ func (x *RegisterAck) String() string {
 func (*RegisterAck) ProtoMessage() {}
 
 func (x *RegisterAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[7]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1669,7 +2074,7 @@ func (x *RegisterAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterAck.ProtoReflect.Descriptor instead.
 func (*RegisterAck) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{7}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RegisterAck) GetAccepted() bool {
@@ -1733,7 +2138,9 @@ type RobotActionState struct {
 	Phase    RobotActionPhase       `protobuf:"varint,1,opt,name=phase,proto3,enum=fleet_adapter.v1.RobotActionPhase" json:"phase,omitempty"`
 	ActionId string                 `protobuf:"bytes,2,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"` // empty when phase is IDLE or UNKNOWN
 	// Current fencing token the adapter should be executing under; the adapter
-	// MUST reject any command with a lower token for this robot.
+	// applies the fencing rule against it: it rejects an AssignAction or CancelAction at
+	// or below it, except an identical re-delivery of the current assignment and a
+	// CancelAction naming the executing action at the token that assigned it.
 	FencingToken uint64 `protobuf:"varint,3,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
 	// Current lease generation. 0 when phase is not IN_PROGRESS or REVOKING.
 	LeaseGeneration uint64 `protobuf:"varint,4,opt,name=lease_generation,json=leaseGeneration,proto3" json:"lease_generation,omitempty"`
@@ -1743,7 +2150,7 @@ type RobotActionState struct {
 
 func (x *RobotActionState) Reset() {
 	*x = RobotActionState{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[8]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1755,7 +2162,7 @@ func (x *RobotActionState) String() string {
 func (*RobotActionState) ProtoMessage() {}
 
 func (x *RobotActionState) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[8]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1768,7 +2175,7 @@ func (x *RobotActionState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RobotActionState.ProtoReflect.Descriptor instead.
 func (*RobotActionState) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{8}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RobotActionState) GetPhase() RobotActionPhase {
@@ -1799,8 +2206,8 @@ func (x *RobotActionState) GetLeaseGeneration() uint64 {
 	return 0
 }
 
-// A command pushed down the stream. command_id is unique per stream and is
-// echoed in the matching CommandResult. robot_id selects the managed robot.
+// A command pushed down the stream. The control plane never reuses a command_id across streams,
+// adapters or leader terms; it is echoed in the matching CommandResult. robot_id selects the managed robot.
 type Command struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	CommandId uint64                 `protobuf:"varint,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
@@ -1822,14 +2229,30 @@ type Command struct {
 	//	*Command_ZoneAdmission
 	//	*Command_RenewLease
 	//	*Command_ValidateAction
-	Command       isCommand_Command `protobuf_oneof:"command"`
+	//	*Command_ActivateStream
+	//	*Command_DeactivateStream
+	//	*Command_ZoneConstraints
+	Command isCommand_Command `protobuf_oneof:"command"`
+	// The term of the control-plane leader that sent this command (contract 1.4.0): a number that
+	// rises with each election of the leader and is never reused. A 1.4.0 control plane sets it on
+	// every command it sends, from 1. 0 means no term was sent: it is lower than every term a 1.4.0
+	// control plane sends, so a control plane or a connection below 1.4.0 is not rejected for it.
+	// The adapter keeps the highest term it has seen for the robot on any message, a stop's
+	// included. It MUST reject any command other than a stop (the Estop arm, the stop's fence)
+	// whose term is lower, by not acting on it and answering CommandResult.stale_leader_term = true.
+	// It MUST accept a stop whatever its term: a stale stop can only hold a robot, while a stale
+	// assignment or release may move one a newer leader has stopped. The same rule covers an
+	// EstopClear, which carries the term too (EstopClear.leader_term; RFC-0001
+	// #fleet-adapter-protocol-the-stop-latch, The leader term).
+	// An adapter below 1.4.0 ignores this field.
+	LeaderTerm    uint64 `protobuf:"varint,21,opt,name=leader_term,json=leaderTerm,proto3" json:"leader_term,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[9]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1841,7 +2264,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[9]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1854,7 +2277,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{9}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Command) GetCommandId() uint64 {
@@ -2013,6 +2436,40 @@ func (x *Command) GetValidateAction() *ValidateAction {
 	return nil
 }
 
+func (x *Command) GetActivateStream() *ActivateStream {
+	if x != nil {
+		if x, ok := x.Command.(*Command_ActivateStream); ok {
+			return x.ActivateStream
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetDeactivateStream() *DeactivateStream {
+	if x != nil {
+		if x, ok := x.Command.(*Command_DeactivateStream); ok {
+			return x.DeactivateStream
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetZoneConstraints() *ZoneConstraints {
+	if x != nil {
+		if x, ok := x.Command.(*Command_ZoneConstraints); ok {
+			return x.ZoneConstraints
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetLeaderTerm() uint64 {
+	if x != nil {
+		return x.LeaderTerm
+	}
+	return 0
+}
+
 type isCommand_Command interface {
 	isCommand_Command()
 }
@@ -2026,7 +2483,7 @@ type Command_CancelAction struct {
 }
 
 type Command_Estop struct {
-	Estop *Estop `protobuf:"bytes,5,opt,name=estop,proto3,oneof"` // DEPRECATED: estop travels on SafetyStream; retained for wire compatibility
+	Estop *Estop `protobuf:"bytes,5,opt,name=estop,proto3,oneof"` // the stop's fence (contract 1.4.0), in order with AssignActions; the stop itself travels on SafetyStream (RFC-0001 #fleet-adapter-protocol-the-stop-latch)
 }
 
 type Command_Pause struct {
@@ -2066,13 +2523,17 @@ type Command_ReservationGranted struct {
 }
 
 type Command_ZoneAdmission struct {
-	ZoneAdmission *ZoneAdmission `protobuf:"bytes,15,opt,name=zone_admission,json=zoneAdmission,proto3,oneof"` // optional; zone-capacity hold/admit (RFC-0001 #tde)
+	ZoneAdmission *ZoneAdmission `protobuf:"bytes,15,opt,name=zone_admission,json=zoneAdmission,proto3,oneof"` // optional; zone-capacity hold/admit (RFC-0001 #control-plane-zone-controller)
 }
 
 type Command_RenewLease struct {
 	// renew_lease refreshes the assignment lease for action_id. The adapter MUST
-	// reset its self-stop timer when lease_generation matches its current
-	// generation. Rationale for a dedicated arm (not HeartbeatRequest): lease
+	// reset its self-stop timer only for a renewal it accepts: action_id names the
+	// action it is executing under its current fencing mark and lease_generation
+	// equals the generation that action was assigned with; it answers any other
+	// renewal, including one after its local lease lapsed, renewed = false
+	// (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee,
+	// Renewal acceptance). Rationale for a dedicated arm (not HeartbeatRequest): lease
 	// renewal carries explicit safety semantics — a missed renewal MUST trigger
 	// autonomous action self-stop (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee); conflating it with liveness heartbeat
 	// would obscure that invariant and make the self-stop condition ambiguous.
@@ -2084,7 +2545,26 @@ type Command_ValidateAction struct {
 	// confirms it can serve type+payload. Issued once, at assignment-time candidate
 	// selection (RFC-0001 #control-plane-scheduler) — not at FleetAction acceptance,
 	// which is gated by the cheaper supported-action catalog pre-filter instead.
-	ValidateAction *ValidateAction `protobuf:"bytes,17,opt,name=validate_action,json=validateAction,proto3,oneof"`
+	ValidateAction *ValidateAction `protobuf:"bytes,17,opt,name=validate_action,json=validateAction,proto3,oneof"` // optional; adapter confirms it can serve type+payload
+}
+
+type Command_ActivateStream struct {
+	// Sensor-stream duty cycle. Refcounted and
+	// lease-bound — see ActivateStream's own comment for the normative rules.
+	ActivateStream *ActivateStream `protobuf:"bytes,18,opt,name=activate_stream,json=activateStream,proto3,oneof"` // optional; declining disables the duty cycle for this adapter's robots
+}
+
+type Command_DeactivateStream struct {
+	DeactivateStream *DeactivateStream `protobuf:"bytes,19,opt,name=deactivate_stream,json=deactivateStream,proto3,oneof"` // optional; an adapter declining activate_stream MUST decline this too
+}
+
+type Command_ZoneConstraints struct {
+	// The operating rules in force WHERE THE ROBOT NOW IS, pushed when its zone
+	// containment changes (FA-R7). It is what makes FA-R3's "honour it for the whole
+	// time the robot is in the zone, including while merely transiting" satisfiable:
+	// assign_action carries the rules for the assignment's target only, once, so an
+	// adapter that enters any other zone had no rule set for where it was.
+	ZoneConstraints *ZoneConstraints `protobuf:"bytes,20,opt,name=zone_constraints,json=zoneConstraints,proto3,oneof"` // optional; zone-containment operating rules (ADR-0059)
 }
 
 func (*Command_AssignAction) isCommand_Command() {}
@@ -2117,6 +2597,12 @@ func (*Command_RenewLease) isCommand_Command() {}
 
 func (*Command_ValidateAction) isCommand_Command() {}
 
+func (*Command_ActivateStream) isCommand_Command() {}
+
+func (*Command_DeactivateStream) isCommand_Command() {}
+
+func (*Command_ZoneConstraints) isCommand_Command() {}
+
 type CommandResult struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	CommandId uint64                 `protobuf:"varint,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"` // echoes Command.command_id
@@ -2140,14 +2626,21 @@ type CommandResult struct {
 	//	*CommandResult_ZoneAdmission
 	//	*CommandResult_RenewLease
 	//	*CommandResult_ValidateAction
-	Result        isCommandResult_Result `protobuf_oneof:"result"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	//	*CommandResult_ActivateStream
+	//	*CommandResult_DeactivateStream
+	//	*CommandResult_ZoneConstraints
+	Result isCommandResult_Result `protobuf_oneof:"result"`
+	// true (contract 1.4.0): the adapter rejected the command because its leader_term was lower than
+	// the highest the adapter has seen for the robot (Command.leader_term). The adapter did not act
+	// on the command and leaves the result oneof empty. Never set for a stop.
+	StaleLeaderTerm bool `protobuf:"varint,20,opt,name=stale_leader_term,json=staleLeaderTerm,proto3" json:"stale_leader_term,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[10]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2159,7 +2652,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[10]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2172,7 +2665,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{10}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CommandResult) GetCommandId() uint64 {
@@ -2320,6 +2813,40 @@ func (x *CommandResult) GetValidateAction() *ValidateActionResult {
 	return nil
 }
 
+func (x *CommandResult) GetActivateStream() *ActivateStreamResult {
+	if x != nil {
+		if x, ok := x.Result.(*CommandResult_ActivateStream); ok {
+			return x.ActivateStream
+		}
+	}
+	return nil
+}
+
+func (x *CommandResult) GetDeactivateStream() *DeactivateStreamResult {
+	if x != nil {
+		if x, ok := x.Result.(*CommandResult_DeactivateStream); ok {
+			return x.DeactivateStream
+		}
+	}
+	return nil
+}
+
+func (x *CommandResult) GetZoneConstraints() *ZoneConstraintsAck {
+	if x != nil {
+		if x, ok := x.Result.(*CommandResult_ZoneConstraints); ok {
+			return x.ZoneConstraints
+		}
+	}
+	return nil
+}
+
+func (x *CommandResult) GetStaleLeaderTerm() bool {
+	if x != nil {
+		return x.StaleLeaderTerm
+	}
+	return false
+}
+
 type isCommandResult_Result interface {
 	isCommandResult_Result()
 }
@@ -2333,7 +2860,7 @@ type CommandResult_CancelAction struct {
 }
 
 type CommandResult_Estop struct {
-	Estop *EstopAck `protobuf:"bytes,6,opt,name=estop,proto3,oneof"` // DEPRECATED: EstopAck returned on SafetyStream; retained for wire compatibility
+	Estop *EstopAck `protobuf:"bytes,6,opt,name=estop,proto3,oneof"` // a receipt for the fence (Command.estop); rows S2 to S4 never read it: the stop's answer is the EstopAck on SafetyStream
 }
 
 type CommandResult_Pause struct {
@@ -2376,6 +2903,18 @@ type CommandResult_ValidateAction struct {
 	ValidateAction *ValidateActionResult `protobuf:"bytes,16,opt,name=validate_action,json=validateAction,proto3,oneof"`
 }
 
+type CommandResult_ActivateStream struct {
+	ActivateStream *ActivateStreamResult `protobuf:"bytes,17,opt,name=activate_stream,json=activateStream,proto3,oneof"`
+}
+
+type CommandResult_DeactivateStream struct {
+	DeactivateStream *DeactivateStreamResult `protobuf:"bytes,18,opt,name=deactivate_stream,json=deactivateStream,proto3,oneof"`
+}
+
+type CommandResult_ZoneConstraints struct {
+	ZoneConstraints *ZoneConstraintsAck `protobuf:"bytes,19,opt,name=zone_constraints,json=zoneConstraints,proto3,oneof"`
+}
+
 func (*CommandResult_AssignAction) isCommandResult_Result() {}
 
 func (*CommandResult_CancelAction) isCommandResult_Result() {}
@@ -2402,11 +2941,158 @@ func (*CommandResult_RenewLease) isCommandResult_Result() {}
 
 func (*CommandResult_ValidateAction) isCommandResult_Result() {}
 
+func (*CommandResult_ActivateStream) isCommandResult_Result() {}
+
+func (*CommandResult_DeactivateStream) isCommandResult_Result() {}
+
+func (*CommandResult_ZoneConstraints) isCommandResult_Result() {}
+
+// EffectiveOperatingConstraint is ONE RESOLVED operating rule. It is the wire form of
+// one FleetZone.status.restrictions.effective[] entry on the Operating axis.
+//
+// THE CARRYING MESSAGE SETS THE SCOPE, AND THE TWO SCOPES DIFFER. This type is sent by
+// two messages, and reading it as though it had one meaning is how a conformance test
+// ends up asserting the wrong set:
+//
+//	AssignAction.operating_constraints (FA-R2) — the rules in force AT THE ONE ZONE
+//	  this robot is being dispatched to: its status.currentZone, which candidate
+//	  filter 2 has already proven is within the resolved leaf set of spec.zone. It is
+//	  read from the same projection candidate filter 12 judged that robot against, so
+//	  the wire and the filter cannot disagree.
+//
+//	ZoneConstraints.operating_constraints (FA-R7) — the UNION across EVERY zone whose
+//	  polygon contains the robot, folded most-restrictive. Wider than the above by
+//	  construction: overlapping polygons are supported, and a robot inside two of them
+//	  is bound by both (ADR-0059).
+//
+// RESOLVED, NEVER RAW, in both. The adapter is never asked to walk a zone tree and
+// never receives a rule that resolution has already superseded: the control plane sends
+// one entry per subject, already folded to the most restrictive rule anywhere in the
+// ancestor chain (FZ-R1/FZ-R4). An adapter that tried to resolve these itself would be
+// the second resolver FZ-R4 exists to forbid.
+//
+// FOR FA-R2, THE SCOPE IS THE LEAF AND NOT THE TARGET (ADR-0058 Amendment 2). Candidate
+// filter 2 admits a robot from anywhere in the SUBTREE of the action's zone, so the
+// rules that govern it are the ones in force where it actually stands — which already
+// include every ancestor's, the target's among them, because the leaf's projection is
+// the fold of itself and its chain. Sending the target's own projection instead would
+// send an EMPTY set for an action on a zone whose rule is declared one level down, and
+// the adapter would have nothing to decline.
+//
+// One narrow exception, on the FA-R2 path only: a robot the action PINS skips filter 2
+// (RFC-0001 filter 6) and may stand outside the subtree, in which case the target's own
+// chain is the floor it is held to. It is never exempt.
+type EffectiveOperatingConstraint struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One of the normative core seven (camera, microphone, water, chemical, uv,
+	// speed, noise) or a namespaced extension. An adapter that does not RECOGNISE
+	// this value MUST decline under FA-R6 naming it.
+	Subject string                  `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
+	Mode    OperatingConstraintMode `protobuf:"varint,2,opt,name=mode,proto3,enum=fleet_adapter.v1.OperatingConstraintMode" json:"mode,omitempty"`
+	// The upper bound a LIMITED rule permits, as a plain non-negative decimal
+	// string: "0.4" for a speed, "65" for a noise cap. Set only under LIMITED, and
+	// never together with allowed.
+	//
+	// THE UNIT IS A PROPERTY OF THE SUBJECT, NOT OF THIS VALUE: speed is in the
+	// namespace's distance unit per second, noise is in dB(A). It is a string and
+	// not a double so an operator's site policy round-trips verbatim rather than
+	// being canonicalised into a form they did not write.
+	Max string `protobuf:"bytes,3,opt,name=max,proto3" json:"max,omitempty"`
+	// AN ALLOW-LIST: the subject is permitted ONLY as one of these values, and
+	// EVERYTHING NOT LISTED IS DENIED. This inverts the reading of every other
+	// field here — elsewhere absence is permission — so it is stated rather than
+	// left to be inferred. Set only under LIMITED, never together with max.
+	Allowed []string `protobuf:"bytes,4,rep,name=allowed,proto3" json:"allowed,omitempty"`
+	// The operator's own words for WHY, carried from the declaring zone. It is what
+	// a refusal shows a person asking why a robot is not moving, so it travels with
+	// the rule rather than being looked up again.
+	Reason string `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
+	// The zone that DECLARED this rule — very often NOT the target zone, because
+	// the effective rule is the most restrictive anywhere in the ancestor chain. An
+	// adapter declining under FA-R5 names it, so an operator is sent to the object
+	// they must actually edit.
+	DeclaringZone string `protobuf:"bytes,6,opt,name=declaring_zone,json=declaringZone,proto3" json:"declaring_zone,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectiveOperatingConstraint) Reset() {
+	*x = EffectiveOperatingConstraint{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectiveOperatingConstraint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectiveOperatingConstraint) ProtoMessage() {}
+
+func (x *EffectiveOperatingConstraint) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectiveOperatingConstraint.ProtoReflect.Descriptor instead.
+func (*EffectiveOperatingConstraint) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *EffectiveOperatingConstraint) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *EffectiveOperatingConstraint) GetMode() OperatingConstraintMode {
+	if x != nil {
+		return x.Mode
+	}
+	return OperatingConstraintMode_OPERATING_CONSTRAINT_MODE_UNSPECIFIED
+}
+
+func (x *EffectiveOperatingConstraint) GetMax() string {
+	if x != nil {
+		return x.Max
+	}
+	return ""
+}
+
+func (x *EffectiveOperatingConstraint) GetAllowed() []string {
+	if x != nil {
+		return x.Allowed
+	}
+	return nil
+}
+
+func (x *EffectiveOperatingConstraint) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *EffectiveOperatingConstraint) GetDeclaringZone() string {
+	if x != nil {
+		return x.DeclaringZone
+	}
+	return ""
+}
+
 type AssignAction struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
-	ActionId   string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`       // FleetAction namespace/name
+	ActionId   string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`       // FleetAction metadata.name; the namespace is the adapter's own (AdapterHello.namespace)
 	ActionType string                 `protobuf:"bytes,2,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"` // matches FleetAction.spec.type
-	// Deprecated: Marked as deprecated in proto/fleet_adapter/v1/fleet_adapter.proto.
+	// Deprecated: Marked as deprecated in fleet_adapter/v1/fleet_adapter.proto.
 	Destination string `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`                    // DEPRECATED: destination now travels in payload_json; control plane no longer sets this.
 	PayloadJson []byte `protobuf:"bytes,4,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // raw JSON from FleetAction.spec.payload
 	// fencing_token orders this assignment. `optional` so the adapter can tell
@@ -2422,16 +3108,37 @@ type AssignAction struct {
 	// renews this generation via renew_lease Commands (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee).
 	LeaseGeneration *uint64 `protobuf:"varint,9,opt,name=lease_generation,json=leaseGeneration,proto3,oneof" json:"lease_generation,omitempty"`
 	// Initial lease duration in milliseconds. The adapter resets its self-stop
-	// timer on each renew_lease renewal; if no renewal arrives before the timer
+	// timer on each renew_lease renewal it accepts; if no renewal arrives before the timer
 	// fires the adapter MUST bring the current action to a safe stop.
 	LeaseDurationMs uint32 `protobuf:"varint,10,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The RESOLVED EFFECTIVE operating rules in force AT THE ZONE THIS ROBOT IS
+	// BEING SENT TO (FA-R2), one entry per subject — the same set candidate filter
+	// 12 judged the robot against, read from the one projection so the wire and the
+	// filter cannot disagree. An adapter that accepts this assignment MUST
+	// honour every one of them for the whole time the robot is in the zone,
+	// INCLUDING WHILE MERELY TRANSITING: the rule constrains the robot's STATE, not
+	// the action (FA-R3). An adapter that cannot honour one, or does not recognise
+	// its subject, MUST decline (FA-R5/FA-R6) rather than accept and ignore it.
+	//
+	// EMPTY MEANS NO RULE IS IN FORCE, WHICH IS PERMISSION — never "everything is
+	// denied". Absence of a rule is permission at every axis (ADR-0058 §2).
+	OperatingConstraints []*EffectiveOperatingConstraint `protobuf:"bytes,11,rep,name=operating_constraints,json=operatingConstraints,proto3" json:"operating_constraints,omitempty"`
+	// The verb a Custom action performs: FleetAction.spec.customType, set only
+	// when action_type is "Custom" and the action names one (contract 1.4.0). An
+	// adapter takes the verb from here when it is set, and from the payload's
+	// `operation` otherwise, which stays accepted. Both set and different: the
+	// adapter MUST decline INVALID_ACTION. A verb the adapter does not serve: it
+	// MUST decline INVALID_ACTION, never run it as some other Custom verb. An
+	// adapter below 1.4.0 ignores this field and reads the payload, so a payload
+	// meant for one keeps naming its verb as `operation`.
+	CustomType    string `protobuf:"bytes,12,opt,name=custom_type,json=customType,proto3" json:"custom_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AssignAction) Reset() {
 	*x = AssignAction{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[11]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2443,7 +3150,7 @@ func (x *AssignAction) String() string {
 func (*AssignAction) ProtoMessage() {}
 
 func (x *AssignAction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[11]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2456,7 +3163,7 @@ func (x *AssignAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignAction.ProtoReflect.Descriptor instead.
 func (*AssignAction) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{11}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *AssignAction) GetActionId() string {
@@ -2473,7 +3180,7 @@ func (x *AssignAction) GetActionType() string {
 	return ""
 }
 
-// Deprecated: Marked as deprecated in proto/fleet_adapter/v1/fleet_adapter.proto.
+// Deprecated: Marked as deprecated in fleet_adapter/v1/fleet_adapter.proto.
 func (x *AssignAction) GetDestination() string {
 	if x != nil {
 		return x.Destination
@@ -2530,6 +3237,20 @@ func (x *AssignAction) GetLeaseDurationMs() uint32 {
 	return 0
 }
 
+func (x *AssignAction) GetOperatingConstraints() []*EffectiveOperatingConstraint {
+	if x != nil {
+		return x.OperatingConstraints
+	}
+	return nil
+}
+
+func (x *AssignAction) GetCustomType() string {
+	if x != nil {
+		return x.CustomType
+	}
+	return ""
+}
+
 type AssignActionResult struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Accepted  bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
@@ -2538,13 +3259,21 @@ type AssignActionResult struct {
 	// accepted_fencing_token echoes the token the adapter is now fenced at, so the
 	// control plane can confirm its assignment won (or learn it was superseded).
 	AcceptedFencingToken *uint64 `protobuf:"varint,4,opt,name=accepted_fencing_token,json=acceptedFencingToken,proto3,oneof" json:"accepted_fencing_token,omitempty"`
+	// The operating subjects this adapter could NOT honour, set alongside
+	// rejection = ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET (FA-R5).
+	//
+	// Declare/honour/attest are claims a control plane cannot verify; DECLINE is an
+	// observable message on a wire, and this field is what makes it observable.
+	// A decline that does not name the subject is not testable and does not satisfy
+	// FA-R5.
+	UnhonourableSubjects []string `protobuf:"bytes,5,rep,name=unhonourable_subjects,json=unhonourableSubjects,proto3" json:"unhonourable_subjects,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
 
 func (x *AssignActionResult) Reset() {
 	*x = AssignActionResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[12]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2556,7 +3285,7 @@ func (x *AssignActionResult) String() string {
 func (*AssignActionResult) ProtoMessage() {}
 
 func (x *AssignActionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[12]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2569,7 +3298,7 @@ func (x *AssignActionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignActionResult.ProtoReflect.Descriptor instead.
 func (*AssignActionResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{12}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AssignActionResult) GetAccepted() bool {
@@ -2600,20 +3329,29 @@ func (x *AssignActionResult) GetAcceptedFencingToken() uint64 {
 	return 0
 }
 
+func (x *AssignActionResult) GetUnhonourableSubjects() []string {
+	if x != nil {
+		return x.UnhonourableSubjects
+	}
+	return nil
+}
+
 type CancelAction struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	ActionId string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
 	Reason   string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-	// Must be >= the adapter's highest accepted token; a stale cancel is rejected
-	// so it cannot abort a newer assignment.
-	FencingToken  *uint64 `protobuf:"varint,3,opt,name=fencing_token,json=fencingToken,proto3,oneof" json:"fencing_token,omitempty"`
+	// Must be above the adapter's highest accepted token, except a cancel naming the
+	// action the adapter is executing, which is honoured at the token that assigned
+	// it; a stale cancel is rejected so it cannot abort a newer assignment.
+	FencingToken  *uint64     `protobuf:"varint,3,opt,name=fencing_token,json=fencingToken,proto3,oneof" json:"fencing_token,omitempty"`
+	Cause         CancelCause `protobuf:"varint,4,opt,name=cause,proto3,enum=fleet_adapter.v1.CancelCause" json:"cause,omitempty"` // machine-readable cause; UNSPECIFIED states none
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CancelAction) Reset() {
 	*x = CancelAction{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[13]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2625,7 +3363,7 @@ func (x *CancelAction) String() string {
 func (*CancelAction) ProtoMessage() {}
 
 func (x *CancelAction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[13]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2638,7 +3376,7 @@ func (x *CancelAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelAction.ProtoReflect.Descriptor instead.
 func (*CancelAction) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{13}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CancelAction) GetActionId() string {
@@ -2662,19 +3400,30 @@ func (x *CancelAction) GetFencingToken() uint64 {
 	return 0
 }
 
+func (x *CancelAction) GetCause() CancelCause {
+	if x != nil {
+		return x.Cause
+	}
+	return CancelCause_CANCEL_CAUSE_UNSPECIFIED
+}
+
 type CancelActionResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Acknowledged  bool                   `protobuf:"varint,1,opt,name=acknowledged,proto3" json:"acknowledged,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
-	Stale         bool                   `protobuf:"varint,3,opt,name=stale,proto3" json:"stale,omitempty"`                                                     // true if rejected because the token was stale
-	Disposition   CancelDisposition      `protobuf:"varint,4,opt,name=disposition,proto3,enum=fleet_adapter.v1.CancelDisposition" json:"disposition,omitempty"` // capability-loss disposition; UNSPECIFIED = stopped-safely
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Acknowledged bool                   `protobuf:"varint,1,opt,name=acknowledged,proto3" json:"acknowledged,omitempty"`
+	Message      string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	Stale        bool                   `protobuf:"varint,3,opt,name=stale,proto3" json:"stale,omitempty"`                                                     // true if rejected because the token was stale
+	Disposition  CancelDisposition      `protobuf:"varint,4,opt,name=disposition,proto3,enum=fleet_adapter.v1.CancelDisposition" json:"disposition,omitempty"` // capability-loss disposition; UNSPECIFIED = stopped-safely
+	// Echoes the CancelCause acted on, so the acknowledgement is self-describing to a
+	// reader who never saw the command. Echoing a cause it did not receive is a
+	// conformance defect.
+	Cause         CancelCause `protobuf:"varint,5,opt,name=cause,proto3,enum=fleet_adapter.v1.CancelCause" json:"cause,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CancelActionResult) Reset() {
 	*x = CancelActionResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[14]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2686,7 +3435,7 @@ func (x *CancelActionResult) String() string {
 func (*CancelActionResult) ProtoMessage() {}
 
 func (x *CancelActionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[14]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2699,7 +3448,7 @@ func (x *CancelActionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelActionResult.ProtoReflect.Descriptor instead.
 func (*CancelActionResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{14}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CancelActionResult) GetAcknowledged() bool {
@@ -2730,18 +3479,25 @@ func (x *CancelActionResult) GetDisposition() CancelDisposition {
 	return CancelDisposition_CANCEL_DISPOSITION_UNSPECIFIED
 }
 
+func (x *CancelActionResult) GetCause() CancelCause {
+	if x != nil {
+		return x.Cause
+	}
+	return CancelCause_CANCEL_CAUSE_UNSPECIFIED
+}
+
 type RenewActionLease struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	ActionId        string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`                         // FleetAction namespace/name; identifies the lease
+	ActionId        string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`                         // FleetAction metadata.name, as in AssignAction; identifies the lease
 	LeaseGeneration uint64                 `protobuf:"varint,2,opt,name=lease_generation,json=leaseGeneration,proto3" json:"lease_generation,omitempty"`   // must match the adapter's current lease_generation
-	LeaseDurationMs uint32                 `protobuf:"varint,3,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"` // new lease duration from this renewal timestamp
+	LeaseDurationMs uint32                 `protobuf:"varint,3,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"` // lease duration, timed by the adapter from its receipt of this renewal
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RenewActionLease) Reset() {
 	*x = RenewActionLease{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[15]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2753,7 +3509,7 @@ func (x *RenewActionLease) String() string {
 func (*RenewActionLease) ProtoMessage() {}
 
 func (x *RenewActionLease) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[15]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2766,7 +3522,7 @@ func (x *RenewActionLease) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewActionLease.ProtoReflect.Descriptor instead.
 func (*RenewActionLease) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{15}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RenewActionLease) GetActionId() string {
@@ -2792,8 +3548,10 @@ func (x *RenewActionLease) GetLeaseDurationMs() uint32 {
 
 type RenewActionLeaseResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// false if lease_generation is stale (adapter has a newer or no generation);
-	// the adapter ignores the renewal and does NOT reset its self-stop timer.
+	// false if lease_generation is not the generation the executing action was assigned with,
+	// if action_id is not the action executing under the current fencing mark, or
+	// if the local lease already lapsed; the adapter ignores the renewal and does
+	// NOT reset its self-stop timer.
 	Renewed bool `protobuf:"varint,1,opt,name=renewed,proto3" json:"renewed,omitempty"`
 	// false if the robot is no longer executing action_id (completed, failed, or
 	// self-stopped). The control plane uses this to detect silent action completion
@@ -2808,7 +3566,7 @@ type RenewActionLeaseResult struct {
 
 func (x *RenewActionLeaseResult) Reset() {
 	*x = RenewActionLeaseResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[16]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2820,7 +3578,7 @@ func (x *RenewActionLeaseResult) String() string {
 func (*RenewActionLeaseResult) ProtoMessage() {}
 
 func (x *RenewActionLeaseResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[16]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2833,7 +3591,7 @@ func (x *RenewActionLeaseResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewActionLeaseResult.ProtoReflect.Descriptor instead.
 func (*RenewActionLeaseResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{16}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RenewActionLeaseResult) GetRenewed() bool {
@@ -2881,7 +3639,7 @@ func (x *RenewActionLeaseResult) GetMessage() string {
 // adapter-confirmed (never inferred from absent motion or a timeout).
 type Estop struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	EstopId       string                 `protobuf:"bytes,1,opt,name=estop_id,json=estopId,proto3" json:"estop_id,omitempty"` // UUID for idempotency and audit
+	EstopId       string                 `protobuf:"bytes,1,opt,name=estop_id,json=estopId,proto3" json:"estop_id,omitempty"` // the stop ID: random, at least 128 bits, the same on every copy and re-send; compared only for equality
 	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	IssuedBy      string                 `protobuf:"bytes,3,opt,name=issued_by,json=issuedBy,proto3" json:"issued_by,omitempty"` // authenticated identity, for attribution only
 	IssuedAtMs    int64                  `protobuf:"varint,4,opt,name=issued_at_ms,json=issuedAtMs,proto3" json:"issued_at_ms,omitempty"`
@@ -2891,7 +3649,7 @@ type Estop struct {
 
 func (x *Estop) Reset() {
 	*x = Estop{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[17]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2903,7 +3661,7 @@ func (x *Estop) String() string {
 func (*Estop) ProtoMessage() {}
 
 func (x *Estop) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[17]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2916,7 +3674,7 @@ func (x *Estop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Estop.ProtoReflect.Descriptor instead.
 func (*Estop) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{17}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Estop) GetEstopId() string {
@@ -2955,9 +3713,9 @@ type EstopAck struct {
 	State         EstopState             `protobuf:"varint,2,opt,name=state,proto3,enum=fleet_adapter.v1.EstopState" json:"state,omitempty"` // confirmed by the adapter, not inferred
 	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	ConfirmedAtMs int64                  `protobuf:"varint,4,opt,name=confirmed_at_ms,json=confirmedAtMs,proto3" json:"confirmed_at_ms,omitempty"`
-	// Epoch-ms at which the adapter issued the hardware stop command (RFC-0001 #safety-timing-requirements, the
-	// <1s ACK→hardware boundary). optional for explicit presence: unset ("not
-	// reported") is distinct from epoch 0.
+	// Epoch-ms at which the adapter issued the hardware stop command, which it does
+	// before sending this ack (RFC-0001 #safety-timing-requirements). optional for
+	// explicit presence: unset ("not reported") is distinct from epoch 0.
 	StopInitiatedAt *int64 `protobuf:"varint,5,opt,name=stop_initiated_at,json=stopInitiatedAt,proto3,oneof" json:"stop_initiated_at,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -2965,7 +3723,7 @@ type EstopAck struct {
 
 func (x *EstopAck) Reset() {
 	*x = EstopAck{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[18]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2977,7 +3735,7 @@ func (x *EstopAck) String() string {
 func (*EstopAck) ProtoMessage() {}
 
 func (x *EstopAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[18]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2990,7 +3748,7 @@ func (x *EstopAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EstopAck.ProtoReflect.Descriptor instead.
 func (*EstopAck) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{18}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *EstopAck) GetEstopId() string {
@@ -3037,6 +3795,8 @@ type AdapterSafetyMessage struct {
 	//
 	//	*AdapterSafetyMessage_EstopAck
 	//	*AdapterSafetyMessage_PauseResult
+	//	*AdapterSafetyMessage_EstopClearAck
+	//	*AdapterSafetyMessage_LocalStop
 	Payload       isAdapterSafetyMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3044,7 +3804,7 @@ type AdapterSafetyMessage struct {
 
 func (x *AdapterSafetyMessage) Reset() {
 	*x = AdapterSafetyMessage{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[19]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3056,7 +3816,7 @@ func (x *AdapterSafetyMessage) String() string {
 func (*AdapterSafetyMessage) ProtoMessage() {}
 
 func (x *AdapterSafetyMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[19]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3069,7 +3829,7 @@ func (x *AdapterSafetyMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdapterSafetyMessage.ProtoReflect.Descriptor instead.
 func (*AdapterSafetyMessage) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{19}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AdapterSafetyMessage) GetSeq() uint64 {
@@ -3111,6 +3871,24 @@ func (x *AdapterSafetyMessage) GetPauseResult() *PauseResult {
 	return nil
 }
 
+func (x *AdapterSafetyMessage) GetEstopClearAck() *EstopClearAck {
+	if x != nil {
+		if x, ok := x.Payload.(*AdapterSafetyMessage_EstopClearAck); ok {
+			return x.EstopClearAck
+		}
+	}
+	return nil
+}
+
+func (x *AdapterSafetyMessage) GetLocalStop() *LocalStopReport {
+	if x != nil {
+		if x, ok := x.Payload.(*AdapterSafetyMessage_LocalStop); ok {
+			return x.LocalStop
+		}
+	}
+	return nil
+}
+
 type isAdapterSafetyMessage_Payload interface {
 	isAdapterSafetyMessage_Payload()
 }
@@ -3123,9 +3901,21 @@ type AdapterSafetyMessage_PauseResult struct {
 	PauseResult *PauseResult `protobuf:"bytes,4,opt,name=pause_result,json=pauseResult,proto3,oneof"` // optional: safety-critical pause confirmation
 }
 
+type AdapterSafetyMessage_EstopClearAck struct {
+	EstopClearAck *EstopClearAck `protobuf:"bytes,5,opt,name=estop_clear_ack,json=estopClearAck,proto3,oneof"` // contract 1.4.0: the adapter lifted the stop a clear named
+}
+
+type AdapterSafetyMessage_LocalStop struct {
+	LocalStop *LocalStopReport `protobuf:"bytes,6,opt,name=local_stop,json=localStop,proto3,oneof"` // contract 1.4.0: the robot's local latch
+}
+
 func (*AdapterSafetyMessage_EstopAck) isAdapterSafetyMessage_Payload() {}
 
 func (*AdapterSafetyMessage_PauseResult) isAdapterSafetyMessage_Payload() {}
+
+func (*AdapterSafetyMessage_EstopClearAck) isAdapterSafetyMessage_Payload() {}
+
+func (*AdapterSafetyMessage_LocalStop) isAdapterSafetyMessage_Payload() {}
 
 // Control plane → adapter on SafetyStream.
 type ControlPlaneSafetyMessage struct {
@@ -3136,6 +3926,7 @@ type ControlPlaneSafetyMessage struct {
 	//
 	//	*ControlPlaneSafetyMessage_Estop
 	//	*ControlPlaneSafetyMessage_Pause
+	//	*ControlPlaneSafetyMessage_EstopClear
 	Payload       isControlPlaneSafetyMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3143,7 +3934,7 @@ type ControlPlaneSafetyMessage struct {
 
 func (x *ControlPlaneSafetyMessage) Reset() {
 	*x = ControlPlaneSafetyMessage{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[20]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3155,7 +3946,7 @@ func (x *ControlPlaneSafetyMessage) String() string {
 func (*ControlPlaneSafetyMessage) ProtoMessage() {}
 
 func (x *ControlPlaneSafetyMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[20]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3168,7 +3959,7 @@ func (x *ControlPlaneSafetyMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlPlaneSafetyMessage.ProtoReflect.Descriptor instead.
 func (*ControlPlaneSafetyMessage) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{20}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ControlPlaneSafetyMessage) GetSeq() uint64 {
@@ -3210,6 +4001,15 @@ func (x *ControlPlaneSafetyMessage) GetPause() *PauseCapabilities {
 	return nil
 }
 
+func (x *ControlPlaneSafetyMessage) GetEstopClear() *EstopClear {
+	if x != nil {
+		if x, ok := x.Payload.(*ControlPlaneSafetyMessage_EstopClear); ok {
+			return x.EstopClear
+		}
+	}
+	return nil
+}
+
 type isControlPlaneSafetyMessage_Payload interface {
 	isControlPlaneSafetyMessage_Payload()
 }
@@ -3222,9 +4022,223 @@ type ControlPlaneSafetyMessage_Pause struct {
 	Pause *PauseCapabilities `protobuf:"bytes,4,opt,name=pause,proto3,oneof"` // optional: safety-critical capability pause
 }
 
+type ControlPlaneSafetyMessage_EstopClear struct {
+	EstopClear *EstopClear `protobuf:"bytes,5,opt,name=estop_clear,json=estopClear,proto3,oneof"` // contract 1.4.0: ends one stop, by its stop ID
+}
+
 func (*ControlPlaneSafetyMessage_Estop) isControlPlaneSafetyMessage_Payload() {}
 
 func (*ControlPlaneSafetyMessage_Pause) isControlPlaneSafetyMessage_Payload() {}
+
+func (*ControlPlaneSafetyMessage_EstopClear) isControlPlaneSafetyMessage_Payload() {}
+
+// Control plane → adapter on SafetyStream: the clear of one stop. It is sent only once the clear's
+// write has landed, and it lifts the latch only for the stop it names.
+type EstopClear struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EstopId       string                 `protobuf:"bytes,1,opt,name=estop_id,json=estopId,proto3" json:"estop_id,omitempty"`       // the stop ID of the stop this clear ends
+	ClearedBy     string                 `protobuf:"bytes,2,opt,name=cleared_by,json=clearedBy,proto3" json:"cleared_by,omitempty"` // authenticated identity, for attribution only
+	ClearedAtMs   int64                  `protobuf:"varint,3,opt,name=cleared_at_ms,json=clearedAtMs,proto3" json:"cleared_at_ms,omitempty"`
+	EndsLocalSet  string                 `protobuf:"bytes,4,opt,name=ends_local_set,json=endsLocalSet,proto3" json:"ends_local_set,omitempty"` // the set ID of the local set this clear ends, or empty
+	LeaderTerm    uint64                 `protobuf:"varint,5,opt,name=leader_term,json=leaderTerm,proto3" json:"leader_term,omitempty"`        // the term of the leader that sends it (The leader term)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EstopClear) Reset() {
+	*x = EstopClear{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EstopClear) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EstopClear) ProtoMessage() {}
+
+func (x *EstopClear) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EstopClear.ProtoReflect.Descriptor instead.
+func (*EstopClear) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *EstopClear) GetEstopId() string {
+	if x != nil {
+		return x.EstopId
+	}
+	return ""
+}
+
+func (x *EstopClear) GetClearedBy() string {
+	if x != nil {
+		return x.ClearedBy
+	}
+	return ""
+}
+
+func (x *EstopClear) GetClearedAtMs() int64 {
+	if x != nil {
+		return x.ClearedAtMs
+	}
+	return 0
+}
+
+func (x *EstopClear) GetEndsLocalSet() string {
+	if x != nil {
+		return x.EndsLocalSet
+	}
+	return ""
+}
+
+func (x *EstopClear) GetLeaderTerm() uint64 {
+	if x != nil {
+		return x.LeaderTerm
+	}
+	return 0
+}
+
+// Adapter → control plane on SafetyStream: the stop a clear named is lifted.
+type EstopClearAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EstopId       string                 `protobuf:"bytes,1,opt,name=estop_id,json=estopId,proto3" json:"estop_id,omitempty"` // the stop ID the adapter has lifted
+	LiftedAtMs    int64                  `protobuf:"varint,2,opt,name=lifted_at_ms,json=liftedAtMs,proto3" json:"lifted_at_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EstopClearAck) Reset() {
+	*x = EstopClearAck{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EstopClearAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EstopClearAck) ProtoMessage() {}
+
+func (x *EstopClearAck) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EstopClearAck.ProtoReflect.Descriptor instead.
+func (*EstopClearAck) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *EstopClearAck) GetEstopId() string {
+	if x != nil {
+		return x.EstopId
+	}
+	return ""
+}
+
+func (x *EstopClearAck) GetLiftedAtMs() int64 {
+	if x != nil {
+		return x.LiftedAtMs
+	}
+	return 0
+}
+
+// Adapter → control plane on SafetyStream: the robot's local latch.
+type LocalStopReport struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Latched       bool                   `protobuf:"varint,1,opt,name=latched,proto3" json:"latched,omitempty"`                              // the robot's local latch is set; true whenever unreadable is true
+	ChangedAtMs   int64                  `protobuf:"varint,2,opt,name=changed_at_ms,json=changedAtMs,proto3" json:"changed_at_ms,omitempty"` // when it was set, or reset at the robot
+	Source        string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`                                 // the edge node's zone, or "robot"; for attribution only
+	SetId         string                 `protobuf:"bytes,4,opt,name=set_id,json=setId,proto3" json:"set_id,omitempty"`                      // the latest set whose clear has not taken effect; empty if none
+	Unreadable    bool                   `protobuf:"varint,5,opt,name=unreadable,proto3" json:"unreadable,omitempty"`                        // the adapter cannot read the local latch; the robot is then in the end state
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LocalStopReport) Reset() {
+	*x = LocalStopReport{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LocalStopReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LocalStopReport) ProtoMessage() {}
+
+func (x *LocalStopReport) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LocalStopReport.ProtoReflect.Descriptor instead.
+func (*LocalStopReport) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *LocalStopReport) GetLatched() bool {
+	if x != nil {
+		return x.Latched
+	}
+	return false
+}
+
+func (x *LocalStopReport) GetChangedAtMs() int64 {
+	if x != nil {
+		return x.ChangedAtMs
+	}
+	return 0
+}
+
+func (x *LocalStopReport) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *LocalStopReport) GetSetId() string {
+	if x != nil {
+		return x.SetId
+	}
+	return ""
+}
+
+func (x *LocalStopReport) GetUnreadable() bool {
+	if x != nil {
+		return x.Unreadable
+	}
+	return false
+}
 
 type TelemetryPayload struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
@@ -3243,7 +4257,7 @@ type TelemetryPayload struct {
 
 func (x *TelemetryPayload) Reset() {
 	*x = TelemetryPayload{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[21]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3255,7 +4269,7 @@ func (x *TelemetryPayload) String() string {
 func (*TelemetryPayload) ProtoMessage() {}
 
 func (x *TelemetryPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[21]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3268,7 +4282,7 @@ func (x *TelemetryPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetryPayload.ProtoReflect.Descriptor instead.
 func (*TelemetryPayload) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{21}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *TelemetryPayload) GetRobotId() string {
@@ -3323,21 +4337,24 @@ func (x *TelemetryPayload) GetCurrentAction() string {
 // Scalars below use proto3 explicit presence because 0 / 0.0 / false are valid,
 // safety-relevant readings; without presence a dropped field deserializes to
 // zero and is indistinguishable from a real reading — a phantom origin (0,0) or
-// a false 0% battery (review RA-3b).
+// a false 0% battery (RA-3b).
 type RobotPosition struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	X             *float64               `protobuf:"fixed64,1,opt,name=x,proto3,oneof" json:"x,omitempty"` // metres, zone frame; 0.0 is a valid coordinate
-	Y             *float64               `protobuf:"fixed64,2,opt,name=y,proto3,oneof" json:"y,omitempty"`
-	Yaw           *float64               `protobuf:"fixed64,3,opt,name=yaw,proto3,oneof" json:"yaw,omitempty"`           // radians; 0.0 is a valid heading
-	Floor         *int32                 `protobuf:"varint,4,opt,name=floor,proto3,oneof" json:"floor,omitempty"`        // 0 = ground is a valid floor; absent != ground
-	Altitude      *float64               `protobuf:"fixed64,5,opt,name=altitude,proto3,oneof" json:"altitude,omitempty"` // metres (geodetic/aerial); AGL/MSL per SwarmadaConfig; frame-exclusive with floor
+	state protoimpl.MessageState `protogen:"open.v1"`
+	X     *float64               `protobuf:"fixed64,1,opt,name=x,proto3,oneof" json:"x,omitempty"` // metres, zone frame; 0.0 is a valid coordinate
+	Y     *float64               `protobuf:"fixed64,2,opt,name=y,proto3,oneof" json:"y,omitempty"`
+	Yaw   *float64               `protobuf:"fixed64,3,opt,name=yaw,proto3,oneof" json:"yaw,omitempty"`    // radians; 0.0 is a valid heading
+	Floor *int32                 `protobuf:"varint,4,opt,name=floor,proto3,oneof" json:"floor,omitempty"` // 0 = ground is a valid floor; absent != ground
+	// metres (geodetic/aerial); AGL/MSL per SwarmadaConfig. Reported alongside floor, not
+	// instead of it: zone containment compares floor in every frame, Geodetic included
+	// (RFC-0001 FZ-Z1).
+	Altitude      *float64 `protobuf:"fixed64,5,opt,name=altitude,proto3,oneof" json:"altitude,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RobotPosition) Reset() {
 	*x = RobotPosition{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[22]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3349,7 +4366,7 @@ func (x *RobotPosition) String() string {
 func (*RobotPosition) ProtoMessage() {}
 
 func (x *RobotPosition) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[22]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3362,7 +4379,7 @@ func (x *RobotPosition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RobotPosition.ProtoReflect.Descriptor instead.
 func (*RobotPosition) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{22}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *RobotPosition) GetX() float64 {
@@ -3412,7 +4429,7 @@ type BatteryStatus struct {
 
 func (x *BatteryStatus) Reset() {
 	*x = BatteryStatus{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[23]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3424,7 +4441,7 @@ func (x *BatteryStatus) String() string {
 func (*BatteryStatus) ProtoMessage() {}
 
 func (x *BatteryStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[23]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3437,7 +4454,7 @@ func (x *BatteryStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatteryStatus.ProtoReflect.Descriptor instead.
 func (*BatteryStatus) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{23}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *BatteryStatus) GetPercent() int32 {
@@ -3473,17 +4490,42 @@ type ActionStatusUpdate struct {
 	ActionId string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
 	State    ActionState            `protobuf:"varint,2,opt,name=state,proto3,enum=fleet_adapter.v1.ActionState" json:"state,omitempty"`
 	Message  string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
-	// fencing_token the robot is currently executing under, echoed so the control
-	// plane can detect a robot still acting on a superseded assignment.
-	FencingToken  *uint64 `protobuf:"varint,4,opt,name=fencing_token,json=fencingToken,proto3,oneof" json:"fencing_token,omitempty"`
-	ProgressPct   int32   `protobuf:"varint,5,opt,name=progress_pct,json=progressPct,proto3" json:"progress_pct,omitempty"` // 0–100; 0 if unknown
+	// fencing_token the reported action was assigned with, echoed so the control
+	// plane can tie the report to that run and detect a robot still acting on a
+	// superseded assignment. The control plane refuses a report whose token is absent
+	// or differs from the token the action was assigned with.
+	FencingToken *uint64 `protobuf:"varint,4,opt,name=fencing_token,json=fencingToken,proto3,oneof" json:"fencing_token,omitempty"`
+	ProgressPct  int32   `protobuf:"varint,5,opt,name=progress_pct,json=progressPct,proto3" json:"progress_pct,omitempty"` // 0–100; 0 if unknown
+	// How the action ENDED; REQUIRED on a terminal state that is not SUCCEEDED. An
+	// adapter that cannot determine the cause MUST leave this unset rather than guess:
+	// a defaulted zero is indistinguishable from a reported value, the same
+	// explicit-presence discipline INSTALL_OUTCOME_UNSPECIFIED follows.
+	EndCause ActionEndCause `protobuf:"varint,6,opt,name=end_cause,json=endCause,proto3,enum=fleet_adapter.v1.ActionEndCause" json:"end_cause,omitempty"`
+	// REQUIRED iff end_cause = ACTION_END_CAUSE_SUPERSEDED: the action_id of the
+	// AssignAction that displaced this one. This is what makes a supersession
+	// structurally distinguishable from an operator cancellation rather than only
+	// differently labelled — an operator cancellation has no superseding action and
+	// can never populate it. A SUPERSEDED report with this empty is malformed, and the
+	// control plane MUST treat it as ACTION_END_CAUSE_UNSPECIFIED rather than accept an
+	// unattributable supersession.
+	SupersedingActionId string `protobuf:"bytes,7,opt,name=superseding_action_id,json=supersedingActionId,proto3" json:"superseding_action_id,omitempty"`
+	// true (contract 1.4.0): a terminal outcome retained from before this connection
+	// (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation, The retained
+	// outcome). The adapter retains the terminal outcome of its last action for a robot, with
+	// its report token (fencing_token), until the control plane acknowledges it with an
+	// ActionOutcomeAck, and sends it with retained = true on each reconnect once it has
+	// processed every RegisterAck. Only a retained outcome carries retained = true. A retained
+	// outcome is not work: the adapter continues nothing for it. What the control plane does
+	// with it is row A13 of RFC-0001 #safety-action-table. An adapter sends it only to a
+	// control plane that negotiated 1.4.0 or later; a control plane below 1.4.0 ignores it.
+	Retained      bool `protobuf:"varint,8,opt,name=retained,proto3" json:"retained,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ActionStatusUpdate) Reset() {
 	*x = ActionStatusUpdate{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[24]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3495,7 +4537,7 @@ func (x *ActionStatusUpdate) String() string {
 func (*ActionStatusUpdate) ProtoMessage() {}
 
 func (x *ActionStatusUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[24]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3508,7 +4550,7 @@ func (x *ActionStatusUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActionStatusUpdate.ProtoReflect.Descriptor instead.
 func (*ActionStatusUpdate) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{24}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ActionStatusUpdate) GetActionId() string {
@@ -3546,17 +4588,183 @@ func (x *ActionStatusUpdate) GetProgressPct() int32 {
 	return 0
 }
 
-type HeartbeatRequest struct {
+func (x *ActionStatusUpdate) GetEndCause() ActionEndCause {
+	if x != nil {
+		return x.EndCause
+	}
+	return ActionEndCause_ACTION_END_CAUSE_UNSPECIFIED
+}
+
+func (x *ActionStatusUpdate) GetSupersedingActionId() string {
+	if x != nil {
+		return x.SupersedingActionId
+	}
+	return ""
+}
+
+func (x *ActionStatusUpdate) GetRetained() bool {
+	if x != nil {
+		return x.Retained
+	}
+	return false
+}
+
+// The control plane's acknowledgement of a retained outcome (contract 1.4.0), the
+// outcome_ack arm of ControlPlaneMessage. It names the action and the outcome's report
+// token. The control plane sends it only once it has recorded the outcome, the action
+// already holds a terminal outcome, it has decided the outcome under a stop, or a direct
+// read of the API server finds the action gone; never for a report token that does not
+// match the action's assignment. On it the adapter stops retaining that outcome; until
+// then the adapter reports the outcome again on every reconnect. An adapter below 1.4.0
+// ignores it.
+type ActionOutcomeAck struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	RobotId       string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
-	SentAtMs      int64                  `protobuf:"varint,2,opt,name=sent_at_ms,json=sentAtMs,proto3" json:"sent_at_ms,omitempty"`
+	ActionId      string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`              // the action whose terminal outcome the control plane has read
+	FencingToken  uint64                 `protobuf:"varint,2,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"` // that outcome's report token
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActionOutcomeAck) Reset() {
+	*x = ActionOutcomeAck{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActionOutcomeAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActionOutcomeAck) ProtoMessage() {}
+
+func (x *ActionOutcomeAck) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActionOutcomeAck.ProtoReflect.Descriptor instead.
+func (*ActionOutcomeAck) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ActionOutcomeAck) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *ActionOutcomeAck) GetFencingToken() uint64 {
+	if x != nil {
+		return x.FencingToken
+	}
+	return 0
+}
+
+type TaskEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"` // e.g. "IntruderDetected" — capability/executor-defined, opaque
+	Seq           uint64                 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`  // monotonic per (subject_kind, subject id); the idempotency key
+	TimeMs        int64                  `protobuf:"varint,3,opt,name=time_ms,json=timeMs,proto3" json:"time_ms,omitempty"`
+	Payload       *structpb.Struct       `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
+	Terminal      bool                   `protobuf:"varint,5,opt,name=terminal,proto3" json:"terminal,omitempty"`                                                                 // marks the event that ends a Continuous execution
+	SubjectKind   EventSubjectKind       `protobuf:"varint,6,opt,name=subject_kind,json=subjectKind,proto3,enum=fleet_adapter.v1.EventSubjectKind" json:"subject_kind,omitempty"` // UNSPECIFIED means ACTION
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TaskEvent) Reset() {
+	*x = TaskEvent{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskEvent) ProtoMessage() {}
+
+func (x *TaskEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskEvent.ProtoReflect.Descriptor instead.
+func (*TaskEvent) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *TaskEvent) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *TaskEvent) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *TaskEvent) GetTimeMs() int64 {
+	if x != nil {
+		return x.TimeMs
+	}
+	return 0
+}
+
+func (x *TaskEvent) GetPayload() *structpb.Struct {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *TaskEvent) GetTerminal() bool {
+	if x != nil {
+		return x.Terminal
+	}
+	return false
+}
+
+func (x *TaskEvent) GetSubjectKind() EventSubjectKind {
+	if x != nil {
+		return x.SubjectKind
+	}
+	return EventSubjectKind_EVENT_SUBJECT_KIND_UNSPECIFIED
+}
+
+type HeartbeatRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Empty means adapter-scoped (see above), not "unknown robot".
+	RobotId       string `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
+	SentAtMs      int64  `protobuf:"varint,2,opt,name=sent_at_ms,json=sentAtMs,proto3" json:"sent_at_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[25]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3568,7 +4776,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[25]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3581,7 +4789,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{25}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *HeartbeatRequest) GetRobotId() string {
@@ -3599,18 +4807,21 @@ func (x *HeartbeatRequest) GetSentAtMs() int64 {
 }
 
 type HeartbeatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RobotId       string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
-	Phase         RobotPhase             `protobuf:"varint,2,opt,name=phase,proto3,enum=fleet_adapter.v1.RobotPhase" json:"phase,omitempty"`
-	Battery       *BatteryStatus         `protobuf:"bytes,3,opt,name=battery,proto3" json:"battery,omitempty"`
-	ReceivedAtMs  int64                  `protobuf:"varint,4,opt,name=received_at_ms,json=receivedAtMs,proto3" json:"received_at_ms,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Echoes HeartbeatRequest.robot_id, including when it is empty.
+	RobotId string `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
+	// phase/battery describe the named robot and are meaningless on an
+	// adapter-scoped reply; leave them unset there.
+	Phase         RobotPhase     `protobuf:"varint,2,opt,name=phase,proto3,enum=fleet_adapter.v1.RobotPhase" json:"phase,omitempty"`
+	Battery       *BatteryStatus `protobuf:"bytes,3,opt,name=battery,proto3" json:"battery,omitempty"`
+	ReceivedAtMs  int64          `protobuf:"varint,4,opt,name=received_at_ms,json=receivedAtMs,proto3" json:"received_at_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[26]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3622,7 +4833,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[26]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3635,7 +4846,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{26}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *HeartbeatResponse) GetRobotId() string {
@@ -3674,7 +4885,7 @@ type ScanCapabilities struct {
 
 func (x *ScanCapabilities) Reset() {
 	*x = ScanCapabilities{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[27]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3686,7 +4897,7 @@ func (x *ScanCapabilities) String() string {
 func (*ScanCapabilities) ProtoMessage() {}
 
 func (x *ScanCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[27]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3699,7 +4910,7 @@ func (x *ScanCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScanCapabilities.ProtoReflect.Descriptor instead.
 func (*ScanCapabilities) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{27}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{33}
 }
 
 type CapabilitiesSnapshot struct {
@@ -3712,14 +4923,45 @@ type CapabilitiesSnapshot struct {
 	// Firmware install state as the robot reports it (ADR-0033). Optional: an adapter
 	// that does not implement push_firmware leaves it unset, and the control plane
 	// keeps its own firmwareVersion record untouched.
-	Firmware      *FirmwareState `protobuf:"bytes,6,opt,name=firmware,proto3" json:"firmware,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Firmware *FirmwareState `protobuf:"bytes,6,opt,name=firmware,proto3" json:"firmware,omitempty"`
+	// ALL sensor streams this robot can serve. Additive,
+	// discovered the same way as supported_actions: pulled via Command.scan,
+	// projected read-only to Robot.status.sensorStreams[]. Optional: an adapter
+	// that declares none is unaffected and offers no ActivateStream target.
+	SensorStreams []*SensorStream `protobuf:"bytes,7,rep,name=sensor_streams,json=sensorStreams,proto3" json:"sensor_streams,omitempty"`
+	// The operating SUBJECTS this robot's adapter can honour while the robot is in
+	// a zone that restricts one: camera, microphone, water, chemical, uv, speed,
+	// noise, or a namespaced extension (`example.com/leaf-blower`). Additive, and
+	// discovered on exactly the path sensor_streams above already takes: pulled via
+	// Command.scan, projected read-only to
+	// Robot.status.honouredOperatingConstraints[] (RFC-0001 amendment
+	// "Zone Restrictions", FA-R1).
+	//
+	// THIS IS NOT THE CAPABILITY VOCABULARY AND THE TWO NEVER MEET (ADR-0058 §7). A
+	// capability answers "can this robot be asked to do X"; an operating subject
+	// answers "is X happening right now". The deciding case is a robot TRANSITING a
+	// ward with a live microphone: no action was refused, no capability was
+	// required, and the constraint was still broken. A subject that happens to
+	// collide with a capability name means nothing.
+	//
+	// DECLARING NONE IS NOT A BREACH, AND IT IS NOT PERMISSION EITHER. An adapter
+	// that leaves this empty is conformant; its robots are simply withheld from any
+	// zone restricting a subject, because an empty declaration satisfies no subject
+	// (ADR-0058 Amendment 1 §A1.2). An adapter built before this field existed
+	// cannot set it and is withheld on the same footing — a cost that decision
+	// accepts rather than resolves permissively.
+	//
+	// The control plane DROPS any entry outside the vocabulary rather than
+	// rejecting the whole declaration, so one malformed subject cannot cost a robot
+	// the valid ones beside it. A dropped subject is an undeclared subject.
+	HonouredOperatingConstraints []string `protobuf:"bytes,8,rep,name=honoured_operating_constraints,json=honouredOperatingConstraints,proto3" json:"honoured_operating_constraints,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *CapabilitiesSnapshot) Reset() {
 	*x = CapabilitiesSnapshot{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[28]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3731,7 +4973,7 @@ func (x *CapabilitiesSnapshot) String() string {
 func (*CapabilitiesSnapshot) ProtoMessage() {}
 
 func (x *CapabilitiesSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[28]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3744,7 +4986,7 @@ func (x *CapabilitiesSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitiesSnapshot.ProtoReflect.Descriptor instead.
 func (*CapabilitiesSnapshot) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{28}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CapabilitiesSnapshot) GetRobotId() string {
@@ -3789,6 +5031,136 @@ func (x *CapabilitiesSnapshot) GetFirmware() *FirmwareState {
 	return nil
 }
 
+func (x *CapabilitiesSnapshot) GetSensorStreams() []*SensorStream {
+	if x != nil {
+		return x.SensorStreams
+	}
+	return nil
+}
+
+func (x *CapabilitiesSnapshot) GetHonouredOperatingConstraints() []string {
+	if x != nil {
+		return x.HonouredOperatingConstraints
+	}
+	return nil
+}
+
+// SensorStream declares one named sensor a robot can serve as an
+// ActivateStream target. A task author discovers
+// what a robot can see before writing a task the same way they discover what
+// actions it can serve — via SupportedAction, the analogous discovery entry
+// above; admission/scheduling can then reject a reference to a stream no
+// candidate robot offers (SensorStreamNotOffered) before ever
+// committing a robot.
+//
+// ABSENCE IS NOT SIGNAL. Copies the PositionFrame rule (message PositionFrame, below):
+// a gap in frames on an activated stream MUST NOT be interpreted as absence
+// of the thing being looked for. A consumer whose stream dries up fails on
+// its own timeout; it MUST NOT silently report "nothing detected".
+//
+// BANDWIDTH ADMISSION IS EXPLICITLY OUT OF SCOPE.
+// Nothing here declares or lets the control plane enforce a per-stream
+// bitrate: adapters cannot declare one accurately enough to admit against — a
+// "5 fps JPEG" stream spans an order of magnitude with resolution and scene
+// complexity, and varies during a run. In its place the edge runtime compares
+// DELIVERED rate against the rate requested at activation and raises a
+// StreamDegraded semantic event (a TaskEvent.type value; TaskEvent is above) when it
+// falls short — reported, never admitted against. An unreported degradation
+// is otherwise indistinguishable from a stream-splitting failure at the
+// control plane, which is why the report exists even though the
+// budget does not.
+type SensorStream struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	StreamId             string                 `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`    // "front-rgb", "mic-array", "lidar-2d" — adapter-defined, stable
+	MediaType            string                 `protobuf:"bytes,2,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"` // "image/jpeg", "audio/l16", "application/vnd.pointcloud"
+	NativeRateHz         float64                `protobuf:"fixed64,3,opt,name=native_rate_hz,json=nativeRateHz,proto3" json:"native_rate_hz,omitempty"`
+	RequiredCapabilities []string               `protobuf:"bytes,4,rep,name=required_capabilities,json=requiredCapabilities,proto3" json:"required_capabilities,omitempty"` // robot capabilities that must be Active for this stream to serve
+	ActivationCost       ActivationCost         `protobuf:"varint,5,opt,name=activation_cost,json=activationCost,proto3,enum=fleet_adapter.v1.ActivationCost" json:"activation_cost,omitempty"`
+	SupportsClip         bool                   `protobuf:"varint,6,opt,name=supports_clip,json=supportsClip,proto3" json:"supports_clip,omitempty"` // can serve a pre/post-roll window
+	ClipPreSecondsMax    uint32                 `protobuf:"varint,7,opt,name=clip_pre_seconds_max,json=clipPreSecondsMax,proto3" json:"clip_pre_seconds_max,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *SensorStream) Reset() {
+	*x = SensorStream{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SensorStream) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SensorStream) ProtoMessage() {}
+
+func (x *SensorStream) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SensorStream.ProtoReflect.Descriptor instead.
+func (*SensorStream) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *SensorStream) GetStreamId() string {
+	if x != nil {
+		return x.StreamId
+	}
+	return ""
+}
+
+func (x *SensorStream) GetMediaType() string {
+	if x != nil {
+		return x.MediaType
+	}
+	return ""
+}
+
+func (x *SensorStream) GetNativeRateHz() float64 {
+	if x != nil {
+		return x.NativeRateHz
+	}
+	return 0
+}
+
+func (x *SensorStream) GetRequiredCapabilities() []string {
+	if x != nil {
+		return x.RequiredCapabilities
+	}
+	return nil
+}
+
+func (x *SensorStream) GetActivationCost() ActivationCost {
+	if x != nil {
+		return x.ActivationCost
+	}
+	return ActivationCost_ACTIVATION_COST_UNSPECIFIED
+}
+
+func (x *SensorStream) GetSupportsClip() bool {
+	if x != nil {
+		return x.SupportsClip
+	}
+	return false
+}
+
+func (x *SensorStream) GetClipPreSecondsMax() uint32 {
+	if x != nil {
+		return x.ClipPreSecondsMax
+	}
+	return 0
+}
+
 type PauseCapabilities struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	Reason               string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
@@ -3800,7 +5172,7 @@ type PauseCapabilities struct {
 
 func (x *PauseCapabilities) Reset() {
 	*x = PauseCapabilities{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[29]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3812,7 +5184,7 @@ func (x *PauseCapabilities) String() string {
 func (*PauseCapabilities) ProtoMessage() {}
 
 func (x *PauseCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[29]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3825,7 +5197,7 @@ func (x *PauseCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseCapabilities.ProtoReflect.Descriptor instead.
 func (*PauseCapabilities) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{29}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *PauseCapabilities) GetReason() string {
@@ -3859,7 +5231,7 @@ type PauseResult struct {
 
 func (x *PauseResult) Reset() {
 	*x = PauseResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[30]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3871,7 +5243,7 @@ func (x *PauseResult) String() string {
 func (*PauseResult) ProtoMessage() {}
 
 func (x *PauseResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[30]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3884,7 +5256,7 @@ func (x *PauseResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseResult.ProtoReflect.Descriptor instead.
 func (*PauseResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{30}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *PauseResult) GetPaused() bool {
@@ -3911,7 +5283,7 @@ type ResumeCapabilities struct {
 
 func (x *ResumeCapabilities) Reset() {
 	*x = ResumeCapabilities{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[31]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3923,7 +5295,7 @@ func (x *ResumeCapabilities) String() string {
 func (*ResumeCapabilities) ProtoMessage() {}
 
 func (x *ResumeCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[31]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3936,7 +5308,7 @@ func (x *ResumeCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeCapabilities.ProtoReflect.Descriptor instead.
 func (*ResumeCapabilities) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{31}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ResumeCapabilities) GetReason() string {
@@ -3963,7 +5335,7 @@ type ResumeResult struct {
 
 func (x *ResumeResult) Reset() {
 	*x = ResumeResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[32]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3975,7 +5347,7 @@ func (x *ResumeResult) String() string {
 func (*ResumeResult) ProtoMessage() {}
 
 func (x *ResumeResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[32]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3988,7 +5360,7 @@ func (x *ResumeResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeResult.ProtoReflect.Descriptor instead.
 func (*ResumeResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{32}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ResumeResult) GetResumed() bool {
@@ -4020,7 +5392,7 @@ type ResourceRequest struct {
 
 func (x *ResourceRequest) Reset() {
 	*x = ResourceRequest{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[33]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4032,7 +5404,7 @@ func (x *ResourceRequest) String() string {
 func (*ResourceRequest) ProtoMessage() {}
 
 func (x *ResourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[33]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4045,7 +5417,7 @@ func (x *ResourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceRequest.ProtoReflect.Descriptor instead.
 func (*ResourceRequest) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{33}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ResourceRequest) GetRequestId() uint64 {
@@ -4118,7 +5490,7 @@ type ResourceResponse struct {
 
 func (x *ResourceResponse) Reset() {
 	*x = ResourceResponse{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[34]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4130,7 +5502,7 @@ func (x *ResourceResponse) String() string {
 func (*ResourceResponse) ProtoMessage() {}
 
 func (x *ResourceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[34]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4143,7 +5515,7 @@ func (x *ResourceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceResponse.ProtoReflect.Descriptor instead.
 func (*ResourceResponse) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{34}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ResourceResponse) GetRequestId() uint64 {
@@ -4203,14 +5575,14 @@ func (*ResourceResponse_Release) isResourceResponse_Response() {}
 
 type ReserveResource struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ResourceName  string                 `protobuf:"bytes,1,opt,name=resource_name,json=resourceName,proto3" json:"resource_name,omitempty"` // SharedResource name; resolved up the zone tree
+	ResourceName  string                 `protobuf:"bytes,1,opt,name=resource_name,json=resourceName,proto3" json:"resource_name,omitempty"` // SharedResource name; looked up across the robot's namespace
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReserveResource) Reset() {
 	*x = ReserveResource{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[35]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4222,7 +5594,7 @@ func (x *ReserveResource) String() string {
 func (*ReserveResource) ProtoMessage() {}
 
 func (x *ReserveResource) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[35]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4235,7 +5607,7 @@ func (x *ReserveResource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReserveResource.ProtoReflect.Descriptor instead.
 func (*ReserveResource) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{35}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ReserveResource) GetResourceName() string {
@@ -4256,7 +5628,7 @@ type ReserveResult struct {
 
 func (x *ReserveResult) Reset() {
 	*x = ReserveResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[36]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4268,7 +5640,7 @@ func (x *ReserveResult) String() string {
 func (*ReserveResult) ProtoMessage() {}
 
 func (x *ReserveResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[36]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4281,7 +5653,7 @@ func (x *ReserveResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReserveResult.ProtoReflect.Descriptor instead.
 func (*ReserveResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{36}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ReserveResult) GetState() ReservationState {
@@ -4314,7 +5686,7 @@ type ReleaseResource struct {
 
 func (x *ReleaseResource) Reset() {
 	*x = ReleaseResource{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[37]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4326,7 +5698,7 @@ func (x *ReleaseResource) String() string {
 func (*ReleaseResource) ProtoMessage() {}
 
 func (x *ReleaseResource) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[37]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4339,7 +5711,7 @@ func (x *ReleaseResource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseResource.ProtoReflect.Descriptor instead.
 func (*ReleaseResource) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{37}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ReleaseResource) GetResourceName() string {
@@ -4359,7 +5731,7 @@ type ReleaseResult struct {
 
 func (x *ReleaseResult) Reset() {
 	*x = ReleaseResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[38]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4371,7 +5743,7 @@ func (x *ReleaseResult) String() string {
 func (*ReleaseResult) ProtoMessage() {}
 
 func (x *ReleaseResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[38]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4384,7 +5756,7 @@ func (x *ReleaseResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseResult.ProtoReflect.Descriptor instead.
 func (*ReleaseResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{38}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ReleaseResult) GetReleased() bool {
@@ -4412,7 +5784,7 @@ type ReservationGranted struct {
 
 func (x *ReservationGranted) Reset() {
 	*x = ReservationGranted{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[39]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4424,7 +5796,7 @@ func (x *ReservationGranted) String() string {
 func (*ReservationGranted) ProtoMessage() {}
 
 func (x *ReservationGranted) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[39]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4437,7 +5809,7 @@ func (x *ReservationGranted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReservationGranted.ProtoReflect.Descriptor instead.
 func (*ReservationGranted) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{39}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ReservationGranted) GetResourceName() string {
@@ -4456,7 +5828,7 @@ type ReservationGrantedAck struct {
 
 func (x *ReservationGrantedAck) Reset() {
 	*x = ReservationGrantedAck{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[40]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4468,7 +5840,7 @@ func (x *ReservationGrantedAck) String() string {
 func (*ReservationGrantedAck) ProtoMessage() {}
 
 func (x *ReservationGrantedAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[40]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4481,7 +5853,7 @@ func (x *ReservationGrantedAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReservationGrantedAck.ProtoReflect.Descriptor instead.
 func (*ReservationGrantedAck) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{40}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ReservationGrantedAck) GetAcknowledged() bool {
@@ -4505,7 +5877,7 @@ type ZoneAdmission struct {
 
 func (x *ZoneAdmission) Reset() {
 	*x = ZoneAdmission{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[41]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4517,7 +5889,7 @@ func (x *ZoneAdmission) String() string {
 func (*ZoneAdmission) ProtoMessage() {}
 
 func (x *ZoneAdmission) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[41]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4530,7 +5902,7 @@ func (x *ZoneAdmission) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZoneAdmission.ProtoReflect.Descriptor instead.
 func (*ZoneAdmission) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{41}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *ZoneAdmission) GetZoneName() string {
@@ -4563,7 +5935,7 @@ type ZoneAdmissionAck struct {
 
 func (x *ZoneAdmissionAck) Reset() {
 	*x = ZoneAdmissionAck{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[42]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4575,7 +5947,7 @@ func (x *ZoneAdmissionAck) String() string {
 func (*ZoneAdmissionAck) ProtoMessage() {}
 
 func (x *ZoneAdmissionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[42]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4588,7 +5960,7 @@ func (x *ZoneAdmissionAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZoneAdmissionAck.ProtoReflect.Descriptor instead.
 func (*ZoneAdmissionAck) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{42}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ZoneAdmissionAck) GetAcknowledged() bool {
@@ -4596,6 +5968,193 @@ func (x *ZoneAdmissionAck) GetAcknowledged() bool {
 		return x.Acknowledged
 	}
 	return false
+}
+
+// ZoneConstraints is the operating rule set in force WHERE THE ROBOT NOW IS
+// (ADR-0059, FA-R7). Pushed by the control plane when that rule set changes -- a
+// containment change that alters it, or a change to a containing zone's restrictions --
+// and at no other time (RFC-0001-zone-restrictions, FA-R7); a containment change that
+// leaves the rule set unchanged sends nothing. The reference control plane also sends it
+// to each robot standing in a zone when the robot's adapter registers a ControlStream,
+// since a newly connected adapter process holds no rule set.
+//
+// # It makes an EXISTING obligation satisfiable; it adds none
+//
+// FA-R3 already requires an adapter to honour an operating rule "for the whole time
+// the robot is in the zone, including while merely transiting". FA-R2 only ever sent
+// it the rules for the ASSIGNMENT TARGET's chain, once, at assignment. So an adapter
+// that entered any other zone -- a corridor it transits, an overlapping bay, a zone
+// whose rule was written after dispatch -- had no rule set for where it now was, and
+// could not comply with an obligation this contract already placed on it. This message
+// is that rule set.
+//
+// # RESOLVED AND UNIONED, never raw
+//
+// The plane derives which zones CONTAIN the robot (every zone whose polygon contains
+// its position, not the one arbitrated onto Robot.status.currentZone for reporting),
+// unions their already-resolved projections, and folds most-restrictive. The adapter
+// is never asked to walk a zone tree and never asked to do point-in-polygon: one
+// evaluator of these rules, in one place (FZ-R4).
+//
+// # EMPTY MEANS NO RULE IS IN FORCE, WHICH IS PERMISSION
+//
+// Never "everything is denied". Absence of a rule is permission at every axis
+// (ADR-0058 section 2), and a push carrying an empty list is how the plane says a robot
+// has LEFT a restricted region. An adapter that read empty as a lockout would strand
+// every robot that walked out of a ward.
+//
+// # THE RULE ARRIVES AFTER THE ROBOT CROSSES THE BOUNDARY
+//
+// Stated on the wire because an implementer needs it: the loop is telemetry-up then
+// command-down, so there is a lag between a robot entering a zone and this message
+// arriving. THIS MESSAGE DOES NOT MAKE A ZONE SAFE. It makes FA-R3 satisfiable for an
+// adapter that wants to comply, which is a different and smaller claim. An adapter that
+// needs a genuine safety boundary evaluates geometry locally, and this contract does
+// not carry geometry -- see ADR-0059 section 6 for what would.
+type ZoneConstraints struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The zones whose polygons contain the robot, sorted by name. Carried so a refusal
+	// or a log line can name WHERE the rule came from, and so an adapter can tell a
+	// containment change from a rule edit. It is the containment SET and not the single
+	// reported location: a robot inside two overlapping zones is inside both, and is
+	// bound by both.
+	ContainingZones []string `protobuf:"bytes,1,rep,name=containing_zones,json=containingZones,proto3" json:"containing_zones,omitempty"`
+	// The RESOLVED EFFECTIVE operating rules in force across every zone above, one entry
+	// per subject, folded most-restrictive. The same wire type AssignAction carries, so
+	// an adapter has ONE representation of an operating rule to implement rather than
+	// two that could diverge — but NOT the same scope: AssignAction carries the rules at
+	// the ONE zone the robot is dispatched to, and this carries the UNION across every
+	// zone containing it. See EffectiveOperatingConstraint's own comment.
+	//
+	// DENIED, LIMITED AND REQUIRED ALL TRAVEL. Required is the inspection-zone mirror
+	// case -- entering a zone can oblige a subject to be ON, not only off -- and a push
+	// that only ever forbade would implement half the enum.
+	OperatingConstraints []*EffectiveOperatingConstraint `protobuf:"bytes,2,rep,name=operating_constraints,json=operatingConstraints,proto3" json:"operating_constraints,omitempty"`
+	// Set when at least one containing zone's own restriction set could not be resolved
+	// (FZ-R6). The rules above are then INCOMPLETE, and an adapter MUST treat the push as
+	// a fail-closed signal for the named zones rather than as a complete answer: an
+	// unresolvable restriction is not an absent restriction.
+	UnresolvedZones []string `protobuf:"bytes,3,rep,name=unresolved_zones,json=unresolvedZones,proto3" json:"unresolved_zones,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ZoneConstraints) Reset() {
+	*x = ZoneConstraints{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ZoneConstraints) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ZoneConstraints) ProtoMessage() {}
+
+func (x *ZoneConstraints) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ZoneConstraints.ProtoReflect.Descriptor instead.
+func (*ZoneConstraints) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *ZoneConstraints) GetContainingZones() []string {
+	if x != nil {
+		return x.ContainingZones
+	}
+	return nil
+}
+
+func (x *ZoneConstraints) GetOperatingConstraints() []*EffectiveOperatingConstraint {
+	if x != nil {
+		return x.OperatingConstraints
+	}
+	return nil
+}
+
+func (x *ZoneConstraints) GetUnresolvedZones() []string {
+	if x != nil {
+		return x.UnresolvedZones
+	}
+	return nil
+}
+
+type ZoneConstraintsAck struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The adapter received the set and has applied it to the robot. It is a RECEIPT and
+	// an ATTESTATION, not a measurement: nothing in a control plane can verify that a
+	// camera is off (ADR-0058 section 12). The plane records what was claimed.
+	Acknowledged bool `protobuf:"varint,1,opt,name=acknowledged,proto3" json:"acknowledged,omitempty"`
+	// The subjects the adapter cannot honour where the robot now is, named the same way
+	// AssignActionResult names them. An adapter that acknowledges while naming subjects
+	// has told the plane it is in a zone it cannot comply with -- which the plane can
+	// report but cannot fix, because the robot is already there.
+	UnhonourableSubjects []string `protobuf:"bytes,2,rep,name=unhonourable_subjects,json=unhonourableSubjects,proto3" json:"unhonourable_subjects,omitempty"`
+	Message              string   `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *ZoneConstraintsAck) Reset() {
+	*x = ZoneConstraintsAck{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ZoneConstraintsAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ZoneConstraintsAck) ProtoMessage() {}
+
+func (x *ZoneConstraintsAck) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ZoneConstraintsAck.ProtoReflect.Descriptor instead.
+func (*ZoneConstraintsAck) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *ZoneConstraintsAck) GetAcknowledged() bool {
+	if x != nil {
+		return x.Acknowledged
+	}
+	return false
+}
+
+func (x *ZoneConstraintsAck) GetUnhonourableSubjects() []string {
+	if x != nil {
+		return x.UnhonourableSubjects
+	}
+	return nil
+}
+
+func (x *ZoneConstraintsAck) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
 }
 
 type VerifyHardware struct {
@@ -4608,7 +6167,7 @@ type VerifyHardware struct {
 
 func (x *VerifyHardware) Reset() {
 	*x = VerifyHardware{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[43]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4620,7 +6179,7 @@ func (x *VerifyHardware) String() string {
 func (*VerifyHardware) ProtoMessage() {}
 
 func (x *VerifyHardware) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[43]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4633,7 +6192,7 @@ func (x *VerifyHardware) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyHardware.ProtoReflect.Descriptor instead.
 func (*VerifyHardware) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{43}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *VerifyHardware) GetComponentName() string {
@@ -4660,7 +6219,7 @@ type VerifyCapability struct {
 
 func (x *VerifyCapability) Reset() {
 	*x = VerifyCapability{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[44]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4672,7 +6231,7 @@ func (x *VerifyCapability) String() string {
 func (*VerifyCapability) ProtoMessage() {}
 
 func (x *VerifyCapability) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[44]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4685,7 +6244,7 @@ func (x *VerifyCapability) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyCapability.ProtoReflect.Descriptor instead.
 func (*VerifyCapability) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{44}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *VerifyCapability) GetCapabilityName() string {
@@ -4713,7 +6272,7 @@ type VerifyModel struct {
 
 func (x *VerifyModel) Reset() {
 	*x = VerifyModel{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[45]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4725,7 +6284,7 @@ func (x *VerifyModel) String() string {
 func (*VerifyModel) ProtoMessage() {}
 
 func (x *VerifyModel) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[45]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4738,7 +6297,7 @@ func (x *VerifyModel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyModel.ProtoReflect.Descriptor instead.
 func (*VerifyModel) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{45}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *VerifyModel) GetModelName() string {
@@ -4773,7 +6332,7 @@ type VerifyResult struct {
 
 func (x *VerifyResult) Reset() {
 	*x = VerifyResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[46]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4785,7 +6344,7 @@ func (x *VerifyResult) String() string {
 func (*VerifyResult) ProtoMessage() {}
 
 func (x *VerifyResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[46]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4798,7 +6357,7 @@ func (x *VerifyResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyResult.ProtoReflect.Descriptor instead.
 func (*VerifyResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{46}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *VerifyResult) GetStatus() ProbeStatus {
@@ -4828,9 +6387,11 @@ type PushFirmware struct {
 	FirmwareUri      string                 `protobuf:"bytes,2,opt,name=firmware_uri,json=firmwareUri,proto3" json:"firmware_uri,omitempty"`
 	FirmwareChecksum string                 `protobuf:"bytes,3,opt,name=firmware_checksum,json=firmwareChecksum,proto3" json:"firmware_checksum,omitempty"` // sha256:<hex>; integrity check
 	// Signature URI or sigstore bundle for the firmware artifact (publisher-trust
-	// check, DD-S1). The adapter MUST verify it against
-	// SwarmadaConfig.spec.signing.trustRoots before install and fail closed on
-	// failure. Required when SwarmadaConfig.spec.signing.requireSignatureVerification.
+	// check, DD-S1). The adapter MUST verify it against the publisher keys
+	// provisioned to the adapter before install and fail closed on failure; the
+	// protocol carries no trust root, and SwarmadaConfig.spec.signing.trustRoots is
+	// read by the control plane only. Required when
+	// SwarmadaConfig.spec.signing.requireSignatureVerification.
 	FirmwareSignatureRef string `protobuf:"bytes,4,opt,name=firmware_signature_ref,json=firmwareSignatureRef,proto3" json:"firmware_signature_ref,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -4838,7 +6399,7 @@ type PushFirmware struct {
 
 func (x *PushFirmware) Reset() {
 	*x = PushFirmware{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[47]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4850,7 +6411,7 @@ func (x *PushFirmware) String() string {
 func (*PushFirmware) ProtoMessage() {}
 
 func (x *PushFirmware) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[47]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4863,7 +6424,7 @@ func (x *PushFirmware) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushFirmware.ProtoReflect.Descriptor instead.
 func (*PushFirmware) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{47}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *PushFirmware) GetTargetVersion() string {
@@ -4899,8 +6460,9 @@ type FirmwareResult struct {
 	Accepted bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"` // download begun
 	Message  string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	// DN or fingerprint of the trust-root key that verified the signature;
-	// populated when accepted=true. Recorded in the FIRMWARE_SIGNATURE_VERIFIED
-	// audit event (DD-S1).
+	// populated when accepted=true. Not read by the control plane at v0.4: the
+	// FIRMWARE_SIGNATURE_VERIFIED audit event records the control plane's own
+	// verification before dispatch (DD-S1).
 	VerifiedSigner string `protobuf:"bytes,3,opt,name=verified_signer,json=verifiedSigner,proto3" json:"verified_signer,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -4908,7 +6470,7 @@ type FirmwareResult struct {
 
 func (x *FirmwareResult) Reset() {
 	*x = FirmwareResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[48]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4920,7 +6482,7 @@ func (x *FirmwareResult) String() string {
 func (*FirmwareResult) ProtoMessage() {}
 
 func (x *FirmwareResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[48]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4933,7 +6495,7 @@ func (x *FirmwareResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FirmwareResult.ProtoReflect.Descriptor instead.
 func (*FirmwareResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{48}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *FirmwareResult) GetAccepted() bool {
@@ -4965,14 +6527,19 @@ type ModelUpdate struct {
 	ModelUri      string                 `protobuf:"bytes,4,opt,name=model_uri,json=modelUri,proto3" json:"model_uri,omitempty"`
 	ModelChecksum string                 `protobuf:"bytes,5,opt,name=model_checksum,json=modelChecksum,proto3" json:"model_checksum,omitempty"` // sha256:<hex>
 	// Signature URI or sigstore bundle for the model artifact (publisher-trust
-	// check, DD-S1). The adapter MUST verify it against
-	// SwarmadaConfig.spec.signing.trustRoots before install and fail closed on
-	// failure. Required when SwarmadaConfig.spec.signing.requireSignatureVerification.
+	// check, DD-S1). The adapter MUST verify it against the publisher keys
+	// provisioned to the adapter before install and fail closed on failure; the
+	// protocol carries no trust root, and SwarmadaConfig.spec.signing.trustRoots is
+	// read by the control plane only. Required when
+	// SwarmadaConfig.spec.signing.requireSignatureVerification.
 	ModelSignatureRef string `protobuf:"bytes,6,opt,name=model_signature_ref,json=modelSignatureRef,proto3" json:"model_signature_ref,omitempty"`
 	// When true, this is an Auto rollback (RFC-0001 #design-details-why-is-modelrollout-rollback-manual-by-default): the adapter MUST reactivate the
 	// robot-retained new_version (the version the robot was on before the failed
 	// update) WITHOUT downloading — model_uri is empty and no signature/checksum is
 	// sent, because the artifact is already present and was verified on first install.
+	// A rollback installs no artifact, so the signature-and-checksum obligation of
+	// RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist does not apply
+	// to it; like any install it ends in a terminal UpdateProgress outcome.
 	Rollback      bool `protobuf:"varint,7,opt,name=rollback,proto3" json:"rollback,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4980,7 +6547,7 @@ type ModelUpdate struct {
 
 func (x *ModelUpdate) Reset() {
 	*x = ModelUpdate{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[49]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4992,7 +6559,7 @@ func (x *ModelUpdate) String() string {
 func (*ModelUpdate) ProtoMessage() {}
 
 func (x *ModelUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[49]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5005,7 +6572,7 @@ func (x *ModelUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelUpdate.ProtoReflect.Descriptor instead.
 func (*ModelUpdate) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{49}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *ModelUpdate) GetModelName() string {
@@ -5071,7 +6638,7 @@ type ModelUpdateResult struct {
 
 func (x *ModelUpdateResult) Reset() {
 	*x = ModelUpdateResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[50]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5083,7 +6650,7 @@ func (x *ModelUpdateResult) String() string {
 func (*ModelUpdateResult) ProtoMessage() {}
 
 func (x *ModelUpdateResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[50]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5096,7 +6663,7 @@ func (x *ModelUpdateResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelUpdateResult.ProtoReflect.Descriptor instead.
 func (*ModelUpdateResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{50}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ModelUpdateResult) GetAcknowledged() bool {
@@ -5123,28 +6690,28 @@ func (x *ModelUpdateResult) GetVerifiedSigner() string {
 // UpdateProgress reports intra-update per-robot progress during a firmware or model
 // rollout, so the control plane can surface it as
 // FirmwareRollout/ModelRollout.status.currentBatch[].updatePhase. It is ADVISORY
-// telemetry and MUST NOT be treated as a terminal outcome. Emitting it is OPTIONAL
+// telemetry and MUST NOT be treated as a terminal outcome. Emitting progress is OPTIONAL
 // for an adapter — a silent adapter simply leaves the phase at the control plane's
-// initial value.
+// initial value — but the LAST message of every install the adapter accepts is REQUIRED:
+// it carries the terminal outcome (below).
 //
 // What IS authoritative differs by kind, and the difference is load-bearing:
-//   - model:    the robot reports per-model state on its own status
-//     (installedModels[].status / failureReason), so an install FAILURE is
-//     observable and is sealed as MODEL_UPDATE_FAILED
-//     (RFC-0001 #safety-required-events).
-//   - firmware: FirmwareResult.accepted means "download begun" — an ACCEPTANCE ack,
-//     not a completion signal. No message in this contract reports a
-//     firmware install failure, which is why FIRMWARE_INSTALL_FAILED is
-//     marked deferred rather than pending: closing it requires a contract
-//     change here, not controller work.
+// - model: the robot reports per-model state on its own status
+// (installedModels[].status / failureReason), so an install FAILURE is
+// observable and is sealed as MODEL_UPDATE_FAILED
+// (RFC-0001 #safety-required-events).
+// - firmware: FirmwareResult.accepted means "download begun" — an ACCEPTANCE ack,
+// not a completion signal. A firmware install failure is reported by this
+// message's terminal outcome (outcome = FAILED, failure_reason,
+// resulting_version) and by FirmwareState on the CapabilitiesSnapshot, and is
+// sealed as FIRMWARE_INSTALL_FAILED (RFC-0001 #safety-required-events).
 type UpdateProgress struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	RobotId string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
 	Kind    UpdateKind             `protobuf:"varint,2,opt,name=kind,proto3,enum=fleet_adapter.v1.UpdateKind" json:"kind,omitempty"` // which rollout this progress belongs to
 	// Phase string; MUST match the CRD updatePhase enum for the kind
 	// (firmware: Pulling / Installing / Verifying / Rebooting;
-	//
-	//	model:    Downloading / Verifying / Installing / HealthChecking).
+	// model: Downloading / Verifying / Installing / HealthChecking).
 	Phase   string `protobuf:"bytes,3,opt,name=phase,proto3" json:"phase,omitempty"`
 	Percent int32  `protobuf:"varint,4,opt,name=percent,proto3" json:"percent,omitempty"` // 0-100 completion, optional (0 if unknown)
 	// ── Terminal outcome (ADR-0033) ────────────────────────────────────────────
@@ -5165,13 +6732,31 @@ type UpdateProgress struct {
 	// is the fact an operator needs and cannot infer — a failed install may leave the
 	// robot on the old version, on a recovery image, or somewhere else entirely.
 	ResultingVersion string `protobuf:"bytes,7,opt,name=resulting_version,json=resultingVersion,proto3" json:"resulting_version,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Which MODEL this report is about (kind = UPDATE_KIND_MODEL only; ignored for
+	// firmware, where a robot has one).
+	//
+	// An adapter that implements model_update SHOULD set it, and MUST set it if it can
+	// have two model installs in flight at once. Without it the control plane has to
+	// recover the model by asking which rollout the robot is in, and a robot legitimately
+	// sits in two rollouts' batches at once — models are independent, so a robot being
+	// Updating for nav-stack is still eligible for vision-stack. That question then has
+	// more than one answer and the outcome lands on whichever model sorted first.
+	//
+	// Omitting it stays wire-compatible: the control plane falls back to correlation and
+	// REFUSES to guess when the answer is ambiguous, so an outcome is deferred to the
+	// CapabilitiesSnapshot recovery carrier (ADR-0033) rather than misattributed.
+	//
+	// It names the model, it does not license the report: a FAILED outcome for a model the
+	// control plane never entered this robot into a batch for is still not recorded, since
+	// an adapter that DECLINES an artifact has installed nothing and changed nothing.
+	ModelName     string `protobuf:"bytes,8,opt,name=model_name,json=modelName,proto3" json:"model_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdateProgress) Reset() {
 	*x = UpdateProgress{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[51]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5183,7 +6768,7 @@ func (x *UpdateProgress) String() string {
 func (*UpdateProgress) ProtoMessage() {}
 
 func (x *UpdateProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[51]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5196,7 +6781,7 @@ func (x *UpdateProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateProgress.ProtoReflect.Descriptor instead.
 func (*UpdateProgress) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{51}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *UpdateProgress) GetRobotId() string {
@@ -5248,10 +6833,17 @@ func (x *UpdateProgress) GetResultingVersion() string {
 	return ""
 }
 
+func (x *UpdateProgress) GetModelName() string {
+	if x != nil {
+		return x.ModelName
+	}
+	return ""
+}
+
 type HardwareComponent struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	Name              string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`   // unique within the robot
-	Type              string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`   // Lidar | Camera | Gripper | ...
+	Type              string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`   // Lidar | Camera | Gripper |...
 	Model             string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"` // manufacturer model; informational
 	Status            HardwareStatus         `protobuf:"varint,4,opt,name=status,proto3,enum=fleet_adapter.v1.HardwareStatus" json:"status,omitempty"`
 	DegradationReason string                 `protobuf:"bytes,5,opt,name=degradation_reason,json=degradationReason,proto3" json:"degradation_reason,omitempty"`
@@ -5281,7 +6873,7 @@ type HardwareComponent struct {
 
 func (x *HardwareComponent) Reset() {
 	*x = HardwareComponent{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[52]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5293,7 +6885,7 @@ func (x *HardwareComponent) String() string {
 func (*HardwareComponent) ProtoMessage() {}
 
 func (x *HardwareComponent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[52]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5306,7 +6898,7 @@ func (x *HardwareComponent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HardwareComponent.ProtoReflect.Descriptor instead.
 func (*HardwareComponent) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{52}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *HardwareComponent) GetName() string {
@@ -5416,7 +7008,7 @@ type InstalledModel struct {
 
 func (x *InstalledModel) Reset() {
 	*x = InstalledModel{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[53]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5428,7 +7020,7 @@ func (x *InstalledModel) String() string {
 func (*InstalledModel) ProtoMessage() {}
 
 func (x *InstalledModel) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[53]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5441,7 +7033,7 @@ func (x *InstalledModel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstalledModel.ProtoReflect.Descriptor instead.
 func (*InstalledModel) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{53}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *InstalledModel) GetName() string {
@@ -5504,7 +7096,7 @@ type FirmwareState struct {
 
 func (x *FirmwareState) Reset() {
 	*x = FirmwareState{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[54]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5516,7 +7108,7 @@ func (x *FirmwareState) String() string {
 func (*FirmwareState) ProtoMessage() {}
 
 func (x *FirmwareState) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[54]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5529,7 +7121,7 @@ func (x *FirmwareState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FirmwareState.ProtoReflect.Descriptor instead.
 func (*FirmwareState) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{54}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *FirmwareState) GetRunningVersion() string {
@@ -5571,7 +7163,7 @@ type HardwareStatusUpdate struct {
 
 func (x *HardwareStatusUpdate) Reset() {
 	*x = HardwareStatusUpdate{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[55]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5583,7 +7175,7 @@ func (x *HardwareStatusUpdate) String() string {
 func (*HardwareStatusUpdate) ProtoMessage() {}
 
 func (x *HardwareStatusUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[55]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5596,7 +7188,7 @@ func (x *HardwareStatusUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HardwareStatusUpdate.ProtoReflect.Descriptor instead.
 func (*HardwareStatusUpdate) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{55}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *HardwareStatusUpdate) GetComponentName() string {
@@ -5633,7 +7225,7 @@ type AdapterEdgeMessage struct {
 
 func (x *AdapterEdgeMessage) Reset() {
 	*x = AdapterEdgeMessage{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[56]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5645,7 +7237,7 @@ func (x *AdapterEdgeMessage) String() string {
 func (*AdapterEdgeMessage) ProtoMessage() {}
 
 func (x *AdapterEdgeMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[56]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5658,7 +7250,7 @@ func (x *AdapterEdgeMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdapterEdgeMessage.ProtoReflect.Descriptor instead.
 func (*AdapterEdgeMessage) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{56}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *AdapterEdgeMessage) GetMsg() isAdapterEdgeMessage_Msg {
@@ -5695,7 +7287,7 @@ type AdapterEdgeMessage_Position struct {
 }
 
 type AdapterEdgeMessage_EstopAck struct {
-	EstopAck *EstopAck `protobuf:"bytes,2,opt,name=estop_ack,json=estopAck,proto3,oneof"` // confirmed ack for an edge-issued estop
+	EstopAck *EstopAck `protobuf:"bytes,2,opt,name=estop_ack,json=estopAck,proto3,oneof"` // confirmed ack for an edge-issued estop, covering every robot it stopped
 }
 
 func (*AdapterEdgeMessage_Position) isAdapterEdgeMessage_Msg() {}
@@ -5714,7 +7306,7 @@ type EdgeControlMessage struct {
 
 func (x *EdgeControlMessage) Reset() {
 	*x = EdgeControlMessage{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[57]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5726,7 +7318,7 @@ func (x *EdgeControlMessage) String() string {
 func (*EdgeControlMessage) ProtoMessage() {}
 
 func (x *EdgeControlMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[57]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5739,7 +7331,7 @@ func (x *EdgeControlMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdgeControlMessage.ProtoReflect.Descriptor instead.
 func (*EdgeControlMessage) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{57}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *EdgeControlMessage) GetMsg() isEdgeControlMessage_Msg {
@@ -5763,7 +7355,7 @@ type isEdgeControlMessage_Msg interface {
 }
 
 type EdgeControlMessage_Estop struct {
-	Estop *Estop `protobuf:"bytes,1,opt,name=estop,proto3,oneof"` // headless zone-scoped estop (RFC-0001 #safety-edge-headless-emergency-stop)
+	Estop *Estop `protobuf:"bytes,1,opt,name=estop,proto3,oneof"` // headless estop; names no robot: the adapter stops every robot it serves via this edge node (RFC-0001 #fleet-adapter-protocol-the-edge-stream)
 }
 
 func (*EdgeControlMessage_Estop) isEdgeControlMessage_Msg() {}
@@ -5783,7 +7375,7 @@ type PositionFrame struct {
 
 func (x *PositionFrame) Reset() {
 	*x = PositionFrame{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[58]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5795,7 +7387,7 @@ func (x *PositionFrame) String() string {
 func (*PositionFrame) ProtoMessage() {}
 
 func (x *PositionFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[58]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5808,7 +7400,7 @@ func (x *PositionFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PositionFrame.ProtoReflect.Descriptor instead.
 func (*PositionFrame) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{58}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *PositionFrame) GetRobotId() string {
@@ -5842,7 +7434,7 @@ type EdgeEndpoint struct {
 
 func (x *EdgeEndpoint) Reset() {
 	*x = EdgeEndpoint{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[59]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5854,7 +7446,7 @@ func (x *EdgeEndpoint) String() string {
 func (*EdgeEndpoint) ProtoMessage() {}
 
 func (x *EdgeEndpoint) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[59]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5867,7 +7459,7 @@ func (x *EdgeEndpoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdgeEndpoint.ProtoReflect.Descriptor instead.
 func (*EdgeEndpoint) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{59}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *EdgeEndpoint) GetZone() string {
@@ -5884,6 +7476,403 @@ func (x *EdgeEndpoint) GetAddress() string {
 	return ""
 }
 
+// ── Sensor stream activation (the duty cycle) ─────────────────────────────────
+//
+// StreamSink names where frames go: the resolved compute runtime endpoint —
+// for a contract: Service ComputeEndpoint, the SAME pinned address
+// the pinned-endpoint resolver already resolved, never the Service VIP —
+// on the EdgeEndpoint/PositionFrame precedent directly above. FRAMES MUST NOT
+// ENTER THE CONTROL PLANE: the adapter (or the edge node relaying for it)
+// ships frames to this address DIRECTLY, on its own data-path connection: the
+// control plane records only that a stream is active, never what it carries.
+// A conforming adapter/edge node MUST NOT route sensor-stream bytes through
+// ControlStream, EdgeStream, or any other control-plane-terminated channel.
+// This is NORMATIVE and it IS conformance-checked: adapters/CONFORMANCE.md C18.2
+// baselines the ControlStream's byte rate while idle, activates a stream, and
+// requires the rate not to rise to carry it.
+//
+// WHAT A GREEN C18.2 DOES AND DOES NOT ESTABLISH, stated here because this
+// comment is what an adapter author reads. It is a byte-rate comparison, so it
+// detects RELAYING -- a stream's worth of traffic appearing on a channel that
+// must not carry it -- and NOT steganography: an adapter dribbling frames
+// through an existing field below the threshold passes the check and still
+// violates this rule. Honour the rule; do not read a passing report as proof.
+type StreamSink struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"` // host:port of the compute runtime; resolved, never a Service DNS name/VIP
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamSink) Reset() {
+	*x = StreamSink{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[69]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamSink) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamSink) ProtoMessage() {}
+
+func (x *StreamSink) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[69]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamSink.ProtoReflect.Descriptor instead.
+func (*StreamSink) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{69}
+}
+
+func (x *StreamSink) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+type ClipWindow struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Mode          ClipWindowMode         `protobuf:"varint,1,opt,name=mode,proto3,enum=fleet_adapter.v1.ClipWindowMode" json:"mode,omitempty"`
+	PreSeconds    uint32                 `protobuf:"varint,2,opt,name=pre_seconds,json=preSeconds,proto3" json:"pre_seconds,omitempty"`    // meaningful only for CLIP; bounded by clip_pre_seconds_max
+	PostSeconds   uint32                 `protobuf:"varint,3,opt,name=post_seconds,json=postSeconds,proto3" json:"post_seconds,omitempty"` // meaningful only for CLIP
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClipWindow) Reset() {
+	*x = ClipWindow{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[70]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClipWindow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClipWindow) ProtoMessage() {}
+
+func (x *ClipWindow) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[70]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClipWindow.ProtoReflect.Descriptor instead.
+func (*ClipWindow) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{70}
+}
+
+func (x *ClipWindow) GetMode() ClipWindowMode {
+	if x != nil {
+		return x.Mode
+	}
+	return ClipWindowMode_CLIP_WINDOW_MODE_UNSPECIFIED
+}
+
+func (x *ClipWindow) GetPreSeconds() uint32 {
+	if x != nil {
+		return x.PreSeconds
+	}
+	return 0
+}
+
+func (x *ClipWindow) GetPostSeconds() uint32 {
+	if x != nil {
+		return x.PostSeconds
+	}
+	return 0
+}
+
+// ActivateStream is the control plane's ONLY way to turn a sensor on, and it
+// is REFCOUNTED per (robot_id, stream_id): the control plane issues ONE
+// activation per (robot, stream) at the MAX rate_hz any live consumer
+// requested, and re-issues it (a fresh command at a possibly higher rate_hz,
+// same robot+stream, next fencing_token) as further consumers join — never a
+// second, independent activation. DeactivateStream is issued by the control
+// plane itself once the LAST consumer leaves non-terminal state. An author
+// therefore never writes "turn it off", and cannot leak an activation by
+// forgetting to: the mechanism is server-side reference counting, not a task
+// obligation.
+//
+// LEASE-BOUND, AND THE SAFE DIRECTION IS OFF — the INVERSE of Estop's lease
+// direction, deliberately. Estop is never fenced and never lease-bound
+// because the failure that matters for a stop is "not applied": a safe stop
+// MUST always be honoured, so nothing may gate it. A stream is the opposite
+// case: the failure that matters is "left on" — an unattended, still-powered
+// sensor is itself the hazard, cost and privacy exposure this lease exists
+// to bound. So lease_expires_ms is renewed (by a fresh ActivateStream carrying
+// the same fencing_token) only while a consumer is genuinely live, and the
+// adapter MUST stop the stream at expiry absent a renewal — a control-plane
+// partition therefore STOPS the camera; it can never leave one running.
+type ActivateStream struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RobotId        string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
+	StreamId       string                 `protobuf:"bytes,2,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	RateHz         float64                `protobuf:"fixed64,3,opt,name=rate_hz,json=rateHz,proto3" json:"rate_hz,omitempty"`
+	Window         *ClipWindow            `protobuf:"bytes,4,opt,name=window,proto3" json:"window,omitempty"`
+	Sinks          []*StreamSink          `protobuf:"bytes,5,rep,name=sinks,proto3" json:"sinks,omitempty"` // WHERE frames go — never the control plane, see StreamSink above
+	FencingToken   uint64                 `protobuf:"varint,6,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	LeaseExpiresMs int64                  `protobuf:"varint,7,opt,name=lease_expires_ms,json=leaseExpiresMs,proto3" json:"lease_expires_ms,omitempty"` // adapter MUST stop the stream at expiry absent a renewal
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ActivateStream) Reset() {
+	*x = ActivateStream{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[71]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateStream) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateStream) ProtoMessage() {}
+
+func (x *ActivateStream) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[71]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateStream.ProtoReflect.Descriptor instead.
+func (*ActivateStream) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{71}
+}
+
+func (x *ActivateStream) GetRobotId() string {
+	if x != nil {
+		return x.RobotId
+	}
+	return ""
+}
+
+func (x *ActivateStream) GetStreamId() string {
+	if x != nil {
+		return x.StreamId
+	}
+	return ""
+}
+
+func (x *ActivateStream) GetRateHz() float64 {
+	if x != nil {
+		return x.RateHz
+	}
+	return 0
+}
+
+func (x *ActivateStream) GetWindow() *ClipWindow {
+	if x != nil {
+		return x.Window
+	}
+	return nil
+}
+
+func (x *ActivateStream) GetSinks() []*StreamSink {
+	if x != nil {
+		return x.Sinks
+	}
+	return nil
+}
+
+func (x *ActivateStream) GetFencingToken() uint64 {
+	if x != nil {
+		return x.FencingToken
+	}
+	return 0
+}
+
+func (x *ActivateStream) GetLeaseExpiresMs() int64 {
+	if x != nil {
+		return x.LeaseExpiresMs
+	}
+	return 0
+}
+
+type ActivateStreamResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Activated     bool                   `protobuf:"varint,1,opt,name=activated,proto3" json:"activated,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActivateStreamResult) Reset() {
+	*x = ActivateStreamResult{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[72]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateStreamResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateStreamResult) ProtoMessage() {}
+
+func (x *ActivateStreamResult) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[72]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateStreamResult.ProtoReflect.Descriptor instead.
+func (*ActivateStreamResult) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{72}
+}
+
+func (x *ActivateStreamResult) GetActivated() bool {
+	if x != nil {
+		return x.Activated
+	}
+	return false
+}
+
+func (x *ActivateStreamResult) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+// DeactivateStream is control-plane-initiated ONLY — refcounting is
+// server-side, so an adapter never infers deactivation from anything but
+// this message or its own lease expiring.
+type DeactivateStream struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RobotId       string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
+	StreamId      string                 `protobuf:"bytes,2,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeactivateStream) Reset() {
+	*x = DeactivateStream{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[73]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeactivateStream) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeactivateStream) ProtoMessage() {}
+
+func (x *DeactivateStream) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[73]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeactivateStream.ProtoReflect.Descriptor instead.
+func (*DeactivateStream) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{73}
+}
+
+func (x *DeactivateStream) GetRobotId() string {
+	if x != nil {
+		return x.RobotId
+	}
+	return ""
+}
+
+func (x *DeactivateStream) GetStreamId() string {
+	if x != nil {
+		return x.StreamId
+	}
+	return ""
+}
+
+type DeactivateStreamResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Deactivated   bool                   `protobuf:"varint,1,opt,name=deactivated,proto3" json:"deactivated,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeactivateStreamResult) Reset() {
+	*x = DeactivateStreamResult{}
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[74]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeactivateStreamResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeactivateStreamResult) ProtoMessage() {}
+
+func (x *DeactivateStreamResult) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[74]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeactivateStreamResult.ProtoReflect.Descriptor instead.
+func (*DeactivateStreamResult) Descriptor() ([]byte, []int) {
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{74}
+}
+
+func (x *DeactivateStreamResult) GetDeactivated() bool {
+	if x != nil {
+		return x.Deactivated
+	}
+	return false
+}
+
+func (x *DeactivateStreamResult) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 // ValidateAction asks the adapter whether it can serve an action's type+payload
 // from the Robot-OS command set it advertises. Pure inspection: reserves nothing,
 // moves no robot. Issued once, at assignment-time candidate selection for the
@@ -5891,16 +7880,20 @@ func (x *EdgeEndpoint) GetAddress() string {
 // cheaper supported-action catalog pre-filter; unsupported=true means unconfirmed
 // (not servable).
 type ValidateAction struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ActionType    string                 `protobuf:"bytes,1,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
-	PayloadJson   []byte                 `protobuf:"bytes,2,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ActionType  string                 `protobuf:"bytes,1,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
+	PayloadJson []byte                 `protobuf:"bytes,2,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	// As AssignAction.custom_type, read the same way (contract 1.4.0): a verb the
+	// adapter does not serve, or one that disagrees with the payload's
+	// `operation`, is servable=false.
+	CustomType    string `protobuf:"bytes,3,opt,name=custom_type,json=customType,proto3" json:"custom_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ValidateAction) Reset() {
 	*x = ValidateAction{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[60]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5912,7 +7905,7 @@ func (x *ValidateAction) String() string {
 func (*ValidateAction) ProtoMessage() {}
 
 func (x *ValidateAction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[60]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5925,7 +7918,7 @@ func (x *ValidateAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateAction.ProtoReflect.Descriptor instead.
 func (*ValidateAction) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{60}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *ValidateAction) GetActionType() string {
@@ -5942,6 +7935,13 @@ func (x *ValidateAction) GetPayloadJson() []byte {
 	return nil
 }
 
+func (x *ValidateAction) GetCustomType() string {
+	if x != nil {
+		return x.CustomType
+	}
+	return ""
+}
+
 type ValidateActionResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Servable      bool                   `protobuf:"varint,1,opt,name=servable,proto3" json:"servable,omitempty"`
@@ -5952,7 +7952,7 @@ type ValidateActionResult struct {
 
 func (x *ValidateActionResult) Reset() {
 	*x = ValidateActionResult{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[61]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5964,7 +7964,7 @@ func (x *ValidateActionResult) String() string {
 func (*ValidateActionResult) ProtoMessage() {}
 
 func (x *ValidateActionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[61]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5977,7 +7977,7 @@ func (x *ValidateActionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateActionResult.ProtoReflect.Descriptor instead.
 func (*ValidateActionResult) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{61}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *ValidateActionResult) GetServable() bool {
@@ -5999,19 +7999,70 @@ func (x *ValidateActionResult) GetMessage() string {
 // can serve, the capabilities a robot needs to be eligible, and a coarse
 // parameter descriptor. Discovery (this catalog, pulled via Command.scan) is the
 // cheap pre-filter; ValidateAction is the authoritative per-instance check.
+//
+// # WHAT AN ACTION PRODUCES, not only what it takes
+//
+// `params` declares the action's INPUTS and, until `results`, nothing declared
+// its OUTPUTS. A binding that feeds one step's output into a later step's input
+// could therefore be checked in only one direction: the consuming end was
+// verifiable against `params`, and the producing end was not verifiable at all,
+// because no descriptor said what a robot action emits. A binding onto a robot
+// action was accepted whatever it named, and the mismatch surfaced at dispatch
+// on a real robot rather than at admission.
+//
+// `results` closes that by reusing `ActionParam` rather than inventing a second
+// descriptor shape. The fields carry their natural output reading: `name` is the
+// result key, `kind`/`unit` its type and unit, `allowed` the closed set an enum
+// result can take, and `min`/`max` its numeric bounds. `required` means the
+// action always emits this key — a consumer binding to a non-required result
+// must tolerate its absence.
+//
+// ADDITIVE. Field 5 is new; an adapter that declares no `results` is unchanged
+// and reads as "makes no statement about its outputs", which is what every
+// adapter built before this field meant. A checker MUST treat an empty `results`
+// as unknown rather than as "produces nothing", or it would reject every binding
+// onto every adapter that predates this field.
+//
+// # ONE ENTRY PER CUSTOM VERB
+//
+// `custom_type` (field 6, contract 1.4.0) keys an entry by the verb a `Custom`
+// action performs, matching FleetAction.spec.customType. Set it only when
+// `action_type` is "Custom". A keyed entry declares ONE verb: its
+// `required_capabilities`, `params` and `results` are that verb's. A `Custom`
+// entry with an empty `custom_type` keeps the meaning every entry had before
+// this field: it declares each Custom verb the adapter serves that no keyed
+// entry names. For a verb V a reader uses the entry keyed V when there is one,
+// and the unkeyed `Custom` entry otherwise. (`action_type`, `custom_type`) is
+// unique within a catalog.
+//
+// A keyed entry MAY also declare the verb in its params, as the `operation`
+// parameter (kind "enum", allowed exactly [custom_type], NOT required), so a
+// reader that does not read `custom_type` still tells the entries apart. It is
+// not required because an adapter reading `custom_type` serves a payload that
+// omits `operation`, and a catalog saying otherwise would be false.
+//
+// A READER THAT DOES NOT READ `custom_type` (any control plane below 1.4.0)
+// treats every entry sharing an `action_type` as ONE declaration of that type:
+// the type is declared if any entry declares it, no single entry's `params`,
+// `required_capabilities` or `results` is the type's, and the reader MUST NOT
+// refuse a catalog because an `action_type` repeats. That is what such a
+// control plane already does, so a catalog with several `Custom` entries breaks
+// none of them.
 type SupportedAction struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	ActionType           string                 `protobuf:"bytes,1,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`                               // matches FleetAction.spec.type
 	RequiredCapabilities []string               `protobuf:"bytes,2,rep,name=required_capabilities,json=requiredCapabilities,proto3" json:"required_capabilities,omitempty"` // robot must have these Active
 	Params               []*ActionParam         `protobuf:"bytes,3,rep,name=params,proto3" json:"params,omitempty"`                                                         // coarse payload parameter descriptors
 	Description          string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
+	Results              []*ActionParam         `protobuf:"bytes,5,rep,name=results,proto3" json:"results,omitempty"`                         // coarse descriptors for what the action EMITS
+	CustomType           string                 `protobuf:"bytes,6,opt,name=custom_type,json=customType,proto3" json:"custom_type,omitempty"` // the one Custom verb this entry declares; empty = every verb no keyed entry names
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
 
 func (x *SupportedAction) Reset() {
 	*x = SupportedAction{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[62]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6023,7 +8074,7 @@ func (x *SupportedAction) String() string {
 func (*SupportedAction) ProtoMessage() {}
 
 func (x *SupportedAction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[62]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6036,7 +8087,7 @@ func (x *SupportedAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SupportedAction.ProtoReflect.Descriptor instead.
 func (*SupportedAction) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{62}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *SupportedAction) GetActionType() string {
@@ -6067,6 +8118,20 @@ func (x *SupportedAction) GetDescription() string {
 	return ""
 }
 
+func (x *SupportedAction) GetResults() []*ActionParam {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
+func (x *SupportedAction) GetCustomType() string {
+	if x != nil {
+		return x.CustomType
+	}
+	return ""
+}
+
 type ActionParam struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -6082,7 +8147,7 @@ type ActionParam struct {
 
 func (x *ActionParam) Reset() {
 	*x = ActionParam{}
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[63]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6094,7 +8159,7 @@ func (x *ActionParam) String() string {
 func (*ActionParam) ProtoMessage() {}
 
 func (x *ActionParam) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[63]
+	mi := &file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6107,7 +8172,7 @@ func (x *ActionParam) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActionParam.ProtoReflect.Descriptor instead.
 func (*ActionParam) Descriptor() ([]byte, []int) {
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{63}
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *ActionParam) GetName() string {
@@ -6159,11 +8224,11 @@ func (x *ActionParam) GetRequired() bool {
 	return false
 }
 
-var File_proto_fleet_adapter_v1_fleet_adapter_proto protoreflect.FileDescriptor
+var File_fleet_adapter_v1_fleet_adapter_proto protoreflect.FileDescriptor
 
-const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
+const file_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\n" +
-	"*proto/fleet_adapter/v1/fleet_adapter.proto\x12\x10fleet_adapter.v1\"\xee\x05\n" +
+	"$fleet_adapter/v1/fleet_adapter.proto\x12\x10fleet_adapter.v1\x1a\x1cgoogle/protobuf/struct.proto\"\xee\x05\n" +
 	"\x0eAdapterMessage\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x126\n" +
 	"\x05hello\x18\x02 \x01(\v2\x1e.fleet_adapter.v1.AdapterHelloH\x00R\x05hello\x12=\n" +
@@ -6177,7 +8242,7 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x10resource_request\x18\n" +
 	" \x01(\v2!.fleet_adapter.v1.ResourceRequestH\x00R\x0fresourceRequest\x12K\n" +
 	"\x0fupdate_progress\x18\v \x01(\v2 .fleet_adapter.v1.UpdateProgressH\x00R\x0eupdateProgressB\t\n" +
-	"\apayload\"\xc3\x03\n" +
+	"\apayload\"\x8a\x04\n" +
 	"\x13ControlPlaneMessage\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x129\n" +
 	"\thello_ack\x18\x02 \x01(\v2\x1a.fleet_adapter.v1.HelloAckH\x00R\bhelloAck\x12B\n" +
@@ -6185,7 +8250,9 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\fdiscover_ack\x18\x04 \x01(\v2\x1d.fleet_adapter.v1.DiscoverAckH\x00R\vdiscoverAck\x125\n" +
 	"\acommand\x18\x05 \x01(\v2\x19.fleet_adapter.v1.CommandH\x00R\acommand\x12B\n" +
 	"\theartbeat\x18\x06 \x01(\v2\".fleet_adapter.v1.HeartbeatRequestH\x00R\theartbeat\x12Q\n" +
-	"\x11resource_response\x18\a \x01(\v2\".fleet_adapter.v1.ResourceResponseH\x00R\x10resourceResponseB\t\n" +
+	"\x11resource_response\x18\a \x01(\v2\".fleet_adapter.v1.ResourceResponseH\x00R\x10resourceResponse\x12E\n" +
+	"\voutcome_ack\x18\b \x01(\v2\".fleet_adapter.v1.ActionOutcomeAckH\x00R\n" +
+	"outcomeAckB\t\n" +
 	"\apayload\"\xc3\x01\n" +
 	"\fAdapterHello\x12\x16\n" +
 	"\x06vendor\x18\x01 \x01(\tR\x06vendor\x12'\n" +
@@ -6234,7 +8301,8 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x05phase\x18\x01 \x01(\x0e2\".fleet_adapter.v1.RobotActionPhaseR\x05phase\x12\x1b\n" +
 	"\taction_id\x18\x02 \x01(\tR\bactionId\x12#\n" +
 	"\rfencing_token\x18\x03 \x01(\x04R\ffencingToken\x12)\n" +
-	"\x10lease_generation\x18\x04 \x01(\x04R\x0fleaseGeneration\"\xea\b\n" +
+	"\x10lease_generation\x18\x04 \x01(\x04R\x0fleaseGeneration\"\xfb\n" +
+	"\n" +
 	"\aCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\x04R\tcommandId\x12\x19\n" +
@@ -6255,8 +8323,14 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x0ezone_admission\x18\x0f \x01(\v2\x1f.fleet_adapter.v1.ZoneAdmissionH\x00R\rzoneAdmission\x12E\n" +
 	"\vrenew_lease\x18\x10 \x01(\v2\".fleet_adapter.v1.RenewActionLeaseH\x00R\n" +
 	"renewLease\x12K\n" +
-	"\x0fvalidate_action\x18\x11 \x01(\v2 .fleet_adapter.v1.ValidateActionH\x00R\x0evalidateActionB\t\n" +
-	"\acommand\"\x88\b\n" +
+	"\x0fvalidate_action\x18\x11 \x01(\v2 .fleet_adapter.v1.ValidateActionH\x00R\x0evalidateAction\x12K\n" +
+	"\x0factivate_stream\x18\x12 \x01(\v2 .fleet_adapter.v1.ActivateStreamH\x00R\x0eactivateStream\x12Q\n" +
+	"\x11deactivate_stream\x18\x13 \x01(\v2\".fleet_adapter.v1.DeactivateStreamH\x00R\x10deactivateStream\x12N\n" +
+	"\x10zone_constraints\x18\x14 \x01(\v2!.fleet_adapter.v1.ZoneConstraintsH\x00R\x0fzoneConstraints\x12\x1f\n" +
+	"\vleader_term\x18\x15 \x01(\x04R\n" +
+	"leaderTermB\t\n" +
+	"\acommand\"\xb3\n" +
+	"\n" +
 	"\rCommandResult\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\x04R\tcommandId\x12\x19\n" +
@@ -6276,8 +8350,19 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x0ezone_admission\x18\x0e \x01(\v2\".fleet_adapter.v1.ZoneAdmissionAckH\x00R\rzoneAdmission\x12K\n" +
 	"\vrenew_lease\x18\x0f \x01(\v2(.fleet_adapter.v1.RenewActionLeaseResultH\x00R\n" +
 	"renewLease\x12Q\n" +
-	"\x0fvalidate_action\x18\x10 \x01(\v2&.fleet_adapter.v1.ValidateActionResultH\x00R\x0evalidateActionB\b\n" +
-	"\x06result\"\xb9\x03\n" +
+	"\x0fvalidate_action\x18\x10 \x01(\v2&.fleet_adapter.v1.ValidateActionResultH\x00R\x0evalidateAction\x12Q\n" +
+	"\x0factivate_stream\x18\x11 \x01(\v2&.fleet_adapter.v1.ActivateStreamResultH\x00R\x0eactivateStream\x12W\n" +
+	"\x11deactivate_stream\x18\x12 \x01(\v2(.fleet_adapter.v1.DeactivateStreamResultH\x00R\x10deactivateStream\x12Q\n" +
+	"\x10zone_constraints\x18\x13 \x01(\v2$.fleet_adapter.v1.ZoneConstraintsAckH\x00R\x0fzoneConstraints\x12*\n" +
+	"\x11stale_leader_term\x18\x14 \x01(\bR\x0fstaleLeaderTermB\b\n" +
+	"\x06result\"\xe2\x01\n" +
+	"\x1cEffectiveOperatingConstraint\x12\x18\n" +
+	"\asubject\x18\x01 \x01(\tR\asubject\x12=\n" +
+	"\x04mode\x18\x02 \x01(\x0e2).fleet_adapter.v1.OperatingConstraintModeR\x04mode\x12\x10\n" +
+	"\x03max\x18\x03 \x01(\tR\x03max\x12\x18\n" +
+	"\aallowed\x18\x04 \x03(\tR\aallowed\x12\x16\n" +
+	"\x06reason\x18\x05 \x01(\tR\x06reason\x12%\n" +
+	"\x0edeclaring_zone\x18\x06 \x01(\tR\rdeclaringZone\"\xbf\x04\n" +
 	"\fAssignAction\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x1f\n" +
 	"\vaction_type\x18\x02 \x01(\tR\n" +
@@ -6291,26 +8376,32 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"deadlineMs\x88\x01\x01\x12.\n" +
 	"\x10lease_generation\x18\t \x01(\x04H\x02R\x0fleaseGeneration\x88\x01\x01\x12*\n" +
 	"\x11lease_duration_ms\x18\n" +
-	" \x01(\rR\x0fleaseDurationMsB\x10\n" +
+	" \x01(\rR\x0fleaseDurationMs\x12c\n" +
+	"\x15operating_constraints\x18\v \x03(\v2..fleet_adapter.v1.EffectiveOperatingConstraintR\x14operatingConstraints\x12\x1f\n" +
+	"\vcustom_type\x18\f \x01(\tR\n" +
+	"customTypeB\x10\n" +
 	"\x0e_fencing_tokenB\x0e\n" +
 	"\f_deadline_msB\x13\n" +
-	"\x11_lease_generation\"\xe7\x01\n" +
+	"\x11_lease_generation\"\x9c\x02\n" +
 	"\x12AssignActionResult\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12E\n" +
 	"\trejection\x18\x03 \x01(\x0e2'.fleet_adapter.v1.AssignActionRejectionR\trejection\x129\n" +
-	"\x16accepted_fencing_token\x18\x04 \x01(\x04H\x00R\x14acceptedFencingToken\x88\x01\x01B\x19\n" +
-	"\x17_accepted_fencing_token\"\x7f\n" +
+	"\x16accepted_fencing_token\x18\x04 \x01(\x04H\x00R\x14acceptedFencingToken\x88\x01\x01\x123\n" +
+	"\x15unhonourable_subjects\x18\x05 \x03(\tR\x14unhonourableSubjectsB\x19\n" +
+	"\x17_accepted_fencing_token\"\xb4\x01\n" +
 	"\fCancelAction\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12(\n" +
-	"\rfencing_token\x18\x03 \x01(\x04H\x00R\ffencingToken\x88\x01\x01B\x10\n" +
-	"\x0e_fencing_token\"\xaf\x01\n" +
+	"\rfencing_token\x18\x03 \x01(\x04H\x00R\ffencingToken\x88\x01\x01\x123\n" +
+	"\x05cause\x18\x04 \x01(\x0e2\x1d.fleet_adapter.v1.CancelCauseR\x05causeB\x10\n" +
+	"\x0e_fencing_token\"\xe4\x01\n" +
 	"\x12CancelActionResult\x12\"\n" +
 	"\facknowledged\x18\x01 \x01(\bR\facknowledged\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x14\n" +
 	"\x05stale\x18\x03 \x01(\bR\x05stale\x12E\n" +
-	"\vdisposition\x18\x04 \x01(\x0e2#.fleet_adapter.v1.CancelDispositionR\vdisposition\"\x86\x01\n" +
+	"\vdisposition\x18\x04 \x01(\x0e2#.fleet_adapter.v1.CancelDispositionR\vdisposition\x123\n" +
+	"\x05cause\x18\x05 \x01(\x0e2\x1d.fleet_adapter.v1.CancelCauseR\x05cause\"\x86\x01\n" +
 	"\x10RenewActionLease\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x12)\n" +
 	"\x10lease_generation\x18\x02 \x01(\x04R\x0fleaseGeneration\x12*\n" +
@@ -6332,19 +8423,45 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x12&\n" +
 	"\x0fconfirmed_at_ms\x18\x04 \x01(\x03R\rconfirmedAtMs\x12/\n" +
 	"\x11stop_initiated_at\x18\x05 \x01(\x03H\x00R\x0fstopInitiatedAt\x88\x01\x01B\x14\n" +
-	"\x12_stop_initiated_at\"\xcd\x01\n" +
+	"\x12_stop_initiated_at\"\xdc\x02\n" +
 	"\x14AdapterSafetyMessage\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\brobot_id\x18\x02 \x01(\tR\arobotId\x129\n" +
 	"\testop_ack\x18\x03 \x01(\v2\x1a.fleet_adapter.v1.EstopAckH\x00R\bestopAck\x12B\n" +
-	"\fpause_result\x18\x04 \x01(\v2\x1d.fleet_adapter.v1.PauseResultH\x00R\vpauseResultB\t\n" +
-	"\apayload\"\xc1\x01\n" +
+	"\fpause_result\x18\x04 \x01(\v2\x1d.fleet_adapter.v1.PauseResultH\x00R\vpauseResult\x12I\n" +
+	"\x0festop_clear_ack\x18\x05 \x01(\v2\x1f.fleet_adapter.v1.EstopClearAckH\x00R\restopClearAck\x12B\n" +
+	"\n" +
+	"local_stop\x18\x06 \x01(\v2!.fleet_adapter.v1.LocalStopReportH\x00R\tlocalStopB\t\n" +
+	"\apayload\"\x82\x02\n" +
 	"\x19ControlPlaneSafetyMessage\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\brobot_id\x18\x02 \x01(\tR\arobotId\x12/\n" +
 	"\x05estop\x18\x03 \x01(\v2\x17.fleet_adapter.v1.EstopH\x00R\x05estop\x12;\n" +
-	"\x05pause\x18\x04 \x01(\v2#.fleet_adapter.v1.PauseCapabilitiesH\x00R\x05pauseB\t\n" +
-	"\apayload\"\xe7\x02\n" +
+	"\x05pause\x18\x04 \x01(\v2#.fleet_adapter.v1.PauseCapabilitiesH\x00R\x05pause\x12?\n" +
+	"\vestop_clear\x18\x05 \x01(\v2\x1c.fleet_adapter.v1.EstopClearH\x00R\n" +
+	"estopClearB\t\n" +
+	"\apayload\"\xb1\x01\n" +
+	"\n" +
+	"EstopClear\x12\x19\n" +
+	"\bestop_id\x18\x01 \x01(\tR\aestopId\x12\x1d\n" +
+	"\n" +
+	"cleared_by\x18\x02 \x01(\tR\tclearedBy\x12\"\n" +
+	"\rcleared_at_ms\x18\x03 \x01(\x03R\vclearedAtMs\x12$\n" +
+	"\x0eends_local_set\x18\x04 \x01(\tR\fendsLocalSet\x12\x1f\n" +
+	"\vleader_term\x18\x05 \x01(\x04R\n" +
+	"leaderTerm\"L\n" +
+	"\rEstopClearAck\x12\x19\n" +
+	"\bestop_id\x18\x01 \x01(\tR\aestopId\x12 \n" +
+	"\flifted_at_ms\x18\x02 \x01(\x03R\n" +
+	"liftedAtMs\"\x9e\x01\n" +
+	"\x0fLocalStopReport\x12\x18\n" +
+	"\alatched\x18\x01 \x01(\bR\alatched\x12\"\n" +
+	"\rchanged_at_ms\x18\x02 \x01(\x03R\vchangedAtMs\x12\x16\n" +
+	"\x06source\x18\x03 \x01(\tR\x06source\x12\x15\n" +
+	"\x06set_id\x18\x04 \x01(\tR\x05setId\x12\x1e\n" +
+	"\n" +
+	"unreadable\x18\x05 \x01(\bR\n" +
+	"unreadable\"\xe7\x02\n" +
 	"\x10TelemetryPayload\x12\x19\n" +
 	"\brobot_id\x18\x01 \x01(\tR\arobotId\x12!\n" +
 	"\ftimestamp_ms\x18\x02 \x01(\x03R\vtimestampMs\x12;\n" +
@@ -6374,14 +8491,27 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\t_chargingB\n" +
 	"\n" +
 	"\b_voltageB\x1e\n" +
-	"\x1c_estimated_minutes_remaining\"\xdf\x01\n" +
+	"\x1c_estimated_minutes_remaining\"\xee\x02\n" +
 	"\x12ActionStatusUpdate\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x123\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x1d.fleet_adapter.v1.ActionStateR\x05state\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x12(\n" +
 	"\rfencing_token\x18\x04 \x01(\x04H\x00R\ffencingToken\x88\x01\x01\x12!\n" +
-	"\fprogress_pct\x18\x05 \x01(\x05R\vprogressPctB\x10\n" +
-	"\x0e_fencing_token\"K\n" +
+	"\fprogress_pct\x18\x05 \x01(\x05R\vprogressPct\x12=\n" +
+	"\tend_cause\x18\x06 \x01(\x0e2 .fleet_adapter.v1.ActionEndCauseR\bendCause\x122\n" +
+	"\x15superseding_action_id\x18\a \x01(\tR\x13supersedingActionId\x12\x1a\n" +
+	"\bretained\x18\b \x01(\bR\bretainedB\x10\n" +
+	"\x0e_fencing_token\"T\n" +
+	"\x10ActionOutcomeAck\x12\x1b\n" +
+	"\taction_id\x18\x01 \x01(\tR\bactionId\x12#\n" +
+	"\rfencing_token\x18\x02 \x01(\x04R\ffencingToken\"\xe0\x01\n" +
+	"\tTaskEvent\x12\x12\n" +
+	"\x04type\x18\x01 \x01(\tR\x04type\x12\x10\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x17\n" +
+	"\atime_ms\x18\x03 \x01(\x03R\x06timeMs\x121\n" +
+	"\apayload\x18\x04 \x01(\v2\x17.google.protobuf.StructR\apayload\x12\x1a\n" +
+	"\bterminal\x18\x05 \x01(\bR\bterminal\x12E\n" +
+	"\fsubject_kind\x18\x06 \x01(\x0e2\".fleet_adapter.v1.EventSubjectKindR\vsubjectKind\"K\n" +
 	"\x10HeartbeatRequest\x12\x19\n" +
 	"\brobot_id\x18\x01 \x01(\tR\arobotId\x12\x1c\n" +
 	"\n" +
@@ -6391,7 +8521,7 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x05phase\x18\x02 \x01(\x0e2\x1c.fleet_adapter.v1.RobotPhaseR\x05phase\x129\n" +
 	"\abattery\x18\x03 \x01(\v2\x1f.fleet_adapter.v1.BatteryStatusR\abattery\x12$\n" +
 	"\x0ereceived_at_ms\x18\x04 \x01(\x03R\freceivedAtMs\"\x12\n" +
-	"\x10ScanCapabilities\"\xed\x02\n" +
+	"\x10ScanCapabilities\"\xfa\x03\n" +
 	"\x14CapabilitiesSnapshot\x12\x19\n" +
 	"\brobot_id\x18\x01 \x01(\tR\arobotId\x12?\n" +
 	"\bhardware\x18\x02 \x03(\v2#.fleet_adapter.v1.HardwareComponentR\bhardware\x12K\n" +
@@ -6399,7 +8529,18 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\vsnapshot_ms\x18\x04 \x01(\x03R\n" +
 	"snapshotMs\x12N\n" +
 	"\x11supported_actions\x18\x05 \x03(\v2!.fleet_adapter.v1.SupportedActionR\x10supportedActions\x12;\n" +
-	"\bfirmware\x18\x06 \x01(\v2\x1f.fleet_adapter.v1.FirmwareStateR\bfirmware\"\x8d\x01\n" +
+	"\bfirmware\x18\x06 \x01(\v2\x1f.fleet_adapter.v1.FirmwareStateR\bfirmware\x12E\n" +
+	"\x0esensor_streams\x18\a \x03(\v2\x1e.fleet_adapter.v1.SensorStreamR\rsensorStreams\x12D\n" +
+	"\x1ehonoured_operating_constraints\x18\b \x03(\tR\x1chonouredOperatingConstraints\"\xc6\x02\n" +
+	"\fSensorStream\x12\x1b\n" +
+	"\tstream_id\x18\x01 \x01(\tR\bstreamId\x12\x1d\n" +
+	"\n" +
+	"media_type\x18\x02 \x01(\tR\tmediaType\x12$\n" +
+	"\x0enative_rate_hz\x18\x03 \x01(\x01R\fnativeRateHz\x123\n" +
+	"\x15required_capabilities\x18\x04 \x03(\tR\x14requiredCapabilities\x12I\n" +
+	"\x0factivation_cost\x18\x05 \x01(\x0e2 .fleet_adapter.v1.ActivationCostR\x0eactivationCost\x12#\n" +
+	"\rsupports_clip\x18\x06 \x01(\bR\fsupportsClip\x12/\n" +
+	"\x14clip_pre_seconds_max\x18\a \x01(\rR\x11clipPreSecondsMax\"\x8d\x01\n" +
 	"\x11PauseCapabilities\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12)\n" +
 	"\x10capability_names\x18\x02 \x03(\tR\x0fcapabilityNames\x125\n" +
@@ -6448,7 +8589,15 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x05admit\x18\x02 \x01(\bR\x05admit\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\"6\n" +
 	"\x10ZoneAdmissionAck\x12\"\n" +
-	"\facknowledged\x18\x01 \x01(\bR\facknowledged\"\xdd\x01\n" +
+	"\facknowledged\x18\x01 \x01(\bR\facknowledged\"\xcc\x01\n" +
+	"\x0fZoneConstraints\x12)\n" +
+	"\x10containing_zones\x18\x01 \x03(\tR\x0fcontainingZones\x12c\n" +
+	"\x15operating_constraints\x18\x02 \x03(\v2..fleet_adapter.v1.EffectiveOperatingConstraintR\x14operatingConstraints\x12)\n" +
+	"\x10unresolved_zones\x18\x03 \x03(\tR\x0funresolvedZones\"\x87\x01\n" +
+	"\x12ZoneConstraintsAck\x12\"\n" +
+	"\facknowledged\x18\x01 \x01(\bR\facknowledged\x123\n" +
+	"\x15unhonourable_subjects\x18\x02 \x03(\tR\x14unhonourableSubjects\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xdd\x01\n" +
 	"\x0eVerifyHardware\x12%\n" +
 	"\x0ecomponent_name\x18\x01 \x01(\tR\rcomponentName\x12`\n" +
 	"\x10expected_metrics\x18\x02 \x03(\v25.fleet_adapter.v1.VerifyHardware.ExpectedMetricsEntryR\x0fexpectedMetrics\x1aB\n" +
@@ -6499,7 +8648,7 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x11ModelUpdateResult\x12\"\n" +
 	"\facknowledged\x18\x01 \x01(\bR\facknowledged\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12'\n" +
-	"\x0fverified_signer\x18\x03 \x01(\tR\x0everifiedSigner\"\x9d\x02\n" +
+	"\x0fverified_signer\x18\x03 \x01(\tR\x0everifiedSigner\"\xbc\x02\n" +
 	"\x0eUpdateProgress\x12\x19\n" +
 	"\brobot_id\x18\x01 \x01(\tR\arobotId\x120\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x1c.fleet_adapter.v1.UpdateKindR\x04kind\x12\x14\n" +
@@ -6507,7 +8656,9 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\apercent\x18\x04 \x01(\x05R\apercent\x12:\n" +
 	"\aoutcome\x18\x05 \x01(\x0e2 .fleet_adapter.v1.InstallOutcomeR\aoutcome\x12%\n" +
 	"\x0efailure_reason\x18\x06 \x01(\tR\rfailureReason\x12+\n" +
-	"\x11resulting_version\x18\a \x01(\tR\x10resultingVersion\"\xb3\x05\n" +
+	"\x11resulting_version\x18\a \x01(\tR\x10resultingVersion\x12\x1d\n" +
+	"\n" +
+	"model_name\x18\b \x01(\tR\tmodelName\"\xb3\x05\n" +
 	"\x11HardwareComponent\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x14\n" +
@@ -6560,20 +8711,51 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x05ts_ms\x18\x03 \x01(\x03R\x04tsMs\"<\n" +
 	"\fEdgeEndpoint\x12\x12\n" +
 	"\x04zone\x18\x01 \x01(\tR\x04zone\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress\"T\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"&\n" +
+	"\n" +
+	"StreamSink\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\"\x86\x01\n" +
+	"\n" +
+	"ClipWindow\x124\n" +
+	"\x04mode\x18\x01 \x01(\x0e2 .fleet_adapter.v1.ClipWindowModeR\x04mode\x12\x1f\n" +
+	"\vpre_seconds\x18\x02 \x01(\rR\n" +
+	"preSeconds\x12!\n" +
+	"\fpost_seconds\x18\x03 \x01(\rR\vpostSeconds\"\x9a\x02\n" +
+	"\x0eActivateStream\x12\x19\n" +
+	"\brobot_id\x18\x01 \x01(\tR\arobotId\x12\x1b\n" +
+	"\tstream_id\x18\x02 \x01(\tR\bstreamId\x12\x17\n" +
+	"\arate_hz\x18\x03 \x01(\x01R\x06rateHz\x124\n" +
+	"\x06window\x18\x04 \x01(\v2\x1c.fleet_adapter.v1.ClipWindowR\x06window\x122\n" +
+	"\x05sinks\x18\x05 \x03(\v2\x1c.fleet_adapter.v1.StreamSinkR\x05sinks\x12#\n" +
+	"\rfencing_token\x18\x06 \x01(\x04R\ffencingToken\x12(\n" +
+	"\x10lease_expires_ms\x18\a \x01(\x03R\x0eleaseExpiresMs\"N\n" +
+	"\x14ActivateStreamResult\x12\x1c\n" +
+	"\tactivated\x18\x01 \x01(\bR\tactivated\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"J\n" +
+	"\x10DeactivateStream\x12\x19\n" +
+	"\brobot_id\x18\x01 \x01(\tR\arobotId\x12\x1b\n" +
+	"\tstream_id\x18\x02 \x01(\tR\bstreamId\"T\n" +
+	"\x16DeactivateStreamResult\x12 \n" +
+	"\vdeactivated\x18\x01 \x01(\bR\vdeactivated\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"u\n" +
 	"\x0eValidateAction\x12\x1f\n" +
 	"\vaction_type\x18\x01 \x01(\tR\n" +
 	"actionType\x12!\n" +
-	"\fpayload_json\x18\x02 \x01(\fR\vpayloadJson\"L\n" +
+	"\fpayload_json\x18\x02 \x01(\fR\vpayloadJson\x12\x1f\n" +
+	"\vcustom_type\x18\x03 \x01(\tR\n" +
+	"customType\"L\n" +
 	"\x14ValidateActionResult\x12\x1a\n" +
 	"\bservable\x18\x01 \x01(\bR\bservable\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xc0\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x9a\x02\n" +
 	"\x0fSupportedAction\x12\x1f\n" +
 	"\vaction_type\x18\x01 \x01(\tR\n" +
 	"actionType\x123\n" +
 	"\x15required_capabilities\x18\x02 \x03(\tR\x14requiredCapabilities\x125\n" +
 	"\x06params\x18\x03 \x03(\v2\x1d.fleet_adapter.v1.ActionParamR\x06params\x12 \n" +
-	"\vdescription\x18\x04 \x01(\tR\vdescription\"\xa3\x01\n" +
+	"\vdescription\x18\x04 \x01(\tR\vdescription\x127\n" +
+	"\aresults\x18\x05 \x03(\v2\x1d.fleet_adapter.v1.ActionParamR\aresults\x12\x1f\n" +
+	"\vcustom_type\x18\x06 \x01(\tR\n" +
+	"customType\"\xa3\x01\n" +
 	"\vActionParam\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04unit\x18\x02 \x01(\tR\x04unit\x12\x12\n" +
@@ -6595,19 +8777,32 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x1eROBOT_ACTION_PHASE_IN_PROGRESS\x10\x02\x12\x1f\n" +
 	"\x1bROBOT_ACTION_PHASE_REVOKING\x10\x03\x12 \n" +
 	"\x1cROBOT_ACTION_PHASE_CANCELLED\x10\x04\x12\x1e\n" +
-	"\x1aROBOT_ACTION_PHASE_UNKNOWN\x10\x05*\xa7\x02\n" +
+	"\x1aROBOT_ACTION_PHASE_UNKNOWN\x10\x05*\xdf\x02\n" +
 	"\x15AssignActionRejection\x12'\n" +
 	"#ASSIGN_ACTION_REJECTION_UNSPECIFIED\x10\x00\x12/\n" +
 	"+ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN\x10\x01\x121\n" +
 	"-ASSIGN_ACTION_REJECTION_MISSING_FENCING_TOKEN\x10\x02\x12&\n" +
 	"\"ASSIGN_ACTION_REJECTION_ROBOT_BUSY\x10\x03\x12-\n" +
 	")ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE\x10\x04\x12*\n" +
-	"&ASSIGN_ACTION_REJECTION_INVALID_ACTION\x10\x05*\xa2\x01\n" +
+	"&ASSIGN_ACTION_REJECTION_INVALID_ACTION\x10\x05\x126\n" +
+	"2ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET\x10\x06*\xb9\x01\n" +
+	"\x17OperatingConstraintMode\x12)\n" +
+	"%OPERATING_CONSTRAINT_MODE_UNSPECIFIED\x10\x00\x12$\n" +
+	" OPERATING_CONSTRAINT_MODE_DENIED\x10\x01\x12%\n" +
+	"!OPERATING_CONSTRAINT_MODE_LIMITED\x10\x02\x12&\n" +
+	"\"OPERATING_CONSTRAINT_MODE_REQUIRED\x10\x03*\xa2\x01\n" +
+	"\vCancelCause\x12\x1c\n" +
+	"\x18CANCEL_CAUSE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15CANCEL_CAUSE_OPERATOR\x10\x01\x12\x1b\n" +
+	"\x17CANCEL_CAUSE_SUPERSEDED\x10\x02\x12 \n" +
+	"\x1cCANCEL_CAUSE_CAPABILITY_LOSS\x10\x03\x12\x1b\n" +
+	"\x17CANCEL_CAUSE_REVOCATION\x10\x04*\xcb\x01\n" +
 	"\x11CancelDisposition\x12\"\n" +
 	"\x1eCANCEL_DISPOSITION_UNSPECIFIED\x10\x00\x12%\n" +
 	"!CANCEL_DISPOSITION_STOPPED_SAFELY\x10\x01\x12 \n" +
 	"\x1cCANCEL_DISPOSITION_COMPLETED\x10\x02\x12 \n" +
-	"\x1cCANCEL_DISPOSITION_RECOVERED\x10\x03*t\n" +
+	"\x1cCANCEL_DISPOSITION_RECOVERED\x10\x03\x12'\n" +
+	"#CANCEL_DISPOSITION_STOP_UNCONFIRMED\x10\x04*t\n" +
 	"\n" +
 	"EstopState\x12\x1b\n" +
 	"\x17ESTOP_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
@@ -6622,7 +8817,22 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x13ACTION_STATE_PAUSED\x10\x04\x12\x1a\n" +
 	"\x16ACTION_STATE_CANCELLED\x10\x05\x12\x18\n" +
 	"\x14ACTION_STATE_STOPPED\x10\x06\x12\x18\n" +
-	"\x14ACTION_STATE_UNKNOWN\x10\a*\x90\x01\n" +
+	"\x14ACTION_STATE_UNKNOWN\x10\a*\x8d\x02\n" +
+	"\x0eActionEndCause\x12 \n" +
+	"\x1cACTION_END_CAUSE_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bACTION_END_CAUSE_SUPERSEDED\x10\x01\x12*\n" +
+	"&ACTION_END_CAUSE_CANCELLED_BY_OPERATOR\x10\x02\x12$\n" +
+	" ACTION_END_CAUSE_CAPABILITY_LOSS\x10\x03\x12\"\n" +
+	"\x1eACTION_END_CAUSE_LEASE_EXPIRED\x10\x04\x12\x1a\n" +
+	"\x16ACTION_END_CAUSE_ESTOP\x10\x05\x12&\n" +
+	"\"ACTION_END_CAUSE_EXECUTION_FAILURE\x10\x06*U\n" +
+	"\x10EventSubjectKind\x12\"\n" +
+	"\x1eEVENT_SUBJECT_KIND_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19EVENT_SUBJECT_KIND_ACTION\x10\x01*o\n" +
+	"\x0eActivationCost\x12\x1f\n" +
+	"\x1bACTIVATION_COST_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19ACTIVATION_COST_ALWAYS_ON\x10\x01\x12\x1d\n" +
+	"\x19ACTIVATION_COST_ON_DEMAND\x10\x02*\x90\x01\n" +
 	"\x10ReservationState\x12!\n" +
 	"\x1dRESERVATION_STATE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19RESERVATION_STATE_GRANTED\x10\x01\x12\x1c\n" +
@@ -6669,7 +8879,12 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"#FIRMWARE_INSTALL_STATUS_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fFIRMWARE_INSTALL_STATUS_RUNNING\x10\x01\x12$\n" +
 	" FIRMWARE_INSTALL_STATUS_UPDATING\x10\x02\x12\"\n" +
-	"\x1eFIRMWARE_INSTALL_STATUS_FAILED\x10\x032\xdc\x01\n" +
+	"\x1eFIRMWARE_INSTALL_STATUS_FAILED\x10\x03*\x8d\x01\n" +
+	"\x0eClipWindowMode\x12 \n" +
+	"\x1cCLIP_WINDOW_MODE_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bCLIP_WINDOW_MODE_CONTINUOUS\x10\x01\x12\x1d\n" +
+	"\x19CLIP_WINDOW_MODE_SNAPSHOT\x10\x02\x12\x19\n" +
+	"\x15CLIP_WINDOW_MODE_CLIP\x10\x032\xdc\x01\n" +
 	"\x13FleetAdapterService\x12\\\n" +
 	"\rControlStream\x12 .fleet_adapter.v1.AdapterMessage\x1a%.fleet_adapter.v1.ControlPlaneMessage(\x010\x01\x12g\n" +
 	"\fSafetyStream\x12&.fleet_adapter.v1.AdapterSafetyMessage\x1a+.fleet_adapter.v1.ControlPlaneSafetyMessage(\x010\x012k\n" +
@@ -6679,214 +8894,260 @@ const file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc = "" +
 	"\x1cio.swarmada.fleet.adapter.v1ZBgithub.com/swarmada/swarmada/proto/fleet_adapter/v1;fleetadapterv1b\x06proto3"
 
 var (
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescOnce sync.Once
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescData []byte
+	file_fleet_adapter_v1_fleet_adapter_proto_rawDescOnce sync.Once
+	file_fleet_adapter_v1_fleet_adapter_proto_rawDescData []byte
 )
 
-func file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP() []byte {
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescOnce.Do(func() {
-		file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc), len(file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc)))
+func file_fleet_adapter_v1_fleet_adapter_proto_rawDescGZIP() []byte {
+	file_fleet_adapter_v1_fleet_adapter_proto_rawDescOnce.Do(func() {
+		file_fleet_adapter_v1_fleet_adapter_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_fleet_adapter_v1_fleet_adapter_proto_rawDesc), len(file_fleet_adapter_v1_fleet_adapter_proto_rawDesc)))
 	})
-	return file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDescData
+	return file_fleet_adapter_v1_fleet_adapter_proto_rawDescData
 }
 
-var file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes = make([]protoimpl.EnumInfo, 14)
-var file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
-var file_proto_fleet_adapter_v1_fleet_adapter_proto_goTypes = []any{
-	(RegistrationRejection)(0),        // 0: fleet_adapter.v1.RegistrationRejection
-	(RobotActionPhase)(0),             // 1: fleet_adapter.v1.RobotActionPhase
-	(AssignActionRejection)(0),        // 2: fleet_adapter.v1.AssignActionRejection
-	(CancelDisposition)(0),            // 3: fleet_adapter.v1.CancelDisposition
-	(EstopState)(0),                   // 4: fleet_adapter.v1.EstopState
-	(ActionState)(0),                  // 5: fleet_adapter.v1.ActionState
-	(ReservationState)(0),             // 6: fleet_adapter.v1.ReservationState
-	(ProbeStatus)(0),                  // 7: fleet_adapter.v1.ProbeStatus
-	(InstallOutcome)(0),               // 8: fleet_adapter.v1.InstallOutcome
-	(UpdateKind)(0),                   // 9: fleet_adapter.v1.UpdateKind
-	(HardwareStatus)(0),               // 10: fleet_adapter.v1.HardwareStatus
-	(ModelStatus)(0),                  // 11: fleet_adapter.v1.ModelStatus
-	(RobotPhase)(0),                   // 12: fleet_adapter.v1.RobotPhase
-	(FirmwareInstallStatus)(0),        // 13: fleet_adapter.v1.FirmwareInstallStatus
-	(*AdapterMessage)(nil),            // 14: fleet_adapter.v1.AdapterMessage
-	(*ControlPlaneMessage)(nil),       // 15: fleet_adapter.v1.ControlPlaneMessage
-	(*AdapterHello)(nil),              // 16: fleet_adapter.v1.AdapterHello
-	(*HelloAck)(nil),                  // 17: fleet_adapter.v1.HelloAck
-	(*DiscoverRobot)(nil),             // 18: fleet_adapter.v1.DiscoverRobot
-	(*DiscoverAck)(nil),               // 19: fleet_adapter.v1.DiscoverAck
-	(*RegisterRobot)(nil),             // 20: fleet_adapter.v1.RegisterRobot
-	(*RegisterAck)(nil),               // 21: fleet_adapter.v1.RegisterAck
-	(*RobotActionState)(nil),          // 22: fleet_adapter.v1.RobotActionState
-	(*Command)(nil),                   // 23: fleet_adapter.v1.Command
-	(*CommandResult)(nil),             // 24: fleet_adapter.v1.CommandResult
-	(*AssignAction)(nil),              // 25: fleet_adapter.v1.AssignAction
-	(*AssignActionResult)(nil),        // 26: fleet_adapter.v1.AssignActionResult
-	(*CancelAction)(nil),              // 27: fleet_adapter.v1.CancelAction
-	(*CancelActionResult)(nil),        // 28: fleet_adapter.v1.CancelActionResult
-	(*RenewActionLease)(nil),          // 29: fleet_adapter.v1.RenewActionLease
-	(*RenewActionLeaseResult)(nil),    // 30: fleet_adapter.v1.RenewActionLeaseResult
-	(*Estop)(nil),                     // 31: fleet_adapter.v1.Estop
-	(*EstopAck)(nil),                  // 32: fleet_adapter.v1.EstopAck
-	(*AdapterSafetyMessage)(nil),      // 33: fleet_adapter.v1.AdapterSafetyMessage
-	(*ControlPlaneSafetyMessage)(nil), // 34: fleet_adapter.v1.ControlPlaneSafetyMessage
-	(*TelemetryPayload)(nil),          // 35: fleet_adapter.v1.TelemetryPayload
-	(*RobotPosition)(nil),             // 36: fleet_adapter.v1.RobotPosition
-	(*BatteryStatus)(nil),             // 37: fleet_adapter.v1.BatteryStatus
-	(*ActionStatusUpdate)(nil),        // 38: fleet_adapter.v1.ActionStatusUpdate
-	(*HeartbeatRequest)(nil),          // 39: fleet_adapter.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),         // 40: fleet_adapter.v1.HeartbeatResponse
-	(*ScanCapabilities)(nil),          // 41: fleet_adapter.v1.ScanCapabilities
-	(*CapabilitiesSnapshot)(nil),      // 42: fleet_adapter.v1.CapabilitiesSnapshot
-	(*PauseCapabilities)(nil),         // 43: fleet_adapter.v1.PauseCapabilities
-	(*PauseResult)(nil),               // 44: fleet_adapter.v1.PauseResult
-	(*ResumeCapabilities)(nil),        // 45: fleet_adapter.v1.ResumeCapabilities
-	(*ResumeResult)(nil),              // 46: fleet_adapter.v1.ResumeResult
-	(*ResourceRequest)(nil),           // 47: fleet_adapter.v1.ResourceRequest
-	(*ResourceResponse)(nil),          // 48: fleet_adapter.v1.ResourceResponse
-	(*ReserveResource)(nil),           // 49: fleet_adapter.v1.ReserveResource
-	(*ReserveResult)(nil),             // 50: fleet_adapter.v1.ReserveResult
-	(*ReleaseResource)(nil),           // 51: fleet_adapter.v1.ReleaseResource
-	(*ReleaseResult)(nil),             // 52: fleet_adapter.v1.ReleaseResult
-	(*ReservationGranted)(nil),        // 53: fleet_adapter.v1.ReservationGranted
-	(*ReservationGrantedAck)(nil),     // 54: fleet_adapter.v1.ReservationGrantedAck
-	(*ZoneAdmission)(nil),             // 55: fleet_adapter.v1.ZoneAdmission
-	(*ZoneAdmissionAck)(nil),          // 56: fleet_adapter.v1.ZoneAdmissionAck
-	(*VerifyHardware)(nil),            // 57: fleet_adapter.v1.VerifyHardware
-	(*VerifyCapability)(nil),          // 58: fleet_adapter.v1.VerifyCapability
-	(*VerifyModel)(nil),               // 59: fleet_adapter.v1.VerifyModel
-	(*VerifyResult)(nil),              // 60: fleet_adapter.v1.VerifyResult
-	(*PushFirmware)(nil),              // 61: fleet_adapter.v1.PushFirmware
-	(*FirmwareResult)(nil),            // 62: fleet_adapter.v1.FirmwareResult
-	(*ModelUpdate)(nil),               // 63: fleet_adapter.v1.ModelUpdate
-	(*ModelUpdateResult)(nil),         // 64: fleet_adapter.v1.ModelUpdateResult
-	(*UpdateProgress)(nil),            // 65: fleet_adapter.v1.UpdateProgress
-	(*HardwareComponent)(nil),         // 66: fleet_adapter.v1.HardwareComponent
-	(*InstalledModel)(nil),            // 67: fleet_adapter.v1.InstalledModel
-	(*FirmwareState)(nil),             // 68: fleet_adapter.v1.FirmwareState
-	(*HardwareStatusUpdate)(nil),      // 69: fleet_adapter.v1.HardwareStatusUpdate
-	(*AdapterEdgeMessage)(nil),        // 70: fleet_adapter.v1.AdapterEdgeMessage
-	(*EdgeControlMessage)(nil),        // 71: fleet_adapter.v1.EdgeControlMessage
-	(*PositionFrame)(nil),             // 72: fleet_adapter.v1.PositionFrame
-	(*EdgeEndpoint)(nil),              // 73: fleet_adapter.v1.EdgeEndpoint
-	(*ValidateAction)(nil),            // 74: fleet_adapter.v1.ValidateAction
-	(*ValidateActionResult)(nil),      // 75: fleet_adapter.v1.ValidateActionResult
-	(*SupportedAction)(nil),           // 76: fleet_adapter.v1.SupportedAction
-	(*ActionParam)(nil),               // 77: fleet_adapter.v1.ActionParam
-	nil,                               // 78: fleet_adapter.v1.VerifyHardware.ExpectedMetricsEntry
-	nil,                               // 79: fleet_adapter.v1.VerifyCapability.ExpectedMetricsEntry
-	nil,                               // 80: fleet_adapter.v1.VerifyModel.ExpectedMetricsEntry
-	nil,                               // 81: fleet_adapter.v1.VerifyResult.ActualMetricsEntry
+var file_fleet_adapter_v1_fleet_adapter_proto_enumTypes = make([]protoimpl.EnumInfo, 20)
+var file_fleet_adapter_v1_fleet_adapter_proto_msgTypes = make([]protoimpl.MessageInfo, 83)
+var file_fleet_adapter_v1_fleet_adapter_proto_goTypes = []any{
+	(RegistrationRejection)(0),           // 0: fleet_adapter.v1.RegistrationRejection
+	(RobotActionPhase)(0),                // 1: fleet_adapter.v1.RobotActionPhase
+	(AssignActionRejection)(0),           // 2: fleet_adapter.v1.AssignActionRejection
+	(OperatingConstraintMode)(0),         // 3: fleet_adapter.v1.OperatingConstraintMode
+	(CancelCause)(0),                     // 4: fleet_adapter.v1.CancelCause
+	(CancelDisposition)(0),               // 5: fleet_adapter.v1.CancelDisposition
+	(EstopState)(0),                      // 6: fleet_adapter.v1.EstopState
+	(ActionState)(0),                     // 7: fleet_adapter.v1.ActionState
+	(ActionEndCause)(0),                  // 8: fleet_adapter.v1.ActionEndCause
+	(EventSubjectKind)(0),                // 9: fleet_adapter.v1.EventSubjectKind
+	(ActivationCost)(0),                  // 10: fleet_adapter.v1.ActivationCost
+	(ReservationState)(0),                // 11: fleet_adapter.v1.ReservationState
+	(ProbeStatus)(0),                     // 12: fleet_adapter.v1.ProbeStatus
+	(InstallOutcome)(0),                  // 13: fleet_adapter.v1.InstallOutcome
+	(UpdateKind)(0),                      // 14: fleet_adapter.v1.UpdateKind
+	(HardwareStatus)(0),                  // 15: fleet_adapter.v1.HardwareStatus
+	(ModelStatus)(0),                     // 16: fleet_adapter.v1.ModelStatus
+	(RobotPhase)(0),                      // 17: fleet_adapter.v1.RobotPhase
+	(FirmwareInstallStatus)(0),           // 18: fleet_adapter.v1.FirmwareInstallStatus
+	(ClipWindowMode)(0),                  // 19: fleet_adapter.v1.ClipWindowMode
+	(*AdapterMessage)(nil),               // 20: fleet_adapter.v1.AdapterMessage
+	(*ControlPlaneMessage)(nil),          // 21: fleet_adapter.v1.ControlPlaneMessage
+	(*AdapterHello)(nil),                 // 22: fleet_adapter.v1.AdapterHello
+	(*HelloAck)(nil),                     // 23: fleet_adapter.v1.HelloAck
+	(*DiscoverRobot)(nil),                // 24: fleet_adapter.v1.DiscoverRobot
+	(*DiscoverAck)(nil),                  // 25: fleet_adapter.v1.DiscoverAck
+	(*RegisterRobot)(nil),                // 26: fleet_adapter.v1.RegisterRobot
+	(*RegisterAck)(nil),                  // 27: fleet_adapter.v1.RegisterAck
+	(*RobotActionState)(nil),             // 28: fleet_adapter.v1.RobotActionState
+	(*Command)(nil),                      // 29: fleet_adapter.v1.Command
+	(*CommandResult)(nil),                // 30: fleet_adapter.v1.CommandResult
+	(*EffectiveOperatingConstraint)(nil), // 31: fleet_adapter.v1.EffectiveOperatingConstraint
+	(*AssignAction)(nil),                 // 32: fleet_adapter.v1.AssignAction
+	(*AssignActionResult)(nil),           // 33: fleet_adapter.v1.AssignActionResult
+	(*CancelAction)(nil),                 // 34: fleet_adapter.v1.CancelAction
+	(*CancelActionResult)(nil),           // 35: fleet_adapter.v1.CancelActionResult
+	(*RenewActionLease)(nil),             // 36: fleet_adapter.v1.RenewActionLease
+	(*RenewActionLeaseResult)(nil),       // 37: fleet_adapter.v1.RenewActionLeaseResult
+	(*Estop)(nil),                        // 38: fleet_adapter.v1.Estop
+	(*EstopAck)(nil),                     // 39: fleet_adapter.v1.EstopAck
+	(*AdapterSafetyMessage)(nil),         // 40: fleet_adapter.v1.AdapterSafetyMessage
+	(*ControlPlaneSafetyMessage)(nil),    // 41: fleet_adapter.v1.ControlPlaneSafetyMessage
+	(*EstopClear)(nil),                   // 42: fleet_adapter.v1.EstopClear
+	(*EstopClearAck)(nil),                // 43: fleet_adapter.v1.EstopClearAck
+	(*LocalStopReport)(nil),              // 44: fleet_adapter.v1.LocalStopReport
+	(*TelemetryPayload)(nil),             // 45: fleet_adapter.v1.TelemetryPayload
+	(*RobotPosition)(nil),                // 46: fleet_adapter.v1.RobotPosition
+	(*BatteryStatus)(nil),                // 47: fleet_adapter.v1.BatteryStatus
+	(*ActionStatusUpdate)(nil),           // 48: fleet_adapter.v1.ActionStatusUpdate
+	(*ActionOutcomeAck)(nil),             // 49: fleet_adapter.v1.ActionOutcomeAck
+	(*TaskEvent)(nil),                    // 50: fleet_adapter.v1.TaskEvent
+	(*HeartbeatRequest)(nil),             // 51: fleet_adapter.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),            // 52: fleet_adapter.v1.HeartbeatResponse
+	(*ScanCapabilities)(nil),             // 53: fleet_adapter.v1.ScanCapabilities
+	(*CapabilitiesSnapshot)(nil),         // 54: fleet_adapter.v1.CapabilitiesSnapshot
+	(*SensorStream)(nil),                 // 55: fleet_adapter.v1.SensorStream
+	(*PauseCapabilities)(nil),            // 56: fleet_adapter.v1.PauseCapabilities
+	(*PauseResult)(nil),                  // 57: fleet_adapter.v1.PauseResult
+	(*ResumeCapabilities)(nil),           // 58: fleet_adapter.v1.ResumeCapabilities
+	(*ResumeResult)(nil),                 // 59: fleet_adapter.v1.ResumeResult
+	(*ResourceRequest)(nil),              // 60: fleet_adapter.v1.ResourceRequest
+	(*ResourceResponse)(nil),             // 61: fleet_adapter.v1.ResourceResponse
+	(*ReserveResource)(nil),              // 62: fleet_adapter.v1.ReserveResource
+	(*ReserveResult)(nil),                // 63: fleet_adapter.v1.ReserveResult
+	(*ReleaseResource)(nil),              // 64: fleet_adapter.v1.ReleaseResource
+	(*ReleaseResult)(nil),                // 65: fleet_adapter.v1.ReleaseResult
+	(*ReservationGranted)(nil),           // 66: fleet_adapter.v1.ReservationGranted
+	(*ReservationGrantedAck)(nil),        // 67: fleet_adapter.v1.ReservationGrantedAck
+	(*ZoneAdmission)(nil),                // 68: fleet_adapter.v1.ZoneAdmission
+	(*ZoneAdmissionAck)(nil),             // 69: fleet_adapter.v1.ZoneAdmissionAck
+	(*ZoneConstraints)(nil),              // 70: fleet_adapter.v1.ZoneConstraints
+	(*ZoneConstraintsAck)(nil),           // 71: fleet_adapter.v1.ZoneConstraintsAck
+	(*VerifyHardware)(nil),               // 72: fleet_adapter.v1.VerifyHardware
+	(*VerifyCapability)(nil),             // 73: fleet_adapter.v1.VerifyCapability
+	(*VerifyModel)(nil),                  // 74: fleet_adapter.v1.VerifyModel
+	(*VerifyResult)(nil),                 // 75: fleet_adapter.v1.VerifyResult
+	(*PushFirmware)(nil),                 // 76: fleet_adapter.v1.PushFirmware
+	(*FirmwareResult)(nil),               // 77: fleet_adapter.v1.FirmwareResult
+	(*ModelUpdate)(nil),                  // 78: fleet_adapter.v1.ModelUpdate
+	(*ModelUpdateResult)(nil),            // 79: fleet_adapter.v1.ModelUpdateResult
+	(*UpdateProgress)(nil),               // 80: fleet_adapter.v1.UpdateProgress
+	(*HardwareComponent)(nil),            // 81: fleet_adapter.v1.HardwareComponent
+	(*InstalledModel)(nil),               // 82: fleet_adapter.v1.InstalledModel
+	(*FirmwareState)(nil),                // 83: fleet_adapter.v1.FirmwareState
+	(*HardwareStatusUpdate)(nil),         // 84: fleet_adapter.v1.HardwareStatusUpdate
+	(*AdapterEdgeMessage)(nil),           // 85: fleet_adapter.v1.AdapterEdgeMessage
+	(*EdgeControlMessage)(nil),           // 86: fleet_adapter.v1.EdgeControlMessage
+	(*PositionFrame)(nil),                // 87: fleet_adapter.v1.PositionFrame
+	(*EdgeEndpoint)(nil),                 // 88: fleet_adapter.v1.EdgeEndpoint
+	(*StreamSink)(nil),                   // 89: fleet_adapter.v1.StreamSink
+	(*ClipWindow)(nil),                   // 90: fleet_adapter.v1.ClipWindow
+	(*ActivateStream)(nil),               // 91: fleet_adapter.v1.ActivateStream
+	(*ActivateStreamResult)(nil),         // 92: fleet_adapter.v1.ActivateStreamResult
+	(*DeactivateStream)(nil),             // 93: fleet_adapter.v1.DeactivateStream
+	(*DeactivateStreamResult)(nil),       // 94: fleet_adapter.v1.DeactivateStreamResult
+	(*ValidateAction)(nil),               // 95: fleet_adapter.v1.ValidateAction
+	(*ValidateActionResult)(nil),         // 96: fleet_adapter.v1.ValidateActionResult
+	(*SupportedAction)(nil),              // 97: fleet_adapter.v1.SupportedAction
+	(*ActionParam)(nil),                  // 98: fleet_adapter.v1.ActionParam
+	nil,                                  // 99: fleet_adapter.v1.VerifyHardware.ExpectedMetricsEntry
+	nil,                                  // 100: fleet_adapter.v1.VerifyCapability.ExpectedMetricsEntry
+	nil,                                  // 101: fleet_adapter.v1.VerifyModel.ExpectedMetricsEntry
+	nil,                                  // 102: fleet_adapter.v1.VerifyResult.ActualMetricsEntry
+	(*structpb.Struct)(nil),              // 103: google.protobuf.Struct
 }
-var file_proto_fleet_adapter_v1_fleet_adapter_proto_depIdxs = []int32{
-	16, // 0: fleet_adapter.v1.AdapterMessage.hello:type_name -> fleet_adapter.v1.AdapterHello
-	18, // 1: fleet_adapter.v1.AdapterMessage.discover:type_name -> fleet_adapter.v1.DiscoverRobot
-	20, // 2: fleet_adapter.v1.AdapterMessage.register:type_name -> fleet_adapter.v1.RegisterRobot
-	35, // 3: fleet_adapter.v1.AdapterMessage.telemetry:type_name -> fleet_adapter.v1.TelemetryPayload
-	38, // 4: fleet_adapter.v1.AdapterMessage.action_status:type_name -> fleet_adapter.v1.ActionStatusUpdate
-	24, // 5: fleet_adapter.v1.AdapterMessage.command_result:type_name -> fleet_adapter.v1.CommandResult
-	40, // 6: fleet_adapter.v1.AdapterMessage.heartbeat:type_name -> fleet_adapter.v1.HeartbeatResponse
-	42, // 7: fleet_adapter.v1.AdapterMessage.capabilities:type_name -> fleet_adapter.v1.CapabilitiesSnapshot
-	47, // 8: fleet_adapter.v1.AdapterMessage.resource_request:type_name -> fleet_adapter.v1.ResourceRequest
-	65, // 9: fleet_adapter.v1.AdapterMessage.update_progress:type_name -> fleet_adapter.v1.UpdateProgress
-	17, // 10: fleet_adapter.v1.ControlPlaneMessage.hello_ack:type_name -> fleet_adapter.v1.HelloAck
-	21, // 11: fleet_adapter.v1.ControlPlaneMessage.register_ack:type_name -> fleet_adapter.v1.RegisterAck
-	19, // 12: fleet_adapter.v1.ControlPlaneMessage.discover_ack:type_name -> fleet_adapter.v1.DiscoverAck
-	23, // 13: fleet_adapter.v1.ControlPlaneMessage.command:type_name -> fleet_adapter.v1.Command
-	39, // 14: fleet_adapter.v1.ControlPlaneMessage.heartbeat:type_name -> fleet_adapter.v1.HeartbeatRequest
-	48, // 15: fleet_adapter.v1.ControlPlaneMessage.resource_response:type_name -> fleet_adapter.v1.ResourceResponse
-	66, // 16: fleet_adapter.v1.DiscoverRobot.hardware:type_name -> fleet_adapter.v1.HardwareComponent
-	67, // 17: fleet_adapter.v1.DiscoverRobot.installed_models:type_name -> fleet_adapter.v1.InstalledModel
-	0,  // 18: fleet_adapter.v1.DiscoverAck.rejection:type_name -> fleet_adapter.v1.RegistrationRejection
-	66, // 19: fleet_adapter.v1.RegisterRobot.reported_hardware:type_name -> fleet_adapter.v1.HardwareComponent
-	0,  // 20: fleet_adapter.v1.RegisterAck.rejection:type_name -> fleet_adapter.v1.RegistrationRejection
-	22, // 21: fleet_adapter.v1.RegisterAck.authoritative_action_state:type_name -> fleet_adapter.v1.RobotActionState
-	73, // 22: fleet_adapter.v1.RegisterAck.edge_endpoints:type_name -> fleet_adapter.v1.EdgeEndpoint
-	1,  // 23: fleet_adapter.v1.RobotActionState.phase:type_name -> fleet_adapter.v1.RobotActionPhase
-	25, // 24: fleet_adapter.v1.Command.assign_action:type_name -> fleet_adapter.v1.AssignAction
-	27, // 25: fleet_adapter.v1.Command.cancel_action:type_name -> fleet_adapter.v1.CancelAction
-	31, // 26: fleet_adapter.v1.Command.estop:type_name -> fleet_adapter.v1.Estop
-	43, // 27: fleet_adapter.v1.Command.pause:type_name -> fleet_adapter.v1.PauseCapabilities
-	45, // 28: fleet_adapter.v1.Command.resume:type_name -> fleet_adapter.v1.ResumeCapabilities
-	41, // 29: fleet_adapter.v1.Command.scan:type_name -> fleet_adapter.v1.ScanCapabilities
-	57, // 30: fleet_adapter.v1.Command.verify_hardware:type_name -> fleet_adapter.v1.VerifyHardware
-	58, // 31: fleet_adapter.v1.Command.verify_capability:type_name -> fleet_adapter.v1.VerifyCapability
-	59, // 32: fleet_adapter.v1.Command.verify_model:type_name -> fleet_adapter.v1.VerifyModel
-	61, // 33: fleet_adapter.v1.Command.push_firmware:type_name -> fleet_adapter.v1.PushFirmware
-	63, // 34: fleet_adapter.v1.Command.model_update:type_name -> fleet_adapter.v1.ModelUpdate
-	53, // 35: fleet_adapter.v1.Command.reservation_granted:type_name -> fleet_adapter.v1.ReservationGranted
-	55, // 36: fleet_adapter.v1.Command.zone_admission:type_name -> fleet_adapter.v1.ZoneAdmission
-	29, // 37: fleet_adapter.v1.Command.renew_lease:type_name -> fleet_adapter.v1.RenewActionLease
-	74, // 38: fleet_adapter.v1.Command.validate_action:type_name -> fleet_adapter.v1.ValidateAction
-	26, // 39: fleet_adapter.v1.CommandResult.assign_action:type_name -> fleet_adapter.v1.AssignActionResult
-	28, // 40: fleet_adapter.v1.CommandResult.cancel_action:type_name -> fleet_adapter.v1.CancelActionResult
-	32, // 41: fleet_adapter.v1.CommandResult.estop:type_name -> fleet_adapter.v1.EstopAck
-	44, // 42: fleet_adapter.v1.CommandResult.pause:type_name -> fleet_adapter.v1.PauseResult
-	46, // 43: fleet_adapter.v1.CommandResult.resume:type_name -> fleet_adapter.v1.ResumeResult
-	42, // 44: fleet_adapter.v1.CommandResult.scan:type_name -> fleet_adapter.v1.CapabilitiesSnapshot
-	60, // 45: fleet_adapter.v1.CommandResult.verify:type_name -> fleet_adapter.v1.VerifyResult
-	62, // 46: fleet_adapter.v1.CommandResult.push_firmware:type_name -> fleet_adapter.v1.FirmwareResult
-	64, // 47: fleet_adapter.v1.CommandResult.model_update:type_name -> fleet_adapter.v1.ModelUpdateResult
-	54, // 48: fleet_adapter.v1.CommandResult.reservation_granted:type_name -> fleet_adapter.v1.ReservationGrantedAck
-	56, // 49: fleet_adapter.v1.CommandResult.zone_admission:type_name -> fleet_adapter.v1.ZoneAdmissionAck
-	30, // 50: fleet_adapter.v1.CommandResult.renew_lease:type_name -> fleet_adapter.v1.RenewActionLeaseResult
-	75, // 51: fleet_adapter.v1.CommandResult.validate_action:type_name -> fleet_adapter.v1.ValidateActionResult
-	2,  // 52: fleet_adapter.v1.AssignActionResult.rejection:type_name -> fleet_adapter.v1.AssignActionRejection
-	3,  // 53: fleet_adapter.v1.CancelActionResult.disposition:type_name -> fleet_adapter.v1.CancelDisposition
-	4,  // 54: fleet_adapter.v1.EstopAck.state:type_name -> fleet_adapter.v1.EstopState
-	32, // 55: fleet_adapter.v1.AdapterSafetyMessage.estop_ack:type_name -> fleet_adapter.v1.EstopAck
-	44, // 56: fleet_adapter.v1.AdapterSafetyMessage.pause_result:type_name -> fleet_adapter.v1.PauseResult
-	31, // 57: fleet_adapter.v1.ControlPlaneSafetyMessage.estop:type_name -> fleet_adapter.v1.Estop
-	43, // 58: fleet_adapter.v1.ControlPlaneSafetyMessage.pause:type_name -> fleet_adapter.v1.PauseCapabilities
-	36, // 59: fleet_adapter.v1.TelemetryPayload.position:type_name -> fleet_adapter.v1.RobotPosition
-	37, // 60: fleet_adapter.v1.TelemetryPayload.battery:type_name -> fleet_adapter.v1.BatteryStatus
-	12, // 61: fleet_adapter.v1.TelemetryPayload.phase:type_name -> fleet_adapter.v1.RobotPhase
-	69, // 62: fleet_adapter.v1.TelemetryPayload.hardware:type_name -> fleet_adapter.v1.HardwareStatusUpdate
-	5,  // 63: fleet_adapter.v1.ActionStatusUpdate.state:type_name -> fleet_adapter.v1.ActionState
-	12, // 64: fleet_adapter.v1.HeartbeatResponse.phase:type_name -> fleet_adapter.v1.RobotPhase
-	37, // 65: fleet_adapter.v1.HeartbeatResponse.battery:type_name -> fleet_adapter.v1.BatteryStatus
-	66, // 66: fleet_adapter.v1.CapabilitiesSnapshot.hardware:type_name -> fleet_adapter.v1.HardwareComponent
-	67, // 67: fleet_adapter.v1.CapabilitiesSnapshot.installed_models:type_name -> fleet_adapter.v1.InstalledModel
-	76, // 68: fleet_adapter.v1.CapabilitiesSnapshot.supported_actions:type_name -> fleet_adapter.v1.SupportedAction
-	68, // 69: fleet_adapter.v1.CapabilitiesSnapshot.firmware:type_name -> fleet_adapter.v1.FirmwareState
-	49, // 70: fleet_adapter.v1.ResourceRequest.reserve:type_name -> fleet_adapter.v1.ReserveResource
-	51, // 71: fleet_adapter.v1.ResourceRequest.release:type_name -> fleet_adapter.v1.ReleaseResource
-	50, // 72: fleet_adapter.v1.ResourceResponse.reserve:type_name -> fleet_adapter.v1.ReserveResult
-	52, // 73: fleet_adapter.v1.ResourceResponse.release:type_name -> fleet_adapter.v1.ReleaseResult
-	6,  // 74: fleet_adapter.v1.ReserveResult.state:type_name -> fleet_adapter.v1.ReservationState
-	78, // 75: fleet_adapter.v1.VerifyHardware.expected_metrics:type_name -> fleet_adapter.v1.VerifyHardware.ExpectedMetricsEntry
-	79, // 76: fleet_adapter.v1.VerifyCapability.expected_metrics:type_name -> fleet_adapter.v1.VerifyCapability.ExpectedMetricsEntry
-	80, // 77: fleet_adapter.v1.VerifyModel.expected_metrics:type_name -> fleet_adapter.v1.VerifyModel.ExpectedMetricsEntry
-	7,  // 78: fleet_adapter.v1.VerifyResult.status:type_name -> fleet_adapter.v1.ProbeStatus
-	81, // 79: fleet_adapter.v1.VerifyResult.actual_metrics:type_name -> fleet_adapter.v1.VerifyResult.ActualMetricsEntry
-	9,  // 80: fleet_adapter.v1.UpdateProgress.kind:type_name -> fleet_adapter.v1.UpdateKind
-	8,  // 81: fleet_adapter.v1.UpdateProgress.outcome:type_name -> fleet_adapter.v1.InstallOutcome
-	10, // 82: fleet_adapter.v1.HardwareComponent.status:type_name -> fleet_adapter.v1.HardwareStatus
-	11, // 83: fleet_adapter.v1.InstalledModel.status:type_name -> fleet_adapter.v1.ModelStatus
-	13, // 84: fleet_adapter.v1.FirmwareState.status:type_name -> fleet_adapter.v1.FirmwareInstallStatus
-	10, // 85: fleet_adapter.v1.HardwareStatusUpdate.status:type_name -> fleet_adapter.v1.HardwareStatus
-	72, // 86: fleet_adapter.v1.AdapterEdgeMessage.position:type_name -> fleet_adapter.v1.PositionFrame
-	32, // 87: fleet_adapter.v1.AdapterEdgeMessage.estop_ack:type_name -> fleet_adapter.v1.EstopAck
-	31, // 88: fleet_adapter.v1.EdgeControlMessage.estop:type_name -> fleet_adapter.v1.Estop
-	36, // 89: fleet_adapter.v1.PositionFrame.position:type_name -> fleet_adapter.v1.RobotPosition
-	77, // 90: fleet_adapter.v1.SupportedAction.params:type_name -> fleet_adapter.v1.ActionParam
-	14, // 91: fleet_adapter.v1.FleetAdapterService.ControlStream:input_type -> fleet_adapter.v1.AdapterMessage
-	33, // 92: fleet_adapter.v1.FleetAdapterService.SafetyStream:input_type -> fleet_adapter.v1.AdapterSafetyMessage
-	70, // 93: fleet_adapter.v1.EdgeService.EdgeStream:input_type -> fleet_adapter.v1.AdapterEdgeMessage
-	15, // 94: fleet_adapter.v1.FleetAdapterService.ControlStream:output_type -> fleet_adapter.v1.ControlPlaneMessage
-	34, // 95: fleet_adapter.v1.FleetAdapterService.SafetyStream:output_type -> fleet_adapter.v1.ControlPlaneSafetyMessage
-	71, // 96: fleet_adapter.v1.EdgeService.EdgeStream:output_type -> fleet_adapter.v1.EdgeControlMessage
-	94, // [94:97] is the sub-list for method output_type
-	91, // [91:94] is the sub-list for method input_type
-	91, // [91:91] is the sub-list for extension type_name
-	91, // [91:91] is the sub-list for extension extendee
-	0,  // [0:91] is the sub-list for field type_name
+var file_fleet_adapter_v1_fleet_adapter_proto_depIdxs = []int32{
+	22,  // 0: fleet_adapter.v1.AdapterMessage.hello:type_name -> fleet_adapter.v1.AdapterHello
+	24,  // 1: fleet_adapter.v1.AdapterMessage.discover:type_name -> fleet_adapter.v1.DiscoverRobot
+	26,  // 2: fleet_adapter.v1.AdapterMessage.register:type_name -> fleet_adapter.v1.RegisterRobot
+	45,  // 3: fleet_adapter.v1.AdapterMessage.telemetry:type_name -> fleet_adapter.v1.TelemetryPayload
+	48,  // 4: fleet_adapter.v1.AdapterMessage.action_status:type_name -> fleet_adapter.v1.ActionStatusUpdate
+	30,  // 5: fleet_adapter.v1.AdapterMessage.command_result:type_name -> fleet_adapter.v1.CommandResult
+	52,  // 6: fleet_adapter.v1.AdapterMessage.heartbeat:type_name -> fleet_adapter.v1.HeartbeatResponse
+	54,  // 7: fleet_adapter.v1.AdapterMessage.capabilities:type_name -> fleet_adapter.v1.CapabilitiesSnapshot
+	60,  // 8: fleet_adapter.v1.AdapterMessage.resource_request:type_name -> fleet_adapter.v1.ResourceRequest
+	80,  // 9: fleet_adapter.v1.AdapterMessage.update_progress:type_name -> fleet_adapter.v1.UpdateProgress
+	23,  // 10: fleet_adapter.v1.ControlPlaneMessage.hello_ack:type_name -> fleet_adapter.v1.HelloAck
+	27,  // 11: fleet_adapter.v1.ControlPlaneMessage.register_ack:type_name -> fleet_adapter.v1.RegisterAck
+	25,  // 12: fleet_adapter.v1.ControlPlaneMessage.discover_ack:type_name -> fleet_adapter.v1.DiscoverAck
+	29,  // 13: fleet_adapter.v1.ControlPlaneMessage.command:type_name -> fleet_adapter.v1.Command
+	51,  // 14: fleet_adapter.v1.ControlPlaneMessage.heartbeat:type_name -> fleet_adapter.v1.HeartbeatRequest
+	61,  // 15: fleet_adapter.v1.ControlPlaneMessage.resource_response:type_name -> fleet_adapter.v1.ResourceResponse
+	49,  // 16: fleet_adapter.v1.ControlPlaneMessage.outcome_ack:type_name -> fleet_adapter.v1.ActionOutcomeAck
+	81,  // 17: fleet_adapter.v1.DiscoverRobot.hardware:type_name -> fleet_adapter.v1.HardwareComponent
+	82,  // 18: fleet_adapter.v1.DiscoverRobot.installed_models:type_name -> fleet_adapter.v1.InstalledModel
+	0,   // 19: fleet_adapter.v1.DiscoverAck.rejection:type_name -> fleet_adapter.v1.RegistrationRejection
+	81,  // 20: fleet_adapter.v1.RegisterRobot.reported_hardware:type_name -> fleet_adapter.v1.HardwareComponent
+	0,   // 21: fleet_adapter.v1.RegisterAck.rejection:type_name -> fleet_adapter.v1.RegistrationRejection
+	28,  // 22: fleet_adapter.v1.RegisterAck.authoritative_action_state:type_name -> fleet_adapter.v1.RobotActionState
+	88,  // 23: fleet_adapter.v1.RegisterAck.edge_endpoints:type_name -> fleet_adapter.v1.EdgeEndpoint
+	1,   // 24: fleet_adapter.v1.RobotActionState.phase:type_name -> fleet_adapter.v1.RobotActionPhase
+	32,  // 25: fleet_adapter.v1.Command.assign_action:type_name -> fleet_adapter.v1.AssignAction
+	34,  // 26: fleet_adapter.v1.Command.cancel_action:type_name -> fleet_adapter.v1.CancelAction
+	38,  // 27: fleet_adapter.v1.Command.estop:type_name -> fleet_adapter.v1.Estop
+	56,  // 28: fleet_adapter.v1.Command.pause:type_name -> fleet_adapter.v1.PauseCapabilities
+	58,  // 29: fleet_adapter.v1.Command.resume:type_name -> fleet_adapter.v1.ResumeCapabilities
+	53,  // 30: fleet_adapter.v1.Command.scan:type_name -> fleet_adapter.v1.ScanCapabilities
+	72,  // 31: fleet_adapter.v1.Command.verify_hardware:type_name -> fleet_adapter.v1.VerifyHardware
+	73,  // 32: fleet_adapter.v1.Command.verify_capability:type_name -> fleet_adapter.v1.VerifyCapability
+	74,  // 33: fleet_adapter.v1.Command.verify_model:type_name -> fleet_adapter.v1.VerifyModel
+	76,  // 34: fleet_adapter.v1.Command.push_firmware:type_name -> fleet_adapter.v1.PushFirmware
+	78,  // 35: fleet_adapter.v1.Command.model_update:type_name -> fleet_adapter.v1.ModelUpdate
+	66,  // 36: fleet_adapter.v1.Command.reservation_granted:type_name -> fleet_adapter.v1.ReservationGranted
+	68,  // 37: fleet_adapter.v1.Command.zone_admission:type_name -> fleet_adapter.v1.ZoneAdmission
+	36,  // 38: fleet_adapter.v1.Command.renew_lease:type_name -> fleet_adapter.v1.RenewActionLease
+	95,  // 39: fleet_adapter.v1.Command.validate_action:type_name -> fleet_adapter.v1.ValidateAction
+	91,  // 40: fleet_adapter.v1.Command.activate_stream:type_name -> fleet_adapter.v1.ActivateStream
+	93,  // 41: fleet_adapter.v1.Command.deactivate_stream:type_name -> fleet_adapter.v1.DeactivateStream
+	70,  // 42: fleet_adapter.v1.Command.zone_constraints:type_name -> fleet_adapter.v1.ZoneConstraints
+	33,  // 43: fleet_adapter.v1.CommandResult.assign_action:type_name -> fleet_adapter.v1.AssignActionResult
+	35,  // 44: fleet_adapter.v1.CommandResult.cancel_action:type_name -> fleet_adapter.v1.CancelActionResult
+	39,  // 45: fleet_adapter.v1.CommandResult.estop:type_name -> fleet_adapter.v1.EstopAck
+	57,  // 46: fleet_adapter.v1.CommandResult.pause:type_name -> fleet_adapter.v1.PauseResult
+	59,  // 47: fleet_adapter.v1.CommandResult.resume:type_name -> fleet_adapter.v1.ResumeResult
+	54,  // 48: fleet_adapter.v1.CommandResult.scan:type_name -> fleet_adapter.v1.CapabilitiesSnapshot
+	75,  // 49: fleet_adapter.v1.CommandResult.verify:type_name -> fleet_adapter.v1.VerifyResult
+	77,  // 50: fleet_adapter.v1.CommandResult.push_firmware:type_name -> fleet_adapter.v1.FirmwareResult
+	79,  // 51: fleet_adapter.v1.CommandResult.model_update:type_name -> fleet_adapter.v1.ModelUpdateResult
+	67,  // 52: fleet_adapter.v1.CommandResult.reservation_granted:type_name -> fleet_adapter.v1.ReservationGrantedAck
+	69,  // 53: fleet_adapter.v1.CommandResult.zone_admission:type_name -> fleet_adapter.v1.ZoneAdmissionAck
+	37,  // 54: fleet_adapter.v1.CommandResult.renew_lease:type_name -> fleet_adapter.v1.RenewActionLeaseResult
+	96,  // 55: fleet_adapter.v1.CommandResult.validate_action:type_name -> fleet_adapter.v1.ValidateActionResult
+	92,  // 56: fleet_adapter.v1.CommandResult.activate_stream:type_name -> fleet_adapter.v1.ActivateStreamResult
+	94,  // 57: fleet_adapter.v1.CommandResult.deactivate_stream:type_name -> fleet_adapter.v1.DeactivateStreamResult
+	71,  // 58: fleet_adapter.v1.CommandResult.zone_constraints:type_name -> fleet_adapter.v1.ZoneConstraintsAck
+	3,   // 59: fleet_adapter.v1.EffectiveOperatingConstraint.mode:type_name -> fleet_adapter.v1.OperatingConstraintMode
+	31,  // 60: fleet_adapter.v1.AssignAction.operating_constraints:type_name -> fleet_adapter.v1.EffectiveOperatingConstraint
+	2,   // 61: fleet_adapter.v1.AssignActionResult.rejection:type_name -> fleet_adapter.v1.AssignActionRejection
+	4,   // 62: fleet_adapter.v1.CancelAction.cause:type_name -> fleet_adapter.v1.CancelCause
+	5,   // 63: fleet_adapter.v1.CancelActionResult.disposition:type_name -> fleet_adapter.v1.CancelDisposition
+	4,   // 64: fleet_adapter.v1.CancelActionResult.cause:type_name -> fleet_adapter.v1.CancelCause
+	6,   // 65: fleet_adapter.v1.EstopAck.state:type_name -> fleet_adapter.v1.EstopState
+	39,  // 66: fleet_adapter.v1.AdapterSafetyMessage.estop_ack:type_name -> fleet_adapter.v1.EstopAck
+	57,  // 67: fleet_adapter.v1.AdapterSafetyMessage.pause_result:type_name -> fleet_adapter.v1.PauseResult
+	43,  // 68: fleet_adapter.v1.AdapterSafetyMessage.estop_clear_ack:type_name -> fleet_adapter.v1.EstopClearAck
+	44,  // 69: fleet_adapter.v1.AdapterSafetyMessage.local_stop:type_name -> fleet_adapter.v1.LocalStopReport
+	38,  // 70: fleet_adapter.v1.ControlPlaneSafetyMessage.estop:type_name -> fleet_adapter.v1.Estop
+	56,  // 71: fleet_adapter.v1.ControlPlaneSafetyMessage.pause:type_name -> fleet_adapter.v1.PauseCapabilities
+	42,  // 72: fleet_adapter.v1.ControlPlaneSafetyMessage.estop_clear:type_name -> fleet_adapter.v1.EstopClear
+	46,  // 73: fleet_adapter.v1.TelemetryPayload.position:type_name -> fleet_adapter.v1.RobotPosition
+	47,  // 74: fleet_adapter.v1.TelemetryPayload.battery:type_name -> fleet_adapter.v1.BatteryStatus
+	17,  // 75: fleet_adapter.v1.TelemetryPayload.phase:type_name -> fleet_adapter.v1.RobotPhase
+	84,  // 76: fleet_adapter.v1.TelemetryPayload.hardware:type_name -> fleet_adapter.v1.HardwareStatusUpdate
+	7,   // 77: fleet_adapter.v1.ActionStatusUpdate.state:type_name -> fleet_adapter.v1.ActionState
+	8,   // 78: fleet_adapter.v1.ActionStatusUpdate.end_cause:type_name -> fleet_adapter.v1.ActionEndCause
+	103, // 79: fleet_adapter.v1.TaskEvent.payload:type_name -> google.protobuf.Struct
+	9,   // 80: fleet_adapter.v1.TaskEvent.subject_kind:type_name -> fleet_adapter.v1.EventSubjectKind
+	17,  // 81: fleet_adapter.v1.HeartbeatResponse.phase:type_name -> fleet_adapter.v1.RobotPhase
+	47,  // 82: fleet_adapter.v1.HeartbeatResponse.battery:type_name -> fleet_adapter.v1.BatteryStatus
+	81,  // 83: fleet_adapter.v1.CapabilitiesSnapshot.hardware:type_name -> fleet_adapter.v1.HardwareComponent
+	82,  // 84: fleet_adapter.v1.CapabilitiesSnapshot.installed_models:type_name -> fleet_adapter.v1.InstalledModel
+	97,  // 85: fleet_adapter.v1.CapabilitiesSnapshot.supported_actions:type_name -> fleet_adapter.v1.SupportedAction
+	83,  // 86: fleet_adapter.v1.CapabilitiesSnapshot.firmware:type_name -> fleet_adapter.v1.FirmwareState
+	55,  // 87: fleet_adapter.v1.CapabilitiesSnapshot.sensor_streams:type_name -> fleet_adapter.v1.SensorStream
+	10,  // 88: fleet_adapter.v1.SensorStream.activation_cost:type_name -> fleet_adapter.v1.ActivationCost
+	62,  // 89: fleet_adapter.v1.ResourceRequest.reserve:type_name -> fleet_adapter.v1.ReserveResource
+	64,  // 90: fleet_adapter.v1.ResourceRequest.release:type_name -> fleet_adapter.v1.ReleaseResource
+	63,  // 91: fleet_adapter.v1.ResourceResponse.reserve:type_name -> fleet_adapter.v1.ReserveResult
+	65,  // 92: fleet_adapter.v1.ResourceResponse.release:type_name -> fleet_adapter.v1.ReleaseResult
+	11,  // 93: fleet_adapter.v1.ReserveResult.state:type_name -> fleet_adapter.v1.ReservationState
+	31,  // 94: fleet_adapter.v1.ZoneConstraints.operating_constraints:type_name -> fleet_adapter.v1.EffectiveOperatingConstraint
+	99,  // 95: fleet_adapter.v1.VerifyHardware.expected_metrics:type_name -> fleet_adapter.v1.VerifyHardware.ExpectedMetricsEntry
+	100, // 96: fleet_adapter.v1.VerifyCapability.expected_metrics:type_name -> fleet_adapter.v1.VerifyCapability.ExpectedMetricsEntry
+	101, // 97: fleet_adapter.v1.VerifyModel.expected_metrics:type_name -> fleet_adapter.v1.VerifyModel.ExpectedMetricsEntry
+	12,  // 98: fleet_adapter.v1.VerifyResult.status:type_name -> fleet_adapter.v1.ProbeStatus
+	102, // 99: fleet_adapter.v1.VerifyResult.actual_metrics:type_name -> fleet_adapter.v1.VerifyResult.ActualMetricsEntry
+	14,  // 100: fleet_adapter.v1.UpdateProgress.kind:type_name -> fleet_adapter.v1.UpdateKind
+	13,  // 101: fleet_adapter.v1.UpdateProgress.outcome:type_name -> fleet_adapter.v1.InstallOutcome
+	15,  // 102: fleet_adapter.v1.HardwareComponent.status:type_name -> fleet_adapter.v1.HardwareStatus
+	16,  // 103: fleet_adapter.v1.InstalledModel.status:type_name -> fleet_adapter.v1.ModelStatus
+	18,  // 104: fleet_adapter.v1.FirmwareState.status:type_name -> fleet_adapter.v1.FirmwareInstallStatus
+	15,  // 105: fleet_adapter.v1.HardwareStatusUpdate.status:type_name -> fleet_adapter.v1.HardwareStatus
+	87,  // 106: fleet_adapter.v1.AdapterEdgeMessage.position:type_name -> fleet_adapter.v1.PositionFrame
+	39,  // 107: fleet_adapter.v1.AdapterEdgeMessage.estop_ack:type_name -> fleet_adapter.v1.EstopAck
+	38,  // 108: fleet_adapter.v1.EdgeControlMessage.estop:type_name -> fleet_adapter.v1.Estop
+	46,  // 109: fleet_adapter.v1.PositionFrame.position:type_name -> fleet_adapter.v1.RobotPosition
+	19,  // 110: fleet_adapter.v1.ClipWindow.mode:type_name -> fleet_adapter.v1.ClipWindowMode
+	90,  // 111: fleet_adapter.v1.ActivateStream.window:type_name -> fleet_adapter.v1.ClipWindow
+	89,  // 112: fleet_adapter.v1.ActivateStream.sinks:type_name -> fleet_adapter.v1.StreamSink
+	98,  // 113: fleet_adapter.v1.SupportedAction.params:type_name -> fleet_adapter.v1.ActionParam
+	98,  // 114: fleet_adapter.v1.SupportedAction.results:type_name -> fleet_adapter.v1.ActionParam
+	20,  // 115: fleet_adapter.v1.FleetAdapterService.ControlStream:input_type -> fleet_adapter.v1.AdapterMessage
+	40,  // 116: fleet_adapter.v1.FleetAdapterService.SafetyStream:input_type -> fleet_adapter.v1.AdapterSafetyMessage
+	85,  // 117: fleet_adapter.v1.EdgeService.EdgeStream:input_type -> fleet_adapter.v1.AdapterEdgeMessage
+	21,  // 118: fleet_adapter.v1.FleetAdapterService.ControlStream:output_type -> fleet_adapter.v1.ControlPlaneMessage
+	41,  // 119: fleet_adapter.v1.FleetAdapterService.SafetyStream:output_type -> fleet_adapter.v1.ControlPlaneSafetyMessage
+	86,  // 120: fleet_adapter.v1.EdgeService.EdgeStream:output_type -> fleet_adapter.v1.EdgeControlMessage
+	118, // [118:121] is the sub-list for method output_type
+	115, // [115:118] is the sub-list for method input_type
+	115, // [115:115] is the sub-list for extension type_name
+	115, // [115:115] is the sub-list for extension extendee
+	0,   // [0:115] is the sub-list for field type_name
 }
 
-func init() { file_proto_fleet_adapter_v1_fleet_adapter_proto_init() }
-func file_proto_fleet_adapter_v1_fleet_adapter_proto_init() {
-	if File_proto_fleet_adapter_v1_fleet_adapter_proto != nil {
+func init() { file_fleet_adapter_v1_fleet_adapter_proto_init() }
+func file_fleet_adapter_v1_fleet_adapter_proto_init() {
+	if File_fleet_adapter_v1_fleet_adapter_proto != nil {
 		return
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[0].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[0].OneofWrappers = []any{
 		(*AdapterMessage_Hello)(nil),
 		(*AdapterMessage_Discover)(nil),
 		(*AdapterMessage_Register)(nil),
@@ -6898,16 +9159,17 @@ func file_proto_fleet_adapter_v1_fleet_adapter_proto_init() {
 		(*AdapterMessage_ResourceRequest)(nil),
 		(*AdapterMessage_UpdateProgress)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[1].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[1].OneofWrappers = []any{
 		(*ControlPlaneMessage_HelloAck)(nil),
 		(*ControlPlaneMessage_RegisterAck)(nil),
 		(*ControlPlaneMessage_DiscoverAck)(nil),
 		(*ControlPlaneMessage_Command)(nil),
 		(*ControlPlaneMessage_Heartbeat)(nil),
 		(*ControlPlaneMessage_ResourceResponse)(nil),
+		(*ControlPlaneMessage_OutcomeAck)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[4].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[9].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[4].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[9].OneofWrappers = []any{
 		(*Command_AssignAction)(nil),
 		(*Command_CancelAction)(nil),
 		(*Command_Estop)(nil),
@@ -6923,8 +9185,11 @@ func file_proto_fleet_adapter_v1_fleet_adapter_proto_init() {
 		(*Command_ZoneAdmission)(nil),
 		(*Command_RenewLease)(nil),
 		(*Command_ValidateAction)(nil),
+		(*Command_ActivateStream)(nil),
+		(*Command_DeactivateStream)(nil),
+		(*Command_ZoneConstraints)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[10].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[10].OneofWrappers = []any{
 		(*CommandResult_AssignAction)(nil),
 		(*CommandResult_CancelAction)(nil),
 		(*CommandResult_Estop)(nil),
@@ -6938,54 +9203,60 @@ func file_proto_fleet_adapter_v1_fleet_adapter_proto_init() {
 		(*CommandResult_ZoneAdmission)(nil),
 		(*CommandResult_RenewLease)(nil),
 		(*CommandResult_ValidateAction)(nil),
+		(*CommandResult_ActivateStream)(nil),
+		(*CommandResult_DeactivateStream)(nil),
+		(*CommandResult_ZoneConstraints)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[11].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[12].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[13].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[18].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[19].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[12].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[13].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[14].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[19].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[20].OneofWrappers = []any{
 		(*AdapterSafetyMessage_EstopAck)(nil),
 		(*AdapterSafetyMessage_PauseResult)(nil),
+		(*AdapterSafetyMessage_EstopClearAck)(nil),
+		(*AdapterSafetyMessage_LocalStop)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[20].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[21].OneofWrappers = []any{
 		(*ControlPlaneSafetyMessage_Estop)(nil),
 		(*ControlPlaneSafetyMessage_Pause)(nil),
+		(*ControlPlaneSafetyMessage_EstopClear)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[22].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[23].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[24].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[33].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[26].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[27].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[28].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[40].OneofWrappers = []any{
 		(*ResourceRequest_Reserve)(nil),
 		(*ResourceRequest_Release)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[34].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[41].OneofWrappers = []any{
 		(*ResourceResponse_Reserve)(nil),
 		(*ResourceResponse_Release)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[52].OneofWrappers = []any{}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[56].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[61].OneofWrappers = []any{}
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[65].OneofWrappers = []any{
 		(*AdapterEdgeMessage_Position)(nil),
 		(*AdapterEdgeMessage_EstopAck)(nil),
 	}
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes[57].OneofWrappers = []any{
+	file_fleet_adapter_v1_fleet_adapter_proto_msgTypes[66].OneofWrappers = []any{
 		(*EdgeControlMessage_Estop)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc), len(file_proto_fleet_adapter_v1_fleet_adapter_proto_rawDesc)),
-			NumEnums:      14,
-			NumMessages:   68,
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fleet_adapter_v1_fleet_adapter_proto_rawDesc), len(file_fleet_adapter_v1_fleet_adapter_proto_rawDesc)),
+			NumEnums:      20,
+			NumMessages:   83,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
-		GoTypes:           file_proto_fleet_adapter_v1_fleet_adapter_proto_goTypes,
-		DependencyIndexes: file_proto_fleet_adapter_v1_fleet_adapter_proto_depIdxs,
-		EnumInfos:         file_proto_fleet_adapter_v1_fleet_adapter_proto_enumTypes,
-		MessageInfos:      file_proto_fleet_adapter_v1_fleet_adapter_proto_msgTypes,
+		GoTypes:           file_fleet_adapter_v1_fleet_adapter_proto_goTypes,
+		DependencyIndexes: file_fleet_adapter_v1_fleet_adapter_proto_depIdxs,
+		EnumInfos:         file_fleet_adapter_v1_fleet_adapter_proto_enumTypes,
+		MessageInfos:      file_fleet_adapter_v1_fleet_adapter_proto_msgTypes,
 	}.Build()
-	File_proto_fleet_adapter_v1_fleet_adapter_proto = out.File
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_goTypes = nil
-	file_proto_fleet_adapter_v1_fleet_adapter_proto_depIdxs = nil
+	File_fleet_adapter_v1_fleet_adapter_proto = out.File
+	file_fleet_adapter_v1_fleet_adapter_proto_goTypes = nil
+	file_fleet_adapter_v1_fleet_adapter_proto_depIdxs = nil
 }

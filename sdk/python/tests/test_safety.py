@@ -54,6 +54,57 @@ def test_c3_per_robot() -> None:
     assert g.check("r2", True, 1, "b1") is FenceDecision.ACCEPT
 
 
+def test_c3_8_adopt_raises_the_mark_from_the_authoritative_token() -> None:
+    """C3.8 — the control plane's own token raises the mark, not just an AssignAction."""
+    g = FenceGuard()
+    assert g.check("r1", True, 14, "a1") is FenceDecision.ACCEPT
+    assert g.adopt("r1", 20) is True
+    assert g.highest("r1") == 20
+    # The whole point: a token BETWEEN the old mark and the adopted one is now stale.
+    # Before adopt() existed this was ACCEPT, and a failed-over control plane's
+    # predecessor could still authorise work.
+    assert g.check("r1", True, 17, "a2") is FenceDecision.STALE
+
+
+def test_c3_8_adopt_never_lowers_the_mark() -> None:
+    """The safety invariant: a replayed or delayed RegisterAck must not re-open a token.
+
+    RegisterAcks are not ordered against each other, so a stale one can land after a
+    newer one. If adopt could lower the mark, that late frame would un-refuse an
+    assignment the adapter had already rejected.
+    """
+    g = FenceGuard()
+    g.adopt("r1", 20)
+    assert g.adopt("r1", 14) is False    # a stale ack, replayed
+    assert g.adopt("r1", 20) is False    # the same ack, re-delivered
+    assert g.adopt("r1", 0) is False     # absent token read as 0
+    assert g.highest("r1") == 20
+    assert g.check("r1", True, 17, "a1") is FenceDecision.STALE
+
+
+def test_c3_8_adopt_drops_the_reack_window_at_the_old_mark() -> None:
+    """After adopting, a command AT the adopted token is STALE, not re-acked.
+
+    The assignment accepted at the OLD mark is not the one the plane is fencing at
+    now, so the C3.4 idempotency window must not survive the raise. Conservative by
+    design: the plane re-issues at N+1 rather than the adapter re-acking an
+    assignment whose identity was never confirmed against the new token.
+    """
+    g = FenceGuard()
+    g.check("r1", True, 14, "a1")
+    assert g.check("r1", True, 14, "a1") is FenceDecision.REACK   # window open at the old mark
+    g.adopt("r1", 20)
+    assert g.check("r1", True, 20, "a1") is FenceDecision.STALE   # and closed by the raise
+    assert g.check("r1", True, 21, "a1") is FenceDecision.ACCEPT
+
+
+def test_c3_8_adopt_is_per_robot() -> None:
+    g = FenceGuard()
+    g.adopt("r1", 20)
+    assert g.highest("r2") == 0
+    assert g.check("r2", True, 1, "b1") is FenceDecision.ACCEPT
+
+
 # ── C4: assignment-lease self-stop ────────────────────────────────────────────
 
 class _Clock:

@@ -26,10 +26,10 @@ import (
 	"github.com/swarmada/swarmada/internal/safety"
 )
 
-// Parallel estop fan-out (RFC-0001 §9.6.2.1), shared by the zone- and
+// Parallel estop fan-out (RFC-0001 #safety-estop-scopes), shared by the zone- and
 // namespace-scoped reconcilers.
 //
-// §9.6.2.1 requires the control plane to "send an estop Command to every in-scope robot's
+// RFC-0001 #safety-estop-scopes requires the control plane to "send an estop Command to every in-scope robot's
 // Fleet Adapter in parallel — not sequentially — so that each command is issued
 // independently and a slow acknowledgement from one robot does not delay the estop signal
 // to others." Both reconcilers previously looped, awaiting each robot's full outcome before
@@ -64,6 +64,9 @@ type estopOutcome struct {
 	robot  string
 	result safety.Result
 	err    error
+	// recErr is the error writing the robot's hold record, when the fan-out records one
+	// (estopFanoutHeld).
+	recErr error
 }
 
 // estopFanout issues a confirmed estop to every named robot concurrently and returns the
@@ -78,7 +81,17 @@ type estopOutcome struct {
 // which is the same fail-open-on-attempt / fail-closed-on-confirmation split TriggerEstop
 // itself makes (a robot it cannot confirm resolves to Failed, never Stopped).
 func estopFanout(ctx context.Context, est ZoneEstopper, namespace string, robots []fleetv1.Robot,
-	reason, issuedBy string, scope metrics.EstopScope) ([]estopOutcome, time.Duration) {
+	reason, issuedBy string, scope metrics.EstopScope, carrier safety.Carrier) ([]estopOutcome, time.Duration) {
+	return estopFanoutHeld(ctx, est, namespace, robots, reason, issuedBy, scope, carrier, nil)
+}
+
+// estopFanoutHeld is estopFanout that also records, for each robot, that the stop holds it
+// (record, run in the robot's own goroutine once its stop has resolved, whatever the outcome:
+// a Failed stop holds the robot as a Stopped one does). The record is written after the send,
+// never before, so it adds nothing to the stop's latency. A nil record records nothing.
+func estopFanoutHeld(ctx context.Context, est ZoneEstopper, namespace string, robots []fleetv1.Robot,
+	reason, issuedBy string, scope metrics.EstopScope, carrier safety.Carrier,
+	record func(ctx context.Context, robot string) error) ([]estopOutcome, time.Duration) {
 	out := make([]estopOutcome, len(robots))
 	start := time.Now()
 
@@ -87,13 +100,23 @@ func estopFanout(ctx context.Context, est ZoneEstopper, namespace string, robots
 		wg.Add(1)
 		go func(i int, name string) {
 			defer wg.Done()
-			res, err := est.TriggerEstop(ctx, namespace, name, reason, issuedBy, scope)
+			res, err := est.TriggerEstop(ctx, namespace, name, reason, issuedBy, scope, carrier)
+			var recErr error
+			if record != nil {
+				recErr = record(ctx, name)
+			}
 			// Each goroutine owns exactly one slot, so no lock is needed and the result
 			// lands at the robot's original index regardless of completion order.
-			out[i] = estopOutcome{robot: name, result: res, err: err}
+			out[i] = estopOutcome{robot: name, result: res, err: err, recErr: recErr}
 		}(i, robots[i].Name)
 	}
 	wg.Wait()
 
 	return out, time.Since(start)
+}
+
+// carrierOf is the stop carrier a zone's or the namespace's hold names: the stop's record on
+// the robot names the same object.
+func carrierOf(h holdRef) safety.Carrier {
+	return safety.Carrier{Kind: fleetv1.StopCarrierKind(h.kind), Name: h.name, UID: h.uid}
 }

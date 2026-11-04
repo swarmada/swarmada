@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -67,13 +69,28 @@ type RegistryClient interface {
 }
 
 // triggerAnnotation carries a training-completion event to the ModelPolicy
-// controller (§9.1.9). The Manual trigger path (swarmctl evaluate policy) writes
-// it; the Webhook and RegistryWatch front-ends (not yet built) would write the
-// same annotation, so the reconciler is the single evaluation path. Its value is
+// controller (RFC-0001 #modelpolicy-schema). The Manual trigger path (swarmctl evaluate policy),
+// the training-completion Webhook receiver (ModelPolicyWebhook, modelpolicy_webhook.go) and
+// the RegistryWatch poller (pollRegistry, below) all write it, so the reconciler is the
+// single evaluation path. Its value is
 // a JSON modelTriggerPayload; the controller clears it once consumed.
 const triggerAnnotation = "swarmada.io/model-trigger"
 
-// resetAnnotation is the operator's suspension override (§9.1.9.4). `swarmctl modelpolicy reset`
+// triggerClaimAnnotation binds one evaluation to the trigger it evaluates, so a trigger
+// is evaluated and counted once however many passes see it (RFC-0001
+// #modelpolicy-repeated-failure-handling: a doubled rejection count would suspend a
+// policy early). Its value is "<trigger digest>.<status digest>", written before the
+// decision is recorded. The decision and the trigger's removal are two writes, status
+// and metadata, and nothing makes them atomic. A later pass that finds this claim for
+// the same trigger over a status that has since changed knows the decision landed and
+// only the removal did not. The controller removes it with the trigger.
+const triggerClaimAnnotation = "swarmada.io/model-trigger-claim"
+
+// reasonTriggerDroppedSuspended is the Warning Event reason for a trigger dropped
+// because the policy is suspended.
+const reasonTriggerDroppedSuspended = "TriggerDroppedWhileSuspended"
+
+// resetAnnotation is the operator's suspension override (RFC-0001 #modelpolicy-repeated-failure-handling). `swarmctl modelpolicy reset`
 // writes it after a SelfSubjectAccessReview on the policy-reset custom verb, so the RBAC gate and
 // the audit trail apply — the CLI is the enforcement point, as it is for admit/reject and estop.
 //
@@ -85,11 +102,11 @@ const resetAnnotation = "swarmada.io/policy-reset"
 // request is a no-op while a NEW value (a second reset after a second suspension) fires again.
 const resetProcessedAnnotation = "swarmada.io/policy-reset-processed"
 
-// historyLimit caps status.history at the most recent N records (§9.1.9 schema).
+// historyLimit caps status.history at the most recent N records (RFC-0001 #modelpolicy-schema).
 const historyLimit = 20
 
 // conditionFailedRepeatedly is set True after spec.consecutiveRejectionLimit
-// consecutive gate rejections; while True, evaluation is suspended (§9.1.9.4).
+// consecutive gate rejections; while True, evaluation is suspended (RFC-0001 #modelpolicy-repeated-failure-handling).
 const conditionFailedRepeatedly = "FailedRepeatedly"
 
 // conditionMetricSchemaMismatch is set True on a rejection caused by metric keys
@@ -97,7 +114,7 @@ const conditionFailedRepeatedly = "FailedRepeatedly"
 // distinct from a genuine threshold breach (ADR-0021).
 const conditionMetricSchemaMismatch = "MetricSchemaMismatch"
 
-// modelTriggerPayload is the training-completion event (§9.1.9.3 webhook payload,
+// modelTriggerPayload is the training-completion event (RFC-0001 #modelpolicy-training-pipeline-integration-webhook-payload webhook payload,
 // reduced to the fields the control plane acts on).
 type modelTriggerPayload struct {
 	ModelVersion      string             `json:"modelVersion"`
@@ -108,18 +125,32 @@ type modelTriggerPayload struct {
 }
 
 // ModelPolicyReconciler is the policy-governed bridge between a training pipeline
-// and ModelRollout (§9.1.9): on each trigger event it evaluates the reported
+// and ModelRollout (RFC-0001 #modelpolicy): on each trigger event it evaluates the reported
 // metrics against the quality gate and, on pass, auto-creates a ModelRollout.
 type ModelPolicyReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
-	// Registry is the OCI client backing the RegistryWatch trigger. Nil defaults to
-	// the production client; tests inject a fake.
+	// Registry is the OCI client backing the RegistryWatch trigger (nil: the production client; tests inject a fake).
 	Registry RegistryClient
-	// Audit records MODEL_ROLLOUT_CREATED into the tamper-evident §9.5.4 chain when
+	notes    heldNotes // keeps each registry-credentials Warning Event to one per policy
+	// Audit records MODEL_ROLLOUT_CREATED into the tamper-evident RFC-0001 #security-audit-logging chain when
 	// this controller auto-creates a ModelRollout. Nil disables audit recording.
 	Audit audit.Recorder
+	// APIReader reads the policy from the API server, bypassing the manager's cache. The
+	// status write that records a decision re-queues the policy, and a cached read can
+	// still carry the trigger that write consumed. The claim and the locked writes keep
+	// such a pass from counting the trigger again; reading live keeps it from failing
+	// on a conflict first. Nil falls back to Client (a unit test's fake client).
+	APIReader client.Reader
+}
+
+// reader is the uncached APIReader when one is wired, else Client (see APIReader).
+func (r *ModelPolicyReconciler) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // +kubebuilder:rbac:groups=swarmada.io,resources=modelpolicies,verbs=get;list;watch;update;patch
@@ -132,7 +163,7 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	logger := log.FromContext(ctx).WithValues("modelpolicy", req.NamespacedName)
 
 	policy := &fleetv1.ModelPolicy{}
-	if err := r.Get(ctx, req.NamespacedName, policy); err != nil {
+	if err := r.reader().Get(ctx, req.NamespacedName, policy); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -146,18 +177,27 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Operator reset (§9.1.9.4): clear a FailedRepeatedly suspension. Handled BEFORE the suspension
+	// Operator reset (RFC-0001 #modelpolicy-repeated-failure-handling): clear a FailedRepeatedly suspension. Handled BEFORE the suspension
 	// guard below, which would otherwise return early and leave the policy suspended forever — the
 	// reset is the one thing that must still be processed while suspended.
 	if done, err := r.applyPolicyReset(ctx, policy); err != nil || done {
 		return ctrl.Result{}, err
 	}
 
-	// Suspension (§9.1.9.4): after consecutiveRejectionLimit consecutive gate
+	// Suspension (RFC-0001 #modelpolicy-repeated-failure-handling): after consecutiveRejectionLimit consecutive gate
 	// failures the policy is suspended — no polling, no evaluation; a pending
-	// trigger is silently dropped until an operator resets the policy.
+	// trigger is dropped until an operator resets the policy. The drop is not silent:
+	// whoever wrote the trigger saw their write succeed, so a Warning Event names why
+	// nothing followed. One Event per dropped trigger, because the drop consumes it.
 	if apimeta.IsStatusConditionTrue(policy.Status.Conditions, conditionFailedRepeatedly) {
-		if _, pending := policy.Annotations[triggerAnnotation]; pending {
+		if raw, pending := policy.Annotations[triggerAnnotation]; pending {
+			// A trigger whose own decision suspended the policy was evaluated, not dropped.
+			if _, recorded := triggerClaimState(policy, raw); !recorded {
+				r.event(policy, corev1.EventTypeWarning, reasonTriggerDroppedSuspended,
+					"model trigger dropped: this policy is suspended ("+conditionFailedRepeatedly+
+						") and evaluates nothing until it is reset (swarmctl modelpolicy reset "+policy.Name+
+						"); the trigger is not queued, so write it again after the reset")
+			}
 			return ctrl.Result{}, r.clearTrigger(ctx, policy)
 		}
 		return ctrl.Result{}, nil
@@ -191,11 +231,31 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, r.clearTrigger(ctx, policy)
 	}
 
+	// One trigger, one evaluation (see triggerClaimAnnotation). A trigger whose
+	// decision is already recorded is only consumed: nothing is recorded again.
+	claimed, recorded := triggerClaimState(policy, raw)
+	if recorded {
+		logger.V(1).Info("trigger already evaluated; consuming it", "version", payload.ModelVersion)
+		return ctrl.Result{}, r.clearTrigger(ctx, policy)
+	}
+
 	// maxConcurrentRollouts: while a prior auto-rollout is still running, queue —
 	// keep the annotation and retry after housekeeping frees the slot.
 	if policy.Status.ActiveRollout != "" {
 		logger.V(1).Info("deployment queued behind active rollout", "active", policy.Status.ActiveRollout)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Claim the trigger before recording anything. The write is locked to the version
+	// this pass read, so a pass working from an older copy stops here. A claim that
+	// matches exactly is this trigger's own, left by a pass whose status write did not
+	// land: evaluate under it.
+	if !claimed {
+		base := policy.DeepCopy()
+		policy.Annotations[triggerClaimAnnotation] = triggerClaim(raw, policy.Status)
+		if err := r.Patch(ctx, policy, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, fmt.Errorf("claiming model trigger: %w", err)
+		}
 	}
 
 	// Evaluate. NewVersion bypasses the gate; otherwise all rules must pass.
@@ -204,7 +264,7 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		failed, absent = evaluateQualityGate(policy.Spec.QualityGate, payload.Metrics)
 	}
 	// ADR-0020: a model with no well-formed checksum is never deployable — the
-	// adapter would have nothing to verify the downloaded bytes against (§9.2.8).
+	// adapter would have nothing to verify the downloaded bytes against (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist).
 	// This holds even on the NewVersion path: an unverified artifact is never shipped.
 	if !signing.ValidChecksum(payload.ModelChecksum) {
 		failed = append(failed, fmt.Sprintf(
@@ -225,15 +285,22 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		EvaluatedAt:     now,
 	}
 
+	// The decision's Events wait for its status write, so a pass whose write is refused
+	// announces nothing it did not record.
+	var announce []func()
+	emit := func(eventType, reason, msg string) {
+		announce = append(announce, func() { r.event(policy, eventType, reason, msg) })
+	}
+
 	base := policy.DeepCopy()
 	switch {
 	case decision == fleetv1.ModelPolicyDecisionReject:
 		policy.Status.RejectionCount++
 		policy.Status.ConsecutiveRejections++
 		policy.Status.LastDecisionReason = strings.Join(failed, "; ")
-		r.event(policy, corev1.EventTypeWarning, "QualityGateFail",
+		emit(corev1.EventTypeWarning, "QualityGateFail",
 			fmt.Sprintf("model %s rejected: %s", payload.ModelVersion, policy.Status.LastDecisionReason))
-		// §9.1.9.4: suspend after too many consecutive rejections (0 = never).
+		// RFC-0001 #modelpolicy-repeated-failure-handling: suspend after too many consecutive rejections (0 = never).
 		if limit := policy.Spec.ConsecutiveRejectionLimit; limit > 0 && policy.Status.ConsecutiveRejections >= limit {
 			apimeta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 				Type:    conditionFailedRepeatedly,
@@ -241,14 +308,14 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				Reason:  "ConsecutiveRejections",
 				Message: fmt.Sprintf("%d consecutive rejections; evaluation suspended until the policy is reset", policy.Status.ConsecutiveRejections),
 			})
-			r.event(policy, corev1.EventTypeWarning, "PolicySuspended",
+			emit(corev1.EventTypeWarning, "PolicySuspended",
 				fmt.Sprintf("suspended after %d consecutive quality-gate rejections", policy.Status.ConsecutiveRejections))
 		}
 
 	case policy.Spec.AutoDeployOn == fleetv1.AutoDeployManual:
-		// Gate passed but deployment needs an explicit approval (§9.1.9 AutoDeployManual).
+		// Gate passed but deployment needs an explicit approval (RFC-0001 #modelpolicy-schema AutoDeployManual).
 		policy.Status.LastDecisionReason = "quality gate passed; awaiting manual approval"
-		r.event(policy, corev1.EventTypeNormal, "QualityGatePass",
+		emit(corev1.EventTypeNormal, "QualityGatePass",
 			fmt.Sprintf("model %s passed the gate; manual approval required", payload.ModelVersion))
 
 	default: // Deploy + (QualityGatePass | NewVersion): auto-create the ModelRollout
@@ -260,7 +327,7 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		policy.Status.ActiveRollout = name
 		policy.Status.DeploymentCount++
 		policy.Status.LastDecisionReason = fmt.Sprintf("quality gate passed; ModelRollout %s created", name)
-		r.event(policy, corev1.EventTypeNormal, "ModelRolloutCreated",
+		emit(corev1.EventTypeNormal, "ModelRolloutCreated",
 			fmt.Sprintf("ModelRollout %s created for %s@%s", name, policy.Spec.ModelName, payload.ModelVersion))
 	}
 
@@ -284,7 +351,7 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Any Deploy decision (gate pass, incl. Manual) clears the consecutive-rejection
-	// streak (§9.1.9.4). A Deploy is only reachable while not suspended.
+	// streak (RFC-0001 #modelpolicy-quality-gate-evaluation-logic). A Deploy is only reachable while not suspended.
 	if decision == fleetv1.ModelPolicyDecisionDeploy {
 		policy.Status.ConsecutiveRejections = 0
 	}
@@ -292,22 +359,84 @@ func (r *ModelPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	policy.Status.LastDecision = decision
 	policy.Status.LastTriggerAt = &now
 	policy.Status.History = appendHistory(policy.Status.History, rec)
-	if err := r.Status().Patch(ctx, policy, client.MergeFrom(base)); err != nil {
+	// Locked to the claimed version: a pass that evaluated an older copy cannot record.
+	if err := r.Status().Patch(ctx, policy, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patching policy status: %w", err)
 	}
+	for _, a := range announce {
+		a()
+	}
 
-	// Consume the trigger so it evaluates exactly once.
+	// Consume the trigger. If this write fails, the claim makes the retry a no-op.
 	return ctrl.Result{}, r.clearTrigger(ctx, policy)
+}
+
+// triggerClaim identifies one evaluation: this trigger, over this recorded state. The
+// status part covers everything an evaluation always changes: history (whose newest
+// record it appends) and the two counters. A capped history, full of records identical
+// to the new one and written in the same second, is the only way an evaluation can
+// leave it unchanged.
+func triggerClaim(trigger string, st fleetv1.ModelPolicyStatus) string {
+	t := sha256.Sum256([]byte(trigger))
+	recorded, _ := json.Marshal(struct {
+		History     []fleetv1.PolicyEvaluationRecord
+		Rejections  int32
+		Deployments int32
+	}{st.History, st.RejectionCount, st.DeploymentCount})
+	s := sha256.Sum256(recorded)
+	return hex.EncodeToString(t[:8]) + "." + hex.EncodeToString(s[:8])
+}
+
+// triggerClaimState reads the claim on a policy against its pending trigger raw.
+// claimed: the claim is this exact evaluation's, and its status write has not landed.
+// recorded: the claim is this trigger's over a status that has changed since, so its
+// decision is already recorded.
+func triggerClaimState(policy *fleetv1.ModelPolicy, raw string) (claimed, recorded bool) {
+	prior, ok := policy.Annotations[triggerClaimAnnotation]
+	if !ok {
+		return false, false
+	}
+	now := triggerClaim(raw, policy.Status)
+	priorTrigger, _, _ := strings.Cut(prior, ".")
+	nowTrigger, _, _ := strings.Cut(now, ".")
+	if priorTrigger != nowTrigger {
+		return false, false // a claim left by an earlier trigger
+	}
+	return prior == now, prior != now
 }
 
 // createRollout auto-creates a ModelRollout from the policy's rolloutTemplate and
 // the trigger event. Owner-referenced for GC; idempotent on an existing name.
 func (r *ModelPolicyReconciler) createRollout(ctx context.Context, policy *fleetv1.ModelPolicy, payload modelTriggerPayload) (string, error) {
 	name := rolloutName(policy.Name, payload.ModelVersion)
+
+	// The policy's target kind is carried through to the rollout it creates, along
+	// with the selector for that kind. An unset targetKind is Robot (the schema
+	// default), which is what every policy written before targetKind existed means.
+	targetKind := policy.Spec.TargetKind
+	selector := policy.Spec.TargetRobotSelector
+	if targetKind == fleetv1.RolloutTargetEdgeNode {
+		selector = policy.Spec.TargetNodeSelector
+	}
+	if selector == nil {
+		// CEL on ModelPolicySpec requires the selector matching targetKind, so this
+		// is unreachable through the API server. Fail closed rather than create a
+		// rollout with an empty selector, which matches EVERY object of the kind.
+		return "", fmt.Errorf("policy %s/%s has no selector for targetKind %q", policy.Namespace, policy.Name, targetKind)
+	}
+	if len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
+		// The schema refuses `{}` on admission, but a policy stored before that rule
+		// existed is still served unchanged (CRD validation ratcheting), so the same
+		// degenerate selector is refused here.
+		return "", fmt.Errorf("policy %s/%s has an empty selector for targetKind %q, which matches every object of the kind; set matchLabels or matchExpressions",
+			policy.Namespace, policy.Name, targetKind)
+	}
+
 	ro := &fleetv1.ModelRollout{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: policy.Namespace},
 		Spec: fleetv1.ModelRolloutSpec{
-			TargetSelector:    policy.Spec.TargetRobotSelector,
+			TargetKind:        targetKind,
+			TargetSelector:    *selector,
 			ModelName:         policy.Spec.ModelName,
 			NewVersion:        payload.ModelVersion,
 			ModelURI:          payload.ModelURI,
@@ -333,7 +462,7 @@ func (r *ModelPolicyReconciler) createRollout(ctx context.Context, policy *fleet
 	return name, nil
 }
 
-// recordRolloutCreated seals a MODEL_ROLLOUT_CREATED entry into the §9.5.4 audit
+// recordRolloutCreated seals a MODEL_ROLLOUT_CREATED entry into the RFC-0001 #security-audit-logging audit
 // chain. The actor is this controller (it IS the creator, via the ModelPolicy
 // quality-gate path). Audit is best-effort: a record failure is logged, never
 // blocking the rollout (the create already succeeded).
@@ -416,10 +545,14 @@ func (r *ModelPolicyReconciler) applyPolicyReset(ctx context.Context, policy *fl
 	return suspended, nil
 }
 
+// clearTrigger removes the trigger and its claim. The write is locked to the version
+// this pass holds, so it cannot remove a newer trigger written since, and a pass
+// working from an older copy fails instead of acting on it.
 func (r *ModelPolicyReconciler) clearTrigger(ctx context.Context, policy *fleetv1.ModelPolicy) error {
 	base := policy.DeepCopy()
 	delete(policy.Annotations, triggerAnnotation)
-	if err := r.Patch(ctx, policy, client.MergeFrom(base)); err != nil {
+	delete(policy.Annotations, triggerClaimAnnotation)
+	if err := r.Patch(ctx, policy, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("clearing trigger annotation: %w", err)
 	}
 	return nil
@@ -431,7 +564,7 @@ func (r *ModelPolicyReconciler) event(obj client.Object, eventType, reason, msg 
 	}
 }
 
-// ── Pure quality-gate logic (§9.1.9.2) ──────────────────────────────────────────
+// ── Pure quality-gate logic (RFC-0001 #modelpolicy-quality-gate-evaluation-logic) ──────────────────────────────────────────
 
 // evaluateQualityGate returns the failed gate rules and the subset of referenced
 // metric keys that were absent from the payload. Empty fails means the gate passes;
@@ -618,7 +751,7 @@ func (r *ModelPolicyReconciler) pollRegistry(ctx context.Context, policy *fleetv
 		return false, nil
 	}
 	repo := policy.Spec.ModelName
-	cred, err := r.modelRegistryCredential(ctx, policy.Namespace)
+	cred, err := r.modelRegistryCredential(ctx, policy, cfg.Registry)
 	if err != nil {
 		return false, err
 	}
@@ -695,8 +828,11 @@ func (r *ModelPolicyReconciler) pollRegistry(ctx context.Context, policy *fleetv
 	triggered := false
 	if mErr == nil && len(metrics) > 0 {
 		raw, err := json.Marshal(modelTriggerPayload{
-			ModelVersion:  highest,
-			ModelURI:      cfg.Registry + "/" + repo + ":" + highest,
+			ModelVersion: highest,
+			// cfg.Registry is a bare host (the registry client supplies http/https for its
+			// own calls); ModelRollout.spec.modelUri must carry a scheme, and an artifact
+			// addressed in an OCI registry is oci://.
+			ModelURI:      "oci://" + cfg.Registry + "/" + repo + ":" + highest,
 			ModelChecksum: manifestDigest,
 			Metrics:       metrics,
 		})
@@ -729,26 +865,16 @@ func parseMetricsLabel(value string) (map[string]float64, error) {
 	return m, nil
 }
 
-// modelRegistryCredential reads the conventional per-namespace registry
-// credentials Secret (shared with FirmwareRollout). Absent → anonymous.
-func (r *ModelPolicyReconciler) modelRegistryCredential(ctx context.Context, namespace string) (*registry.Credential, error) {
-	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: registryCredentialsSecret}, secret)
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
+// modelRegistryCredential reads the conventional per-namespace registry credentials
+// Secret (shared with FirmwareRollout) for a poll of reg. Absent, or not listing reg →
+// anonymous; a Secret that lists no host also writes one Warning Event on the policy.
+func (r *ModelPolicyReconciler) modelRegistryCredential(ctx context.Context, policy *fleetv1.ModelPolicy,
+	reg string) (*registry.Credential, error) {
+	cred, err := readRegistryCredential(ctx, r.Client, policy.Namespace)
 	if err != nil {
-		return nil, fmt.Errorf("reading registry credentials: %w", err)
+		return nil, err
 	}
-	cred := &registry.Credential{
-		BearerToken: string(secret.Data["token"]),
-		Username:    string(secret.Data["username"]),
-		Password:    string(secret.Data["password"]),
-	}
-	if cred.BearerToken == "" && cred.Username == "" && cred.Password == "" {
-		return nil, nil
-	}
-	return cred, nil
+	return toRegistryCred(boundRegistryCredential(ctx, &r.notes, r.Recorder, policy, cred, reg)), nil
 }
 
 // SetupWithManager registers the ModelPolicy controller.

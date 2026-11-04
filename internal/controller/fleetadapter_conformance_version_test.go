@@ -42,6 +42,13 @@ import (
 //
 // Conformance stays SELF-CERTIFIED (ADR-0007) — these tests only ever exercise the CONSUMER side:
 // the controller reads an already-attested report. Nothing here issues a result.
+//
+// That is a statement about SELF-CERTIFICATION and NOT about the signing path, which these tests
+// very much do reach: verifyConformance resolves the namespace signing policy before it can return
+// Passed, so every test below that expects a Passed seeds signingOffConfig(cvNS) (see cvFixture).
+// The word "SwarmadaConfig" does not appear in this file only because that seeding goes through a
+// helper declared in fleetadapter_controller_test.go — grepping this file for the type name and
+// concluding the signing path is untouched is the wrong inference, and it has been drawn once.
 
 const cvNS = "warehouse-a"
 
@@ -67,6 +74,12 @@ func cvDigest(body string) string {
 
 // cvFixture wires an adapter whose spec pins the report's digest, plus the ConfigMap holding it.
 // digestOverride != "" pins a WRONG digest, simulating an altered report.
+//
+// These fixtures exercise DIGEST verification and version recording, never signature
+// distribution, so every test here that expects a Passed seeds signingOffConfig(cvNS): a
+// namespace policy that exists and does not require a signature. Absence used to mean the
+// same thing implicitly; since ADR-0053 it means the opposite (verification ON, fail
+// closed), so the policy is stated rather than assumed.
 func cvFixture(t *testing.T, body, digestOverride string, extra ...client.Object) (*FleetAdapterReconciler, client.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -117,7 +130,7 @@ func cvGet(t *testing.T, c client.Client) fleetv1.FleetAdapter {
 
 // The version the harness stamped is recorded beside the result.
 func TestConformanceVersion_RecordedFromVerifiedReport(t *testing.T) {
-	r, c := cvFixture(t, cvReport(true, "1.0.0"), "")
+	r, c := cvFixture(t, cvReport(true, "1.0.0"), "", signingOffConfig(cvNS))
 	cvReconcile(t, r)
 	fa := cvGet(t, c)
 	if fa.Status.Conformance != fleetv1.ConformanceStatePassed {
@@ -135,7 +148,7 @@ func TestConformanceVersion_RecordedFromVerifiedReport(t *testing.T) {
 // (empty) and said so in the message — it must NOT flip conformance to Failed, which would silently
 // invalidate every attestation made before the field existed.
 func TestConformanceVersion_AbsentIsUnknownNotFailure(t *testing.T) {
-	r, c := cvFixture(t, cvReport(true, ""), "")
+	r, c := cvFixture(t, cvReport(true, ""), "", signingOffConfig(cvNS))
 	cvReconcile(t, r)
 	fa := cvGet(t, c)
 	if fa.Status.Conformance != fleetv1.ConformanceStatePassed {
@@ -180,7 +193,7 @@ func TestConformanceVersion_NotRecordedWhenNonConformant(t *testing.T) {
 // A stale version must not outlive the result it belonged to: once the report stops verifying, the
 // recorded version is CLEARED rather than left behind next to a Failed.
 func TestConformanceVersion_ClearedWhenReportStopsVerifying(t *testing.T) {
-	r, c := cvFixture(t, cvReport(true, "1.0.0"), "")
+	r, c := cvFixture(t, cvReport(true, "1.0.0"), "", signingOffConfig(cvNS))
 	cvReconcile(t, r)
 	if got := cvGet(t, c).Status.ConformanceContractVersion; got != "1.0.0" {
 		t.Fatalf("precondition: contract version = %q, want 1.0.0", got)
@@ -225,7 +238,7 @@ func TestConformanceVersion_TransitionOnlyWrite(t *testing.T) {
 		Data:       map[string]string{"report.json": body},
 	}
 	writes := 0
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fa, cm).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fa, cm, signingOffConfig(cvNS)).
 		WithStatusSubresource(&fleetv1.FleetAdapter{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string,
@@ -250,7 +263,7 @@ func TestConformanceVersion_TransitionOnlyWrite(t *testing.T) {
 
 // A re-attestation against a NEW contract version updates the recorded value (and does write).
 func TestConformanceVersion_UpdatesOnReAttestation(t *testing.T) {
-	r, c := cvFixture(t, cvReport(true, "1.0.0"), "")
+	r, c := cvFixture(t, cvReport(true, "1.0.0"), "", signingOffConfig(cvNS))
 	cvReconcile(t, r)
 	if got := cvGet(t, c).Status.ConformanceContractVersion; got != "1.0.0" {
 		t.Fatalf("precondition: %q", got)

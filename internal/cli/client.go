@@ -31,7 +31,7 @@ import (
 
 // ConfigFlags carries the connection flags shared by every command, resolved on
 // the cobra root. They map to the same ~/.kube/config and KUBECONFIG that
-// kubectl uses (RFC-0001 §9.5.1): swarmctl has no credentials of its own.
+// kubectl uses (RFC-0001 #security-operator-authentication-humans-and-ci-cd-systems): swarmctl has no credentials of its own.
 type ConfigFlags struct {
 	// Kubeconfig is an explicit --kubeconfig path; empty means fall back to the
 	// KUBECONFIG env var, then ~/.kube/config, then in-cluster config.

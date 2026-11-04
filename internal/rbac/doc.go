@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package rbac holds the conformance test for the five built-in swarmada:* RBAC
-// ClusterRoles (RFC-0001 §9.5.3). The test asserts the permission-matrix
+// ClusterRoles (RFC-0001 #security-authorization-swarmada-rbac-roles). The test asserts the permission-matrix
 // invariants — most importantly that the estop-clear safety verb is granted to
 // swarmada:admin and to no other built-in role — so a future edit to the manifests
 // cannot silently over-grant a safety-critical verb.

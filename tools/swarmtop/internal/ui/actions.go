@@ -22,9 +22,9 @@ import (
 	"github.com/swarmada/swarmtop/internal/k8sclient"
 )
 
-// The full-width action table lives in tasks.go now: spec §3 rule 7 folds
-// "swarmtop · actions" into the combined composite screen, and §3b requires a
-// single row builder for member and standalone rows alike. What remains here is
+// The full-width action table lives in tasks.go: "swarmtop · actions" is folded
+// into the combined composite screen, which uses one row builder for member and
+// standalone rows alike. What remains here is
 // the split pane, the detail pane, and the narrow list — none of which duplicate
 // a row renderer.
 
@@ -51,7 +51,7 @@ func (m Model) viewActionDetail() string {
 // assigned robot. It renders the SAME flattened rows as the full screen, tasks
 // included, because both are driven by taskCursor. Members indent under their
 // task; the narrow pane has no room for a TASK column, so the indent is the
-// hierarchy cue and the detail pane is the authoritative answer (spec §3a).
+// hierarchy cue and the detail pane is the authoritative answer.
 func (m Model) narrowActionList() string {
 	rows := m.taskRows()
 	if len(rows) == 0 {
@@ -92,7 +92,7 @@ func (m Model) actionDetailLines(t *k8sclient.FleetActionView) []string {
 
 	// The width-independent answer to "which task does this belong to", present on
 	// EVERY action — member or standalone. This is why the narrow list can drop
-	// the TASK column without losing the information (spec §3a).
+	// the TASK column without losing the information.
 	if t.OwnerTask != "" {
 		add(fmt.Sprintf("Task      %s   (member: %s)", t.OwnerTask,
 			strings.TrimPrefix(t.Name, t.OwnerTask+"-")))

@@ -23,7 +23,7 @@ import (
 	"github.com/swarmada/swarmada/internal/audit"
 )
 
-// Finalizing a cancel seals a FLEETACTION_CANCELLED entry into the §9.5.4 chain,
+// Finalizing a cancel seals a FLEETACTION_CANCELLED entry into the RFC-0001 #security-audit-logging chain,
 // carrying the reason. (An unbound action finalizes immediately — no confirmed-stop
 // wait — so the audit records once.)
 func TestFleetAction_CancelIsAudited(t *testing.T) {

@@ -35,9 +35,9 @@ def test_observed_phases_collects_nonempty():
     items = [
         {"status": {"phase": "Idle"}},
         {"status": {"phase": "Offline"}},
-        {"status": {"phase": ""}},   # empty ignored
-        {"status": {}},              # missing ignored
-        {},                          # no status ignored
+        {"status": {"phase": ""}},  # empty ignored
+        {"status": {}},  # missing ignored
+        {},  # no status ignored
     ]
     assert observed_phases(items) == {"Idle", "Offline"}
 
@@ -60,7 +60,8 @@ def test_coverage_gaps_empty_when_all_seen():
 def _ra1_snap(frames, writes, ns="warehouse-a"):
     return Snapshot(
         f'swarmada_telemetry_frames_received_total{{namespace="{ns}",adapter="sim"}} {frames}\n'
-        f'swarmada_telemetry_status_writes_total{{namespace="{ns}",transition_type="phase_change"}} {writes}\n'
+        f"swarmada_telemetry_status_writes_total"
+        f'{{namespace="{ns}",transition_type="phase_change"}} {writes}\n'
     )
 
 
@@ -81,7 +82,7 @@ def test_ra1_ok_fails_per_tick_writer():
 def test_ra1_ratio_none_without_frames():
     snap = _ra1_snap(0, 0)
     assert ra1_ratio(snap, "warehouse-a") is None
-    assert ra1_ok(None) is False   # no telemetry seen → not provable → fail
+    assert ra1_ok(None) is False  # no telemetry seen → not provable → fail
 
 
 def test_ra1_ratio_survives_the_label_mismatch_between_the_two_counters():
@@ -124,6 +125,10 @@ def test_edge_estop_confirmed_matches_stopped_line():
 
 
 def test_edge_estop_confirmed_rejects_failed_and_absent():
-    assert edge_estop_confirmed(
-        "EDGE_ESTOP_CONFIRMED robot=sim-robot-001 id=e state=FAILED\n", "sim-robot-001") is False
+    assert (
+        edge_estop_confirmed(
+            "EDGE_ESTOP_CONFIRMED robot=sim-robot-001 id=e state=FAILED\n", "sim-robot-001"
+        )
+        is False
+    )
     assert edge_estop_confirmed("no marker here\n", "sim-robot-001") is False

@@ -125,7 +125,7 @@ func HardwareStatusCell(status string) Cell {
 	}
 }
 
-// OutcomeCell colorizes an audit-log outcome (§9.5.4): Allowed green, Denied
+// OutcomeCell colorizes an audit-log outcome (RFC-0001 #security-audit-logging): Allowed green, Denied
 // red, Error yellow. A denied action is never silently dropped, so it must read
 // as distinct from a healthy allow at a glance.
 func OutcomeCell(outcome string) Cell {
@@ -138,6 +138,27 @@ func OutcomeCell(outcome string) Cell {
 		return styledCell(sgrYellow, outcome)
 	default:
 		return TextCell(outcome)
+	}
+}
+
+// OutcomeCertaintyCell colorizes FleetAction.status.outcomeCertainty (RFC-0001
+// #fleetaction-state-machine). Unestablished is red because it is the one terminal
+// disposition that ALWAYS warrants a person, and it is rendered beside a phase of
+// Failed — the fail-closed pin (R4) guarantees that pairing — so in a column of
+// Failed rows it is precisely the one an operator must not read as just another
+// observed failure.
+//
+// An EMPTY value renders as None, never as Established. No v0.4 controller writes
+// the field, so empty means "not recorded", and showing it as Established would
+// assert the observation the field exists to stop anyone assuming.
+func OutcomeCertaintyCell(certainty string) Cell {
+	switch certainty {
+	case "Unestablished":
+		return styledCell(sgrRed, certainty)
+	case "Established":
+		return styledCell(sgrGreen, certainty)
+	default:
+		return TextCell(None)
 	}
 }
 

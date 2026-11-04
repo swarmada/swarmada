@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** API Designer, Distributed Systems Reviewer, Security Reviewer
-- **Related:** RFC-0001 §9.1.12 (adapter presence), §9.3.8 (offline-duration accounting), the Robot schema (`status.connectivity.lastSeenAt`); ADR-0011 (connectivity-critical); ADR-0025 (mTLS ControlStream — the verified presence source)
+- **Related:** RFC-0001 "FleetAdapter" (adapter presence), "Robot Health and Connectivity" (offline-duration accounting), the Robot schema (`status.connectivity.lastSeenAt`); ADR-0011 (connectivity-critical); ADR-0025 (mTLS ControlStream — the verified presence source)
 
 ## Context
 
@@ -58,6 +58,16 @@ live (`lastSeenAt != nil && age <= heartbeatTimeout`), set `Ready=True`
 phase is `Offline`, recover it to `Discovered` (re-entering the normal flow). Phase
 promotion to `Idle`/schedulability stays **out of scope** — that is the conformance
 / admission gate, and `Ready` is separate from it by design.
+
+> **Amended 2026-09-06 by [ADR-0054](0054-the-control-plane-heartbeats-on-a-cadence.md).**
+> The paragraph below assumes *"the fan-out fires on every heartbeat"*. When this was
+> written nothing sent heartbeats on a cadence — the only `HeartbeatRequest` sender was the
+> Robot controller's confirming exchange, which runs only once a robot has **already** been
+> judged stale. The throttle was therefore a ceiling with no floor: `lastSeenAt` was
+> refreshed about once per 1.5 × `heartbeatTimeout`. ADR-0054 supplies the
+> floor — a periodic adapter-scoped `HeartbeatRequest` per connected adapter — so the
+> assumption below now holds. **The throttle itself is unchanged** and this paragraph is
+> otherwise accurate as written.
 
 **Throttling (write-amplification).** The fan-out fires on every heartbeat, so each
 Robot's `lastSeenAt` is refreshed **at most once per throttle interval**: write only

@@ -147,6 +147,12 @@ func collectDocuments(t *testing.T) []document {
 			if d.IsDir() {
 				return nil
 			}
+			// A kustomization file is a build instruction for kustomize, not an API
+			// object, so there is nothing in it to decode against api/v1. The documents
+			// it lists sit beside it and are decoded like any other.
+			if d.Name() == "kustomization.yaml" || d.Name() == "kustomization.yml" {
+				return nil
+			}
 			if ext := strings.ToLower(filepath.Ext(path)); ext == ".yaml" || ext == ".yml" {
 				files = append(files, path)
 			}

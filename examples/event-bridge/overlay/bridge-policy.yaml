@@ -1,0 +1,44 @@
+# The half of least privilege RBAC cannot express: which SemanticEvents the bridge
+# may create. `create semanticevents` alone would let it raise an event for any
+# source in the namespace — a model's, a camera adapter's — and fire that source's
+# triggers.
+#
+# A ValidatingAdmissionPolicy is evaluated by the API server itself (CEL), so it
+# adds no controller, webhook or CRD. Kubernetes 1.30 or later.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: event-bridge-own-sources-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["semanticevents"]
+  matchConditions:
+    - name: requested-by-the-event-bridge
+      expression: request.userInfo.username == 'system:serviceaccount:warehouse-a:event-bridge'
+  validations:
+    - expression: >-
+        object.spec.source in ['building-doors', 'work-orders', 'schedules', 'static-cameras']
+      message: the event bridge may only raise events for building-doors, work-orders, schedules and static-cameras
+      reason: Forbidden
+    - expression: object.metadata.name.startsWith('evb-')
+      message: a SemanticEvent from the event bridge is named evb-<hash of caller and id>
+      reason: Forbidden
+    - expression: >-
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'event-bridge'
+      message: a SemanticEvent from the event bridge must carry app.kubernetes.io/managed-by=event-bridge
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: event-bridge-own-sources-only
+spec:
+  policyName: event-bridge-own-sources-only
+  validationActions: ["Deny"]

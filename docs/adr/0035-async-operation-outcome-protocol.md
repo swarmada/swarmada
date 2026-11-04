@@ -3,7 +3,7 @@
 - **Status:** proposed
 - **Date:** 2026-08-05
 - **Deciders:** _(pending)_
-- **Related:** ADR-0033 (install-outcome reporting — the point-solution this generalizes), ADR-0019 (adapter action discovery and validation), RFC-0001 §9.2 (Fleet Adapter Protocol); `proto/fleet_adapter/v1/fleet_adapter.proto`
+- **Related:** ADR-0033 (install-outcome reporting — the point-solution this generalizes), ADR-0019 (adapter action discovery and validation), RFC-0001 "Fleet Adapter Protocol"; `proto/fleet_adapter/v1/fleet_adapter.proto`
 
 ## Context
 

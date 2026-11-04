@@ -32,7 +32,7 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// §9.1.9.4 operator reset. The CLI writes the request under a SelfSubjectAccessReview; this is the
+// RFC-0001 #modelpolicy-repeated-failure-handling operator reset. The CLI writes the request under a SelfSubjectAccessReview; this is the
 // controller half that acts on it.
 //
 // Two properties carry the design:

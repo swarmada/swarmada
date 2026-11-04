@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
 
+{{- define "swarmada.webhooksFollowingFailurePolicy" -}}
+mrobot.swarmada.io, vcomputeworkloadtemplate.swarmada.io, vfirmwarerollout.swarmada.io, vfleetaction.swarmada.io, vfleettask.swarmada.io, vfleetzone.swarmada.io, vmodelrollout.swarmada.io, vrobot.swarmada.io, vrobotstatus.swarmada.io, vswarmadaconfig.swarmada.io, vzonemaintenance.swarmada.io
+{{- end }}
+
 {{- if .Values.webhooks.enabled -}}
 {{- $svc := printf "%s-webhook-service" (include "swarmada.fullname" .) -}}
 {{- $certName := printf "%s-serving-cert" (include "swarmada.fullname" .) -}}
@@ -16,8 +20,14 @@
 #     and you must create the Secret {{ include "swarmada.webhookCertSecret" . }}.
 #
 # failurePolicy: webhooks generated as Fail render {{ .Values.webhooks.failurePolicy }}
-# so an operator can loosen them; webhooks generated as Ignore render a literal Ignore
-# (ADR-0046 — attribution must never block a safe stop).
+# so an operator can loosen them; webhooks generated as Ignore render a literal Ignore,
+# because there Ignore is the property: the ADR-0046 estop-actor stampers (attribution must
+# never block a safe stop), and the Robot and SwarmadaConfig delete checks
+# vrobotdelete.swarmada.io and vswarmadaconfigdelete.swarmada.io (a manager outage must not
+# block a Robot delete or a namespace delete; a namespace delete still waits while it holds a
+# FleetZone, FleetTask, FirmwareRollout or ModelRollout, whose DELETE checks stay Fail).
+# Each mutating webhook states its reason beside its policy. A mutating webhook failing
+# open stores the object without what it would have written; it does not skip a validation.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: Service
@@ -56,6 +66,9 @@ webhooks:
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
       {{- end }}
+    # Ignore (ADR-0046): writes no defaults, only the swarmada.io/estop-actor stamp. Skipped,
+    # the estop or resume still lands and is recorded without a verified actor; blocking a stop
+    # on attribution would invert the safety property.
     failurePolicy: Ignore
     name: mfirmwarerollout.swarmada.io
     rules:
@@ -74,6 +87,9 @@ webhooks:
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
       {{- end }}
+    # Ignore (ADR-0046): writes no defaults, only the swarmada.io/estop-actor stamp. Skipped,
+    # the estop or resume still lands and is recorded without a verified actor; blocking a stop
+    # on attribution would invert the safety property.
     failurePolicy: Ignore
     name: mfleetzone.swarmada.io
     rules:
@@ -92,6 +108,9 @@ webhooks:
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
       {{- end }}
+    # Ignore (ADR-0046): writes no defaults, only the swarmada.io/estop-actor stamp. Skipped,
+    # the estop or resume still lands and is recorded without a verified actor; blocking a stop
+    # on attribution would invert the safety property.
     failurePolicy: Ignore
     name: mmodelrollout.swarmada.io
     rules:
@@ -110,6 +129,10 @@ webhooks:
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
       {{- end }}
+    # Fail: runs the RobotClass merge (identity, adapter, per-field constraints and charging
+    # limits, telemetry cadence). The merge runs only on create or a spec.robotClass change, so
+    # a skipped merge is never retried and the Robot is stored without its class's safety
+    # limits.
     failurePolicy: {{ .Values.webhooks.failurePolicy }}
     name: mrobot.swarmada.io
     rules:
@@ -128,6 +151,9 @@ webhooks:
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
       {{- end }}
+    # Ignore (ADR-0046): writes no defaults, only the swarmada.io/estop-actor stamp. Skipped,
+    # the estop or resume still lands and is recorded without a verified actor; blocking a stop
+    # on attribution would invert the safety property.
     failurePolicy: Ignore
     name: mswarmadaconfig.swarmada.io
     rules:
@@ -148,6 +174,24 @@ metadata:
     cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ $certName }}
   {{- end }}
 webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-computeworkloadtemplate
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: {{ .Values.webhooks.failurePolicy }}
+    name: vcomputeworkloadtemplate.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["computeworkloadtemplates"]
+    sideEffects: None
   - admissionReviewVersions:
       - v1
     clientConfig:
@@ -182,6 +226,24 @@ webhooks:
       - apiGroups: ["swarmada.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
+        resources: ["fleetactions"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-fleetaction-delete
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: vfleetactiondelete.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
         resources: ["fleetactions"]
     sideEffects: None
   - admissionReviewVersions:
@@ -235,7 +297,7 @@ webhooks:
     rules:
       - apiGroups: ["swarmada.io"]
         apiVersions: ["v1"]
-        operations: ["DELETE"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["modelrollouts"]
     sideEffects: None
   - admissionReviewVersions:
@@ -262,6 +324,42 @@ webhooks:
       service:
         name: {{ $svc }}
         namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-robot-delete
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: vrobotdelete.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["robots"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-robot-status
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: {{ .Values.webhooks.failurePolicy }}
+    name: vrobotstatus.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["robots/status"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
         path: /validate-swarmada-io-v1-swarmadaconfig
       {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
       caBundle: {{ .Values.webhooks.caBundle }}
@@ -272,6 +370,24 @@ webhooks:
       - apiGroups: ["swarmada.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
+        resources: ["swarmadaconfigs"]
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-swarmada-io-v1-swarmadaconfig-delete
+      {{- if and (not .Values.webhooks.certManager.enabled) .Values.webhooks.caBundle }}
+      caBundle: {{ .Values.webhooks.caBundle }}
+      {{- end }}
+    failurePolicy: Ignore
+    name: vswarmadaconfigdelete.swarmada.io
+    rules:
+      - apiGroups: ["swarmada.io"]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
         resources: ["swarmadaconfigs"]
     sideEffects: None
   - admissionReviewVersions:

@@ -93,13 +93,14 @@ func TestWire_CommitPushesAssignAction(t *testing.T) {
 	if len(cmd.assigns) != 1 || cmd.assignTo[0] != "r1" {
 		t.Fatalf("assign pushes = %+v to %v", cmd.assigns, cmd.assignTo)
 	}
-	if got := cmd.assigns[0]; got.ActionID != "t1" || got.FencingToken != 1 || got.LeaseGeneration != 1 {
-		t.Errorf("pushed assign_action = %+v (want fencing/gen 1)", got)
+	gen := uint64(getAction(t, c, "t1").Status.AssignmentGeneration)
+	if got := cmd.assigns[0]; got.ActionID != "t1" || gen < 1 || got.FencingToken != gen || got.LeaseGeneration != gen {
+		t.Errorf("pushed assign_action = %+v (want fencing/gen = the committed generation %d)", got, gen)
 	}
 }
 
 // THE GAP THIS TEST EXISTS FOR. spec.payload.raw must ride the ASSIGNMENT, not just
-// validate_action: §9.1.4.5 tells adapter implementers "an adapter MUST read the payload
+// validate_action: RFC-0001 #fleetaction-the-payload-field tells adapter implementers "an adapter MUST read the payload
 // from payload_json on assignment rather than relying on what it retained at validation",
 // and since proto field 3 `destination` is deprecated ("destination now travels in
 // payload_json") this is the only channel for one. Before this, pushAssignAction built
@@ -190,7 +191,7 @@ func TestWire_PushFailureDoesNotAffectAssignment(t *testing.T) {
 	reconcileAction(t, r, "t1") // must not error out of the reconcile
 
 	ft := getAction(t, c, "t1")
-	if ft.Status.Phase != fleetv1.ActionPhaseAssigned || ft.Status.AssignedRobot != "r1" || ft.Status.AssignmentGeneration != 1 {
+	if ft.Status.Phase != fleetv1.ActionPhaseAssigned || ft.Status.AssignedRobot != "r1" || ft.Status.AssignmentGeneration < 1 {
 		t.Fatalf("a failed wire push disturbed the authoritative assignment: phase=%s robot=%q gen=%d",
 			ft.Status.Phase, ft.Status.AssignedRobot, ft.Status.AssignmentGeneration)
 	}

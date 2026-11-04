@@ -26,7 +26,7 @@ import (
 	"github.com/swarmada/swarmada/internal/probe"
 )
 
-// PROBE_FAILURE (§9.6.5.1). A single failed probe is noise; the fact worth sealing is the
+// PROBE_FAILURE (RFC-0001 #safety-required-events). A single failed probe is noise; the fact worth sealing is the
 // SUSTAINED failure that crosses the threshold, because that is what demotes the component
 // and takes its capabilities out of scheduling.
 

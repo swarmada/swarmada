@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-07
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 (§5.2.4 FleetTask, non-goals #9, #10), ADR-0002, ADR-0005, `docs/architecture.md`
+- **Related:** RFC-0001 ("FleetTask", non-goals #9, #10), ADR-0002, ADR-0005, `docs/architecture.md`
 
 ## Context
 
@@ -19,7 +19,7 @@ The *north* surface — how a task source (a WMS, a scheduler, an operator tool)
 submits work — has no such forces. A task source can reach the cluster's API
 server over HTTPS, submits declarative desired state (`FleetTask` resources), and
 requires neither pushed commands nor a high-cadence channel. RFC-0001 already has
-task sources create `FleetTask` resources through the API (§5.2.4) and defers the
+task sources create `FleetTask` resources through the API (RFC-0001, "FleetTask") and defers the
 question of how tasks are *authored* upstream (non-goal #10). What has not been
 recorded is the decision that follows from this: that the north surface **is** the
 Kubernetes API, and that Swarmada will not introduce a second, bespoke north-side
@@ -43,8 +43,8 @@ than reinventing them:
 - **Idempotency** — deterministic `FleetTask` names (and, where used, server-side
   apply with a stable field manager) make a repeated submission idempotent by
   construction.
-- **Flow control** — API Priority & Fairness and `ResourceQuota` bound submission
-  rate and object count using upstream primitives.
+- **Flow control** — API Priority & Fairness and `ResourceQuota` bound concurrent
+  submission requests and object count using upstream primitives.
 - **Versioning** — the CRD versioning rule in `docs/api-principles.md` governs;
   breaking changes move to a new API version with conversion, not a negotiated
   protocol handshake.

@@ -31,19 +31,20 @@ limitations under the License.
 // the streaming core is unit- and race-testable without envtest:
 //
 //   - [Registrar] answers Discover/Register (creating/looking up DiscoveredRobot
-//     and Robot; §9.3.1). The Kubernetes-backed implementation is wired in a
-//     later backlog step; until then [Server] uses a safe reject-all default.
+//     and Robot; RFC-0001 #control-plane-swarmada-api-server). The Kubernetes-backed implementation,
+//     [github.com/swarmada/swarmada/internal/registrar.Registrar], is wired by
+//     cmd/manager; a [Server] built without one uses a safe reject-all default.
 //   - [TelemetryIngestor] receives one translated frame per TelemetryPayload.
-//     [github.com/swarmada/swarmada/internal/telemetry.Ingestor] satisfies it
-//     directly; the live feed (backlog §E, step 2) injects a real Ingestor wired
-//     to the projector and TSDB. Until then telemetry frames are dropped, so no
-//     Robot.status write ever happens on a telemetry tick (RA-1).
+//     cmd/manager wires the telemetry router
+//     ([github.com/swarmada/swarmada/internal/telemetry.NewRouter]); a [Server] built
+//     without one drops telemetry frames. Either way no Robot.status write happens
+//     on a telemetry tick (RA-1).
 //
 // # Scope of this stage
 //
 // This is the first ControlStream step: handshake, Discover/Register dispatch,
 // and TelemetryPayload receipt/translation. SafetyStream (estop; §9.2.1, RA-6),
 // pushed Commands (assignment/lease/pause/verify), heartbeat requests, and the
-// per-message mTLS-SAN robot_id authorization (§9.2.7, backlog §F) are later
+// per-message mTLS-SAN robot_id authorization (deferred) are later
 // items; message arms this stage does not yet drive are accepted and ignored.
 package controlstream

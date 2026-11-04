@@ -31,6 +31,13 @@ import (
 // ErrNoEligibleRobot is returned when no robot satisfies the action's constraints.
 var ErrNoEligibleRobot = errors.New("no eligible robot available")
 
+// ErrExternalAction is returned when SelectRobot is called for an action carrying
+// spec.executor. Such an action is dispatched to a ComputeEndpoint, never to a
+// robot (Draft 4 Option B) — this is a distinct outcome from ErrNoEligibleRobot
+// (which means "no robot could do this work"), since here no robot search should
+// ever have been attempted.
+var ErrExternalAction = errors.New("action targets an executor endpoint, not a robot")
+
 // Scheduler selects the best robot from a slice of candidates for a given action.
 type Scheduler interface {
 	// SelectRobot returns the robot that should be assigned to action, or an error
@@ -54,11 +61,20 @@ type Scheduler interface {
 
 // DefaultScheduler implements a priority-weighted, capability-aware heuristic.
 //
-// Selection criteria (all must pass):
-//  1. Robot phase is Idle
-//  2. Robot has all required capabilities
-//  3. If action.Spec.Zone is set, robot must be in that zone
-//  4. If action.Spec.RobotSelector is set, only that robot is considered
+// Selection criteria (all must pass) — the RFC-0001 candidate filters this package
+// owns, being the ones decidable from a (robot, action) pair with no client read:
+//  1. filter 1 — robot phase is Idle
+//  2. filter 3 — robot has all required capabilities
+//  3. filter 5 — robot satisfies every parametric constraint
+//  4. filter 6 — if action.Spec.RobotSelector is set, only that robot is considered
+//
+// The CROSS-OBJECT filters are not here and must not be: filter 2 (zone leaf-set
+// containment) needs the FleetZone tree, filter 8 (ZoneMaintenance) needs the
+// maintenance windows, filter 9 needs the FleetAdapter and filter 10 the robot's
+// estop state read at dispatch time. All four are enforced at the FleetAction
+// controller's single choke point (internal/controller/dispatch_filters.go), which
+// covers the ordinary selection and the preemption search alike. A caller that
+// builds its own candidate list MUST route it through that choke point.
 //
 // Among eligible robots the one with the highest battery level is chosen to
 // avoid stranding a low-battery robot mid-action. When the action carries a
@@ -74,6 +90,15 @@ func NewDefaultScheduler() *DefaultScheduler { return &DefaultScheduler{} }
 
 // SelectRobot implements Scheduler.
 func (s *DefaultScheduler) SelectRobot(action *fleetv1.FleetAction, candidates []fleetv1.Robot, acceptDegraded, preferSameManufacturer, honorPreferredRobot bool) (fleetv1.Robot, error) {
+	// External actions (spec.executor set) are dispatched to a ComputeEndpoint,
+	// never to a robot. This early return is the top-of-the-hottest-loop branch
+	// the compute-action decision calls for: a
+	// bug here means either an external action consumes a robot or a robot action
+	// silently stops being scheduled, so it fires before any candidate is examined.
+	if action.Spec.Executor != nil {
+		return fleetv1.Robot{}, ErrExternalAction
+	}
+
 	eligible := make([]fleetv1.Robot, 0, len(candidates))
 
 	for _, robot := range candidates {
@@ -125,74 +150,36 @@ func (s *DefaultScheduler) SelectRobot(action *fleetv1.FleetAction, candidates [
 }
 
 // isEligible checks the hard constraints for a (robot, action) pair that are decidable from the
-// pair alone: filter 1 (phase) plus the zone/capability/selector/parametric matcher.
+// pair alone: filter 1 (phase) plus the capability/selector/parametric matcher.
 //
-// Filter 10 (active emergency stop) is NOT checked here. It is enforced by the caller, in
-// FleetActionReconciler.filterDispatchEligible, which is the single choke point for both the
+// The cross-object filters (2, 8, 9, 10) are NOT checked here. They are enforced by the caller,
+// in FleetActionReconciler.filterDispatchEligible, which is the single choke point for both the
 // normal selection and the preemption search and is the only place that emits an operator-facing
-// exclusion reason. A caller that builds its own candidate list MUST apply filter 10 itself.
+// exclusion reason. A caller that builds its own candidate list MUST route it through that choke
+// point.
 func (s *DefaultScheduler) isEligible(robot *fleetv1.Robot, action *fleetv1.FleetAction, acceptDegraded bool) bool {
-	// Must be Idle (not Busy, Charging, Degraded, Offline, or Pending), plus the
-	// zone/capability/selector match shared with preemption.
-	if robot.Status.Phase != fleetv1.RobotPhaseIdle {
-		return false
-	}
-	return robotMatchesAction(robot, action, acceptDegraded)
+	return ExcludedByForAssignment(robot, action, acceptDegraded) == nil
 }
 
-// RobotMatchesAction reports whether a robot satisfies a action's zone, capability,
-// and selector constraints — everything EXCEPT the robot's phase. The Scheduler
-// adds the Idle requirement on top of this (see isEligible); Critical-priority
-// preemption (RFC-0001 §9.1.4.3) reuses it to find a busy-but-otherwise-suitable
-// robot, so the two paths can never diverge on what "eligible" means. Degraded-
-// capability acceptance is resolved from the action's own spec field (the namespace
-// default is applied by the Scheduler's caller, not here).
+// RobotMatchesAction reports whether a robot satisfies the candidate filters this
+// package owns — filters 6, 3 and 5 — for everything EXCEPT the robot's phase. The
+// Scheduler adds the Idle requirement on top of this (see isEligible);
+// preemptor-band preemption (RFC-0001 #fleetaction-priority-semantics) reuses it to
+// find a busy-but-otherwise-suitable robot, so the two paths can never diverge on
+// what "eligible" means. Degraded-capability acceptance is resolved from the
+// action's own spec field (the namespace default is applied by the Scheduler's
+// caller, not here).
+//
+// ZONE IS NOT HERE, and its absence is deliberate. Filter 2 is leaf-set containment
+// against Robot.status.currentZone resolved through the FleetZone tree — a client
+// read this pure pair-wise matcher has no way to perform, and the string equality on
+// Robot.spec.zone that used to stand in for it was wrong twice over: it never
+// resolved a parent zone to its descendants, and it compared where a robot is
+// CONFIGURED rather than where it currently is. Filter 2 now lives beside the other
+// cross-object filters at the controller's choke point, which the preemption search
+// reads through as well, so removing it from here narrows no path.
 func RobotMatchesAction(robot *fleetv1.Robot, action *fleetv1.FleetAction) bool {
-	return robotMatchesAction(robot, action, acceptDegradedOf(action))
-}
-
-// robotMatchesAction is the shared matcher. acceptDegraded widens the set of
-// schedulable capabilities to include Degraded entries (§control-plane filter 3).
-func robotMatchesAction(robot *fleetv1.Robot, action *fleetv1.FleetAction, acceptDegraded bool) bool {
-	// Explicit robot selector overrides zone and capability checks.
-	if action.Spec.RobotSelector != "" {
-		return robot.Name == action.Spec.RobotSelector
-	}
-
-	// Zone constraint.
-	if action.Spec.Zone != "" && robot.Spec.Zone != action.Spec.Zone {
-		return false
-	}
-
-	// Capability requirements. Active capabilities always satisfy a requirement;
-	// Degraded entries do so only when the action accepts degraded capabilities
-	// (RFC-0001 §control-plane filter 3). Paused/Inactive/Unavailable/Failed
-	// entries are present in status.capabilities[] for observability but are never
-	// schedulable (§Robot Capability Derivation Truth Table).
-	capSet := make(map[string]bool, len(robot.Status.Capabilities))
-	for _, c := range robot.Status.Capabilities {
-		if c.Status == fleetv1.CapabilityStatusActive ||
-			(acceptDegraded && c.Status == fleetv1.CapabilityStatusDegraded) {
-			capSet[c.Name] = true
-		}
-	}
-	for _, required := range action.Spec.RequiredCapabilities {
-		if !capSet[required] {
-			return false
-		}
-	}
-
-	// Parametric constraints (§6.10.3): each declared constraint requires an Active
-	// capability that resolves the named parameter to at least the constraint value.
-	// A parameter no Active capability resolves is unsatisfied — a robot that cannot
-	// prove it meets the constraint is excluded (fail-closed).
-	for param, min := range action.Spec.Constraints {
-		if !robotMeetsConstraint(robot, param, min) {
-			return false
-		}
-	}
-
-	return true
+	return ExcludedBy(robot, action, acceptDegradedOf(action)) == nil
 }
 
 // RobotSatisfiesActionCapabilities reports whether the robot still meets the action's
@@ -206,13 +193,7 @@ func RobotSatisfiesActionCapabilities(robot *fleetv1.Robot, action *fleetv1.Flee
 	if action.Spec.RobotSelector != "" && robot.Name != action.Spec.RobotSelector {
 		return false
 	}
-	capSet := make(map[string]bool, len(robot.Status.Capabilities))
-	for _, c := range robot.Status.Capabilities {
-		if c.Status == fleetv1.CapabilityStatusActive ||
-			(acceptDegraded && c.Status == fleetv1.CapabilityStatusDegraded) {
-			capSet[c.Name] = true
-		}
-	}
+	capSet := schedulableCapabilities(robot, acceptDegraded)
 	for _, required := range action.Spec.RequiredCapabilities {
 		if !capSet[required] {
 			return false

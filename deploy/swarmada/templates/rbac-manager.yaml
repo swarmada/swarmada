@@ -5,16 +5,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Controller-manager ClusterRole + binding.
 #
-# DERIVED FROM config/rbac/role.yaml (controller-gen output) AND
-# config/rbac/fleetaction_supplemental_role.yaml. The two are folded into ONE
-# ClusterRole here: the supplement exists in config/ only because controller-gen
-# silently drops the fleetactions/{,status,finalizers} + robots/finalizers markers
-# on regeneration (see that file's header); a hand-templated chart role has no
-# such quirk, so those rules are simply included directly.
+# The rules below EQUAL config/rbac/role.yaml (controller-gen output from the
+# +kubebuilder:rbac markers), rule for rule. Only the role, binding and
+# ServiceAccount names and the namespace are templated.
 #
-# Keep in sync with config/rbac — if role.yaml changes, update this block
-# (step 5 adds `make helm-sync` to regenerate it from config/, so drift is not
-# silent).
+# ENFORCED, not promised: `make helm-verify-sync` renders this chart and fails on
+# any difference in either direction (hack/verify-helm-render.py). A chart that
+# grants less than role.yaml is a controller that gets 403s on a Helm install and
+# nowhere else; one that grants more is over-privileged on every install.
+#
+# After changing a marker: `make manifests`, then copy role.yaml's rules here.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -23,7 +23,6 @@ metadata:
   labels:
     {{- include "swarmada.labels" . | nindent 4 }}
 rules:
-# ── config/rbac/role.yaml ──
 - apiGroups:
   - ""
   resources:
@@ -40,6 +39,12 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
 - apiGroups:
   - authorization.k8s.io
   resources:
@@ -61,8 +66,24 @@ rules:
 - apiGroups:
   - swarmada.io
   resources:
+  - computeendpoints
+  - fleetadapters
+  - resultsinks
+  - robotclasses
+  - robotprobes
+  - semanticevents
+  - semanticeventsources
+  - tasktriggers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
   - discoveredrobots
   verbs:
+  - create
   - delete
   - get
   - list
@@ -72,14 +93,19 @@ rules:
   resources:
   - discoveredrobots/status
   - firmwarerollouts/status
+  - fleetactions/status
   - fleetadapters/status
+  - fleettasks/status
   - fleetzones/status
   - modelpolicies/status
   - modelrollouts/status
   - robotclasses/status
   - robotprobes/status
   - robots/status
+  - semanticevents/status
+  - semanticeventsources/status
   - swarmadaconfigs/status
+  - tasktriggers/status
   - zonemaintenances/status
   verbs:
   - get
@@ -89,20 +115,47 @@ rules:
   - swarmada.io
   resources:
   - firmwarerollouts
-  - fleetadapters
-  - robotclasses
-  - robotprobes
   verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions
+  - robots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleetactions/finalizers
+  - fleettasks/finalizers
+  - robots/finalizers
+  - zonemaintenances/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - swarmada.io
+  resources:
+  - fleettasks
+  verbs:
+  - create
   - get
   - list
   - watch
 - apiGroups:
   - swarmada.io
   resources:
-  - fleetactions
   - fleetzones
   - modelpolicies
-  - robots
   - zonemaintenances
   verbs:
   - get
@@ -114,46 +167,23 @@ rules:
   - swarmada.io
   resources:
   - modelrollouts
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
   - swarmadaconfigs
   verbs:
   - create
   - get
   - list
-  - watch
-- apiGroups:
-  - swarmada.io
-  resources:
-  - zonemaintenances/finalizers
-  verbs:
-  - update
-# ── config/rbac/fleetaction_supplemental_role.yaml (markers controller-gen drops) ──
-- apiGroups:
-  - swarmada.io
-  resources:
-  - fleetactions
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
   - patch
-  - delete
-- apiGroups:
-  - swarmada.io
-  resources:
-  - fleetactions/status
-  verbs:
-  - get
   - update
-  - patch
-- apiGroups:
-  - swarmada.io
-  resources:
-  - fleetactions/finalizers
-  - robots/finalizers
-  verbs:
-  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

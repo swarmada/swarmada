@@ -217,7 +217,7 @@ func TestEnvtest_ModelRolloutStampsSuspension(t *testing.T) {
 			ModelURI:          "oci://registry/models/item-recognition:3.2.1",
 			ModelChecksum:     "sha256:" + strings.Repeat("a", 64),
 			Strategy:          fleetv1.RolloutStrategy{RollingUpdate: &fleetv1.RollingUpdateStrategy{MaxUnavailable: "1"}},
-			SafetyConstraints: fleetv1.RolloutSafetyConstraints{MinBatteryPct: 30, RequireIdleState: true},
+			SafetyConstraints: fleetv1.RolloutSafetyConstraints{MinBatteryPct: 30, RequireIdleState: apiBool(true)},
 		},
 	}
 	if err := envK8s.Create(ctx, ro); err != nil {

@@ -40,16 +40,19 @@ func heldAction(name, robot string, phase fleetv1.ActionPhase, ds fleetv1.Desire
 	return a
 }
 
-// ── Paused: the §9.6.2.4 split, reached declaratively ────────────────────────
+// ── Paused: the estop-behaviour split, reached declaratively ────────────────────────
 
 func TestDesiredPaused_AssignedReleasesRobotAndZoneSlot(t *testing.T) {
-	// Table §9.6.2.4 row `Assigned`: the robot never started, so the binding goes back and
-	// the zone slot is freed for someone who can use it.
+	// Table estop-behaviour row `Assigned`: the binding goes back and the zone slot is freed for
+	// someone who can use it. The assignment was pushed, so the robot is told to stop; its
+	// acknowledgement is the proof on which its own record of the action is released.
 	a := heldAction("t1", "r1", fleetv1.ActionPhaseAssigned, fleetv1.DesiredStatePaused, nil)
 	a.Spec.Zone = "z1"
 	tdeDouble := &fakeTDE{}
 	r, c := newActionReconciler(t, a, robotInPhase("r1", fleetv1.RobotPhaseAssigned, "t1"))
 	r.TDE = tdeDouble
+	cmd := &fakeCommander{cancelAck: true, cancelDisp: command.CancelStoppedSafely}
+	r.Commander = cmd
 
 	reconcileAction(t, r, "t1")
 
@@ -61,8 +64,11 @@ func TestDesiredPaused_AssignedReleasesRobotAndZoneSlot(t *testing.T) {
 		t.Errorf("Assigned hold kept the binding: robot=%q lease=%v",
 			ft.Status.AssignedRobot, ft.Status.LeaseExpiresAt)
 	}
+	if len(cmd.cancelTo) != 1 || cmd.cancelTo[0] != "r1" {
+		t.Errorf("the hold did not tell the robot to stop: cancels to %v", cmd.cancelTo)
+	}
 	if rob := getRobot(t, c, "r1", actionNS); rob.Status.AssignedAction != "" {
-		t.Errorf("robot still bound to %q after an Assigned hold", rob.Status.AssignedAction)
+		t.Errorf("robot still records %q after its adapter acknowledged the cancel", rob.Status.AssignedAction)
 	}
 	if tdeDouble.releases != 1 {
 		t.Errorf("zone slot releases = %d, want 1 — a robot that never entered the zone "+
@@ -70,9 +76,31 @@ func TestDesiredPaused_AssignedReleasesRobotAndZoneSlot(t *testing.T) {
 	}
 }
 
+func TestDesiredPaused_AssignedKeepsTheRecordUntilTheRobotIsProvablyOff(t *testing.T) {
+	// The same hold, with an adapter that does not acknowledge the cancel: the binding is
+	// released as the table says, but the robot keeps recording the action, so a requeue cannot
+	// give it to a second robot while this one may still be moving (the executor guard).
+	a := heldAction("t1", "r1", fleetv1.ActionPhaseAssigned, fleetv1.DesiredStatePaused, nil)
+	r, c := newActionReconciler(t, a, robotInPhase("r1", fleetv1.RobotPhaseAssigned, "t1"))
+	r.Commander = &fakeCommander{cancelAck: false}
+
+	reconcileAction(t, r, "t1")
+
+	ft := getAction(t, c, "t1")
+	if ft.Status.Phase != fleetv1.ActionPhasePaused || ft.Status.AssignedRobot != "" {
+		t.Fatalf("phase=%s robot=%q, want Paused with the binding released", ft.Status.Phase, ft.Status.AssignedRobot)
+	}
+	if !strings.Contains(ft.Status.Message, "has not acknowledged") {
+		t.Errorf("message = %q, want it to say the robot has not acknowledged the stop", ft.Status.Message)
+	}
+	if rob := getRobot(t, c, "r1", actionNS); rob.Status.AssignedAction != "t1" {
+		t.Errorf("robot's record of t1 released without proof: %q", rob.Status.AssignedAction)
+	}
+}
+
 func TestDesiredPaused_InProgressKeepsRobotBoundAndLeaseRenewed(t *testing.T) {
-	// Table §9.6.2.4 row `InProgress`: the robot is physically committed. Releasing it
-	// here would let a second robot take the action — the double-execution §9.6.3.5
+	// Table estop-behaviour row `InProgress`: the robot is physically committed. Releasing it
+	// here would let a second robot take the action — the double-execution RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee
 	// exists to prevent — and the reason for the hold does not change that.
 	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	a := heldAction("t1", "r1", fleetv1.ActionPhaseInProgress, fleetv1.DesiredStatePaused, lease)
@@ -280,7 +308,7 @@ func TestDesiredPaused_EstopArrivingAfterADeclarativeHoldDoesNotRePause(t *testi
 	}
 }
 
-// A Pending action is not executing, so §9.6.2.4's table says `Pending` → no change and
+// A Pending action is not executing, so RFC-0001 #safety-fleetaction-behaviour-during-estop's table says `Pending` → no change and
 // the hold reuses that verbatim. It is worth pinning: a hold that silently terminated
 // queued work would be a very different feature.
 func TestDesiredPaused_PendingActionIsNotHeld(t *testing.T) {
@@ -296,6 +324,6 @@ func TestDesiredPaused_PendingActionIsNotHeld(t *testing.T) {
 	reconcileAction(t, r, "t1")
 
 	if got := getAction(t, c, "t1").Status.Phase; got == fleetv1.ActionPhasePaused {
-		t.Error("a Pending action was moved to Paused; §9.6.2.4 specifies no change")
+		t.Error("a Pending action was moved to Paused; estop-behaviour specifies no change")
 	}
 }

@@ -27,17 +27,25 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
+	"github.com/swarmada/swarmada/internal/executorguard"
 	"github.com/swarmada/swarmada/internal/metrics"
+	"github.com/swarmada/swarmada/internal/safety"
 )
 
 const (
@@ -69,8 +77,9 @@ const (
 	conditionTypeConnectivityCritical = "ConnectivityCritical"
 
 	// heartbeatConfirmAttempts / heartbeatConfirmInterval are the confirming exchange
-	// from §9.6.3.2: three HeartbeatRequests, five seconds apart, before a robot whose
-	// telemetry has gone quiet is declared Offline.
+	// from RFC-0001 #safety-control-plane-response: three HeartbeatRequests, five seconds apart, before a robot whose
+	// status.connectivity.lastSeenAt (stamped from adapter presence) has aged past the
+	// threshold is declared Offline.
 	heartbeatConfirmAttempts = 3
 	heartbeatConfirmInterval = 5 * time.Second
 )
@@ -87,29 +96,134 @@ const (
 // +kubebuilder:rbac:groups=swarmada.io,resources=robots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=swarmada.io,resources=swarmadaconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleetactions,verbs=get
+// +kubebuilder:rbac:groups=swarmada.io,resources=fleetzones,verbs=get
 
 // RobotReconciler reconciles Robot objects.
 type RobotReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// Audit records ROBOT_ADMITTED (§9.6.5.1) the first time a Robot is reconciled.
+	// Audit records ROBOT_ADMITTED (RFC-0001 #safety-required-events) the first time a Robot is reconciled.
 	// Nil disables the record; reconciliation is unaffected.
 	Audit audit.Recorder
 
 	// Liveness runs the confirming heartbeat exchange before a robot is declared
-	// Offline (§9.6.3.2). Nil disables confirmation and the transition falls back to
+	// Offline (RFC-0001 #safety-control-plane-response). Nil disables confirmation and the transition falls back to
 	// elapsed time alone — the pre-confirmation behaviour, which is the correct
 	// fallback: a control plane with no push path must still detect a dead robot.
 	Liveness LivenessProber
+
+	// Projection keeps the telemetry projector's per-robot cache bound to the Robot
+	// GENERATION it describes: without it, a Robot deleted and recreated under the
+	// same swarmada.io/robot-id inherits a stale cache and never re-establishes its
+	// telemetry-derived status (batteryPercent, hardware) for as long as the manager
+	// runs. Nil disables the reset and restores that behaviour; it writes no status
+	// either way (RA-1) — see [RobotProjectionResetter].
+	Projection *RobotProjectionResetter
+
+	// Positions tells the ZonePositionOverdue condition whether a position frame has
+	// been observed for a robot whose persisted status shows none: a position that
+	// matched no polygon leaves the same status as no position at all. The
+	// ZoneController satisfies it. Nil leaves only the persisted evidence, and a robot
+	// between zones then reads as NoPositionReported. See robot_position_overdue.go.
+	Positions PositionObservations
+
+	// Recorder emits the AutoRemovalHeld Event when Offline auto-removal leaves a robot
+	// that holds a stop in place. Nil emits nothing; the robot is left in place either way.
+	Recorder record.EventRecorder
+
+	// autoRemovalHeld is what each robot left in place was last reported holding, by UID,
+	// so the Event is emitted once per change and not on every reconcile.
+	autoRemovalHeld sync.Map
+
+	// positionOverdueThreshold overrides positionOverdueThreshold for tests in this
+	// package. Zero uses the fixed value.
+	positionOverdueThreshold time.Duration
+
+	// Frames is the per-robot last-frame clock (the telemetry Router). Nil disables
+	// robot-silence detection, leaving Offline to adapter presence alone.
+	Frames RobotFrameClock
+
+	// Holds releases the shared-resource holds and waits of a deleted Robot at once, and
+	// tells each waiter promoted by that release (the TDE engine). Nil leaves them until
+	// the next TDE recovery.
+	Holds SharedResourceHolds
 
 	// beats counts consecutive unanswered confirmations per robot. Deliberately
 	// in-memory: it is scratch state for one Offline decision, and persisting it would
 	// add three status writes per event to etcd for a value nobody reads. Leader
 	// election means one reconciler owns it; losing it on restart costs at most one
-	// extra confirmation round, and the robot's telemetry age is unchanged either way.
+	// extra confirmation round, and the robot's lastSeenAt age is unchanged either way.
 	beatsMu sync.Mutex
 	beats   map[types.NamespacedName]int
+}
+
+// SharedResourceHolds releases the adapter-initiated shared-resource holds and waits in a
+// namespace whose Robot no longer exists (RFC-0001 #tde-normative-invariants, TDE-7).
+type SharedResourceHolds interface {
+	ReleaseAbsentRobots(ctx context.Context, namespace string) error
+}
+
+// RobotFrameClock reports how long a robot has sent nothing of its own.
+// [github.com/swarmada/swarmada/internal/telemetry.Router] satisfies it.
+type RobotFrameClock interface {
+	// Silence is the time since the robot's last frame; seen is false when no frame has
+	// arrived since the clock started, and silence is then measured from its start.
+	Silence(namespace, robotID string) (silence time.Duration, seen bool)
+}
+
+// robotReportedPhase is the part of a RobotFrameClock that also knows the phase each
+// robot last reported. [github.com/swarmada/swarmada/internal/telemetry.Router]
+// satisfies it; a clock that does not is read as having no report.
+type robotReportedPhase interface {
+	LastReportedPhase(namespace, robotID string) (fleetv1.RobotPhase, bool)
+}
+
+// livePhase is the phase a robot on a liveness-owned phase advances to once it is live:
+// Error when its own latest report says Error, else steadyPhaseForLive. The status sink
+// writes a reported Error only over a phase the robot is live in, so a robot that goes
+// Offline while in Error, or is admitted while reporting it, gets it here: the projector
+// does not report an unchanged phase again, and without this the robot would come back
+// Idle and be assigned work while it reports a fault (RFC-0001
+// #safety-scope-and-responsibility-boundary, Layer 3).
+func (r *RobotReconciler) livePhase(robot *fleetv1.Robot) fleetv1.RobotPhase {
+	if rp, ok := r.Frames.(robotReportedPhase); ok {
+		if p, seen := rp.LastReportedPhase(robot.Namespace, robot.Annotations[RobotIDAnnotation]); seen &&
+			p == fleetv1.RobotPhaseError {
+			return fleetv1.RobotPhaseError
+		}
+	}
+	return steadyPhaseForLive(robot)
+}
+
+// robotSilence reports whether the robot has been silent past its threshold while its
+// adapter may still be heartbeating (RFC-0001 #control-plane-robot-health-and-connectivity).
+//
+// lastSeenAt measures the ADAPTER: it is stamped for every robot the adapter serves. So a
+// robot that stops sending behind a live adapter needs its own clock, and this is it.
+//
+// The threshold is the namespace Offline threshold or three of the robot's telemetry
+// intervals, whichever is longer. telemetryIntervalSeconds is the maximum gap an adapter
+// may leave between a robot's TelemetryPayload frames, so three missed frames is a robot
+// that has stopped reporting, never a slow one; and the namespace threshold stays the
+// floor so a short interval does not make this clock stricter than the adapter's.
+//
+// The clock is judged only for a robot known to stream: one heard from since the clock
+// started, or one whose status already carries telemetry-owned fields (battery or
+// hardware), which only the telemetry sink and the probe write. A robot whose adapter
+// sends no telemetry at all is left to adapter presence rather than declared silent.
+func (r *RobotReconciler) robotSilence(robot *fleetv1.Robot, offlineThreshold time.Duration) (silence, threshold time.Duration, silent bool) {
+	id := robot.Annotations[RobotIDAnnotation]
+	if r.Frames == nil || id == "" {
+		return 0, 0, false
+	}
+	silence, seen := r.Frames.Silence(robot.Namespace, id)
+	streamed := seen || robot.Status.BatteryPercent != nil || len(robot.Status.Hardware) > 0
+	threshold = offlineThreshold
+	if iv := robot.Spec.TelemetryIntervalSeconds; iv != nil && *iv > 0 {
+		threshold = max(threshold, 3*time.Duration(*iv)*time.Second)
+	}
+	return silence, threshold, streamed && silence > threshold
 }
 
 // LivenessProber asks a robot's adapter to confirm the robot is alive.
@@ -170,13 +284,32 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	robot := &fleetv1.Robot{}
 	if err := r.Get(ctx, req.NamespacedName, robot); err != nil {
 		if errors.IsNotFound(err) {
-			// Robot was deleted; clean up any assigned actions.
+			// Robot was deleted. A lift or door it held is released now, not at the next
+			// TDE recovery, and the waiter promoted is told. The object is gone, so its
+			// robot_id is not known here; the engine releases every hold whose Robot no
+			// longer exists, the test recovery applies.
+			if r.Holds != nil {
+				if err := r.Holds.ReleaseAbsentRobots(ctx, req.Namespace); err != nil {
+					return ctrl.Result{}, fmt.Errorf("releasing a deleted robot's shared-resource holds: %w", err)
+				}
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching robot: %w", err)
 	}
 
 	original := robot.DeepCopy()
+
+	// Rebind the telemetry projector's cache to THIS Robot generation before anything
+	// else. A recreated object carries a new UID and an empty status while the
+	// projector still holds the previous generation's material state, and an
+	// unchanged telemetry stream then matches that stale state and emits nothing —
+	// the recreated robot would report no batteryPercent and no hardware until the
+	// manager restarted. This drops the stale entry so the next frame re-establishes
+	// status through the normal projector path. It writes nothing here, but a drop
+	// causes one status write on that next frame, so it drops only when this
+	// namespace's binding changed object (RA-1; see RobotProjectionResetter).
+	r.Projection.Observe(robot.Namespace, robot.Annotations[RobotIDAnnotation], robot.UID)
 
 	// Offline and Critical thresholds are namespace tunables (spec.health.*); resolve
 	// both from a single SwarmadaConfig read, each failing safe to its default.
@@ -187,13 +320,31 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// §Robot Schema) — there is no longer a separate top-level field.
 	if robot.Status.Connectivity != nil && robot.Status.Connectivity.LastSeenAt != nil {
 		age := time.Since(robot.Status.Connectivity.LastSeenAt.Time)
+		silence, silenceThreshold, silent := r.robotSilence(robot, heartbeatTimeout)
 		switch {
+		case silent && robot.Status.Phase != fleetv1.RobotPhaseOffline:
+			// The robot itself has gone quiet behind a live adapter. No confirm step: the
+			// exchange runs through the same adapter whose presence is already known, and
+			// its answer would prove the adapter, not the robot. Written on the edge only
+			// (the case requires phase != Offline); the clock itself writes nothing.
+			logger.Info("robot sent nothing past its silence threshold, marking Offline",
+				"silence", silence, "threshold", silenceThreshold, "adapterAge", age)
+			r.clearBeats(robot)
+			robot.Status.Phase = fleetv1.RobotPhaseOffline
+			r.setCondition(robot, conditionTypeReady, metav1.ConditionFalse,
+				"RobotSilent", fmt.Sprintf("No frame from the robot for %s (threshold %s); its adapter may still be live",
+					silence.Round(time.Second), silenceThreshold))
+			r.recordRobotOffline(ctx, robot, time.Now().Add(-silence), silenceThreshold)
+		case silent:
+			// Still silent and already Offline: nothing changes, and the adapter's fresh
+			// presence below must not bring it back.
 		case age > heartbeatTimeout && robot.Status.Phase != fleetv1.RobotPhaseOffline:
-			// Confirm before declaring (§9.6.3.2). Stale telemetry is not the same fact as
-			// a dead robot: a robot whose telemetry stalls while its stream is still live
-			// was, until now, declared Offline without ever being asked. That matters
+			// Confirm before declaring (RFC-0001 #safety-control-plane-response). An aged lastSeenAt is not the same fact as
+			// a dead robot: lastSeenAt is stamped from adapter presence, and a robot whose
+			// adapter presence lapses while the robot is still live was once declared
+			// Offline without ever being asked. That matters
 			// because Offline is the single trigger for in-flight action revocation
-			// (§9.6.3.5) — a false Offline revokes work from a robot that is still doing it.
+			// (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee) — a false Offline revokes work from a robot that is still doing it.
 			//
 			// The exchange is spread across reconciles rather than slept through inline:
 			// three attempts five seconds apart is fifteen seconds, and holding a workqueue
@@ -201,12 +352,12 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			// the whole fleet.
 			confirmed, attempts, err := r.confirmLiveness(ctx, robot)
 			if confirmed {
-				logger.Info("telemetry stale but robot answered a heartbeat; not marking Offline",
+				logger.Info("lastSeenAt stale but robot answered a heartbeat; not marking Offline",
 					"age", age, "attempts", attempts)
 				// Answered: leave the phase alone and come back when the next attempt
-				// would be due. lastSeenAt is untouched on purpose — the robot answered a
-				// liveness probe, it did not send telemetry, and conflating the two would
-				// hide a genuinely stalled telemetry stream behind a healthy-looking age.
+				// would be due. lastSeenAt is untouched on purpose — it records adapter
+				// presence, and a per-robot heartbeat answer is a different fact; writing
+				// it here would hide a lapsed adapter presence behind a healthy-looking age.
 				return ctrl.Result{RequeueAfter: heartbeatConfirmInterval}, nil
 			}
 			if attempts < heartbeatConfirmAttempts {
@@ -228,7 +379,8 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			// Live: the Fleet Adapter is projecting fresh liveness (ADR-0026). Mark
 			// Ready and advance a robot sitting on a liveness-owned phase — Discovered
 			// (freshly admitted) or Offline (recovering) — to its steady summary:
-			// InProgress when it holds an assigned action, else Idle (ADR-0029).
+			// InProgress when it holds an assigned action, else Idle (ADR-0029), or
+			// Error when the robot's own latest report says Error (livePhase).
 			// Scheduler-owned (Idle/Assigned/InProgress), Maintenance, Charging and
 			// Error are left to their owners. The advance is derived from
 			// conditions/liveness/assignedAction, rides the material-change patch below,
@@ -237,7 +389,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			// liveness only; schedulability (Idle + Connected + Conformance) is a
 			// separate gate and is not touched here.
 			if isLivenessOwnedPhase(robot.Status.Phase) {
-				robot.Status.Phase = steadyPhaseForLive(robot)
+				robot.Status.Phase = r.livePhase(robot)
 			}
 			if cur := findCondition(robot, conditionTypeReady); cur == nil || cur.Status != metav1.ConditionTrue {
 				r.setCondition(robot, conditionTypeReady, metav1.ConditionTrue,
@@ -249,7 +401,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.setCondition(robot, conditionTypeReady, metav1.ConditionUnknown,
 			"Initialising", "Waiting for first Fleet Adapter heartbeat")
 		// First time the control plane has ever observed this Robot, so this is the
-		// admission (§9.6.5.1 ROBOT_ADMITTED). An unset phase is the idempotence
+		// admission (RFC-0001 #safety-required-events ROBOT_ADMITTED). An unset phase is the idempotence
 		// marker: it is written exactly once and never returns to "", so the entry
 		// cannot be duplicated on requeue and no extra annotation is needed. This
 		// covers BOTH admission paths — `swarmctl admit` and auto-admit (ADR-0014) —
@@ -262,7 +414,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	robot.Status.Capabilities = deriveCapabilities(robot)
 	r.recordCapabilityDegradations(ctx, robot, priorCaps, robot.Status.Capabilities)
 
-	// ── 3a. Derive aggregate health (§9.3.3) ──────────────────────────────────
+	// ── 3a. Derive aggregate health (RFC-0001 #control-plane-robot-health-and-connectivity) ──────────────────────────────────
 	// A pure summary of the two collections resolved immediately above — no lookups,
 	// no clock, no I/O — so it adds NO etcd write of its own: like the OfflineSince
 	// write below it rides the material-change patch in section 4 (RA-1: never a
@@ -276,7 +428,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// signals harder to read.
 	robot.Status.Health = deriveHealth(robot)
 
-	// ── 3b. Offline-duration accounting (§9.3.8) ──────────────────────────────
+	// ── 3b. Offline-duration accounting (RFC-0001 #control-plane-observability-prometheus-metrics-contract) ──────────────────────────────
 	// Anchor OfflineSince when the robot enters Offline; at reconnect (phase left
 	// Offline) observe the completed span and clear the anchor. Purely
 	// observational — the OfflineSince write rides the existing material-change
@@ -295,7 +447,7 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		robot.Status.OfflineSince = nil
 	}
 
-	// ── 3c. Prolonged-offline "Critical" escalation (ADR-0011, §9.1.11 health) ──
+	// ── 3c. Prolonged-offline "Critical" escalation (ADR-0011, RFC-0001 #swarmadaconfig health) ──
 	// A robot Offline for at least connectivityCriticalThresholdSeconds is surfaced
 	// as a ConnectivityCritical condition — NOT a phase, since it is still Offline.
 	// The condition is written only on its True↔False edges, so it rides the
@@ -316,28 +468,69 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// provably dead — e.g. a robot killed without a clean disconnect. Gated so a warehouse
 	// (operator-created) robot is never removed: the Robot must be auto-admitted, the namespace
 	// must opt in, the offline dwell must have elapsed, and any assigned action's lease must be
-	// provably dead (§9.6.3.5; a nil horizon or a transient lookup error is NOT death — fail
+	// provably dead (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee; a nil horizon or a transient lookup error is NOT death — fail
 	// closed). This is a lifecycle action driven by presence + lease death, never a telemetry
 	// tick (RA-1), and it short-circuits the status patch since the object is being deleted.
+	//
+	// A robot that holds a stop (safety.HeldBy: an estop not Normal, or a Failed component)
+	// is left in place, with an Event. The stop lives only in its status, so the robot that
+	// auto-admit created again would be Normal and dispatchable, released with no operator
+	// (RFC-0001 #safety-estop-state-machine). Once released, it is removed on a later pass.
 	if robot.Status.Phase == fleetv1.RobotPhaseOffline && robot.Status.OfflineSince != nil && isAutoAdmitted(robot) {
 		if enabled, grace := r.autoRemovePolicy(ctx, robot.Namespace); enabled &&
 			!time.Now().Before(robot.Status.OfflineSince.Add(grace)) &&
 			r.assignedLeaseProvablyDead(ctx, robot) {
-			logger.Info("auto-removing offline auto-admitted robot: adapter presence gone and lease provably dead (ADR-0030)",
-				"offlineSince", robot.Status.OfflineSince.Time, "grace", grace)
-			if err := r.Delete(ctx, robot); err != nil && !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("auto-removing offline robot: %w", err)
+			if held := safety.HeldBy(robot); held != "" {
+				r.recordAutoRemovalHeld(robot, held)
+			} else {
+				r.autoRemovalHeld.Delete(robot.UID)
+				logger.Info("auto-removing offline auto-admitted robot: adapter presence gone and lease provably dead (ADR-0030)",
+					"offlineSince", robot.Status.OfflineSince.Time, "grace", grace)
+				if err := r.Delete(ctx, robot); err != nil && !errors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("auto-removing offline robot: %w", err)
+				}
+				return ctrl.Result{}, nil
 			}
-			return ctrl.Result{}, nil
 		}
 	}
+
+	// ── 3e. A robot no position frame has placed (RFC-0001 #fleetzone-zone-controller-current-zone-derivation) ──
+	// Published for a robot whose declared zone needs a position frame to place it, on
+	// the ConnectivityCritical shape: False while it awaits its first frame, True once
+	// that has lasted positionOverdueThreshold. It rides the material-change patch
+	// below and is edited only when its state changes (RA-1). A failed zone read leaves
+	// the condition as it was rather than failing the reconcile, which also carries
+	// the offline detection above.
+	untilOverdue, err := r.reconcileZonePositionOverdue(ctx, robot)
+	if err != nil {
+		logger.Error(err, "evaluating ZonePositionOverdue; condition left unchanged")
+	}
+
+	// ── 3f. One robot per wire robot-id ───────────────────────────────────────
+	// A Robot whose wire robot-id another Robot also carries gets the RobotIDConflict
+	// condition, on the transition only (robot_id_conflict.go). The dispatch choke point
+	// withholds every such Robot; this is the half an operator reads.
+	r.reconcileRobotIDConflict(ctx, robot)
 
 	// ── 4. Persist status only on a material change ───────────────────────────
 	// Skip no-op patches so unchanged robots do not generate a status write to
 	// etcd on every periodic reconcile (RA-1: Robot.status is a throttled
 	// projection of material state, not a per-tick heartbeat sink).
+	//
+	// A write that changes the phase carries the resourceVersion it read. The robot is
+	// read from the cache, and the phase has other writers: a view taken before the
+	// scheduler's claim still says Discovered, and a plain merge of the advance from it
+	// would write Idle over InProgress and leave the claim in place. A conflict requeues,
+	// and the next reconcile re-reads.
 	if !reflect.DeepEqual(original.Status, robot.Status) {
-		if err := r.Status().Patch(ctx, robot, client.MergeFrom(original)); err != nil {
+		patch := client.MergeFrom(original)
+		if original.Status.Phase != robot.Status.Phase {
+			patch = client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+		}
+		if err := r.Status().Patch(ctx, robot, patch); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("patching robot status: %w", err)
 		}
 	}
@@ -350,6 +543,11 @@ func (r *RobotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		if untilCritical := time.Until(robot.Status.OfflineSince.Add(criticalTimeout)); untilCritical > 0 && untilCritical < requeue {
 			requeue = untilCritical
 		}
+	}
+	// Likewise aim at the ZonePositionOverdue horizon, so the escalation is not late by
+	// up to a whole requeue period.
+	if untilOverdue > 0 && untilOverdue < requeue {
+		requeue = untilOverdue
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
 }
@@ -392,6 +590,30 @@ func (r *RobotReconciler) reconcileConnectivityCritical(robot *fleetv1.Robot, cr
 	return false
 }
 
+// EventAutoRemovalHeld is the reason of the Event emitted when Offline auto-removal
+// leaves a robot that holds a stop in place.
+const EventAutoRemovalHeld = "AutoRemovalHeld"
+
+// recordAutoRemovalHeld reports that auto-removal left robot in place because of held,
+// once for each value held takes.
+func (r *RobotReconciler) recordAutoRemovalHeld(robot *fleetv1.Robot, held string) {
+	if prev, ok := r.autoRemovalHeld.Swap(robot.UID, held); ok && prev == held {
+		return
+	}
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Event(robot, corev1.EventTypeWarning, EventAutoRemovalHeld, fmt.Sprintf(
+		"offline auto-removal left this robot in place: it holds a stop (%s), which lives only in its "+
+			"status, so auto-admit would create it again Normal and dispatchable. It stays in place, held, "+
+			"until the robot reports again and is released (an estop by an authorized clear and an "+
+			"operator's confirmed resume, `swarmctl estop resume`; a Failed component when the robot "+
+			"reports it repaired). While it is Offline it cannot be released: the resume check refuses "+
+			"an Offline robot. A robot that never reports again stays held, and is removed only with its "+
+			"namespace: no command decommissions one robot",
+		held))
+}
+
 // isAutoAdmitted reports whether the Robot was created by auto-admit (ADR-0014) and is thus
 // eligible for opt-in offline auto-removal. Operator-created robots lack the marker and are
 // never removed (ADR-0030).
@@ -417,7 +639,7 @@ func (r *RobotReconciler) autoRemovePolicy(ctx context.Context, namespace string
 
 // assignedLeaseProvablyDead reports whether the robot holds no live lease: it has no assigned
 // action, the named FleetAction is gone, or that action's lease horizon is provably past
-// (§9.6.3.5, reusing leaseProvablyDead/leaseTimings from the action controller, so this
+// (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee, reusing leaseProvablyDead/leaseTimings from the action controller, so this
 // controller and the FleetAction controller judge lease death by the SAME namespace-resolved
 // skew — ADR-0044). A nil horizon is NOT proof of death, and a transient lookup error FAILS
 // CLOSED (returns false) so removal never races a robot that might still be executing (ADR-0030).
@@ -427,13 +649,21 @@ func (r *RobotReconciler) assignedLeaseProvablyDead(ctx context.Context, robot *
 		return true
 	}
 	action := &fleetv1.FleetAction{}
+	_, _, skew := leaseTimings(ctx, r.Client, robot.Namespace)
 	if err := r.Get(ctx, client.ObjectKey{Namespace: robot.Namespace, Name: name}, action); err != nil {
 		if errors.IsNotFound(err) {
-			return true
+			// The action is gone, and with it the lease horizon it recorded. The robot may still
+			// run it on the lease it was last given, so the horizon is bounded by the longest
+			// lease the configuration admits plus the skew margin, counted from when the robot
+			// fell silent (the executor guard). With no such time it fails closed.
+			if robot.Status.OfflineSince == nil {
+				return false
+			}
+			return !time.Now().Before(executorguard.Dead(executorguard.Input{
+				Reference: robot.Status.OfflineSince.Time, Now: time.Now(), Skew: skew}))
 		}
 		return false // fail closed on a transient error
 	}
-	_, _, skew := leaseTimings(ctx, r.Client, robot.Namespace)
 	return leaseProvablyDead(leaseTime(action.Status.LeaseExpiresAt), time.Now(), skew)
 }
 
@@ -465,6 +695,14 @@ func findCondition(robot *fleetv1.Robot, condType string) *metav1.Condition {
 		}
 	}
 	return nil
+}
+
+// DeriveCapabilities is the capability derivation the Robot reconciler writes to
+// status.capabilities, for a caller that must judge a robot on its current hardware
+// before that reconcile has run: the estop resume confirmation
+// (RFC-0001 #safety-estop-state-machine). It reads only the Robot and writes nothing.
+func DeriveCapabilities(robot *fleetv1.Robot) []fleetv1.CapabilityStatusEntry {
+	return deriveCapabilities(robot)
 }
 
 // deriveCapabilities computes status.capabilities[] from the declared
@@ -537,6 +775,16 @@ func deriveCapabilities(robot *fleetv1.Robot) []fleetv1.CapabilityStatusEntry {
 	}
 	sort.Strings(names) // stable order so an unchanged set compares equal
 
+	// No capabilities is nil, not an empty slice. status.capabilities is omitempty, so
+	// the persisted status reads an empty set back as nil, and the Reconcile guard
+	// compares with reflect.DeepEqual, which holds nil and empty to be different: an
+	// empty slice here would issue a status patch with an empty body on every reconcile
+	// of a robot that declares nothing. Nil and empty are the same persisted state, so
+	// nothing is lost; a set that becomes empty or stops being empty still differs in
+	// length from the one before it.
+	if len(names) == 0 {
+		return nil
+	}
 	result := make([]fleetv1.CapabilityStatusEntry, len(names))
 	for i, name := range names {
 		result[i] = byName[name]
@@ -545,7 +793,7 @@ func deriveCapabilities(robot *fleetv1.Robot) []fleetv1.CapabilityStatusEntry {
 }
 
 // deriveHealth computes status.health from status.hardware[] and status.capabilities[],
-// per the aggregate rule in §9.3.3:
+// per the aggregate rule in RFC-0001 #control-plane-robot-health-and-connectivity:
 //
 //	Healthy  — all hardware components Healthy; all pauseable:false capabilities Active
 //	Degraded — >=1 component Degraded, none Failed; all pauseable:false capabilities Active
@@ -816,14 +1064,21 @@ func (r *RobotReconciler) setCondition(robot *fleetv1.Robot, condType string,
 	})
 }
 
-// SetupWithManager registers the controller with the manager.
+// SetupWithManager registers the controller with the manager. A Robot's create or delete
+// also reconciles the Robots carrying the same wire robot-id, so RobotIDConflict appears on
+// both twins and clears on the survivor (robotsSharingWireID).
 func (r *RobotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fleetv1.Robot{}).
+		Watches(&fleetv1.Robot{}, handler.EnqueueRequestsFromMapFunc(r.robotsSharingWireID),
+			builder.WithPredicates(predicate.Funcs{
+				UpdateFunc:  func(event.UpdateEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			})).
 		Complete(r)
 }
 
-// sealRobotEvent appends one §9.6.5.1 entry about a Robot to the tamper-evident chain.
+// sealRobotEvent appends one RFC-0001 #safety-required-events entry about a Robot to the tamper-evident chain.
 //
 // Best-effort and nil-safe by construction: every caller sits on a transition that has
 // already been decided, so a sink failure must log and return — never block the
@@ -860,7 +1115,7 @@ func (r *RobotReconciler) recordRobotOffline(ctx context.Context, robot *fleetv1
 
 // recordRobotCritical seals ROBOT_CRITICAL on the T2 escalation edge, listing the actions
 // left in Revoking. Those action names are the point of the record: at T2 nothing is
-// requeued — reassignment waits for lease expiry (§9.6.3.5) — so an operator reading the
+// requeued — reassignment waits for lease expiry (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee) — so an operator reading the
 // chain needs to see precisely which work is stranded and on which robot.
 func (r *RobotReconciler) recordRobotCritical(ctx context.Context, robot *fleetv1.Robot, offlineFor time.Duration) {
 	detail := map[string]string{"offline_duration_seconds": strconv.Itoa(int(offlineFor.Seconds()))}
@@ -927,7 +1182,7 @@ func (r *RobotReconciler) recordCapabilityDegradations(ctx context.Context, robo
 	}
 }
 
-// recordRobotAdmitted writes ROBOT_ADMITTED (§9.6.5.1) on a Robot's first
+// recordRobotAdmitted writes ROBOT_ADMITTED (RFC-0001 #safety-required-events) on a Robot's first
 // reconcile. The two-phase admission gate (§6.6) is a security control, so its
 // decisions belong in the tamper-evident chain and not only in the event stream.
 // Best-effort: the Robot exists either way, and a sink failure must not block it.

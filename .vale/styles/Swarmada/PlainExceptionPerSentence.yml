@@ -1,0 +1,11 @@
+# Plain-language limit 3: at most one of "unless", "except" or "only if" per
+# sentence. Flags every such marker after the first in the same sentence.
+# Same sentence-end definition and scope as PlainKeywordPerSentence.
+extends: existence
+message: "'%s' is a second exception marker (unless / except / only if) in this sentence. Limit: one per sentence. Split it, or list the cases as bullets."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+nonword: true
+ignorecase: true
+tokens:
+  - '(?<=\b(?:unless|except|only if)\b(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[\s\S])*?)\b(?:unless|except|only if)\b'

@@ -3,8 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** Distributed Systems Reviewer, API Designer, Kubernetes Expert
-- **Related:** RFC-0001 §9.1.11 (SwarmadaConfig maintenance defaults, ZoneMaintenance
-  lifecycle), §9.6.3.5 (lease / single-executor safety), the RA-1 status-write
+- **Related:** RFC-0001 "SwarmadaConfig" (maintenance defaults) and "ZoneMaintenance"
+  (lifecycle), "Assignment Lease and the Single-Executor Guarantee", the RA-1 status-write
   discipline
 
 ## Context
@@ -24,7 +24,8 @@ facts shape the fix:
   Active, giving a natural deadline anchor.
 - The controller already has a safe force-pause path: `requeueTask` sets the
   `requeue-requested` annotation, and the FleetTask controller confirmed-stops the
-  robot (single-executor safe, §9.6.3.5) and returns the task to Pending, freeing
+  robot (single-executor safe — RFC-0001, "Assignment Lease and the Single-Executor
+  Guarantee") and returns the task to Pending, freeing
   the robot to be paused. `Immediate` mode uses exactly this.
 
 There is no per-`ZoneMaintenance` drain-timeout field — only the namespace default.
@@ -86,5 +87,5 @@ Specifics:
 - **Drawback accepted.** A robot mid-task is interrupted when the timeout elapses —
   that is the explicit trade the timeout exists to make. Operators who want
   unbounded wind-down set a large value; a per-namespace default governs the rest.
-  There is no per-maintenance override yet, so a single maintenance that needs a
-  different bound must wait for the namespace default or the future field.
+  There is no per-maintenance override, so a single maintenance that needs a
+  different bound must use the namespace default.

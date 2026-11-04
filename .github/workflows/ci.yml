@@ -37,19 +37,30 @@ jobs:
       - name: Build controller-manager
         run: make build
 
-      # golangci-lint v2 (the repo's .golangci.yml is the v2 schema). The install
-      # script with no version arg fetches the latest stable release (v2 line);
-      # append a tag (e.g. ... | sh -s -- -b DIR v2.1.6) to pin.
-      - name: Install golangci-lint v2
+      # golangci-lint, pinned (the repo's .golangci.yml is the v2 schema). Unpinned, the
+      # install script fetched the newest release, so CI and a local run could disagree on
+      # the same tree: 2.15.0 added an errcheck finding that 2.14.0 does not report. Change
+      # this pin and the local install together (brew: golangci-lint 2.15.0).
+      - name: Install golangci-lint v2.15.0 (pinned)
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin"
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.15.0/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.15.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Lint (golangci-lint v2)
         run: make lint-go
 
-      - name: Test (race detector + coverage)
+      # envtest (docs/testing.md layer 2) is required in CI. GitHub sets CI=true, and
+      # under it the envtest suites' TestMain fail when the control-plane binaries are
+      # missing instead of skipping, so if this step stops installing them the build
+      # goes red rather than green with every envtest skipped.
+      - name: Install envtest control plane (setup-envtest, pinned)
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          make setup-envtest
+
+      - name: Test (race detector + coverage; envtest required)
         run: make test-go
 
       - name: Upload coverage
@@ -190,8 +201,23 @@ jobs:
           curl -sSLo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
           chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
 
+      # The quickstart runs its LIVE path here: a real adapters/simulation/sim_adapter.py
+      # process drives one robot over the mTLS ControlStream, so that robot's zone comes from
+      # real position telemetry and the scheduler can assign it work. The adapter needs
+      # Python and its runtime dependencies; the gRPC stubs are committed.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          make install-py
+
       # make quickstart-test creates the kind cluster, builds + loads the image,
-      # deploys the control plane, applies config/samples, drives readiness,
+      # deploys the control plane, applies config/samples, starts the live adapter,
       # asserts the scheduler assigned a task, and tears the cluster down.
       - name: Quickstart end-to-end (build · deploy · assign · assert)
         run: make quickstart-test

@@ -28,15 +28,17 @@ import (
 // swarmadaGroup is the API group every Swarmada custom verb is authorized under.
 const swarmadaGroup = "swarmada.io"
 
-// RequireVerb enforces a Swarmada custom verb (admit, reject, cancel,
-// estop-trigger, estop-clear — RFC-0001 §9.5.3) before its action runs. It posts
+// RequireVerb enforces an RBAC verb on a swarmada.io resource before its action
+// runs: the custom verbs admit, reject, cancel, estop-trigger, estop-clear,
+// rollout-resume and policy-reset (RFC-0001 #security-authorization-swarmada-rbac-roles),
+// and the built-in patch verb `cancel task` checks on fleettasks. It posts
 // a SelfSubjectAccessReview for the verb against the target resource and returns
 // a structured error unless the API server explicitly allows it.
 //
 // This is the RBAC gate that makes a custom verb meaningful on a CRD: the action
 // is performed only after the server confirms the caller holds the *verb* grant,
 // never as a bare patch that would ride on a broader update permission. It fails
-// closed (§9.5.3): any error contacting the authorizer, or a non-allow verdict,
+// closed (RFC-0001 #security-authorization-swarmada-rbac-roles): any error contacting the authorizer, or a non-allow verdict,
 // denies the action.
 func RequireVerb(ctx context.Context, cs kubernetes.Interface, verb, resource, namespace, name string) error {
 	ssar := &authzv1.SelfSubjectAccessReview{
@@ -58,7 +60,7 @@ func RequireVerb(ctx context.Context, cs kubernetes.Interface, verb, resource, n
 	if res.Status.Allowed {
 		return nil
 	}
-	msg := fmt.Sprintf("not authorized to %s %s/%s in namespace %q: requires the %q verb on %s.%s (RFC-0001 §9.5.3)",
+	msg := fmt.Sprintf("not authorized to %s %s/%s in namespace %q: requires the %q verb on %s.%s (RFC-0001 #security-authorization-swarmada-rbac-roles)",
 		verb, singularOf(resource), name, namespace, verb, resource, swarmadaGroup)
 	if res.Status.Reason != "" {
 		msg += " — " + res.Status.Reason

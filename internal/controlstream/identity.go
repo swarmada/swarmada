@@ -25,7 +25,7 @@ import (
 )
 
 // TLSIdentity is the authenticated identity of a connected adapter, derived from
-// its mTLS client-certificate SAN (RFC-0001 §9.2.7). Unlike AdapterHello's
+// its mTLS client-certificate SAN (RFC-0001 #fleet-adapter-protocol-transport-security). Unlike AdapterHello's
 // self-reported fields, this IS the security boundary: every per-robot
 // authorization decision is made against it. Verified is false when the
 // connection presented no usable client certificate — in which case an enabled

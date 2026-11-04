@@ -1,0 +1,15 @@
+# Plain-language limit 9b: a bolded term followed by "is", "are", "means",
+# "refers to" or "denotes" defines the term in passing ("The **report token**
+# is ..."). Runs on the raw Markdown, because rendered text has lost the bold.
+# Not flagged: a Terms entry "- **term**: definition" (the colon follows the
+# bold), a bold lead-in such as "**Report.** The adapter ...", headings, lines
+# inside a blockquote note ("> ...") or a table ("| ..."), and fenced code
+# (the trailing lookbehind requires an even number of ``` / ~~~ fence lines
+# before the match).
+extends: existence
+message: "'%s' defines a term in passing. Define each term once, in the Terms block, as '- **term**: definition'."
+level: error
+scope: raw
+nonword: true
+tokens:
+  - '(?m)(?<=^(?![ \t]*[>|#])[^\n]*?)\*\*[^*\n]{1,80}\*\*,?[ \t]+(?:is|are|means|refers to|denotes)\b(?<=\A(?:(?![ \t]*(?:```|~~~))[^\n]*\n|[ \t]*(?:```|~~~)[^\n]*\n(?:(?![ \t]*(?:```|~~~))[^\n]*\n)*[ \t]*(?:```|~~~)[^\n]*\n)*[^\n]*)'

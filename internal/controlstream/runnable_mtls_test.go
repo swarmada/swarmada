@@ -16,7 +16,7 @@ limitations under the License.
 
 package controlstream
 
-// mTLS enforcement for the ControlStream listener (RFC-0001 §9.2.7, ADR-0025).
+// mTLS enforcement for the ControlStream listener (RFC-0001 #fleet-adapter-protocol-transport-security, ADR-0025).
 // These tests run a real GRPCRunnable with a server tls.Config over a loopback
 // port and dial it with real client certificates, so they exercise the actual TLS
 // handshake — not the fabricated VerifiedChains of identity_test.go.
@@ -181,11 +181,18 @@ func openHello(t *testing.T, cl fav1.FleetAdapterServiceClient) fav1.FleetAdapte
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
-	if err := stream.Send(hello()); err != nil { // hello() from server_test.go
+	h := hello() // from server_test.go
+	// The namespace goodSAN's certificate binds; a hello declaring another is refused.
+	h.GetHello().Namespace = "warehouse-a"
+	if err := stream.Send(h); err != nil {
 		t.Fatalf("send hello: %v", err)
 	}
-	if _, err := stream.Recv(); err != nil {
+	reply, err := stream.Recv()
+	if err != nil {
 		t.Fatalf("recv hello ack: %v", err)
+	}
+	if !reply.GetHelloAck().GetAccepted() {
+		t.Fatalf("hello refused: %s", reply.GetHelloAck().GetMessage())
 	}
 	return stream
 }

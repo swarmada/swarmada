@@ -1,0 +1,10 @@
+# Optional extra for the simulation adapter's real-artifact mode (--model-trust-root).
+# Without it the adapter runs as before; with --model-trust-root and without it, every
+# model_update is refused. Install into the interpreter that runs sim_adapter.py:
+#
+#     pip install -r adapters/simulation/requirements-model-runtime.txt
+#
+# onnxruntime: MIT. numpy: BSD-3-Clause. cryptography: Apache-2.0 OR BSD-3-Clause.
+onnxruntime>=1.18
+numpy>=1.26
+cryptography>=42

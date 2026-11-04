@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package registry is a minimal read-only OCI Distribution API client (the
 // registry REST API, plain HTTPS+JSON — no external OCI dependency). It backs the
-// ModelPolicy RegistryWatch trigger (RFC-0001 §9.1.9): list a repository's tags,
+// ModelPolicy RegistryWatch trigger (RFC-0001 #modelpolicy-schema): list a repository's tags,
 // resolve a tag's manifest digest (the artifact checksum), and read the image
 // config labels that carry model quality metrics.
 //
@@ -34,6 +34,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/swarmada/swarmada/internal/artifact"
 )
 
 const (
@@ -54,6 +56,18 @@ type Credential struct {
 	BearerToken string
 	Username    string
 	Password    string
+	// Hosts lists the registry and token-server hosts (host[:port]) the credential may be
+	// presented to. Empty means none: the client then sends every request anonymously.
+	Hosts []string
+}
+
+// For returns the credential to present to host, or nil (anonymous) when host is not one
+// the credential lists.
+func (c *Credential) For(host string) *Credential {
+	if c == nil || !artifact.HostListed(c.Hosts, host) {
+		return nil
+	}
+	return c
 }
 
 func (c *Credential) apply(req *http.Request) {
@@ -136,6 +150,8 @@ func (c *Client) scheme(registry string) string {
 
 func (c *Client) do(ctx context.Context, registry, path, accept string, cred *Credential) (*http.Response, error) {
 	url := c.scheme(registry) + "://" + registry + path
+	// Only a registry the credential lists receives it; any other is read anonymously.
+	cred = cred.For(registry)
 
 	resp, err := c.get(ctx, url, accept, "", cred)
 	if err != nil {
@@ -187,7 +203,47 @@ func (c *Client) get(ctx context.Context, url, accept, bearer string, cred *Cred
 	} else {
 		cred.apply(req)
 	}
-	return c.httpClient().Do(req)
+	return c.redirectSafe(cred).Do(req)
+}
+
+// maxRedirects is net/http's own limit, which a client with a CheckRedirect no longer applies.
+const maxRedirects = 10
+
+// redirectSafe returns a copy of the HTTP client that drops the Authorization header on a
+// redirect away from the first host, unless the target is an https host the credential lists
+// (or the loopback development registry). A registry commonly redirects a blob to storage
+// that needs no credential, so the redirect is followed; net/http alone keeps the header for
+// a subdomain of the first host.
+func (c *Client) redirectSafe(cred *Credential) *http.Client {
+	hc := *c.httpClient()
+	prev := hc.CheckRedirect
+	var hosts []string
+	if cred != nil {
+		hosts = cred.Hosts
+	}
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if !presentable(req.URL.Scheme, req.URL.Host, req.URL.Hostname(), via[0].URL.Host, hosts) {
+			req.Header.Del("Authorization")
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		return nil
+	}
+	return &hc
+}
+
+// presentable reports whether an Authorization header may travel to scheme://host on a
+// redirect from first: to the same host, or to a listed one, and never in plain http except
+// on loopback.
+func presentable(scheme, host, hostname, first string, hosts []string) bool {
+	if !artifact.CredentialTransport(scheme, hostname) {
+		return false
+	}
+	return strings.EqualFold(host, first) || artifact.HostListed(hosts, host)
 }
 
 // bearerChallenge is a parsed WWW-Authenticate: Bearer challenge.

@@ -3,11 +3,11 @@
 - **Status:** proposed
 - **Date:** 2026-08-05
 - **Deciders:** _(pending)_
-- **Related:** ADR-0033 (surfaced the drift), ADR-0032 (contract versioning and conformance gating), ADR-0007 (conformance self-certification), RFC-0001 §9.6.5.1 (Required Events)
+- **Related:** ADR-0033 (surfaced the drift), ADR-0032 (contract versioning and conformance gating), ADR-0007 (conformance self-certification), RFC-0001 "Required Events"
 
 ## Context
 
-The mechanical Status check for Required Events (§9.6.5.1) verifies that a production
+The mechanical Status check for RFC-0001's "Required Events" verifies that a production
 writer **references** an event constant. It does not verify that the writer is
 **reachable** — that a real code path can actually fire it. ADR-0033 found two audit
 rows (`MODEL_UPDATE_SUCCEEDED`, `MODEL_UPDATE_FAILED`) marked `emitted` while being

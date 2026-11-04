@@ -42,37 +42,69 @@ const zeNS = "warehouse-a"
 // fakeEstopper records which robots were estopped/cleared and returns a scripted
 // state.
 type fakeEstopper struct {
-	// mu guards the recorders. Zone and namespace estop fan out in PARALLEL (§9.6.2.1),
+	// mu guards the recorders. Zone and namespace estop fan out in PARALLEL (RFC-0001 #safety-estop-scopes),
 	// so TriggerEstop is called concurrently — the double has to be as safe as the thing
 	// it stands in for, or `go test -race` fails on the test's own bookkeeping.
 	mu       sync.Mutex
 	estopped []string
 	cleared  []string
 	state    fleetv1.RobotEstopState
-	// scopes records the §9.3.8 scope label each call carried. Every emit site used to
+	// scopes records the metrics-contract scope label each call carried. Every emit site used to
 	// hard-code "robot", so a zone or namespace estop was indistinguishable from a
 	// single-robot one in the metrics; recording it here is what lets a test say otherwise.
 	scopes []metrics.EstopScope
+	// c, when set, receives the outcome on the robot's status.estopState, as the real
+	// dispatcher writes it. A stop in force retries every robot that records it but shows
+	// no stop state, so a double that wrote nothing would be stopped on every pass.
+	c client.Client
 }
 
-func (f *fakeEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
-	scope metrics.EstopScope) (safety.Result, error) {
+func (f *fakeEstopper) TriggerEstop(ctx context.Context, ns, robotID, _, _ string,
+	scope metrics.EstopScope, carrier safety.Carrier) (safety.Result, error) {
 	f.mu.Lock()
 	f.scopes = append(f.scopes, scope)
 	f.estopped = append(f.estopped, robotID)
 	st := f.state
+	c := f.c
 	f.mu.Unlock()
 	if st == "" {
 		st = fleetv1.RobotEstopStopped
 	}
+	if c != nil {
+		robot := &fleetv1.Robot{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: robotID}, robot); err == nil {
+			base := robot.DeepCopy()
+			robot.Status.EstopState = st
+			recordLikeTheDispatcher(robot, scope, carrier)
+			_ = c.Status().Patch(ctx, robot, client.MergeFrom(base))
+		}
+	}
 	return safety.Result{State: st, Confirmed: st == fleetv1.RobotEstopStopped}, nil
 }
 
-func (f *fakeEstopper) ClearEstop(_ context.Context, _, robotID, _ string) (fleetv1.RobotEstopState, error) {
+func (f *fakeEstopper) ClearEstop(_ context.Context, _, robotID, _ string, _ safety.Ends) (fleetv1.RobotEstopState, error) {
 	f.mu.Lock()
 	f.cleared = append(f.cleared, robotID)
 	f.mu.Unlock()
 	return fleetv1.RobotEstopNormal, nil
+}
+
+// recordLikeTheDispatcher appends a stop to robot's status.stops, as the safety dispatcher does
+// once it has sent the stop (RFC-0001 #safety-robot-stop-table, row S1): a double that recorded
+// nothing would be sent the stop again by every pass that keys on the record.
+func recordLikeTheDispatcher(robot *fleetv1.Robot, scope metrics.EstopScope, carrier safety.Carrier) {
+	if carrier.Kind == "" {
+		carrier = safety.Carrier{Kind: fleetv1.StopCarrierRobot, Name: robot.Name, UID: string(robot.UID)}
+	}
+	sc := fleetv1.StopScopeRobot
+	switch scope {
+	case metrics.ScopeZone:
+		sc = fleetv1.StopScopeZone
+	case metrics.ScopeNamespace:
+		sc = fleetv1.StopScopeNamespace
+	}
+	robot.Status.Stops = append(robot.Status.Stops, fleetv1.RobotStop{ID: safety.NewStopID(), Scope: sc,
+		Carrier: &fleetv1.StopCarrier{Kind: carrier.Kind, Name: carrier.Name, UID: carrier.UID}, SentAt: metav1.Now()})
 }
 
 // names/clearedNames return SORTED COPIES. Under a parallel fan-out the arrival order
@@ -112,6 +144,9 @@ func newZEReconciler(t *testing.T, est *fakeEstopper, rec record.EventRecorder, 
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&fleetv1.FleetZone{}, &fleetv1.Robot{}).WithObjects(objs...).Build()
+	if est != nil {
+		est.c = c
+	}
 	return &ZoneEstopReconciler{Client: c, Estopper: est, Recorder: rec}, c
 }
 
@@ -136,7 +171,7 @@ func TestZoneEstop_PropagatesToChildren(t *testing.T) {
 	// dock-1 → floor-1 → site-1. Trigger on floor-1.
 	est := &fakeEstopper{}
 	r, c := newZEReconciler(t, est, nil,
-		zeZone("floor-1", "site-1", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true}, "e1"),
+		zeZone("floor-1", "site-1", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true)}, "e1"),
 		zeZone("dock-1", "floor-1", nil, ""),
 		zeZone("site-1", "", nil, ""),
 		zeRobot("r-dock", "dock-1"),   // descendant of floor-1 → estopped
@@ -159,7 +194,7 @@ func TestZoneEstop_PropagatesToChildren(t *testing.T) {
 func TestZoneEstop_NoChildrenWhenPolicyFalse(t *testing.T) {
 	est := &fakeEstopper{}
 	r, _ := newZEReconciler(t, est, nil,
-		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: false}, "e1"),
+		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(false)}, "e1"),
 		zeZone("dock-1", "floor-1", nil, ""),
 		zeRobot("r-dock", "dock-1"),   // descendant → NOT estopped (policy false)
 		zeRobot("r-floor", "floor-1"), // in floor-1 → estopped
@@ -178,7 +213,7 @@ func TestZoneEstop_NotifiesParent(t *testing.T) {
 	est := &fakeEstopper{}
 	rec := record.NewFakeRecorder(8)
 	r, _ := newZEReconciler(t, est, rec,
-		zeZone("dock-1", "floor-1", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true, PropagateToParent: true}, "e1"),
+		zeZone("dock-1", "floor-1", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true), PropagateToParent: true}, "e1"),
 		zeZone("floor-1", "", nil, ""),
 		zeRobot("r-dock", "dock-1"),
 		zeRobot("r-floor", "floor-1"), // in the PARENT → must NOT be estopped
@@ -243,7 +278,7 @@ func TestZoneEstop_NewTriggerRefires(t *testing.T) {
 func TestZoneEstop_ClearResumesRobots(t *testing.T) {
 	est := &fakeEstopper{}
 	r, c := newZEReconciler(t, est, nil,
-		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true}, "e1"),
+		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true)}, "e1"),
 		zeZone("dock-1", "floor-1", nil, ""),
 		zeRobot("r-dock", "dock-1"),
 		zeRobot("r-floor", "floor-1"),

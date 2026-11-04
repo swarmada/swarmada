@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package registrar implements the control-plane side of the two-phase robot
-// discovery handshake (RFC-0001 §9.2.5, §9.3.1): it answers the Discover and
+// discovery handshake (RFC-0001 #fleet-adapter-protocol-connection-lifecycle, RFC-0001 #control-plane-swarmada-api-server): it answers the Discover and
 // Register messages a Fleet Adapter sends over ControlStream. It satisfies
 // [github.com/swarmada/swarmada/internal/controlstream.Registrar].
 //
@@ -27,6 +27,7 @@ package registrar
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
@@ -39,6 +40,8 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/command"
 	"github.com/swarmada/swarmada/internal/controlstream"
+	"github.com/swarmada/swarmada/internal/estopscope"
+	"github.com/swarmada/swarmada/internal/robotid"
 	fav1 "github.com/swarmada/swarmada/proto/fleet_adapter/v1"
 )
 
@@ -92,7 +95,7 @@ func (r *Registrar) reader() client.Reader {
 }
 
 // ttlFor resolves the DiscoveredRobot TTL for a namespace from its SwarmadaConfig
-// singleton (spec.provisioning.discoveredRobotTTLMinutes, §9.1.11). It FAILS SAFE
+// singleton (spec.provisioning.discoveredRobotTTLMinutes, RFC-0001 #swarmadaconfig). It FAILS SAFE
 // to fallbackTTL on any problem — no SwarmadaConfig, a list error, or a
 // non-positive minutes value — so an unreadable policy never breaks discovery; it
 // just uses the built-in deadline instead of an operator-tuned one.
@@ -122,7 +125,7 @@ func (r *Registrar) fallbackTTL() time.Duration {
 // FleetAdapter.spec.servesRobotClasses. It is empty — so auto-admit does not fire
 // and the two-phase operator path stands — when the adapter is unknown, serves zero
 // or several classes, or the lookup fails. The class is derived only from the
-// mTLS-verified adapter name (§9.2.7); a self-reported AdapterHello never
+// mTLS-verified adapter name (RFC-0001 #fleet-adapter-protocol-transport-security); a self-reported AdapterHello never
 // contributes, so a forged Hello cannot influence this privileged decision. A
 // lookup error never blocks discovery (fail safe).
 func (r *Registrar) suggestedClass(ctx context.Context, tlsID controlstream.TLSIdentity, namespace string) string {
@@ -143,7 +146,7 @@ func (r *Registrar) suggestedClass(ctx context.Context, tlsID controlstream.TLSI
 // robot_id, refuses a robot that is already admitted, and otherwise upserts a
 // DiscoveredRobot carrying the reported inventory (including the MAC address) for
 // an operator to admit. Every outcome is reported in-band via the ack — never a
-// gRPC error (§9.2.4).
+// gRPC error (RFC-0001 #fleet-adapter-protocol-in-band-error-model).
 func (r *Registrar) Discover(ctx context.Context, id controlstream.AdapterIdentity, tlsID controlstream.TLSIdentity, msg *fav1.DiscoverRobot) *fav1.DiscoverAck {
 	robotID := msg.GetRobotId()
 	if !validRobotID(robotID) {
@@ -162,17 +165,18 @@ func (r *Registrar) Discover(ctx context.Context, id controlstream.AdapterIdenti
 	}
 	key := types.NamespacedName{Namespace: id.Namespace, Name: robotID}
 
-	// An already-admitted Robot must Register, not Discover (§9.2.5).
-	var existing fleetv1.Robot
-	switch err := r.Client.Get(ctx, key, &existing); {
-	case err == nil:
+	// An already-admitted Robot must Register, not Discover (RFC-0001 #discoveredrobot-conflict-handling-duplicate-robot-id).
+	// The robot_id is resolved as Register resolves it (robotid.Lookup), so a robot
+	// admitted under another name is found and no DiscoveredRobot is staged for it.
+	switch existing, err := robotid.Lookup(ctx, r.Client, id.Namespace, robotID); {
+	case err != nil:
+		return &fav1.DiscoverAck{Accepted: false, Message: "control-plane lookup failed: " + err.Error()}
+	case existing != nil:
 		return &fav1.DiscoverAck{
 			Accepted:  false,
 			Rejection: fav1.RegistrationRejection_REGISTRATION_REJECTION_ALREADY_EXISTS,
 			Message:   "robot is already admitted; reconnect via Register",
 		}
-	case !apierrors.IsNotFound(err):
-		return &fav1.DiscoverAck{Accepted: false, Message: "control-plane lookup failed: " + err.Error()}
 	}
 
 	// Upsert the DiscoveredRobot: create it, then (re)write status so a re-announce
@@ -225,10 +229,10 @@ func (r *Registrar) Discover(ctx context.Context, id controlstream.AdapterIdenti
 
 // Register handles a reconnect of an already-admitted robot. It validates the
 // robot_id, confirms a matching Robot exists, and returns the full reconnect
-// state so the adapter can resynchronise after a disconnect (§9.2.5): the binding
+// state so the adapter can resynchronise after a disconnect (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation): the binding
 // hints (telemetry interval, assigned zone), the current active capabilities, the
 // AUTHORITATIVE action state (phase + fencing token / lease generation, so the
-// adapter resumes or self-stops correctly per §9.6.3.5), and the edge endpoints of
+// adapter resumes or self-stops correctly per RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee), and the edge endpoints of
 // the robot's zone chain. All fields are read-only projections (RA-1).
 func (r *Registrar) Register(ctx context.Context, id controlstream.AdapterIdentity, msg *fav1.RegisterRobot) *fav1.RegisterAck {
 	robotID := msg.GetRobotId()
@@ -247,17 +251,35 @@ func (r *Registrar) Register(ctx context.Context, id controlstream.AdapterIdenti
 		}
 	}
 
-	var robot fleetv1.Robot
-	switch err := r.Client.Get(ctx, types.NamespacedName{Namespace: id.Namespace, Name: robotID}, &robot); {
-	case apierrors.IsNotFound(err):
+	// The robot_id is the id the adapter announced, resolved through the Robot's
+	// swarmada.io/robot-id annotation (robotid.Lookup), not the object name: the two differ
+	// for a robot admitted under another name (`swarmctl admit --name`), and a name lookup
+	// would refuse that robot's every reconnect. An id naming more than one Robot is
+	// refused (fail closed).
+	found, err := robotid.Lookup(ctx, r.Client, id.Namespace, robotID)
+	switch {
+	case errors.Is(err, robotid.ErrUnreadable):
+		// A failed read says nothing about whose robot this is. A refusal with no rejection code
+		// tells a conforming adapter that the robot is not its own, and it never announces it again
+		// (RFC-0001 #fleet-adapter-protocol-connection-lifecycle). NOT_ADMITTED is the refusal an
+		// adapter retries: it stops the robot and any work it holds for it, announces it (a Discover
+		// whose lookup fails creates nothing, and an admitted robot is answered ALREADY_EXISTS), and
+		// sends register again every provisioning-loop interval.
+		return &fav1.RegisterAck{
+			Accepted:  false,
+			Rejection: fav1.RegistrationRejection_REGISTRATION_REJECTION_NOT_ADMITTED,
+			Message:   "admission could not be confirmed (control-plane lookup failed; register again): " + err.Error(),
+		}
+	case err != nil:
+		return &fav1.RegisterAck{Accepted: false, Message: "control-plane lookup failed: " + err.Error()}
+	case found == nil:
 		return &fav1.RegisterAck{
 			Accepted:  false,
 			Rejection: fav1.RegistrationRejection_REGISTRATION_REJECTION_NOT_ADMITTED,
 			Message:   "no admitted Robot for this id; announce it via Discover first",
 		}
-	case err != nil:
-		return &fav1.RegisterAck{Accepted: false, Message: "control-plane lookup failed: " + err.Error()}
 	}
+	robot := *found
 
 	ack := &fav1.RegisterAck{Accepted: true, Message: "registered"}
 	if robot.Spec.TelemetryIntervalSeconds != nil {
@@ -287,7 +309,7 @@ func activeCapabilities(robot *fleetv1.Robot) []string {
 }
 
 // authoritativeActionState projects the robot's assigned FleetAction into the wire
-// RobotActionState the adapter uses to resume/self-stop after a reconnect (§9.6.3.5):
+// RobotActionState the adapter uses to resume/self-stop after a reconnect (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation):
 // no assigned action ⇒ IDLE; a claimed action with no control-plane record ⇒ UNKNOWN
 // (halt and report); otherwise the mapped phase, carrying the fencing token /
 // lease generation only for an actively-executing action.
@@ -301,6 +323,10 @@ func (r *Registrar) authoritativeActionState(ctx context.Context, namespace stri
 		return &fav1.RobotActionState{Phase: fav1.RobotActionPhase_ROBOT_ACTION_PHASE_UNKNOWN, ActionId: actionName}
 	}
 	phase := mapActionPhase(action.Status.Phase)
+	// A robot a stop holds is not told to continue (stopHoldsWork): IN_PROGRESS or REVOKING is sent as IDLE.
+	if phase != fav1.RobotActionPhase_ROBOT_ACTION_PHASE_CANCELLED && stopHoldsWork(robot) {
+		phase = fav1.RobotActionPhase_ROBOT_ACTION_PHASE_IDLE
+	}
 	st := &fav1.RobotActionState{Phase: phase}
 	switch phase {
 	case fav1.RobotActionPhase_ROBOT_ACTION_PHASE_IN_PROGRESS,
@@ -337,7 +363,7 @@ func mapActionPhase(p fleetv1.ActionPhase) fav1.RobotActionPhase {
 const edgeWalkCap = 64
 
 // edgeEndpoints collects the edge-node endpoints of the robot's zone and its
-// ancestors (§9.2.10): a Fleet Adapter dials these facility-LAN endpoints for the
+// ancestors (RFC-0001 #fleet-adapter-protocol-the-edge-stream): a Fleet Adapter dials these facility-LAN endpoints for the
 // partition-surviving edge/estop channel. Leaf zone first, then ancestors.
 func (r *Registrar) edgeEndpoints(ctx context.Context, namespace, zone string) []*fav1.EdgeEndpoint {
 	var out []*fav1.EdgeEndpoint
@@ -493,4 +519,21 @@ func mapModelStatus(s fav1.ModelStatus) fleetv1.ModelStatus {
 	default:
 		return fleetv1.ModelStatusInactive
 	}
+}
+
+// stopHoldsWork reports whether a stop holds the work robot records: its estopState is
+// Stopping, Stopped, Failed or Resuming (cleared, the operator's resume not yet
+// confirmed), or it records a stop (its own trigger, or a zone's or the namespace's stop
+// in status.estopHeldBy) whatever its estopState reads. It is the FleetAction reconciler's
+// estopHoldsWork, which holds the action at its phase (internal/controller). Such a robot
+// is told IDLE on registration, never IN_PROGRESS or REVOKING: its action stays held, and
+// its stop is sent again on its SafetyStream (internal/safety.Dispatcher.RegisterStream;
+// RFC-0001 #safety-action-table, rows A6 and A13).
+func stopHoldsWork(robot *fleetv1.Robot) bool {
+	switch robot.Status.EstopState {
+	case fleetv1.RobotEstopStopping, fleetv1.RobotEstopStopped, fleetv1.RobotEstopFailed, fleetv1.RobotEstopResuming:
+		return true
+	}
+	_, held := estopscope.HeldOnRecord(robot)
+	return held
 }

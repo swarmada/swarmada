@@ -80,6 +80,56 @@ class FenceGuard:
         self._assignment[robot] = assignment_id
         return FenceDecision.ACCEPT
 
+    def adopt(self, robot: str, token: int) -> bool:
+        """Raise the mark to the control plane's OWN statement of the current token.
+
+        ``check()`` raises the mark from a command the adapter is being asked to run.
+        This raises it from ``RegisterAck.authoritative_action_state.fencing_token`` --
+        the control plane saying, out of band, "this robot is at token N". The proto
+        states the obligation on that field directly: "Current fencing token the adapter
+        should be executing under; the adapter MUST reject any command with a lower token
+        for this robot."
+
+        Without it the mark only ever rises from commands this adapter accepted, so an
+        adapter cannot learn about a token it never saw. After a control-plane FAILOVER
+        the new plane legitimately holds a higher token, and an adapter that never adopts
+        it goes on honouring commands the DEAD plane authorised -- two executors on one
+        robot, which is the single hazard C3 exists to prevent (C3.8).
+
+        MONOTONIC, and that is the safety property, not an optimisation. Adopting a value
+        at or below the current mark is a no-op returning ``False``. Control-plane
+        messages are not ordered against each other on this path: a RegisterAck delayed
+        behind a newer one, or replayed by a reconnect, arrives carrying a token that was
+        current when it was sent and is stale by the time it lands. If adopt could LOWER
+        the mark, that late message would re-open a token the adapter had already refused
+        -- turning the reconnect handshake into a way to un-refuse a stale assignment, and
+        handing an attacker who can replay one frame a way to reinstate a revoked command.
+        There is no legitimate reason for the authoritative token to go backwards; a plane
+        that means "stop" says so on the estop path, which carries no fence at all
+        (RFC-0001 #safety-emergency-stop-protocol) precisely so a stale token can never
+        refuse a stop.
+
+        The assignment recorded at the OLD mark is dropped, so the C3.4 idempotent-re-ack
+        window does not survive the raise: after adopting N, a command AT N is STALE
+        rather than re-acked, because the assignment this adapter accepted at the old mark
+        is not the one the plane is now fencing at. That is deliberately conservative --
+        the plane re-issues at N+1 and loses a round trip, where the alternative is
+        re-acking an assignment whose identity was never confirmed against the new token.
+        On a safety MUST the failure has to land on the refusing side.
+
+        Returns ``True`` if the mark advanced.
+
+        Not internally locked, in keeping with the rest of this class: every reference
+        adapter handles ``register_ack`` and ``command`` on the same stream-receive
+        thread, so ``adopt`` and ``check`` never interleave. An adapter that dispatches
+        them to different threads must serialise the two calls itself.
+        """
+        if token <= self._highest.get(robot, 0):
+            return False                      # never lower the mark; a replay must not re-open it
+        self._highest[robot] = token
+        self._assignment.pop(robot, None)     # the assignment at the old mark is not this one
+        return True
+
     def highest(self, robot: str) -> int:
         return self._highest.get(robot, 0)
 

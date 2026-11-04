@@ -36,7 +36,7 @@ import (
 //
 // SHAPE. Operator intake is an annotation consumed by the controller, gated in the CLI by a
 // SelfSubjectAccessReview on the rollout-resume custom verb — the same split ModelPolicy's
-// policy-reset uses (§9.1.9.4): status stays control-plane-owned, the operator's intent is a
+// policy-reset uses (RFC-0001 #security-permission-matrix): status stays control-plane-owned, the operator's intent is a
 // spec-side fact, and RBAC plus the audit trail apply at one enforcement point.
 //
 // SEMANTICS. Resume EXCLUDES the failed robots from further attempts by this rollout; it does
@@ -87,9 +87,10 @@ func mergeExcluded(existing, add []string) []string {
 	return out
 }
 
-// markResumeProcessed stamps the processed marker so the same request cannot fire twice.
-// Called whether or not the rollout was actually Paused: a stale annotation left on a running
-// rollout must not silently resume a FUTURE pause.
+// markResumeProcessed stamps the processed marker so the same request cannot fire twice, and
+// consumes the operator stamp that attributed it (see consumeEstopActor). Called whether or
+// not the rollout was actually Paused: a stale annotation left on a running rollout must not
+// silently resume a FUTURE pause.
 func markResumeProcessed(ctx context.Context, c client.Client, obj client.Object, req string) error {
 	base := obj.DeepCopyObject().(client.Object)
 	ann := obj.GetAnnotations()
@@ -97,6 +98,7 @@ func markResumeProcessed(ctx context.Context, c client.Client, obj client.Object
 		ann = map[string]string{}
 	}
 	ann[rolloutResumeProcessedAnnotation] = req
+	consumeEstopActor(ann)
 	obj.SetAnnotations(ann)
 	if err := c.Patch(ctx, obj, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording rollout-resume processed marker: %w", err)

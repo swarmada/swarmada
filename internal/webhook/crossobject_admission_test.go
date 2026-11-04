@@ -33,7 +33,7 @@ import (
 	"github.com/swarmada/swarmada/internal/contract"
 )
 
-// Cross-object admission rules (RFC-0001 §9.3.1) that single-object CEL cannot express,
+// Cross-object admission rules (RFC-0001 #control-plane-swarmada-api-server) that single-object CEL cannot express,
 // because each needs to read a DIFFERENT object than the one being admitted.
 //
 // Every rule is tested three ways: it rejects the invalid case, it admits the valid one,
@@ -208,7 +208,7 @@ func TestRobotAdmission_RobotIDDoesNotCollideWithItself(t *testing.T) {
 func TestRobotAdmission_RobotIDCollisionIntroducedByUpdateIsRejected(t *testing.T) {
 	// THE CASE THE UPDATE SHORT-CIRCUIT USED TO MISS. Uniqueness was asserted at create
 	// only, so `kubectl annotate robot amr-2 swarmada.io/robot-id=rid-1 --overwrite` handed
-	// a second Robot the identity the Scheduler dispatches by (§9.1.2.6) — two tasks, one
+	// a second Robot the identity the Scheduler dispatches by (RFC-0001 #robot-field-validation-rules) — two tasks, one
 	// physical robot, which is exactly what the rule exists to prevent. The update below
 	// changes neither spec.robotClass nor spec.adapter.name, so it is the shape of write
 	// the old gate waved through.
@@ -219,7 +219,22 @@ func TestRobotAdmission_RobotIDCollisionIntroducedByUpdateIsRejected(t *testing.
 
 	stolen := xoRobot("amr-2", "aisle-b3", "rid-1")
 	_, err := g.ValidateUpdate(ctx, current, stolen)
-	mustRejectWith(t, err, `robot-id "rid-1" is already bound to Robot "amr-1"`)
+	// Refused before uniqueness is asked: a robot-id cannot change after create at all.
+	mustRejectWith(t, err, `swarmada.io/robot-id cannot change after the Robot is created ("rid-2" -> "rid-1")`)
+}
+
+// The one robot-id an update may still introduce is the defaulter's backfill of an unset
+// id to the robot's name, and that is checked for uniqueness too: here the name is
+// already another robot's id.
+func TestRobotAdmission_RobotIDBackfillCollisionOnUpdateIsRejected(t *testing.T) {
+	ctx := context.Background()
+	existing := xoRobot("amr-1", "aisle-b3", "amr-2")
+	current := xoRobot("amr-2", "aisle-b3", "")
+	g := &RobotAdmissionGate{Client: xoClient(t, xoAdapter(), xoZone("aisle-b3", ""), existing, current)}
+
+	backfilled := xoRobot("amr-2", "aisle-b3", "amr-2")
+	_, err := g.ValidateUpdate(ctx, current, backfilled)
+	mustRejectWith(t, err, `robot-id "amr-2" is already bound to Robot "amr-1"`)
 }
 
 func TestRobotAdmission_RobotIDListErrorFailsClosed(t *testing.T) {
@@ -267,7 +282,7 @@ func TestZoneMaintenanceAdmission_ZoneMustExist(t *testing.T) {
 
 func TestZoneMaintenanceAdmission_ParentZoneIsAllowed(t *testing.T) {
 	// Unlike Robot.spec.zone, a Zone-scoped window resolves to the zone AND its descendants
-	// (§9.1.10), so maintaining a whole branch is the intended use — not an error.
+	// (RFC-0001 #zonemaintenance-schema), so maintaining a whole branch is the intended use — not an error.
 	ctx := context.Background()
 	v := &ZoneMaintenanceValidator{
 		Client: xoClient(t, xoZone("floor-1", ""), xoZone("aisle-b3", "floor-1")),

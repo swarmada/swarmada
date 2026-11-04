@@ -20,7 +20,7 @@ controller-manager ``/metrics``, this:
   1. **polls** Robot/FleetAction status across the whole run, accumulating every
      RobotPhase, FleetAction phase, and estop state observed (poll the API, never
      swarmtop — RFC sub-task requirement);
-  2. evaluates the seven RFC-0001 §9.3.8 alert expressions (promql_lite) at the
+  2. evaluates the seven metrics-contract alert expressions (promql_lite) at the
      scenario beats where their fixtures fire, and again after, recording
      fire/clear;
   3. asserts RA-1 end-to-end: telemetry runs at full cadence but status writes
@@ -73,7 +73,8 @@ TARGET_ESTOP_STATES = ["Stopping", "Stopped"]
 # delayed-ack fixture (SWARMADA_SIM_ESTOP_ACK_DELAY_MS) breach the SLO, which is now
 # unblocked work rather than a transport limitation. See the harness README.
 KNOWN_GAPS = {"SwarmadaEstopLatencySLOBreach"}
-KNOWN_GAPS_REASON = "no real TriggerEstop is issued in this scenario (the estop states are projected)"
+KNOWN_GAPS_REASON = ("no real TriggerEstop is issued in this scenario "
+                     "(the estop states are projected)")
 
 # RA-1 ceiling: over a full run of high-cadence telemetry, status writes must be a
 # small fraction of frames. The sim emits at 5 Hz; a compliant projector writes
@@ -248,10 +249,10 @@ def main() -> int:
     required = set(ALERTS) - (KNOWN_GAPS - gate_gaps)
     never_fired = [n for n in ALERTS if n in required and n not in acc.fired]
     if never_fired:
-        failures.append(f"§9.3.8 alerts that never fired: {never_fired}")
+        failures.append(f"metrics-contract alerts that never fired: {never_fired}")
     never_cleared = [n for n in must_clear if n in required and n not in acc.cleared]
     if never_cleared:
-        failures.append(f"§9.3.8 alerts that never cleared: {never_cleared}")
+        failures.append(f"metrics-contract alerts that never cleared: {never_cleared}")
     gaps_not_fired = [n for n in KNOWN_GAPS if n not in gate_gaps and n not in acc.fired]
     if gaps_not_fired:
         print(f"    documented gaps (not gating) — {KNOWN_GAPS_REASON}: {gaps_not_fired}")
@@ -273,7 +274,7 @@ def main() -> int:
             print(f"❌ {f}", file=sys.stderr)
         return 1
     print("✅ full-surface demo-test: every targeted phase/estop-state observed, "
-          "all §9.3.8 alerts fired (gauges cleared), RA-1 held.")
+          "all metrics-contract alerts fired (gauges cleared), RA-1 held.")
     return 0
 
 

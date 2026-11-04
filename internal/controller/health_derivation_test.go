@@ -30,7 +30,7 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// The aggregate health rule in RFC-0001 §9.3.3, which was specified in two places and
+// The aggregate health rule in RFC-0001 #control-plane-robot-health-and-connectivity, which was specified in two places and
 // implemented in neither: status.health had no writer at all, so swarmtop rendered a
 // blank health column for every robot in every cluster.
 //

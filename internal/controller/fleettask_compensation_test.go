@@ -17,17 +17,24 @@ limitations under the License.
 package controller
 
 import (
-	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// ── local helpers for the compensation saga (failurePolicy: Compensate) ──────────
+// The compensation saga (failurePolicy: Compensate), on envtest.
+//
+// These five ran on the fake client, which does not apply the XValidation rule
+// that a member carrying spec.executor may not declare a compensation
+// (TestEnvtest_FleetTaskCompensationExcludesExecutor). The saga's whole promise is
+// that a partly-completed task is rolled back; the rule exists because an external
+// executor is the one thing the control plane cannot roll back. Running the saga
+// tests behind that rule means the fixtures they assert on are fixtures a cluster
+// would actually hold.
+//
+// ── local helpers for the compensation saga ─────────────────────────────────
 
 // ftActionComp is ftAction with an optional compensation FleetActionSpec.
 func ftActionComp(name string, deps []string, comp bool) fleetv1.FleetTaskAction {
@@ -36,19 +43,6 @@ func ftActionComp(name string, deps []string, comp bool) fleetv1.FleetTaskAction
 		a.Compensation = &fleetv1.FleetActionSpec{Type: fleetv1.ActionTypeNavigate}
 	}
 	return a
-}
-
-// setActionPhase drives an existing (primary or compensation) child FleetAction to a phase.
-func setActionPhase(t *testing.T, c client.Client, name string, phase fleetv1.ActionPhase) {
-	t.Helper()
-	var a fleetv1.FleetAction
-	if err := c.Get(context.Background(), types.NamespacedName{Namespace: actionNS, Name: name}, &a); err != nil {
-		t.Fatalf("get action %s: %v", name, err)
-	}
-	a.Status.Phase = phase
-	if err := c.Status().Update(context.Background(), &a); err != nil {
-		t.Fatalf("update %s status: %v", name, err)
-	}
 }
 
 func compPhaseOf(ft *fleetv1.FleetTask, name string) string {
@@ -77,17 +71,17 @@ func TestFleetTask_CompensateSingle(t *testing.T) {
 		ftActionComp("a", nil, true),
 		ftActionComp("b", []string{"a"}, false),
 	)
-	r, c := newFleetTaskReconciler(t, task,
+	e := newFTEnv(t, task,
 		childAction("c1", "a", fleetv1.ActionPhaseSucceeded),
 		childAction("c1", "b", fleetv1.ActionPhaseFailed),
 	)
 
-	reconcileFT(t, r, "c1")
-	ft := getFT(t, c, "c1")
+	e.reconcile("c1")
+	ft := e.task("c1")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseCompensating {
 		t.Fatalf("phase = %q, want Compensating", ft.Status.Phase)
 	}
-	if getActionOrNil(t, c, compChildName("c1", "a")) == nil {
+	if e.action(compChildName("c1", "a")) == nil {
 		t.Fatalf("expected compensation child for 'a' to be generated")
 	}
 	if got := compPhaseOf(ft, "a"); got != compPhaseInProgress {
@@ -95,9 +89,9 @@ func TestFleetTask_CompensateSingle(t *testing.T) {
 	}
 
 	// The compensation succeeds → task Compensated.
-	setActionPhase(t, c, compChildName("c1", "a"), fleetv1.ActionPhaseSucceeded)
-	reconcileFT(t, r, "c1")
-	ft = getFT(t, c, "c1")
+	e.setPhase(compChildName("c1", "a"), fleetv1.ActionPhaseSucceeded)
+	e.reconcile("c1")
+	ft = e.task("c1")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseCompensated {
 		t.Fatalf("phase = %q, want Compensated", ft.Status.Phase)
 	}
@@ -117,22 +111,22 @@ func TestFleetTask_CompensateReverseOrder(t *testing.T) {
 		ftActionComp("b", []string{"a"}, true),
 		ftActionComp("c", []string{"b"}, false),
 	)
-	r, c := newFleetTaskReconciler(t, task,
+	e := newFTEnv(t, task,
 		childAction("c2", "a", fleetv1.ActionPhaseSucceeded),
 		childAction("c2", "b", fleetv1.ActionPhaseSucceeded),
 		childAction("c2", "c", fleetv1.ActionPhaseFailed),
 	)
 
 	// Pass 1: only b (the successor) is compensated; a waits.
-	reconcileFT(t, r, "c2")
-	ft := getFT(t, c, "c2")
+	e.reconcile("c2")
+	ft := e.task("c2")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseCompensating {
 		t.Fatalf("phase = %q, want Compensating", ft.Status.Phase)
 	}
-	if getActionOrNil(t, c, compChildName("c2", "b")) == nil {
+	if e.action(compChildName("c2", "b")) == nil {
 		t.Fatalf("expected b's compensation to be generated first")
 	}
-	if getActionOrNil(t, c, compChildName("c2", "a")) != nil {
+	if e.action(compChildName("c2", "a")) != nil {
 		t.Fatalf("a's compensation must NOT be generated before b's completes")
 	}
 	if got := compPhaseOf(ft, "a"); got != compPhasePending {
@@ -143,10 +137,10 @@ func TestFleetTask_CompensateReverseOrder(t *testing.T) {
 	}
 
 	// Pass 2: b's compensation succeeds → a's compensation is now generated.
-	setActionPhase(t, c, compChildName("c2", "b"), fleetv1.ActionPhaseSucceeded)
-	reconcileFT(t, r, "c2")
-	ft = getFT(t, c, "c2")
-	if getActionOrNil(t, c, compChildName("c2", "a")) == nil {
+	e.setPhase(compChildName("c2", "b"), fleetv1.ActionPhaseSucceeded)
+	e.reconcile("c2")
+	ft = e.task("c2")
+	if e.action(compChildName("c2", "a")) == nil {
 		t.Fatalf("expected a's compensation after b's succeeded")
 	}
 	if got := compPhaseOf(ft, "a"); got != compPhaseInProgress {
@@ -157,9 +151,9 @@ func TestFleetTask_CompensateReverseOrder(t *testing.T) {
 	}
 
 	// Pass 3: a's compensation succeeds → task Compensated.
-	setActionPhase(t, c, compChildName("c2", "a"), fleetv1.ActionPhaseSucceeded)
-	reconcileFT(t, r, "c2")
-	ft = getFT(t, c, "c2")
+	e.setPhase(compChildName("c2", "a"), fleetv1.ActionPhaseSucceeded)
+	e.reconcile("c2")
+	ft = e.task("c2")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseCompensated {
 		t.Fatalf("phase = %q, want Compensated", ft.Status.Phase)
 	}
@@ -172,16 +166,16 @@ func TestFleetTask_CompensateFailsClosed(t *testing.T) {
 		ftActionComp("a", nil, true),
 		ftActionComp("b", []string{"a"}, false),
 	)
-	r, c := newFleetTaskReconciler(t, task,
+	e := newFTEnv(t, task,
 		childAction("c3", "a", fleetv1.ActionPhaseSucceeded),
 		childAction("c3", "b", fleetv1.ActionPhaseFailed),
 	)
 
-	reconcileFT(t, r, "c3") // enters Compensating, generates a's compensation
-	setActionPhase(t, c, compChildName("c3", "a"), fleetv1.ActionPhaseFailed)
-	reconcileFT(t, r, "c3")
+	e.reconcile("c3") // enters Compensating, generates a's compensation
+	e.setPhase(compChildName("c3", "a"), fleetv1.ActionPhaseFailed)
+	e.reconcile("c3")
 
-	ft := getFT(t, c, "c3")
+	ft := e.task("c3")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseFailed {
 		t.Fatalf("phase = %q, want Failed (fail closed)", ft.Status.Phase)
 	}
@@ -200,17 +194,17 @@ func TestFleetTask_CompensateNothingToUndo(t *testing.T) {
 		ftActionComp("a", nil, false),
 		ftActionComp("b", []string{"a"}, false),
 	)
-	r, c := newFleetTaskReconciler(t, task,
+	e := newFTEnv(t, task,
 		childAction("c4", "a", fleetv1.ActionPhaseSucceeded),
 		childAction("c4", "b", fleetv1.ActionPhaseFailed),
 	)
 
-	reconcileFT(t, r, "c4")
-	ft := getFT(t, c, "c4")
+	e.reconcile("c4")
+	ft := e.task("c4")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseCompensated {
 		t.Fatalf("phase = %q, want Compensated", ft.Status.Phase)
 	}
-	if getActionOrNil(t, c, compChildName("c4", "a")) != nil {
+	if e.action(compChildName("c4", "a")) != nil {
 		t.Errorf("no compensation child expected when nothing declares compensation")
 	}
 }
@@ -227,29 +221,29 @@ func TestFleetTask_CompensateWaitsForRunningSuccessor(t *testing.T) {
 		ftActionComp("x", nil, false),
 	)
 
-	r, c := newFleetTaskReconciler(t, task,
+	e := newFTEnv(t, task,
 		childAction("c5", "a", fleetv1.ActionPhaseSucceeded),
 		childAction("c5", "b", fleetv1.ActionPhaseInProgress),
 		childAction("c5", "x", fleetv1.ActionPhaseFailed),
 	)
 
-	reconcileFT(t, r, "c5")
-	ft := getFT(t, c, "c5")
+	e.reconcile("c5")
+	ft := e.task("c5")
 	if ft.Status.Phase != fleetv1.FleetTaskPhaseCompensating {
 		t.Fatalf("phase = %q, want Compensating", ft.Status.Phase)
 	}
 	// b (still running) must have been cancelled, and a's undo must NOT have started yet.
-	if b := getActionOrNil(t, c, childName("c5", "b")); b == nil || b.Spec.DesiredState != fleetv1.DesiredStateCancelled {
+	if b := e.action(childName("c5", "b")); b == nil || b.Spec.DesiredState != fleetv1.DesiredStateCancelled {
 		t.Errorf("running successor 'b' should be desiredState Cancelled, got %+v", b)
 	}
-	if getActionOrNil(t, c, compChildName("c5", "a")) != nil {
+	if e.action(compChildName("c5", "a")) != nil {
 		t.Fatalf("a's compensation must not start while successor 'b' is not yet terminal")
 	}
 
 	// b finishes cancelling → a's compensation is now eligible.
-	setActionPhase(t, c, childName("c5", "b"), fleetv1.ActionPhaseCancelled)
-	reconcileFT(t, r, "c5")
-	if getActionOrNil(t, c, compChildName("c5", "a")) == nil {
+	e.setPhase(childName("c5", "b"), fleetv1.ActionPhaseCancelled)
+	e.reconcile("c5")
+	if e.action(compChildName("c5", "a")) == nil {
 		t.Fatalf("a's compensation should start once 'b' is terminal")
 	}
 }

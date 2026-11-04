@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package signing verifies firmware and model artifact signatures against the
-// trust roots configured in SwarmadaConfig.spec.signing (RFC-0001 §9.1.7, §9.2.8).
+// trust roots configured in SwarmadaConfig.spec.signing (RFC-0001 #security-model-and-firmware-registry-credentials, #fleet-adapter-protocol-fleet-adapter-compliance-checklist).
 // Verification fails closed: any missing input, unparseable key, or non-matching
 // signature returns an error, and the caller MUST refuse to dispatch the artifact.
 package signing

@@ -30,7 +30,7 @@ import (
 	"github.com/swarmada/swarmada/internal/audit"
 )
 
-// Robot-controller producers for the §9.6.5.1 safety audit log. Each seals on a real
+// Robot-controller producers for the RFC-0001 #safety-required-events safety audit log. Each seals on a real
 // transition, carries the exact detail fields the table lists, and is best-effort: the
 // chain records what happened, and must never be able to stop it happening.
 //

@@ -1,0 +1,113 @@
+# The zone-proposal worker: a Deployment the cluster starts, so nobody runs it by hand.
+#
+# Its Role is the whole of what it may do: read FleetActions, the ArtifactStore, the
+# floor-mapping ConfigMap and FleetZones; create ConfigMaps (its proposals); and update
+# one ConfigMap, floor-keepouts, which carries the keep-out mask reference. It can read
+# FleetZones and write none, so it cannot apply a zone. The operator applies the
+# proposal, and that apply is the confirm step.
+#
+# It mounts the store read-write: it reads maps from it and saves the adapter's
+# keep-out mask, rendered from the applied zone set, beside them.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zone-proposal-worker
+  namespace: warehouse-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zone-proposal-worker
+  namespace: warehouse-a
+rules:
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetactions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["artifactstores"]
+    verbs: ["get"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["floor-keepouts"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zone-proposal-worker
+  namespace: warehouse-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: zone-proposal-worker
+subjects:
+  - kind: ServiceAccount
+    name: zone-proposal-worker
+    namespace: warehouse-a
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zone-proposal-worker
+  namespace: warehouse-a
+  labels:
+    app.kubernetes.io/name: zone-proposal-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zone-proposal-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zone-proposal-worker
+    spec:
+      serviceAccountName: zone-proposal-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: swarmada-zone-proposal-worker:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --namespace=warehouse-a
+            - --claim=floor-maps
+            - --mount=/var/lib/swarmada/floor-maps
+            - --store=floor-maps
+            - --tool-dir=/app/tools/map-to-fleetzone
+            - --config=floor-mapping
+            - --work=/work
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: floor-maps
+              mountPath: /var/lib/swarmada/floor-maps
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: floor-maps
+          persistentVolumeClaim:
+            claimName: floor-maps
+        - name: work
+          emptyDir: {}

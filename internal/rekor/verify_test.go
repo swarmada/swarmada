@@ -31,7 +31,7 @@ import (
 	"testing"
 )
 
-// §9.1.7.3. The property under test is that a FORGED transparency-log response is refused.
+// RFC-0001 #swarmadaconfig-schema. The property under test is that a FORGED transparency-log response is refused.
 //
 // Index presence alone could never do this: the old check accepted any endpoint that returned a
 // non-empty UUID array, so a hostile Rekor satisfied the dispatch gate with `["anything"]`. Each

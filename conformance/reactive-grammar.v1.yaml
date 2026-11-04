@@ -1,0 +1,162 @@
+# Copyright 2026 The Swarmada Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# The ReactiveBlock grammar, version 1 — machine-readable.
+#
+# WHY THIS FILE EXISTS. The reactive tier is DECLARED in the control plane and
+# EXECUTED where the control plane cannot watch it: on the adapter or the edge
+# node, at sensor rate, inside a dispatched action, surviving a partition. The
+# conformance profile is the only thing that makes that tolerable. If the
+# profile lags the grammar, the guarantee is fiction.
+#
+# So the grammar is not prose that a checklist tries to keep up with. It is this
+# enumeration, and REACTIVE-BLOCK.md's RB0.1 fails the run when any construct
+# here has no check bound to it, or any check names a construct that is not
+# here. Adding a construct without adding a check is therefore a FAILING BUILD,
+# not an oversight someone might catch in review. That is the structural guard
+# design 7.3 asks for, made mechanical.
+#
+# STATUS. The grammar is SPECIFIED and NOT IMPLEMENTED. S5 (the reactive tier)
+# is gated on physical hardware and has not run; no Go type, no proto message,
+# and no CRD field for `spec.reactive` exists in the tree today. This manifest
+# is therefore the grammar's only machine-readable form. When S5 lands it in
+# proto and api/v1, this file MUST become generated from that source rather than
+# maintained beside it, and RB0.1 is what will catch the day they disagree.
+#
+# PROVENANCE of each construct is recorded per entry: `design` means it appears
+# verbatim in the compute design;
+# `closure` means this manifest closes a set the design left open by example
+# (the aggregate and comparison vocabularies), which is a design act recorded
+# here rather than smuggled in as an obvious reading.
+
+apiVersion: conformance.swarmada.io/v1alpha1
+kind: ReactiveGrammar
+grammarVersion: "1"           # the value an adapter declares as reactive_grammar_version
+revision: "2026.09.02"
+
+# ── Structure ────────────────────────────────────────────────────────────────
+structure:
+  - id: block.rules
+    kind: field
+    required: true
+    provenance: design
+    summary: "spec.reactive.rules[] — one or more named rules. A block with no rule is not dispatched."
+  - id: rule.name
+    kind: field
+    required: true
+    provenance: design
+    summary: "A rule name, unique within the block; it is how an upward event is attributed to a rule."
+  - id: rule.when
+    kind: field
+    required: true
+    provenance: design
+    summary: "Exactly one predicate. There is no and/or/not: a rule that needs two conditions is two rules and an event."
+  - id: rule.then
+    kind: field
+    required: true
+    provenance: design
+    summary: "One or more effects from the closed set of four, applied in order."
+  - id: rule.cooldownMs
+    kind: field
+    required: true
+    provenance: design
+    summary: "Mandatory. Minimum interval between two firings of the same rule. Absent, a rule at sensor rate is a fork bomb with an actuator on the end."
+
+# ── Predicates: the `when` side, closed to ROBOT-LOCAL sources ───────────────
+# A predicate MUST NOT match on a control-plane-delivered event or on
+# control-plane state. The closure of this side matters as much as
+# the closure of the effect side: with a downward event path, a TaskTrigger
+# could reach a robot-local effect that ran with no admission, no scheduling,
+# no reservation and no lease check.
+predicates:
+  - id: predicate.stream
+    provenance: design
+    source: robot-local
+    summary: "Matches an aggregate over a named sensor stream against a threshold."
+    fields:
+      - {name: stream,    required: true,  summary: "streamId declared in CapabilitiesSnapshot.sensor_streams"}
+      - {name: aggregate, required: true,  summary: "one of aggregates below"}
+      - {name: forMs,     required: true,  summary: "debounce window; MANDATORY"}
+    comparisonRequired: true
+  - id: predicate.computeResult
+    provenance: design
+    source: robot-local
+    summary: "Matches a field of a LOCAL executor's result (an onRobot executor the adapter hosts)."
+    fields:
+      - {name: computeResult, required: true, summary: "executorRef of a local executor"}
+      - {name: field,         required: true, summary: "result field name"}
+      - {name: present,       required: false, summary: "true matches presence"}
+    comparisonRequired: false
+  - id: predicate.computeEvent
+    provenance: design
+    source: robot-local
+    summary: "Matches a semantic event raised by a LOCAL executor."
+    fields:
+      - {name: computeEvent, required: true, summary: "executorRef of a local executor"}
+      - {name: type,         required: true, summary: "the event type"}
+    comparisonRequired: false
+
+aggregates:      # closure — the design shows `min` and implies a closed set
+  - {id: aggregate.min,   provenance: closure}
+  - {id: aggregate.max,   provenance: closure}
+  - {id: aggregate.mean,  provenance: closure}
+  - {id: aggregate.count, provenance: closure}
+
+comparisons:     # closure — the design shows `lt`
+  - {id: comparison.lt,  provenance: closure}
+  - {id: comparison.lte, provenance: closure}
+  - {id: comparison.gt,  provenance: closure}
+  - {id: comparison.gte, provenance: closure}
+
+# ── Effects: the `then` side, exactly four ───────────────────────────────────
+# THERE IS NO navigate, NO stop, NO setSpeed, AND NO WAY TO ADD ONE. Principle 2
+# (one authority for motion) is enforced by the SHAPE of this list, not by a
+# rule someone remembers. RB3.6 asserts the negative directly.
+effects:
+  - id: effect.activateStream
+    provenance: design
+    commandsMotion: false
+    summary: "Turn a declared sensor stream on for a bounded hold, at a bounded rate."
+    fields:
+      - {name: streamId, required: true}
+      - {name: rateHz,   required: true}
+      - {name: holdMs,   required: true, summary: "bounded; an activation cannot be held open indefinitely by a rule"}
+  - id: effect.invokeExecutor
+    provenance: design
+    commandsMotion: false
+    summary: "Invoke an executor CLASS the robot's own adapter declares it can host. Not a cluster endpoint: a reactive rule cannot reach off the robot."
+    fields:
+      - {name: executorRef, required: true}
+      - {name: input,       required: false}
+  - id: effect.raiseEvent
+    provenance: design
+    commandsMotion: false
+    summary: "Raise a semantic event upward. This is the ONLY way a reaction influences where the robot goes: the control plane sees the event and decides, paying the round trip."
+    fields:
+      - {name: type,    required: true}
+      - {name: payload, required: false}
+  - id: effect.playCue
+    provenance: design
+    commandsMotion: false
+    gatedBy: SwarmadaConfig.spec.reactive.allowLocalCues
+    summary: "Play a DECLARED cue id through a declared robot capability. The acknowledged soft spot: an actuator with no control-plane transition behind it, permitted because sound is not motion and is reversible."
+    fields:
+      - {name: cueId, required: true, summary: "a declared cue id; there is no free-form content field and one must never be added"}
+
+# ── Prohibitions: constructs that MUST NOT exist ─────────────────────────────
+# These are enumerated so they can be TESTED. A prohibition with no check is a
+# comment, and a comment is what this design cannot afford on this side.
+prohibitions:
+  - id: prohibition.motionEffect
+    summary: "No effect commands motion. navigate, stop, setSpeed, setPose, dock and every synonym are absent from `effects` and MUST be rejected."
+    reject: [navigate, stop, setSpeed, setPose, goTo, dock, undock, move, cancelMotion]
+  - id: prohibition.controlPlaneSource
+    summary: "No predicate matches a control-plane-delivered event or control-plane state."
+    reject: [taskTrigger, fleetTask, fleetAction, controlPlaneEvent, zone, reservation, desiredState]
+  - id: prohibition.freeFormCue
+    summary: "playCue carries a declared cue id and no free-form content (no text, no ssml, no uri)."
+    reject: [text, ssml, uri, body, script]
+  - id: prohibition.unboundedRule
+    summary: "cooldownMs and, for a stream predicate, forMs are mandatory. A rule missing either is rejected, never defaulted."
+  - id: prohibition.openEffectSet
+    summary: "An effect key outside the four above is rejected at admission and at dispatch. There is no extension point, no `custom`, and no passthrough."

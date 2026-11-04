@@ -67,7 +67,7 @@ func TestPushAssignAction_AcceptedRoundTrip(t *testing.T) {
 	}
 }
 
-// The payload must reach the wire on the ASSIGNMENT (§9.1.4.5), not only on
+// The payload must reach the wire on the ASSIGNMENT (RFC-0001 #fleetaction-the-payload-field), not only on
 // validate_action. proto field 3 `destination` is deprecated in favour of
 // payload_json, so this is the only field that can carry a Navigate's destination.
 func TestPushAssignAction_CarriesPayloadOnTheWire(t *testing.T) {

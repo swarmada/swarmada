@@ -22,6 +22,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/swarmada/swarmada/internal/estopscope"
 )
 
 // Carrying the authenticated operator identity onto estop and rollout-resume writes
@@ -145,9 +147,21 @@ func stampActorOn(ctx context.Context, obj metav1.Object, key string) {
 	obj.SetAnnotations(anns)
 }
 
-// stampEstopActor stamps on an estop-triggered transition (trigger, re-fire, or clear).
+// stampEstopActor stamps on an estop-triggered transition (trigger, re-fire, or clear), and
+// holds the stop finalizer on a carrier the moment its trigger lands: from then until the clear
+// has been applied, the carrier cannot disappear with a stop that reached no robot, even while
+// no manager replica serves the delete checks (estopscope.StopFinalizer; the controllers release
+// it after the clear). Removing the finalizer by hand ends the stop unapplied.
 func stampEstopActor(ctx context.Context, obj metav1.Object) {
 	stampActorOn(ctx, obj, estopTriggeredAnnotation)
+	if _, triggered := obj.GetAnnotations()[estopTriggeredAnnotation]; triggered {
+		for _, f := range obj.GetFinalizers() {
+			if f == estopscope.StopFinalizer {
+				return
+			}
+		}
+		obj.SetFinalizers(append(obj.GetFinalizers(), estopscope.StopFinalizer))
+	}
 }
 
 // stampResumeActor stamps on a rollout-resume transition (ADR-0041's operator intake).

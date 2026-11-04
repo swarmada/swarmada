@@ -3,8 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-08-20
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.6.5 (estop state machine and its audit record), §9.5.4 (audit envelope,
-  `actor.type`), §9.6.2 (estop scopes and timing), §F-2b (estop verb authorization);
+- **Related:** RFC-0001 "Estop State Machine" (and its audit record), "Audit Logging" (the audit
+  envelope and `actor.type`), "Estop Scopes" and "Timing Requirements", and estop verb authorization;
   ADR-0041 (rollout resume — the second operator intent this attributes), ADR-0025 (the cert-manager
   webhook serving path this reuses unchanged), ADR-0033 (`emitted` means a writer exists)
 
@@ -54,6 +54,9 @@ the controllers read it off the object they already fetch.**
 3. **The stamp is the webhook's assertion, not a field the caller fills in.** A client-supplied value is
    overwritten on the same admission, so writing the annotation directly cannot name someone else.
 
+   *2026-10-28:* this holds only when the stamping webhook runs. On an install without it, a
+   client-written actor is kept; see the RFC's security chapter.
+
 4. **`failurePolicy: Ignore` on all four.** This is the invariant expressed as a marker: attribution is
    best-effort, authorization is not. If the webhook server is unreachable the stamp is skipped and the
    estop still lands. Authorization is untouched — the *validating* webhooks keep `failurePolicy: Fail`
@@ -66,7 +69,7 @@ the controllers read it off the object they already fetch.**
    again. The scope is retained after the prefix: which estop it was, was never in doubt.
 
 6. **The identity rides the envelope only.** `audit.Entry.Actor`, never the `Detail` map —
-   `scripts/specdiff.py`'s `_ENVELOPE_FIELDS` check fails on duplicated envelope identity, and a test
+   the specification's drift check (its `_ENVELOPE_FIELDS` rule) fails on duplicated envelope identity, and a test
    asserts the absence directly so the failure surfaces before the spec gate.
 
 7. **Controller-authored events keep their service-account actor.** `sealFirmwareEventAs` /
@@ -90,9 +93,9 @@ the controllers read it off the object they already fetch.**
   `SWARMADA_CONFIG_MODIFIED`. Rejected: the estop entry carries fan-out results the webhook does not have
   — `robots_in_scope`, worst ack latency, per-robot outcome — because they do not exist until the
   fan-out runs. Splitting into an admission-time "requested" entry plus a controller-time "outcome" entry
-  would work, but it changes the §9.6.5.1 event table and doubles the entries an auditor must correlate.
+  would work, but it changes the "Required Events" table and doubles the entries an auditor must correlate.
 - **A fourth `ActorType` (`unattributed`).** Cleaner to consume and machine-checkable. Rejected by the maintainers:
-  `actor.type` is a normative §9.5.4 enum, and widening it to describe a *provenance* property rather
+  `actor.type` is a normative "Audit Logging" enum, and widening it to describe a *provenance* property rather
   than an actor *kind* pushes the cost onto every existing consumer. `service-account` +
   `unattributed:` prefix carries the same information without a wire change.
 - **Leave the disclosure in place.** It was honest and it was cheap. Rejected because the disclosure's

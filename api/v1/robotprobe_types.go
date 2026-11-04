@@ -30,9 +30,10 @@ const (
 )
 
 // RobotProbeSpec defines an active health check targeting a set of robots.
-// The Zone Controller calls the VerifyHardware Fleet Adapter RPC at
-// spec.intervalSeconds to actively confirm hardware, capability, or model
-// health, rather than relying on passive telemetry alone.
+// Every spec.intervalSeconds the RobotProbe controller pushes a verify_hardware,
+// verify_capability or verify_model Command (per spec.probeType) to each selected
+// robot over its Fleet Adapter's ControlStream, to actively confirm hardware,
+// capability, or model health rather than relying on passive telemetry alone.
 type RobotProbeSpec struct {
 	// RobotSelector selects the robots this probe verifies.
 	RobotSelector metav1.LabelSelector `json:"robotSelector"`
@@ -40,7 +41,11 @@ type RobotProbeSpec struct {
 	// ProbeType is the target class of the verification (hardware/capability/model).
 	ProbeType ProbeType `json:"probeType"`
 
-	// TargetComponent names the specific component/capability/model to verify.
+	// TargetComponent names the hardware component to verify when ProbeType is
+	// hardware. It is read only for hardware probes: a capability probe reads
+	// TargetCapability and a model probe reads TargetModel, so a capability or model
+	// probe that sets only this field sends an empty target. The Target print column
+	// shows this field only.
 	// +optional
 	TargetComponent string `json:"targetComponent,omitempty"`
 
@@ -57,14 +62,17 @@ type RobotProbeSpec struct {
 	// +optional
 	SyntheticInput []byte `json:"syntheticInput,omitempty"`
 
-	// IntervalSeconds is how often the probe runs.
+	// IntervalSeconds is how often the probe runs: the rate at which the control
+	// plane issues the probe command to each targeted robot (RFC-0001 §9.1.7). It is a
+	// rate the controller enforces, not only a requeue hint — no robot is probed
+	// twice within one interval, however often the RobotProbe is reconciled.
 	// +optional
 	// +kubebuilder:validation:Minimum=10
 	// +kubebuilder:validation:Maximum=3600
 	// +kubebuilder:default=60
 	IntervalSeconds int32 `json:"intervalSeconds,omitempty"`
 
-	// TimeoutSeconds is the per-probe RPC timeout.
+	// TimeoutSeconds is how long the controller waits for one robot's probe result.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=60
@@ -75,6 +83,12 @@ type RobotProbeSpec struct {
 	// status.lastProbeResult flips to Degraded/Failed. Optional: unset (nil) means
 	// fall back to SwarmadaConfig.spec.health.defaultProbeFailureThreshold, else the
 	// built-in default of 3 (ADR-0012).
+	//
+	// Cycles are issued one per IntervalSeconds, so this threshold is also a
+	// duration: a failure must persist for between (failureThreshold-1) ×
+	// intervalSeconds and failureThreshold × intervalSeconds before the component is
+	// demoted. That holds for an unreachable adapter too — a probe RPC that fails
+	// instantly is still only one cycle (ADR-0050).
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
@@ -83,19 +97,20 @@ type RobotProbeSpec struct {
 	// RecoveryThreshold is the consecutive Healthy cycles before the debounced
 	// status.lastProbeResult returns to Healthy. Optional: unset (nil) means fall
 	// back to SwarmadaConfig.spec.health.defaultProbeRecoveryThreshold, else the
-	// built-in default of 2 (ADR-0012).
+	// built-in default of 2 (ADR-0012). Cycles are paced by IntervalSeconds, so this
+	// is also a duration — see FailureThreshold.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
 	RecoveryThreshold *int32 `json:"recoveryThreshold,omitempty"`
 
-	// ExpectedMetrics are threshold key/value pairs the VerifyHardware result is
-	// checked against (e.g. {"min_frame_rate_pct": "80"}).
+	// ExpectedMetrics are threshold key/value pairs sent with the verify Command and
+	// checked against the adapter's result (e.g. {"min_frame_rate_pct": "80"}).
 	// +optional
 	ExpectedMetrics map[string]string `json:"expectedMetrics,omitempty"`
 }
 
-// ProbeResult is a probe outcome value (§9.1.6).
+// ProbeResult is a probe outcome value (RFC-0001 #robotprobe-schema).
 // +kubebuilder:validation:Enum=Healthy;Degraded;Failed;Pending;Unknown
 type ProbeResult string
 
@@ -169,9 +184,11 @@ type RobotProbeStatus struct {
 
 // RobotProbe is the Schema for the robotprobes API.
 //
-// RobotProbes add active verification on top of passive telemetry. The Zone
-// Controller calls the VerifyHardware Fleet Adapter RPC at spec.intervalSeconds
-// to confirm the targeted hardware, capability, or model is functioning within
+// RobotProbes add active verification on top of passive telemetry. Every
+// spec.intervalSeconds the RobotProbe controller pushes a verify_hardware,
+// verify_capability or verify_model Command to each selected robot over its Fleet
+// Adapter's ControlStream (the Fleet Adapter protocol has no VerifyHardware RPC), to
+// confirm the targeted hardware, capability, or model is functioning within
 // spec.expectedMetrics thresholds. This is distinct from Kubernetes-style
 // liveness probing: it verifies robot subsystems via the Fleet Adapter, not an
 // HTTP endpoint.

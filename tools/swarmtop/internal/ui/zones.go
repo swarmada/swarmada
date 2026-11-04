@@ -43,7 +43,7 @@ func (m Model) viewZones() string {
 
 	b.WriteString(m.styles.colHeader.Render(
 		pad("NAME", 20) + pad("ESTOP", 12) + pad("ROBOTS", 8) + pad("OCCUPANCY", 11) +
-			pad("KIND", 8) + "PARENT"))
+			pad("KIND", 11) + "PARENT"))
 	b.WriteByte('\n')
 
 	for i, z := range m.fleet.Zones {
@@ -82,7 +82,7 @@ func (m Model) zoneRow(z k8sclient.ZoneView) string {
 		m.styles.level(pad(z.EstopStatus, 12), zoneEstopLevel(z.EstopStatus)) +
 		pad(fmt.Sprintf("%d", z.RobotCount), 8) +
 		pad(zoneOccupancy(z), 11) +
-		pad(zoneKind(z), 8) +
+		pad(zoneKind(z), 11) +
 		format.Dash(z.ParentZone)
 }
 
@@ -135,6 +135,10 @@ func (m Model) zoneDetailLines(z *k8sclient.ZoneView) []string {
 	add("Parent      " + format.Dash(z.ParentZone))
 	if len(z.ChildZones) > 0 {
 		add("Children    " + strings.Join(z.ChildZones, ", "))
+	}
+	if len(z.MemberZones) > 0 {
+		add("Members     " + strings.Join(z.MemberZones, ", ") +
+			m.styles.muted.Render("  (grouped by name; no robot is placed in a composite)"))
 	}
 	add("Waypoints   " + fmt.Sprintf("%d", z.Waypoints))
 
@@ -191,7 +195,13 @@ func zoneOccupancy(z k8sclient.ZoneView) string {
 // zoneKind reports the structural role. A zone not yet reconciled reports IsLeaf false as a SAFE
 // default (robot admission requires a leaf), so "node" here means "leaf not confirmed", which is
 // why it is not phrased as a positive claim about having children.
+//
+// A COMPOSITE zone (spec.memberZones) is checked first: it has no parentZone children, so the
+// control plane reports it isLeaf, and "leaf" would say the one wrong thing about it.
 func zoneKind(z k8sclient.ZoneView) string {
+	if len(z.MemberZones) > 0 {
+		return "composite"
+	}
 	if z.IsLeaf {
 		return "leaf"
 	}

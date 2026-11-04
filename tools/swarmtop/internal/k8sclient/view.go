@@ -295,6 +295,9 @@ type ZoneView struct {
 	ParentZone  string
 	IsLeaf      bool
 	ChildZones  []string
+	// MemberZones is spec.memberZones: the zones a COMPOSITE zone groups. A composite has no
+	// parentZone children, so the control plane reports it isLeaf; this is what says otherwise.
+	MemberZones []string
 
 	RobotCount          int32
 	CurrentConcurrent   int32

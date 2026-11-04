@@ -44,7 +44,7 @@ func signingConfig(ns string, enforce bool) *fleetv1.SwarmadaConfig {
 	return &fleetv1.SwarmadaConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "swarmada-config", Namespace: ns},
 		Spec: fleetv1.SwarmadaConfigSpec{
-			Signing: fleetv1.SwarmadaSigningConfig{RequireSignatureVerification: enforce},
+			Signing: fleetv1.SwarmadaSigningConfig{RequireSignatureVerification: &enforce},
 		},
 	}
 }

@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,7 +55,7 @@ func discoveredRobot(name, ns string) *fleetv1.DiscoveredRobot {
 		Status: fleetv1.DiscoveredRobotStatus{
 			Manufacturer:   "Acme",
 			Model:          "Origin",
-			AdapterVersion: "1.0",
+			AdapterVersion: "1.0.0",
 			ReportedHardware: []fleetv1.DiscoveredHardwareComponent{
 				{Name: "cam", Type: fleetv1.HardwareTypeCamera, Status: fleetv1.HardwareHealthy},
 			},
@@ -66,7 +68,7 @@ func robotClass(name, ns string) *fleetv1.RobotClass {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: fleetv1.RobotClassSpec{
 			Manufacturer: "Acme", Model: "Origin",
-			BaseAdapter: fleetv1.BaseAdapterRef{Name: "acme-adapter", Version: "2.0"},
+			BaseAdapter: fleetv1.BaseAdapterRef{Name: "acme-adapter", Version: "2.0.0"},
 			Hardware:    []fleetv1.HardwareComponent{{Name: "lidar", Type: fleetv1.HardwareTypeLidar}},
 		},
 	}
@@ -168,12 +170,17 @@ func TestAdmitRequiresAdapterWithoutClass(t *testing.T) {
 }
 
 // Reject MARKS the DiscoveredRobot and leaves the deletion to the control plane, so the
-// manager can seal ROBOT_REJECTED (§9.6.5.1) before the object disappears. Deleting here —
+// manager can seal ROBOT_REJECTED (RFC-0001 #safety-required-events) before the object disappears. Deleting here —
 // as this did — made an operator's refusal indistinguishable from a TTL sweep.
-func TestRejectMarksForTheControlPlaneAndRecordsEvent(t *testing.T) {
+func TestRejectMarksForTheControlPlaneAndWritesNoEvent(t *testing.T) {
 	ns := "warehouse-a"
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(discoveredRobot("dr-stale", ns)).Build()
 	cs := authorizer(true)
+	// No built-in role holds create on events, so the API server refuses a caller's
+	// Event. The CLI must not try: the manager records the Rejected Event.
+	cs.PrependReactor("create", "events", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "events"}, "", errors.New("not granted"))
+	})
 	var out bytes.Buffer
 	o := newTestOptions(&out, cli.OutputTable)
 
@@ -189,10 +196,13 @@ func TestRejectMarksForTheControlPlaneAndRecordsEvent(t *testing.T) {
 	if got := marked.Annotations[annRobotRejected]; got != "stale test entry" {
 		t.Errorf("rejection annotation = %q, want the operator's reason", got)
 	}
-	// The rejection reason was recorded as an Event.
-	evs, _ := cs.CoreV1().Events(ns).List(context.Background(), metav1.ListOptions{})
-	if len(evs.Items) != 1 || evs.Items[0].Reason != "Rejected" || !strings.Contains(evs.Items[0].Message, "stale test entry") {
-		t.Errorf("expected a Rejected event with the reason, got %+v", evs.Items)
+	for _, a := range cs.Actions() {
+		if a.GetResource().Resource == "events" {
+			t.Errorf("the CLI wrote an Event (%s); the manager records the Rejected Event", a.GetVerb())
+		}
+	}
+	if strings.Contains(out.String(), "warning") {
+		t.Errorf("a reject by a caller without events create printed a warning: %q", out.String())
 	}
 	if !strings.Contains(out.String(), "rejected") {
 		t.Errorf("missing confirmation output: %q", out.String())

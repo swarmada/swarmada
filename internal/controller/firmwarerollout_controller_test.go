@@ -59,7 +59,7 @@ func signingConfig(require bool) *fleetv1.SwarmadaConfig {
 	cfg := &fleetv1.SwarmadaConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "swarmada-config", Namespace: rolloutNS},
 		Spec: fleetv1.SwarmadaConfigSpec{
-			Signing: fleetv1.SwarmadaSigningConfig{RequireSignatureVerification: require},
+			Signing: fleetv1.SwarmadaSigningConfig{RequireSignatureVerification: &require},
 		},
 	}
 	if require {
@@ -81,7 +81,7 @@ func fwRollout(sigRef string) *fleetv1.FirmwareRollout {
 			FirmwareChecksum:     fwChecksum,
 			FirmwareSignatureRef: sigRef,
 			Strategy:             fleetv1.RolloutStrategy{RollingUpdate: &fleetv1.RollingUpdateStrategy{MaxUnavailable: "1"}},
-			SafetyConstraints:    fleetv1.RolloutSafetyConstraints{MinBatteryPct: 30, RequireIdleState: true},
+			SafetyConstraints:    fleetv1.RolloutSafetyConstraints{MinBatteryPct: 30, RequireIdleState: apiBool(true)},
 		},
 	}
 }

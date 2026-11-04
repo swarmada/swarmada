@@ -1,0 +1,16 @@
+# Plain-language limit 6: every rule names its actor.
+# Flags (a) a passive requirement with no "by" later in the sentence:
+# "MUST be sent", "MUST NOT be held", "SHOULD be explicitly logged";
+# (b) "is to be <participle>" / "are to be <participle>" with no "by";
+# (c) a sentence or list item that opens with the keyword ("MUST send ...").
+# Participles: any word ending in -ed plus a list of irregular ones.
+# Scope: the same as PlainKeywordPerSentence (Vale 3.23).
+extends: existence
+message: "'%s' states a requirement without naming who must act. Name the actor as the subject: 'The Fleet Adapter MUST ...'."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+nonword: true
+tokens:
+  - '\b(?:MUST|SHALL|SHOULD|MAY)(?: NOT)? be (?:\w+ly )?(?:\w+ed|sent|held|kept|done|given|shown|made|set|put|run|read|written|rewritten|taken|built|found|known|seen|left|lost|met|told|brought|chosen|driven|frozen|hidden|broken|begun|drawn|thrown|withdrawn|overridden|bound|split|cut|shut|spent|dealt|meant|understood|forgotten|forbidden|reset|resent|undone|withheld|upheld|sought|led|fed|paid|cast|lit|sent|torn|worn|struck|hung|laid|redone|rerun|rebuilt)\b(?!(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[\s\S])*?\bby\b)'
+  - '\b(?:is|are) to be (?:\w+ly )?(?:\w+ed|sent|held|kept|done|given|shown|made|set|put|run|read|written|taken|built|found|known|seen|left|met|told|chosen|bound|reset|withheld)\b(?!(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[\s\S])*?\bby\b)'
+  - '(?:^|(?<=[.?!][)"''’”\]]*\s+))(?:MUST|SHALL|SHOULD|MAY|REQUIRED)\b'

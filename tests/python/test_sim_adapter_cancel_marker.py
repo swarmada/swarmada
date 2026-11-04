@@ -44,8 +44,7 @@ from adapters.simulation.simulator import make_simulator  # noqa: E402
 
 _ROBOT = "sim-robot-001"
 _ADAPTER_SRC = (
-    pathlib.Path(__file__).resolve().parents[2]
-    / "adapters" / "simulation" / "sim_adapter.py"
+    pathlib.Path(__file__).resolve().parents[2] / "adapters" / "simulation" / "sim_adapter.py"
 )
 
 
@@ -113,9 +112,9 @@ def test_marker_names_the_cancelled_action_not_an_empty_string(
 
     line = _marker_lines(capsys.readouterr().err, "CANCEL_HONOURED")[0]
     assert "action=inspect-dock" in line, f"marker does not name the action: {line!r}"
-    assert "action= " not in line and not line.rstrip().endswith("action="), (
-        f"marker names an empty action -- the name was read after the clear: {line!r}"
-    )
+    assert "action= " not in line and not line.rstrip().endswith(
+        "action="
+    ), f"marker names an empty action -- the name was read after the clear: {line!r}"
     assert a._current_action == "", "the branch must still clear the current action"
 
 
@@ -133,9 +132,9 @@ def test_disposition_is_read_back_from_the_wire_value(
     a._handle_command(_cancel())
 
     line = _marker_lines(capsys.readouterr().err, "CANCEL_HONOURED")[0]
-    on_the_wire = pb.CancelDisposition.Name(
-        pb.CANCEL_DISPOSITION_STOPPED_SAFELY
-    ).removeprefix("CANCEL_DISPOSITION_")
+    on_the_wire = pb.CancelDisposition.Name(pb.CANCEL_DISPOSITION_STOPPED_SAFELY).removeprefix(
+        "CANCEL_DISPOSITION_"
+    )
     assert f"disposition={on_the_wire}" in line
 
 
@@ -191,9 +190,9 @@ def test_cancel_with_nothing_assigned_still_reports(
     kinds = []
     while not a._outbox.empty():
         kinds.append(a._outbox.get().WhichOneof("payload"))
-    assert "action_status" not in kinds, (
-        f"an idle cancel emitted an action status for a nonexistent action: {kinds}"
-    )
+    assert (
+        "action_status" not in kinds
+    ), f"an idle cancel emitted an action status for a nonexistent action: {kinds}"
 
 
 def test_edge_estop_marker_is_unchanged() -> None:
@@ -218,3 +217,77 @@ def test_edge_estop_marker_is_unchanged() -> None:
     )
     for field in ("robot={self._robot}", "id={ec.estop.estop_id}", "state="):
         assert field in src, f"estop marker lost its {field!r} field"
+
+
+def _cancel_naming(action_id: str, command_id: int = 91):
+    return pb.Command(
+        command_id=command_id,
+        robot_id=_ROBOT,
+        cancel_action=pb.CancelAction(action_id=action_id, fencing_token=1),
+    )
+
+
+def _drain(a: SimAdapter) -> list:
+    out = []
+    while not a._outbox.empty():
+        out.append(a._outbox.get())
+    return out
+
+
+def test_cancel_naming_another_action_leaves_the_running_one_alone(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A preempted action's cancel must not abort the action that preempted it.
+
+    When a higher-priority action preempts a running one in place, the robot switches
+    to the new action first; the control plane then sends cancel_action for the OLD
+    one. Each action counts its own fencing tokens, so the cancel is not stale by token:
+    its action_id is the only thing that says it is not about the running action. An
+    adapter that ignores action_id stops the robot on the new action, which then never
+    completes. The quickstart's healthy-fleet scenario failed exactly so.
+    """
+    a = _adapter()
+    a._current_action = "deliver-pallet-001"
+    stops: list[str] = []
+    releases: list[str] = []
+    a._sim.command_stop = lambda robot: stops.append(robot)  # type: ignore[method-assign]
+    a._lease.release = lambda robot: releases.append(robot)  # type: ignore[method-assign]
+    _drain(a)
+
+    a._handle_command(_cancel_naming("inspect-receiving-dock", command_id=91))
+
+    assert a._current_action == "deliver-pallet-001", (
+        "a cancel naming inspect-receiving-dock cleared the running deliver-pallet-001"
+    )
+    assert stops == [], "the robot was stopped for an action it is not running"
+    assert releases == [], "the running action's lease was released"
+    msgs = _drain(a)
+    kinds = [m.WhichOneof("payload") for m in msgs]
+    assert "action_status" not in kinds, (
+        f"a status was emitted for the running action on a cancel that did not name it: {kinds}"
+    )
+    results = [m.command_result for m in msgs if m.WhichOneof("payload") == "command_result"]
+    assert len(results) == 1 and results[0].command_id == 91
+    assert results[0].cancel_action.acknowledged, (
+        "the named action is not executing on this robot, so it is stopped: the reply "
+        "must say so, or the control plane waits for the old lease to die"
+    )
+    err = capsys.readouterr().err
+    assert not _marker_lines(err, "CANCEL_HONOURED")
+    line = _marker_lines(err, "CANCEL_NOT_RUNNING")[0]
+    for field in ("action=inspect-receiving-dock", "running=deliver-pallet-001", "command_id=91"):
+        assert field in line, f"marker missing {field!r}: {line!r}"
+
+
+def test_cancel_naming_the_running_action_still_stops_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The guard above must not turn a real cancel into a no-op."""
+    a = _adapter()
+    a._current_action = "deliver-pallet-001"
+
+    a._handle_command(_cancel_naming("deliver-pallet-001"))
+
+    assert a._current_action == ""
+    line = _marker_lines(capsys.readouterr().err, "CANCEL_HONOURED")[0]
+    assert "action=deliver-pallet-001" in line

@@ -27,7 +27,9 @@ type DiscoveredRobotPhase string
 const (
 	// DiscoveredRobotPhaseDiscovered — connected, awaiting operator admission decision.
 	DiscoveredRobotPhaseDiscovered DiscoveredRobotPhase = "Discovered"
-	// DiscoveredRobotPhaseStale — approaching TTL expiry; will be deleted if not admitted soon.
+	// DiscoveredRobotPhaseStale — in the last quarter of the TTL window, before expiry;
+	// the DiscoveredRobot controller deletes the object at ttlExpiresAt if it is not
+	// admitted or re-announced first.
 	DiscoveredRobotPhaseStale DiscoveredRobotPhase = "Stale"
 )
 
@@ -110,7 +112,8 @@ type DiscoveredRobotStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	RobotID string `json:"robotId"`
 
-	// ConnectedAt is the time the Fleet Adapter called Discover.
+	// ConnectedAt is the time of the most recent Discover for this robot. It is
+	// rewritten on every re-announce, and the TTL window is measured from it.
 	ConnectedAt metav1.Time `json:"connectedAt"`
 
 	// AdapterAddress is the gRPC address of the Fleet Adapter.
@@ -134,7 +137,9 @@ type DiscoveredRobotStatus struct {
 	// +optional
 	MacAddress string `json:"macAddress,omitempty"`
 
-	// RobotClass suggested by the Fleet Adapter (may be empty).
+	// SuggestedRobotClass is the sole entry of the mTLS-verified FleetAdapter's
+	// spec.servesRobotClasses; empty when that adapter is unknown or serves zero
+	// or several classes. Not taken from anything the adapter self-reports.
 	// +optional
 	SuggestedRobotClass string `json:"suggestedRobotClass,omitempty"`
 
@@ -150,13 +155,15 @@ type DiscoveredRobotStatus struct {
 	// +optional
 	ReportedCapabilities []string `json:"reportedCapabilities,omitempty"`
 
-	// LastAnnouncedAt is the most recent time the Fleet Adapter re-announced this
-	// robot (the discovery-TTL liveness refresh); TTLExpiresAt is derived from it.
+	// LastAnnouncedAt is specified as the most recent time the Fleet Adapter
+	// re-announced this robot. Never written at v0.4; ConnectedAt carries that
+	// time instead, and TTLExpiresAt is derived from it.
 	// +optional
 	LastAnnouncedAt *metav1.Time `json:"lastAnnouncedAt,omitempty"`
 
-	// TTLExpiresAt is the time at which this resource will be auto-deleted
-	// if the robot has not been admitted or rejected.
+	// TTLExpiresAt is the time at which the DiscoveredRobot controller deletes
+	// this resource if the robot has not been admitted or rejected. Each
+	// re-announce moves it forward.
 	// +optional
 	TTLExpiresAt *metav1.Time `json:"ttlExpiresAt,omitempty"`
 }
@@ -175,7 +182,8 @@ type DiscoveredRobotSpec struct{}
 //	swarmctl admit robot <name> --zone <leaf-zone>
 //
 // DiscoveredRobot.spec is always empty — this is a read-only resource.
-// Operators CANNOT edit it; admission is exclusively via swarmctl admit.
+// Operators do not edit it; a robot is admitted by swarmctl admit or by the
+// namespace's auto-admit settings, and rejected by swarmctl delete robot.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -185,7 +193,7 @@ type DiscoveredRobotSpec struct{}
 // +kubebuilder:printcolumn:name="Firmware",type="string",JSONPath=".status.firmwareVersion"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Connected",type="date",JSONPath=".status.connectedAt"
-// +kubebuilder:printcolumn:name="TTL",type="date",JSONPath=".status.ttlExpiresAt"
+// +kubebuilder:printcolumn:name="TTL",type="string",JSONPath=".status.ttlExpiresAt"
 type DiscoveredRobot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

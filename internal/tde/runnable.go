@@ -31,7 +31,7 @@ import (
 const recoveryConfigName = "swarmada-config"
 
 // RecoveryRunnable rebuilds TDE reservation state from FleetZone.status each time
-// this replica acquires leadership (§9.4.7 startup recovery + leader-failover
+// this replica acquires leadership (RFC-0001 #tde-restart-recovery startup recovery + leader-failover
 // re-recovery). It is a leader-elected manager.Runnable: a standby replica holds no
 // reservation state, and the moment it wins leadership the engine is rebuilt from
 // durable FleetZone.status BEFORE it serves any grant.
@@ -48,7 +48,7 @@ type RecoveryRunnable struct {
 	// Client reads FleetZone.status (the manager cached client; the cache is synced
 	// before leader-elected runnables start).
 	Client client.Client
-	// Mode selects the §9.4.7 recovery policy when the Zone Controller is ready
+	// Mode selects the RFC-0001 #tde-restart-recovery recovery policy when the Zone Controller is ready
 	// (RecoverValidate in production).
 	Mode RecoveryMode
 	// Log receives lifecycle messages.
@@ -60,12 +60,12 @@ type RecoveryRunnable struct {
 	// Ready, when non-nil, reports whether the Zone Controller has loaded zone
 	// geometry. Recovery waits for it (up to ReadyTimeout) before validating Occupied
 	// reservations against Robot.status.currentZone; on timeout it applies Fallback
-	// (§9.4.7). Nil disables the readiness gate (Mode is used unconditionally).
+	// (RFC-0001 #tde-restart-recovery). Nil disables the readiness gate (Mode is used unconditionally).
 	Ready func() bool
-	// ReadyTimeout bounds the wait for Ready. Zero uses the §9.1.11.10 default (30s).
+	// ReadyTimeout bounds the wait for Ready. Zero uses the cancel-on-disconnect default (30s).
 	ReadyTimeout time.Duration
 	// Fallback is the conservative recovery mode when the Zone Controller is not ready
-	// in time. Empty defaults to RecoverReleaseAll (§9.4.7).
+	// in time. Empty defaults to RecoverReleaseAll (RFC-0001 #tde-restart-recovery).
 	Fallback RecoveryMode
 	// ReadyPollInterval is how often Ready is polled while waiting. Zero uses 200ms.
 	ReadyPollInterval time.Duration
@@ -95,7 +95,7 @@ func (r *RecoveryRunnable) Start(ctx context.Context) error {
 	// Resolve the recovery tunables from the manager-namespace SwarmadaConfig
 	// (ADR-0015), fail-safe to the static defaults. Choose the recovery mode: validate
 	// against currentZone once the Zone Controller is ready, else the conservative
-	// fallback on timeout (§9.4.7).
+	// fallback on timeout (RFC-0001 #tde-restart-recovery).
 	readyTimeout, fallback := r.resolveRecoveryConfig(ctx)
 	mode := r.recoveryMode(ctx, readyTimeout, fallback)
 
@@ -135,11 +135,11 @@ func (r *RecoveryRunnable) Start(ctx context.Context) error {
 func (r *RecoveryRunnable) resolveRecoveryConfig(ctx context.Context) (time.Duration, RecoveryMode) {
 	timeout := r.ReadyTimeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second // §9.1.11.10 default
+		timeout = 30 * time.Second // cancel-on-disconnect default
 	}
 	fallback := r.Fallback
 	if fallback == "" {
-		fallback = RecoverReleaseAll // §9.4.7 default conservative fallback
+		fallback = RecoverReleaseAll // RFC-0001 #tde-restart-recovery default conservative fallback
 	}
 	if r.ConfigNamespace == "" {
 		return timeout, fallback
@@ -161,7 +161,7 @@ func (r *RecoveryRunnable) resolveRecoveryConfig(ctx context.Context) (time.Dura
 
 // recoveryMode waits for the Zone Controller to become ready (up to readyTimeout)
 // and returns Mode (RecoverValidate) on success, or the conservative fallback on
-// timeout (§9.4.7). With no Ready gate configured it uses Mode unconditionally.
+// timeout (RFC-0001 #tde-restart-recovery). With no Ready gate configured it uses Mode unconditionally.
 func (r *RecoveryRunnable) recoveryMode(ctx context.Context, readyTimeout time.Duration, fallback RecoveryMode) RecoveryMode {
 	if r.Ready == nil {
 		return r.Mode
@@ -179,7 +179,7 @@ func (r *RecoveryRunnable) waitReady(ctx context.Context, timeout time.Duration)
 		return true
 	}
 	if timeout <= 0 {
-		timeout = 30 * time.Second // §9.1.11.10 default
+		timeout = 30 * time.Second // cancel-on-disconnect default
 	}
 	interval := r.ReadyPollInterval
 	if interval <= 0 {

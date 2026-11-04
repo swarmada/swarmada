@@ -1,0 +1,46 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Second of three per-robot adapter identities for demo-ab-live (see
+# ../../../examples/demo-ab-live/run.sh). One shared FleetAdapter identity
+# cannot carry more than one live sim_adapter.py process:
+# internal/command/dispatcher.go keys its live-stream map by
+# "<namespace>/<adapter-name>" alone (adapterKey, dispatcher.go ~line 91), so a
+# second concurrent RegisterStream() under the same identity silently
+# overwrites the first — command push (assign_action, cancel_task, active
+# probes) would then only ever reach whichever robot registered last. Three
+# distinct SANs -> three distinct FleetAdapter objects -> three independent
+# dispatcher map entries is the only way to run three robots live and
+# correctly addressable at once without changing sim_adapter.py's one-process-
+# one-robot model. See adapter-client-cert.yaml in ../quickstart-mtls for the
+# SAN-parsing details this mirrors.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sim-fleet-adapter-2-client
+  namespace: system
+spec:
+  secretName: sim-fleet-adapter-2-client-tls
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: sim-fleet-adapter-2
+  dnsNames:
+    - sim-fleet-adapter-2.warehouse-a.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer

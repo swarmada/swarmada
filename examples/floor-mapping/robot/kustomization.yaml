@@ -1,0 +1,24 @@
+# The ROS 2 adapter's side of a robot run: its FleetAdapter and the robot class it serves.
+# The report is one the conformance harness wrote for this adapter (contract 1.4.0, suite
+# 2026.10.17, 53 pass, 1 advisory fail on the SHOULD C13.2, 17 skip), pinned by digest in
+# fleetadapter.yaml: change a byte and the controller reports the conformance Failed.
+# The adapter build that earned it, including explore-floor, is not in the published
+# fleet-adapter-ros2 repository, so this report cannot be reproduced from public code.
+# adapters/REGISTRY.md records the published adapter's own result (contract 1.0.0, stale).
+#
+# Apply after examples/first-run and ../object-store/setup.sh; the robot is then admitted
+# with swarmctl admit --class ros2-nav2-v1 once its adapter has announced it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - robotclass.yaml
+  - fleetadapter.yaml
+
+configMapGenerator:
+  - name: fleet-adapter-ros2-conformance
+    namespace: warehouse-a
+    files:
+      - report.json=conformance-report.json
+    options:
+      disableNameSuffixHash: true

@@ -32,12 +32,15 @@ spec:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
             - --leader-elect
-            # ControlStream moves OFF 9443. controller-runtime's webhook server takes 9443 by
-            # default and is not configurable from here, so with the webhooks enabled the two
-            # would race for the same port inside one pod and whichever bound second would
-            # fail. The Service still publishes 9443 and forwards to 9445, so the documented
-            # adapter endpoint (swarmada-controlstream.system.svc:9443) is unchanged and no
-            # adapter, chart or runbook needs editing.
+            # Repeated from config/manager/manager.yaml: `args` on a Container has no
+            # merge key, so a strategic-merge patch replaces the whole list and would
+            # otherwise silently drop the durable audit sink. The volume and
+            # mount DO merge (by name / mountPath) and are not repeated.
+            - --audit-log-file=/var/log/swarmada/audit.jsonl
+            # ControlStream is on 9445, the manager's default, stated here because this
+            # list replaces the base args. controller-runtime's webhook server takes 9443 and
+            # is not configurable from here, so the two must not share it. The Service
+            # publishes 9445 too: adapters dial swarmada-controlstream.system.svc:9445.
             #
             # PORT MAP inside this pod — every one of these is already claimed, so a new
             # listener must not reuse them:

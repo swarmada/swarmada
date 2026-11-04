@@ -202,3 +202,84 @@ func TestRouter_InvalidateForcesImmediateReresolve(t *testing.T) {
 		t.Fatalf("sinkB=%d, want 1 (Invalidate forced an immediate re-resolve to B)", sinkB.count())
 	}
 }
+
+// recordingStatusSink captures the material updates that reach the status plane.
+type recordingStatusSink struct {
+	mu   sync.Mutex
+	upds []telemetry.MaterialUpdate
+}
+
+func (r *recordingStatusSink) ApplyMaterialUpdate(_ context.Context, upd telemetry.MaterialUpdate) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.upds = append(r.upds, upd)
+	return true, nil
+}
+
+func (r *recordingStatusSink) batteryWrites() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, u := range r.upds {
+		if u.BatteryPct != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// ForgetRobot reaches a robot's plane without the caller knowing which plane that
+// is. This is the case that matters in production: the wire robot_id need not be
+// namespaced (the reference adapter sends a bare name, routing to the "" plane),
+// so the Robot object's own namespace does not identify its plane.
+func TestRouter_ForgetRobotClearsStateInWhicheverPlaneHoldsIt(t *testing.T) {
+	sink := &recordingStatusSink{}
+	resolver := func(string) telemetry.PlaneConfig { return telemetry.PlaneConfig{} }
+	r := telemetry.NewRouter(resolver, sink)
+	ctx := context.Background()
+
+	// A bare, un-namespaced robot_id — routed to the "" plane.
+	const bare = "sim-robot-001"
+	if err := r.Ingest(ctx, robotFrame(bare, fleetv1.RobotPhaseIdle)); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	if got := sink.batteryWrites(); got != 1 {
+		t.Fatalf("first frame should establish battery once, got %d writes", got)
+	}
+	// Unchanged stream: the RA-1 gate holds, nothing more is written.
+	for i := 0; i < 5; i++ {
+		if err := r.Ingest(ctx, robotFrame(bare, fleetv1.RobotPhaseIdle)); err != nil {
+			t.Fatalf("ingest %d: %v", i, err)
+		}
+	}
+	if got := sink.batteryWrites(); got != 1 {
+		t.Fatalf("unchanged stream must not write again, got %d battery writes", got)
+	}
+
+	// The Robot object is recreated. Without the reset the identical stream stays
+	// silent and the new object never gets a battery reading. The resetter names the
+	// Robot's namespace; the frames carried none, and their entry is dropped too.
+	if !r.ForgetRobot("warehouse-a", bare) {
+		t.Fatal("ForgetRobot found no state for a robot the router had projected")
+	}
+	if err := r.Ingest(ctx, robotFrame(bare, fleetv1.RobotPhaseIdle)); err != nil {
+		t.Fatalf("post-forget ingest: %v", err)
+	}
+	if got := sink.batteryWrites(); got != 2 {
+		t.Fatalf("after ForgetRobot the next frame must re-establish battery, got %d writes", got)
+	}
+
+	// RA-1: exactly one re-establishing write, then quiet again.
+	for i := 0; i < 10; i++ {
+		if err := r.Ingest(ctx, robotFrame(bare, fleetv1.RobotPhaseIdle)); err != nil {
+			t.Fatalf("ingest %d: %v", i, err)
+		}
+	}
+	if got := sink.batteryWrites(); got != 2 {
+		t.Fatalf("re-establishing must be one write, not a per-tick unlock; got %d", got)
+	}
+
+	if r.ForgetRobot("warehouse-a", "never-seen") {
+		t.Fatal("ForgetRobot claimed to drop state for an unknown robot")
+	}
+}

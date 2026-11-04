@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-23
 - **Deciders:** API Designer, Security Reviewer, Test Engineer
-- **Related:** RFC-0001 §9.1.9 (ModelPolicy quality gate), ADR-0020 (model artifact integrity), ADR-0012 (probe-status debounce)
+- **Related:** RFC-0001 "ModelPolicy" (quality gate), ADR-0020 (model artifact integrity), ADR-0012 (probe-status debounce)
 
 ## Context
 
@@ -32,7 +32,7 @@ under-performing model off physical robots. The forces in tension:
 simulation-first workflows report simulation-only metrics as the normal case, so
 the safe default must not make simulation iteration impossible; free-form metric
 keys (`customMetrics`) are deliberately flexible and should stay that way; and a
-pluggable evaluation-provider interface (a future extension point that lets an
+pluggable evaluation-provider interface (an extension point, not built, that would let an
 external evaluation system compute the metrics) could reintroduce whatever
 semantics this ADR does not pin down.
 
@@ -95,7 +95,7 @@ The quality gate evaluates **fail-closed**.
   of these semantics — requiring that the metrics' provenance matches the
   deployed artifact — without changing how the gate itself evaluates.
 
-## Follow-up test obligations
+## Test obligations
 
 - A configured rule whose metric is missing from the payload produces a Reject
   naming the missing key.

@@ -1,0 +1,135 @@
+# UC-1.7 — RobotClass defaulting on admission (RFC-0001 #robotclass).
+#
+# Declare a robot type once; every Robot that references it inherits the type's
+# hardware, capabilities, adapter binding and telemetry defaults — stamped onto
+# spec by the mutating admission webhook (mrobot.swarmada.io,
+# internal/webhook/robot_defaulter.go) at CREATE time.
+#
+# This is the "Node template" analogy: the class is the template, the webhook is
+# the defaulter, and the stored object carries the result.
+#
+# REQUIRES a control plane deployed with admission webhooks serving —
+# config/overlays/demo-webhooks. Against config/overlays/quickstart-mtls
+# (ENABLE_WEBHOOKS=false) the bare Robot below is REJECTED, not silently stored:
+# spec.adapter, spec.manufacturer and spec.model are required by the CRD schema and
+# only the defaulter supplies them, so a webhooks-off apply fails with
+#
+#     The Robot "bare-robot-001" is invalid:
+#       * spec.adapter: Required value
+#       * spec.manufacturer: Required value
+#       * spec.model: Required value
+#
+# which is a better failure than this comment used to claim — it is loud rather than
+# silent. Observed by server dry-run against a webhooks-off cluster, 2026-09-06.
+#
+# ORDER, with webhooks on. The validating webhook (vrobot.swarmada.io) admits a Robot
+# only when its FleetAdapter is Connected with conformance Passed (RFC-0001 #fleetadapter-admission-gating).
+# So the first apply of this file creates the SwarmadaConfig, FleetZone and RobotClass,
+# and refuses the Robot:
+#
+#     FleetAdapter "sim-fleet-adapter" not found in namespace "warehouse-a"
+#
+# That refusal is expected: it is the gate working. Bring the adapter under management
+# first (start it, wait for its DiscoveredRobot, then `swarmctl admit`), then apply this
+# file again. The three objects come back unchanged and the bare Robot is created with
+# the class defaults. See README.md in this directory.
+#
+# Nothing here writes status.
+#
+# THE NAMESPACE MUST ALREADY EXIST. This file declares only `swarmada.io/v1` kinds,
+# so create it first:
+#
+#     kubectl create namespace warehouse-a
+#
+# It used to carry a core `v1` Namespace document of its own. That was removed: every
+# other file in config/samples/ is swarmada.io-only, and test/samples decodes each
+# document against api/v1, where a core kind is not registered — one `kind: Namespace`
+# here failed three tests in that package. The namespace was already being created by
+# hand before this file is applied, so the document was redundant as well as breaking.
+---
+# REQUIRED when admission webhooks are on, and easy to miss.
+#
+# The first FleetZone in a namespace makes SwarmadaConfigBootstrapReconciler
+# auto-create a `swarmada-config` with an EMPTY spec, relying on kubebuilder
+# defaults. `spec.signing.requireSignatureVerification` defaults to true and
+# `trustRoots` defaults to empty — and vswarmadaconfig.swarmada.io rejects exactly
+# that pair ("at least one trustRoot is required when requireSignatureVerification
+# is true"). With webhooks off the create succeeds and nobody notices; with webhooks
+# on the bootstrap controller cannot create the object it is required to create and
+# hot-loops on the error.
+#
+# Pre-creating a valid config here means the bootstrap controller's Get succeeds and
+# it never attempts the create. `requireSignatureVerification: false` is the demo
+# posture (no artifacts are installed here); production sets trustRoots instead.
+apiVersion: swarmada.io/v1
+kind: SwarmadaConfig
+metadata:
+  name: swarmada-config
+  namespace: warehouse-a
+spec:
+  signing:
+    requireSignatureVerification: false
+---
+apiVersion: swarmada.io/v1
+kind: FleetZone
+metadata:
+  name: warehouse-a
+  namespace: warehouse-a
+spec:
+  displayName: "Receiving and staging area — east wing"
+  waypoints:
+    - name: charging-bay
+      x: 1.1
+      "y": 1.1
+      yaw: 1.57
+---
+# The template. One declaration of what an "amr-standard" is.
+apiVersion: swarmada.io/v1
+kind: RobotClass
+metadata:
+  name: amr-standard
+  namespace: warehouse-a
+spec:
+  manufacturer: SimBot
+  model: SimBot-250
+  baseAdapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  hardware:
+    - name: lidar_top
+      type: Lidar
+      model: SIM-L2
+    - name: camera_front
+      type: Camera
+      model: SIM-C1
+  baseCapabilities:
+    - name: navigation
+      type: hardware-native
+      pauseable: false
+    - name: camera_front
+      type: hardware-native
+      pauseable: false
+      requiredHardware:
+        - camera_front
+  defaultTelemetry:
+    telemetryIntervalSeconds: 5
+---
+# The bare Robot. No capabilities, no hardware, no manufacturer, no model, no
+# adapter — only a name, a zone and the class it belongs to. Everything else is
+# stamped by the webhook on admission.
+#
+# The label marks the one document in config/samples/ that needs webhooks ON. The
+# documented whole-directory applies are webhooks-off and select it away with
+#   kubectl apply -f config/samples/ -l 'swarmada.io/sample-posture!=webhooks-on'
+# so they apply everything that works there. Applying this file by name, as the demo
+# does, ignores the label.
+apiVersion: swarmada.io/v1
+kind: Robot
+metadata:
+  name: bare-robot-001
+  namespace: warehouse-a
+  labels:
+    swarmada.io/sample-posture: webhooks-on
+spec:
+  robotClass: amr-standard
+  zone: warehouse-a

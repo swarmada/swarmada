@@ -58,19 +58,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The Makefile runs a Go-discovery preflight at parse time, so any `make` target
-      # needs Go present even when it compiles nothing. Mirrors ci.yml's python job.
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-
-      # adapters/external/ is gitignored — `make adapters` git-clones the three reference
-      # adapters from their own public repositories. A checkout alone leaves those paths
-      # absent, so three of the four matrix entries fail on a missing directory rather
-      # than on the dependency floor this job exists to test.
-      - name: Fetch the reference adapters
+      # adapters/external/ is gitignored: each reference adapter lives in its own public
+      # repository, and docs/adapters.md tells a reader to clone it there. A checkout alone
+      # leaves the path absent, so three of the four matrix entries would fail on a missing
+      # directory rather than on the dependency floor this job exists to test. Clone the one
+      # this entry installs, the way the docs do; the Makefile has no target for it.
+      - name: Fetch the reference adapter
         if: matrix.needs_sdk == 'true'
-        run: make adapters
+        run: git clone --depth 1 "https://github.com/swarmada/${{ matrix.name }}.git" "${{ matrix.path }}"
 
       - uses: actions/setup-python@v5
         with:

@@ -27,6 +27,10 @@ import (
 
 // validConfig is a SwarmadaConfig that satisfies all five cross-field rules; each
 // test mutates one block to trip exactly one rule.
+// sigBoolPtr builds a *bool for the signing gate, which is a pointer so that an explicit
+// false is distinguishable from unset (unset defaults to true).
+func sigBoolPtr(b bool) *bool { return &b }
+
 func validConfig() *fleetv1.SwarmadaConfig {
 	return &fleetv1.SwarmadaConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "swarmada-config"},
@@ -45,7 +49,7 @@ func validConfig() *fleetv1.SwarmadaConfig {
 				},
 			},
 			Signing: fleetv1.SwarmadaSigningConfig{
-				RequireSignatureVerification: true,
+				RequireSignatureVerification: sigBoolPtr(true),
 				TrustRoots:                   []fleetv1.SigningTrustRoot{{Name: "ca"}},
 			},
 		},
@@ -119,28 +123,75 @@ func TestSwarmadaConfig_TTLMustExceedTimeout(t *testing.T) {
 	assertValid(t, never)
 }
 
-func TestSwarmadaConfig_SignatureVerificationRequiresTrustRoots(t *testing.T) {
+// Verification on with no trust root is INCOMPLETE, not invalid: it is warned about and
+// admitted (ADR-0051). The control plane's own bootstrap config is born in exactly that
+// state, and rejecting it made the reconciler hot-loop against a webhook running
+// failurePolicy=fail — a namespace could reach a state where the config that would break
+// the loop could not be written either.
+func TestSwarmadaConfig_SignatureVerificationWithoutTrustRootsWarnsAndAdmits(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Signing.TrustRoots = nil
-	assertRejected(t, cfg, "trustRoot is required")
+	warnings, err := validateSwarmadaConfig(cfg)
+	if err != nil {
+		t.Fatalf("an incomplete signing config must be admitted, not rejected: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "no trustRoots are configured") {
+		t.Fatalf("expected a trust-root warning, got %v", warnings)
+	}
 
-	// Not requiring verification → no trust roots needed.
+	// Not requiring verification → no trust roots needed, and nothing to warn about.
 	off := validConfig()
-	off.Spec.Signing.RequireSignatureVerification = false
+	off.Spec.Signing.RequireSignatureVerification = sigBoolPtr(false)
 	off.Spec.Signing.TrustRoots = nil
-	assertValid(t, off)
+	warnings, err = validateSwarmadaConfig(off)
+	if err != nil {
+		t.Fatalf("verification off with no trust roots is valid: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("no warning expected when verification is off, got %v", warnings)
+	}
+}
+
+// The bootstrap object the controller actually creates — an entirely empty spec, with every
+// field materialized by the API server's defaults — must be admissible. This is the exact
+// object SwarmadaConfigBootstrapReconciler writes on the first FleetZone in a namespace.
+func TestSwarmadaConfig_BootstrapObjectIsAdmissible(t *testing.T) {
+	boot := validConfig()
+	boot.Spec.Signing = fleetv1.SwarmadaSigningConfig{} // nil → defaults to true, no trust roots
+	if _, err := validateSwarmadaConfig(boot); err != nil {
+		t.Fatalf("the auto-created bootstrap config must be admissible, got: %v", err)
+	}
+}
+
+// nil means unset, which the schema defaults to true — so the accessor must read nil as
+// enforcement ON. A Go accessor that disagreed with the schema default would answer
+// differently from the API server about the same object.
+func TestSwarmadaConfig_NilSignatureVerificationMeansOn(t *testing.T) {
+	var s fleetv1.SwarmadaSigningConfig
+	if !s.SignatureVerificationRequired() {
+		t.Error("nil requireSignatureVerification must read as true (the schema default)")
+	}
+	s.RequireSignatureVerification = sigBoolPtr(false)
+	if s.SignatureVerificationRequired() {
+		t.Error("an explicit false must read as false — that is the whole point of the pointer")
+	}
+	s.RequireSignatureVerification = sigBoolPtr(true)
+	if !s.SignatureVerificationRequired() {
+		t.Error("an explicit true must read as true")
+	}
 }
 
 // Multiple violations are all reported, not just the first.
 func TestSwarmadaConfig_MultipleViolations(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Telemetry.Sink = fleetv1.TelemetrySink{Type: fleetv1.TelemetrySinkMimir} // no endpoint
-	cfg.Spec.Signing.TrustRoots = nil                                                 // require but none
+	cfg.Spec.CoordinateSystem.ReferenceFrame = fleetv1.ReferenceFrameGeodetic         // no geodetic block
+	cfg.Spec.CoordinateSystem.Geodetic = nil
 	_, err := validateSwarmadaConfig(cfg)
 	if err == nil {
 		t.Fatal("expected rejection")
 	}
-	if !strings.Contains(err.Error(), "endpoint is required") || !strings.Contains(err.Error(), "trustRoot is required") {
+	if !strings.Contains(err.Error(), "endpoint is required") || !strings.Contains(err.Error(), "geodetic is required") {
 		t.Fatalf("expected both violations reported, got: %v", err)
 	}
 }
@@ -177,4 +228,40 @@ func TestSwarmadaConfig_CoordinateFrameExclusion(t *testing.T) {
 
 	// Unset frame (defaults to Local) with no geodetic block → valid.
 	assertValid(t, validConfig())
+}
+
+// The inert estop field warns when set false rather than accepting the value in silence: an
+// operator who writes false and sees the write succeed has every reason to believe estopped
+// robots will now auto-resume, and they will not (ADR-0052).
+func TestSwarmadaConfig_InertEstopFieldWarnsWhenSetFalse(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Estop.RequireExplicitClearAfterEstop = sigBoolPtr(false)
+	warnings, err := validateSwarmadaConfig(cfg)
+	if err != nil {
+		t.Fatalf("setting an inert field must not be rejected: %v", err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "requireExplicitClearAfterEstop") && strings.Contains(w, "no effect") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a warning that the field is inert, got %v", warnings)
+	}
+
+	// Unset and explicit true are the normal cases and warn about nothing.
+	for _, v := range []*bool{nil, sigBoolPtr(true)} {
+		ok := validConfig()
+		ok.Spec.Estop.RequireExplicitClearAfterEstop = v
+		warnings, err := validateSwarmadaConfig(ok)
+		if err != nil {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		for _, w := range warnings {
+			if strings.Contains(w, "requireExplicitClearAfterEstop") {
+				t.Errorf("no warning expected for %v, got %q", v, w)
+			}
+		}
+	}
 }

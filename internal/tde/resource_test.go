@@ -28,7 +28,7 @@ func liftResource() fleetv1.SharedResource {
 }
 
 // The first robot to reserve a free resource is granted; a second is queued behind
-// it; releasing the holder promotes the queued robot (§5.4.5).
+// it; releasing the holder promotes the queued robot (RFC-0001 #tde-shared-resource-queue-management).
 func TestReserveResource_GrantQueuePromote(t *testing.T) {
 	e, _ := newEngine(t, fzone("z", 0, liftResource()))
 	ctx := context.Background()

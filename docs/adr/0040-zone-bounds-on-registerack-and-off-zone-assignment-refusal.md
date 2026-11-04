@@ -3,7 +3,7 @@
 - **Status:** proposed
 - **Date:** 2026-08-16
 - **Deciders:** _(pending)_
-- **Related:** ADR-0032 (contract versioning — bump rules applied below), ADR-0039 (the other additive `fleet_adapter.v1` field awaiting a decision), RFC-0001 §9.3.1 / §9.3.4 (FleetZone, point-in-polygon containment), `adapters/CONFORMANCE.md` C2.3 (honour `RegisterAck` configuration) and C3 (anti-double-execution posture)
+- **Related:** ADR-0032 (contract versioning — bump rules applied below), ADR-0039 (the other additive `fleet_adapter.v1` field awaiting a decision), RFC-0001 "FleetZone" and "Zone Controller: Current Zone Derivation" (point-in-polygon containment), `adapters/CONFORMANCE.md` C2.3 (honour `RegisterAck` configuration) and C3 (anti-double-execution posture)
 
 ## Context
 
@@ -24,7 +24,8 @@ type PhysicalBounds struct {
 ```
 
 and the Zone Controller already runs point-in-polygon against it to derive a robot's current
-zone from position telemetry (§9.3.4). The model is sound and, importantly, **coordinate-system
+zone from position telemetry (RFC-0001, "Zone Controller: Current Zone
+Derivation"). The model is sound and, importantly, **coordinate-system
 neutral** — a polygon plus a floor, or an altitude band, describes a warehouse aisle and a drone
 corridor equally well. That matters because the three reference adapters (`-ros2`, `-vda5050`,
 `-mavlink`) have entirely different geometry, and a shape that only suited one of them would be

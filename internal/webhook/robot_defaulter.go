@@ -42,15 +42,20 @@ const (
 	annLengthUnit  = "swarmada.io/length-unit"
 	annAngleUnit   = "swarmada.io/angle-unit"
 	annGroundFloor = "swarmada.io/ground-floor"
+
+	// annRobotSource records whether the Robot's bound Fleet Adapter drives simulated
+	// or physical robots (ADR-0038). Same informational contract as the three above.
+	annRobotSource = fleetv1.RobotSourceAnnotation
 )
 
 // +kubebuilder:webhook:path=/mutate-swarmada-io-v1-robot,mutating=true,failurePolicy=fail,sideEffects=None,groups=swarmada.io,resources=robots,verbs=create;update,versions=v1,name=mrobot.swarmada.io,admissionReviewVersions=v1
 
 // +kubebuilder:rbac:groups=swarmada.io,resources=robotclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=swarmada.io,resources=swarmadaconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=swarmada.io,resources=fleetadapters,verbs=get;list;watch
 
 // RobotDefaulter is the mutating webhook that performs the RobotClass
-// admission-time merge (RFC-0001 §5.2.1.2): when spec.robotClass is set, the
+// admission-time merge (RFC-0001 #robotclass): when spec.robotClass is set, the
 // class's hardware inventory, default models, base capabilities, operational
 // defaults, and base adapter are merged onto the Robot once, at admission, and
 // the resolved values are persisted on the object. Mutating webhooks run
@@ -62,7 +67,7 @@ const (
 // itself changed — mirroring RobotAdmissionGate.ValidateUpdate's trigger
 // condition. An unrelated update (status, labels, a manual edit to an
 // already-resolved field) must NOT be re-merged: updating a RobotClass does
-// not retroactively mutate robots already admitted against it (§5.2.1.3).
+// not retroactively mutate robots already admitted against it (RFC-0001 #robotclass).
 type RobotDefaulter struct {
 	Client client.Client
 }
@@ -90,6 +95,11 @@ func (d *RobotDefaulter) Default(ctx context.Context, obj runtime.Object) error 
 	// purely informational, fail-safe to the CRD defaults.
 	d.stampCoordinateAnnotations(ctx, robot)
 
+	// Stamp the adapter's provenance (ADR-0038), also regardless of RobotClass. Like
+	// the coordinate stamps it only records what could be resolved: an unresolvable
+	// adapter leaves the annotation unset rather than guessing a value.
+	d.stampRobotSource(ctx, robot)
+
 	// Carry the authenticated operator onto a robot-scoped estop trigger/clear (ADR-0046).
 	// Robot is the one carrier that already had a mutating webhook, so the stamp rides
 	// here rather than in its own; the other four live in estop_actor_webhooks.go.
@@ -101,8 +111,11 @@ func (d *RobotDefaulter) Default(ctx context.Context, obj runtime.Object) error 
 	// change, since the validating RobotAdmissionGate already fails closed on the same
 	// write.
 	stampEstopActor(ctx, robot)
+	// The same stamp on an operator's request to release the robot from the post-clear
+	// estop window, so ESTOP_RESUME_CONFIRMED names the person who released it.
+	stampActorOn(ctx, robot, fleetv1.EstopResumeAnnotation)
 
-	// Backfill the telemetry-projection identity (RFC-0001 §9.3.1): default
+	// Backfill the telemetry-projection identity (RFC-0001 #control-plane-swarmada-api-server): default
 	// swarmada.io/robot-id to metadata.name when unset, so operator-created Robots
 	// (and any predating auto-admit stamping) resolve robot_id → Robot for telemetry
 	// status. Auto-admit stamps it explicitly; this covers everything else.
@@ -128,7 +141,7 @@ func (d *RobotDefaulter) Default(ctx context.Context, obj runtime.Object) error 
 			if old.Spec.RobotClass == robot.Spec.RobotClass {
 				// Class reference unchanged: already resolved at a prior
 				// admission. Do not re-merge over whatever the object holds
-				// now (§5.2.1.3 — no retroactive mutation).
+				// now (RFC-0001 #robotclass — no retroactive mutation).
 				return nil
 			}
 			log.V(1).Info("RobotClass reference changed on update; re-resolving merge",
@@ -177,6 +190,37 @@ func (d *RobotDefaulter) stampCoordinateAnnotations(ctx context.Context, robot *
 	robot.Annotations[annLengthUnit] = lengthUnit
 	robot.Annotations[annAngleUnit] = angleUnit
 	robot.Annotations[annGroundFloor] = strconv.FormatInt(int64(groundFloor), 10)
+}
+
+// stampRobotSource writes swarmada.io/robot-source onto the Robot from the
+// spec.simulated declaration of the FleetAdapter it binds to (ADR-0038).
+//
+// Fail-safe in the same shape as stampCoordinateAnnotations, but with the opposite
+// fallback, and deliberately so: an unresolvable adapter (unset name, not found,
+// read error) leaves the annotation UNSET. An absent annotation means "unknown",
+// not "assumed physical" — spec.simulated's own false default already carries the
+// physical reading at the FleetAdapter level, and stamping Physical here would put
+// an unearned claim on the Robot. Informational only: never gates admission.
+func (d *RobotDefaulter) stampRobotSource(ctx context.Context, robot *fleetv1.Robot) {
+	if robot.Spec.Adapter.Name == "" {
+		return
+	}
+	var adapter fleetv1.FleetAdapter
+	key := client.ObjectKey{Namespace: robot.Namespace, Name: robot.Spec.Adapter.Name}
+	if err := d.Client.Get(ctx, key, &adapter); err != nil {
+		logf.FromContext(ctx).V(1).Info("robot-source not stamped: adapter unresolvable",
+			"adapter", key, "err", err)
+		return
+	}
+
+	source := fleetv1.RobotSourcePhysical
+	if adapter.Spec.Simulated {
+		source = fleetv1.RobotSourceSimulated
+	}
+	if robot.Annotations == nil {
+		robot.Annotations = map[string]string{}
+	}
+	robot.Annotations[annRobotSource] = string(source)
 }
 
 // mergeRobotClass applies RobotClassSpec's documented merge semantics onto

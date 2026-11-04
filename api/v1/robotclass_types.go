@@ -20,14 +20,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// RobotClass (RFC-0001 §5.2.1) is a namespace-scoped template capturing the
+// RobotClass (RFC-0001 #robotclass) is a namespace-scoped template capturing the
 // shared hardware inventory, default inference models, base capabilities, and
 // operational defaults common to every robot of one physical type. A Robot that
 // sets spec.robotClass inherits these fields at admission time (the merge runs
 // once and the resolved spec is persisted on the Robot; updating the class does
-// NOT retroactively mutate existing robots — see §5.2.1.3).
+// NOT retroactively mutate existing robots — see RFC-0001 #robotclass).
 //
-// RobotClass is also the key the FleetAdapter admission gate (§5.2.12) matches
+// RobotClass is also the key the FleetAdapter admission gate (RFC-0001 #fleetadapter) matches
 // on: a Robot referencing a class is admissible only if a Connected, conformant
 // FleetAdapter serves that class.
 
@@ -69,7 +69,7 @@ const (
 // ── Spec ──────────────────────────────────────────────────────────────────────
 
 // RobotClassSpec is the shared template merged into a Robot's spec at admission
-// (§5.2.1.2). Scalar fields: the Robot value wins if present, else the class
+// (RFC-0001 #robotclass). Scalar fields: the Robot value wins if present, else the class
 // value. List fields (hardware, defaultModels, baseCapabilities) merge
 // union-by-name — a Robot entry with the same name fully replaces the class
 // entry; there is no partial per-field merge within a list element.
@@ -91,7 +91,7 @@ type RobotClassSpec struct {
 	// Hardware is the physical component inventory present on every robot of this
 	// class. Keyed by name; a Robot overrides one entry by declaring a hardware
 	// item with the same name. A Robot cannot remove a class entry — omission
-	// means inheritance. See §5.2.3 for the authoritative per-type field list.
+	// means inheritance. See RFC-0001 #robot for the authoritative per-type field list.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
@@ -124,7 +124,7 @@ type RobotClassSpec struct {
 
 	// DefaultTelemetry are the telemetry-cadence defaults inherited by all robots of
 	// this class; any field may be overridden per-robot. Fields a robot leaves unset
-	// are filled from here by the RobotDefaulter merge (§9.1.11).
+	// are filled from here by the RobotDefaulter merge (RFC-0001 #robotclass-inheritance-and-merge-behavior).
 	// +optional
 	DefaultTelemetry *ClassTelemetryDefaults `json:"defaultTelemetry,omitempty"`
 }
@@ -134,20 +134,20 @@ type RobotClassSpec struct {
 // when the Robot leaves them unset.
 type ClassTelemetryDefaults struct {
 	// TelemetryIntervalSeconds is the default telemetry reporting interval (the
-	// ceiling between frames; basis for Offline detection).
+	// ceiling between frames). It is not an input to Offline detection.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=30
 	TelemetryIntervalSeconds *int32 `json:"telemetryIntervalSeconds,omitempty"`
 
 	// MotionThresholdMeters is the default minimum position change before a new
-	// position frame is sent.
+	// position frame is sent. Not sent to any adapter at v0.4 (see the Robot field).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MotionThresholdMeters *float64 `json:"motionThresholdMeters,omitempty"`
 
 	// MaxIdleIntervalSeconds is the default ceiling on how long a stationary robot may
-	// go without sending a position frame.
+	// go without sending a position frame. Not sent to any adapter at v0.4.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=300
@@ -281,21 +281,27 @@ type ClassModel struct {
 	// ModelURI is where the Robot Agent fetches the model artifact
 	// (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
 	// Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
-	// validated identically wherever it is declared (RFC-0001 D3).
+	// validated identically wherever it is declared.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^(oci|s3|https)://`
 	ModelURI string `json:"modelUri"`
 
-	// RequiredHardware lists component names that must be Healthy for the model to
-	// run; a degraded dependency moves the model — and the capabilities it grants
-	// — Inactive. MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+	// RequiredHardware lists component names specified to be Healthy for the
+	// model to run, a degraded dependency moving the model Inactive. Not
+	// implemented at v0.4: no controller reads this list; capability derivation
+	// uses each capability's own requiredHardware. MaxItems bounds CEL cost (see
+	// Robot.spec.hardware's comment).
 	// +optional
 	// +kubebuilder:validation:MaxItems=32
 	// +listType=set
 	RequiredHardware []string `json:"requiredHardware,omitempty"`
 
-	// GrantsCapabilities lists capabilities unlocked when the model is Active.
-	// MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+	// GrantsCapabilities lists the capabilities this model provides. At v0.4 it
+	// is read only by candidate filter 7 (a robot is withheld from an action
+	// needing one of these names while the model is Updating). It adds nothing
+	// to spec.capabilities[] or status.capabilities[]: a model-granted capability
+	// comes from a ModelRollout's own grantsCapabilities. MaxItems bounds CEL
+	// cost (see Robot.spec.hardware's comment).
 	// +optional
 	// +kubebuilder:validation:MaxItems=32
 	// +listType=set
@@ -337,12 +343,15 @@ type ClassCapability struct {
 	// +optional
 	Parameters map[string]CapabilityParameter `json:"parameters,omitempty"`
 
-	// DegradedPolicy governs whether this capability may still be scheduled while
-	// in Degraded status. When absent (or Schedulable=false) a Degraded instance is
-	// treated as Inactive for scheduling. When Schedulable=true, the Scheduler may
-	// satisfy a action's parametric constraints using the capability's currently
-	// resolved (reduced) parameters — so a degraded capability serves lower-
-	// constraint actions but is excluded from those it can no longer meet.
+	// DegradedPolicy governs whether a Degraded instance of this capability can
+	// satisfy an action's parametric constraints. It does not decide whether the
+	// capability itself counts: a FleetAction with acceptDegradedCapabilities (or
+	// the namespace default) set can be matched to a robot whose required
+	// capability is Degraded, whatever this policy says. When Schedulable=true, the
+	// Scheduler uses the capability's currently resolved (reduced) parameters — so
+	// a degraded capability serves lower-constraint actions but is excluded from
+	// those it can no longer meet. When absent (or Schedulable=false), a Degraded
+	// instance satisfies no parametric constraint.
 	// +optional
 	DegradedPolicy *CapabilityDegradedPolicy `json:"degradedPolicy,omitempty"`
 }
@@ -352,7 +361,9 @@ type ClassCapability struct {
 type CapabilityDegradedPolicy struct {
 	// Schedulable allows the Scheduler to satisfy parametric constraints with this
 	// capability while it is Degraded, using its current (reduced) resolved
-	// parameters. Default false: a Degraded capability is not schedulable.
+	// parameters. Default false: a Degraded instance satisfies no parametric
+	// constraint. Whether it satisfies a required capability is decided by the
+	// FleetAction's acceptDegradedCapabilities, not by this field.
 	// +kubebuilder:default=false
 	Schedulable bool `json:"schedulable"`
 }
@@ -372,7 +383,10 @@ type CapabilityParameter struct {
 
 // ClassConstraints are operational limits inherited by robots of a class.
 type ClassConstraints struct {
-	// MaxPayloadKg caps the load the robot will accept, in kilograms.
+	// MaxPayloadKg is the declared load limit in kilograms. Admission fills it
+	// onto a Robot that leaves it unset; no controller or dispatch filter acts on
+	// it. The dispatch path checks an action's payload against a capability
+	// parameter resolved from hardware, not against this field.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxPayloadKg *float64 `json:"maxPayloadKg,omitempty"`
@@ -384,8 +398,9 @@ type ClassConstraints struct {
 	// +kubebuilder:validation:Maximum=100
 	MinBatteryPctForAction *int32 `json:"minBatteryPctForAction,omitempty"`
 
-	// MaxSpeedMs is the maximum commanded speed in metres per second; the Fleet
-	// Adapter enforces this limit.
+	// MaxSpeedMs is the declared maximum speed in metres per second. Admission
+	// fills it onto a Robot that leaves it unset; no controller acts on it and no
+	// Fleet Adapter protocol message carries it, so no adapter is told this limit.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxSpeedMs *float64 `json:"maxSpeedMs,omitempty"`
@@ -394,15 +409,16 @@ type ClassConstraints struct {
 // ClassChargingConfig is the charging policy inherited by robots of a class.
 // +kubebuilder:validation:XValidation:rule="!has(self.minBatteryPctToCharge) || !has(self.targetBatteryPct) || self.targetBatteryPct > self.minBatteryPctToCharge",message="targetBatteryPct must be greater than minBatteryPctToCharge"
 type ClassChargingConfig struct {
-	// MinBatteryPctToCharge is the battery level below which the robot initiates
-	// autonomous docking.
+	// MinBatteryPctToCharge is the battery level below which the robot is
+	// specified to initiate autonomous docking. Not acted on at v0.4: no
+	// controller uses it and no Fleet Adapter protocol message carries it.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	MinBatteryPctToCharge *int32 `json:"minBatteryPctToCharge,omitempty"`
 
-	// TargetBatteryPct is the level at which the robot leaves the dock; it MUST be
-	// greater than MinBatteryPctToCharge.
+	// TargetBatteryPct is the level at which the robot is specified to leave the
+	// dock; it MUST be greater than MinBatteryPctToCharge. Not acted on at v0.4.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
@@ -412,18 +428,20 @@ type ClassChargingConfig struct {
 // ── Status ────────────────────────────────────────────────────────────────────
 
 // RobotClassStatus is the observed state of a RobotClass. A RobotClass is a
-// template and carries little runtime state; status is used to surface
-// validation problems (e.g. an unreachable model URI), an observed generation,
-// and how many Robots currently inherit from this class.
+// template and carries little runtime state. The RobotClass controller writes
+// two values: the observed generation and how many Robots currently reference this
+// class. It writes no condition and validates nothing about the class (an
+// unreachable model URI, for example, is not reported here).
 type RobotClassStatus struct {
-	// Conditions is the standard conditions list.
+	// Conditions is the standard conditions list. No controller writes a condition
+	// on a RobotClass at this version, so it is empty.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status was computed from.
-	// It is the RobotClass generation the admission-time merge (§5.2.1.2) draws from —
+	// It is the RobotClass generation the admission-time merge (RFC-0001 #robotclass) draws from —
 	// the "last merge generation" a newly-admitted Robot of this class inherits.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

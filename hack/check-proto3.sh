@@ -32,6 +32,12 @@ done < <(find "$PROTO_DIR" -name '*.proto')
 # 2. buf lint + breaking, if buf is installed
 if command -v buf >/dev/null 2>&1; then
   ( cd "$PROTO_DIR" && buf lint ) || fail=1
+  # Formatting is a hard gate, unlike breaking: buf format is deterministic and has no
+  # judgement in it, so a diff here is always an unformatted file and never an intentional
+  # change. Left unchecked, alignment drifts and the next real proto diff arrives buried in
+  # whitespace -- which is how a whitespace-only edit once went unreviewed in this tree.
+  ( cd "$PROTO_DIR" && buf format --diff --exit-code ) || {
+    echo "buf: proto formatting drift -- run: (cd $PROTO_DIR && buf format -w)"; fail=1; }
   # Breaking-change check is ADVISORY pre-1.0: the fleet_adapter.v1 contract has no
   # external consumers yet and is still being shaped (e.g. the FleetTask→FleetAction
   # rename), so intentional breaking changes are expected and must not fail the build.

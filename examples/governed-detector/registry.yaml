@@ -1,0 +1,68 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# A local OCI registry inside the demo cluster (CNCF Distribution, Apache-2.0). It holds the
+# model artifacts and their cosign signatures. It has no authentication and serves plain
+# HTTP, and it is reached from the demo host only through `kubectl port-forward`: this is a
+# single-host demo registry, not a production one.
+#
+# Integrity does not rest on the transport. The adapter checks the manifest digest against
+# ModelRollout.spec.modelChecksum, every layer against the manifest, and the signature against
+# the pinned trust root, so a registry that serves different bytes is refused, whatever it is.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: model-registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-registry
+  namespace: model-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: model-registry}
+  template:
+    metadata:
+      labels: {app: model-registry}
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet: {path: /v2/, port: 5000}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/registry}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-registry
+  namespace: model-registry
+spec:
+  selector: {app: model-registry}
+  ports:
+    - port: 5000
+      targetPort: 5000

@@ -1,0 +1,178 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: artifactstores.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: ArtifactStore
+    listKind: ArtifactStoreList
+    plural: artifactstores
+    shortNames:
+    - as
+    singular: artifactstore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ArtifactStore is the Schema for the artifactstores API.
+
+          NO STATUS SUBRESOURCE, DELIBERATELY. ArtifactStore is reference-only
+          configuration, in the same shape as StorageClass or IngressClass. No controller
+          reconciles it, so there is nothing it could truthfully report.
+
+          No controller or webhook reads it at this version: nothing stores an artifact in
+          it or checks that it is reachable, and the ArtifactStoreNotReachable scheduling
+          reason is written by nothing.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ArtifactStoreSpec is an administrator-installed reference to where artifact
+              bytes actually live. An artifact reference
+              (ActionResultArtifact) names a store BY NAME; there is no field anywhere a
+              task could write a hostPath, a node name, or a bare filesystem path — the
+              same containment shape as ComputeEndpoint and ResultSink.
+            properties:
+              edgeLocal:
+                description: EdgeLocal configures an EdgeLocal-kind backing. Required
+                  iff Kind is EdgeLocal.
+                properties:
+                  path:
+                    description: Path is a directory the edge runtime already owns.
+                    minLength: 1
+                    type: string
+                  zone:
+                    description: |-
+                      Zone is the FleetZone this edge location serves. A consuming step must
+                      be co-located with it (ArtifactStoreNotReachable otherwise).
+                    minLength: 1
+                    type: string
+                required:
+                - path
+                - zone
+                type: object
+              kind:
+                description: Kind selects the backing.
+                enum:
+                - ObjectStore
+                - VolumeClaim
+                - EdgeLocal
+                type: string
+              objectStore:
+                description: ObjectStore configures an ObjectStore-kind backing. Required
+                  iff Kind is ObjectStore.
+                properties:
+                  credentialRef:
+                    description: |-
+                      CredentialRef names the Secret that holds write credentials for this store.
+                      At v0.4 the control plane does not read it and gives these credentials to
+                      no executor; a writer must obtain its own. It is never carried in a task
+                      spec.
+                    properties:
+                      key:
+                        description: Key is the data key holding the credential.
+                        type: string
+                      name:
+                        description: Name is the Secret name in the same namespace.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  endpoint:
+                    description: Endpoint is the object-store endpoint (e.g. "s3://swarmada-evidence").
+                    minLength: 1
+                    type: string
+                required:
+                - endpoint
+                type: object
+              retention:
+                description: |-
+                  Retention declares how long artifacts should be kept.
+
+                  ENFORCEABLE on ObjectStore, via the bucket's own lifecycle policy.
+                  ADVISORY ONLY on VolumeClaim and EdgeLocal — NOTHING SWEEPS THEM. A
+                  deployment keeping identifying material (a plate, a face) on an
+                  EdgeLocal or VolumeClaim store is relying entirely on an operator's own
+                  cron job or equivalent process; declaring Retention here does not make
+                  that happen. That is a legitimate operational choice, and this field
+                  exists so it is a VISIBLE one rather than an implicit one.
+                properties:
+                  maxAgeDays:
+                    description: MaxAgeDays is the retention period.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - maxAgeDays
+                type: object
+              volumeClaim:
+                description: VolumeClaim configures a VolumeClaim-kind backing. Required
+                  iff Kind is VolumeClaim.
+                properties:
+                  accessMode:
+                    description: |-
+                      AccessMode declares what the claim supports. A non-ReadWriteMany (and
+                      non-ReadOnlyMany) claim can be read from ONE place only, making a
+                      consuming step placement-constrained by this input — the scheduling
+                      gate ArtifactStoreNotReachable exists for exactly this.
+                    enum:
+                    - ReadWriteOnce
+                    - ReadOnlyMany
+                    - ReadWriteMany
+                    type: string
+                  claimName:
+                    description: ClaimName is the PersistentVolumeClaim name, in this
+                      namespace.
+                    minLength: 1
+                    type: string
+                  subPath:
+                    description: SubPath is a path within the claim's volume.
+                    type: string
+                required:
+                - accessMode
+                - claimName
+                type: object
+            required:
+            - kind
+            type: object
+            x-kubernetes-validations:
+            - message: objectStore must be set if and only if kind is ObjectStore
+              rule: (self.kind == 'ObjectStore') == has(self.objectStore)
+            - message: volumeClaim must be set if and only if kind is VolumeClaim
+              rule: (self.kind == 'VolumeClaim') == has(self.volumeClaim)
+            - message: edgeLocal must be set if and only if kind is EdgeLocal
+              rule: (self.kind == 'EdgeLocal') == has(self.edgeLocal)
+        type: object
+    served: true
+    storage: true
+    subresources: {}

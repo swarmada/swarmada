@@ -1,0 +1,56 @@
+# Patrol work addressed to a zone the operator confirmed.
+#
+# The target is the room, floor-room-a. Because the room holds a keep-out, it is a
+# container (ADR-0069): the control plane resolves it to its navigable remainder,
+# floor-room-a-open, and offers the work only to a robot whose zone is in that set.
+# That decides WHICH robot does the work. It does not decide WHERE the robot goes:
+# the goals are the x/y in the payloads, chosen here inside room A, and the control
+# plane checks them against no polygon.
+#
+# The generated zones are FrameLocal: their polygons are in the map frame and the
+# control plane does not use them for containment. A robot is in one of them because
+# its spec.zone says so, which is why the operator places the robot in
+# floor-room-a-open before this runs.
+#
+# EVERY PAYLOAD HERE IS WRITTEN AS `raw:` (base64 of the JSON), with the JSON in a
+# comment beside it. A payload written as plain keys reaches the adapter as the same
+# object too, and a member's payload reaches its child FleetAction intact; these samples
+# use the `raw` form, and tests/python/test_floor_mapping_samples.py keeps each comment
+# and its payload in step.
+#
+# EVERY ACTION HERE IS `onFailure: Alert`. The default, Requeue, dispatches a failed action
+# again 30 s later with no operator. A robot action that fails is one an operator should look
+# at before anything moves again: a segment the robot refused before motion ("...; no motion")
+# is typically the one the operator then charges, and a requeued segment would be dispatched
+# while the charging cable is in. Alert leaves the action Failed and raises an operator alert.
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: patrol-generated-zones
+  namespace: warehouse-a
+spec:
+  completionPolicy: All
+  failurePolicy: FailFast
+  desiredState: Running
+  actions:
+    - name: patrol-west
+      action:
+        type: Patrol
+        zone: floor-room-a
+        priority: Normal
+        onFailure: Alert
+        requiredCapabilities: [navigation]
+        payload:
+          # {"x":3.5,"y":3.0}
+          raw: eyJ4IjozLjUsInkiOjMuMH0=
+    - name: patrol-east
+      dependsOn: [patrol-west]
+      action:
+        type: Patrol
+        zone: floor-room-a
+        priority: Normal
+        onFailure: Alert
+        requiredCapabilities: [navigation]
+        payload:
+          # {"x":4.0,"y":1.0}
+          raw: eyJ4Ijo0LjAsInkiOjEuMH0=

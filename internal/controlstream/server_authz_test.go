@@ -31,15 +31,30 @@ import (
 // fakeSafetyDispatcher records routed EstopAcks so the server's authorize-before-
 // route gate can be observed.
 type fakeSafetyDispatcher struct {
-	mu     sync.Mutex
-	routed []*fav1.EstopAck
+	mu      sync.Mutex
+	routed  []*fav1.EstopAck
+	cleared []*fav1.EstopClearAck
+}
+
+func (f *fakeSafetyDispatcher) RouteClearAck(_ TLSIdentity, _ SafetySender, _ string, ack *fav1.EstopClearAck) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cleared = append(f.cleared, ack)
+	return nil
+}
+
+func (f *fakeSafetyDispatcher) clearCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.cleared)
 }
 
 func (f *fakeSafetyDispatcher) RegisterStream(TLSIdentity, SafetySender) func() { return func() {} }
-func (f *fakeSafetyDispatcher) RouteAck(ack *fav1.EstopAck) {
+func (f *fakeSafetyDispatcher) RouteAck(_ TLSIdentity, _ SafetySender, _ string, ack *fav1.EstopAck) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.routed = append(f.routed, ack)
+	return nil
 }
 func (f *fakeSafetyDispatcher) count() int {
 	f.mu.Lock()
@@ -157,7 +172,7 @@ func telemetryFor(robotID string) *fav1.AdapterMessage {
 }
 
 // A forged/unauthorized robot_id is dropped, the stream is NOT torn down, and a
-// legitimate robot on the SAME stream still ingests (§9.2.7 fail-closed).
+// legitimate robot on the SAME stream still ingests (RFC-0001 #security-fleet-adapter-authentication-robot-identity fail-closed).
 func TestControlStream_ForgedRobotIDDropped_StreamSurvives(t *testing.T) {
 	ing := &fakeIngestor{}
 	auth := &fakeAuthorizer{allow: map[string]bool{"amr-1": true}} // amr-forged is NOT allowed
@@ -202,7 +217,7 @@ func TestControlStream_ForgedRobotIDDropped_StreamSurvives(t *testing.T) {
 	}
 }
 
-// A denied authorization is recorded to the safety audit log (§9.5.4) — a denied
+// A denied authorization is recorded to the safety audit log (RFC-0001 #security-audit-logging) — a denied
 // action is never silently dropped.
 func TestControlStream_AuthzDeniedIsAudited(t *testing.T) {
 	sink := &audit.MemorySink{}
@@ -285,5 +300,50 @@ func TestControlStream_UnauthorizedRegisterRefusedInBand(t *testing.T) {
 	}
 	if reg.registers != nil {
 		t.Fatalf("SECURITY: an unauthorized Register reached the Registrar: %+v", reg.registers)
+	}
+}
+
+// beatRouter records per-robot heartbeat routing so a test can assert an
+// adapter-scoped beat answers no robot's confirming exchange.
+type beatRouter struct {
+	routedRobots []string
+}
+
+func (b *beatRouter) RegisterStream(TLSIdentity, CommandSender) func()     { return func() {} }
+func (b *beatRouter) RouteResult(CommandSender, *fav1.CommandResult) error { return nil }
+
+func (b *beatRouter) RouteHeartbeat(_ string, robotID string) {
+	b.routedRobots = append(b.routedRobots, robotID)
+}
+
+// ADR-0054: an EMPTY robot_id is the adapter-scoped reply to the periodic
+// liveness probe. It must drive adapter presence even under a strict Authorizer that
+// allows no robot at all — the identity it asserts is the mTLS one, not a robot's — and
+// it must answer no per-robot confirming exchange.
+func TestDispatch_AdapterScopedHeartbeatIsPresenceOnly(t *testing.T) {
+	fp := &fakePresence{}
+	router := &beatRouter{}
+	s := &Server{
+		Presence:   fp,
+		Commands:   router,
+		Authorizer: &fakeAuthorizer{allow: map[string]bool{}}, // deny every robot
+	}
+	id := AdapterIdentity{Namespace: "warehouse-a"}
+	tlsID := TLSIdentity{AdapterName: "acme", Namespace: "warehouse-a", Verified: true}
+
+	hb := &fav1.AdapterMessage{Payload: &fav1.AdapterMessage_Heartbeat{
+		Heartbeat: &fav1.HeartbeatResponse{}, // adapter-scoped: no robot_id
+	}}
+	if err := s.dispatch(context.Background(), &streamWriter{}, id, tlsID, hb); err != nil {
+		t.Fatalf("dispatch adapter-scoped heartbeat: %v", err)
+	}
+	if fp.heartbeats != 1 {
+		t.Fatalf("adapter presence heartbeats = %d, want 1 — the liveness floor never reaches status", fp.heartbeats)
+	}
+	for _, r := range router.routedRobots {
+		if r == "" {
+			continue
+		}
+		t.Fatalf("adapter-scoped beat routed a per-robot heartbeat for %q", r)
 	}
 }

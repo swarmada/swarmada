@@ -74,3 +74,21 @@ appVersion so a plain `helm install` pins to a real version, not :latest.
 {{- define "swarmada.webhookCertSecret" -}}
 {{- printf "%s-webhook-server-cert" (include "swarmada.fullname" .) -}}
 {{- end -}}
+
+{{/* Name of the ControlStream Service; the server certificate's SAN is built from it. */}}
+{{- define "swarmada.controlStreamService" -}}
+{{- printf "%s-controlstream" (include "swarmada.fullname" .) -}}
+{{- end -}}
+
+{{/*
+Name of the Secret holding the ControlStream server keypair and the adapter client CA
+(tls.crt, tls.key, ca.crt): controlStream.tls.existingSecret when set, otherwise the one
+cert-manager fills from the server Certificate.
+*/}}
+{{- define "swarmada.controlStreamTLSSecret" -}}
+{{- if .Values.controlStream.tls.existingSecret -}}
+{{- .Values.controlStream.tls.existingSecret -}}
+{{- else -}}
+{{- printf "%s-controlstream-server-tls" (include "swarmada.fullname" .) -}}
+{{- end -}}
+{{- end -}}

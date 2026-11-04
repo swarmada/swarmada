@@ -5,7 +5,7 @@ plane by implementing the `fleet_adapter.v1` gRPC contract defined in
 [`proto/fleet_adapter/v1/fleet_adapter.proto`](../proto/fleet_adapter/v1/fleet_adapter.proto).
 Adapters are the project's primary extension point: adding a robot family is an
 additive act that implements a stable contract, not a change to the control
-plane. RFC-0001 §5.3 is the normative description of the protocol.
+plane. RFC-0001 #fleet-adapter-protocol is the normative description of the protocol.
 
 ## The contract in one paragraph
 
@@ -23,8 +23,9 @@ edge node, the adapter also holds an `EdgeService` stream to it.
 
 | Case | Location | Why |
 | :--- | :------- | :-- |
-| Reference / community adapters | `adapters/<name>/` in this repo | Maintained by the core project; kept in lockstep with the contract. |
-| Vendor-owned adapters | A separate repository under the org | A third party owns the code, its license, its CLA scope, and its release cadence (see [`docs/adr/0002`](../docs/adr/0002-repository-topology.md)). |
+| Skeleton, template, simulation | `adapters/example-noop/`, `adapters/template/`, `adapters/simulation/` in this repo | The only adapter code this tree holds: a reference skeleton, the cookiecutter template, and a simulation adapter kept as test and demonstration infrastructure ([ADR-0005](../docs/adr/0005-reference-adapter-policy.md)). |
+| Reference adapters for open interfaces (ROS 2 / Nav2, VDA5050, MAVLink) | Their own repositories under the `swarmada` organisation, tracked in [`REGISTRY.md`](REGISTRY.md); clone one into `adapters/external/` to run it locally | Keeps the core focused on the contract, the harness, the template and the registry ([ADR-0005](../docs/adr/0005-reference-adapter-policy.md)). |
+| Vendor-specific adapters | The vendor's own repository | A vendor owns the code, its license, and its release cadence, and scaffolds it from the template; vendor-specific adapters are never built in the core tree ([ADR-0005](../docs/adr/0005-reference-adapter-policy.md), [ADR-0002](../docs/adr/0002-repository-topology.md)). |
 
 Either way, an adapter is only a valid Swarmada adapter if it **passes the
 conformance suite** in [`CONFORMANCE.md`](CONFORMANCE.md). "Vendor-neutral
@@ -37,10 +38,15 @@ makes an adapter part of the standard.
    adapter is measured against.
 2. Generate client stubs from the proto (`make proto`) or use the checked-in
    generated stubs under `proto/fleet_adapter/v1/`.
-3. Start from [`example-noop/`](example-noop/), which shows the required stream
-   topology, the handshake, command dispatch, and the safety-critical behaviors
-   without any real robot integration.
-4. Replace the no-op handlers with calls into the manufacturer's fleet API.
+3. Scaffold the adapter from the [`template/`](template/) cookiecutter. It
+   generates an adapter wired to the shared `swarmada-sdk` safety primitives
+   (fencing, lease self-stop, confirmed estop) with a simulated robot binding.
+   [`example-noop/`](example-noop/) shows the stream topology, the handshake and
+   command dispatch in the smallest form, but it declares no action type and
+   refuses every assignment, so it exercises neither fencing nor the lease
+   self-stop; read it, do not start from it.
+4. Replace the simulated binding at each `TODO(vendor)` marker with calls into the
+   manufacturer's fleet API.
 5. Run the conformance suite and fix every `MUST` failure before submitting.
 
 ## In this directory
@@ -49,4 +55,8 @@ makes an adapter part of the standard.
 | :--- | :------ |
 | [`CONFORMANCE.md`](CONFORMANCE.md) | The conformance specification every adapter must satisfy. |
 | [`REGISTRY.md`](REGISTRY.md) | The registry of known adapters: repository, maintainer, protocol version, and conformance status. |
-| [`example-noop/`](example-noop/) | A reference adapter that speaks the full protocol with no real hardware behind it. |
+| [`example-noop/`](example-noop/) | A reference skeleton with no hardware behind it: it answers every command, declares no action type and refuses every assignment. |
+| [`template/`](template/) | The cookiecutter template a new adapter is generated from. |
+| [`simulation/`](simulation/) | The in-tree simulation adapter (`make conformance-sim`). |
+| [`conformance/`](conformance/) | The executable conformance harness (`make conformance`). |
+| [`scenarios/`](scenarios/) | Scenario presets shared by the simulation adapter. |

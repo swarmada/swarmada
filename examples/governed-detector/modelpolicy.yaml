@@ -1,0 +1,57 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The quality gate for the floor-hazard classifier. An evaluation job runs each candidate on
+# the held-out frame set and POSTs the numbers it measured, with the artifact's digest and
+# signature reference, to this policy's HMAC-authenticated endpoint. That job is not in this
+# repository; README.md says what it sends. The controller compares the numbers with the gate
+# and, only on a pass, creates the ModelRollout that pushes the artifact to the robots.
+#
+# The thresholds are the demo's, chosen for what a floor-hazard classifier on a robot must not
+# do: miss cables. The gate reads numbers; it does not run the model.
+#
+# NO STATUS IS DECLARED IN THIS FILE.
+apiVersion: swarmada.io/v1
+kind: ModelPolicy
+metadata:
+  name: floor-hazard-gate
+  namespace: warehouse-a
+spec:
+  modelName: floor-hazard
+  targetKind: Robot
+  targetRobotSelector:
+    matchLabels:
+      swarmada.io/model: SimBot-250
+  trigger:
+    type: Webhook
+    webhook:
+      enabled: true
+      authSecretRef: modelpolicy-hmac
+  qualityGate:
+    minEvalEpisodes: 500          # frames evaluated; the payload key is eval_episodes
+    customMetrics:
+      - {name: accuracy, operator: GreaterThanOrEqual, threshold: 0.80}
+      - {name: min_class_recall, operator: GreaterThanOrEqual, threshold: 0.60}
+      - {name: recall_cable, operator: GreaterThanOrEqual, threshold: 0.70}
+  autoDeployOn: QualityGatePass
+  rolloutTemplate:
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: "1"
+        pauseOnError: true
+    safetyConstraints:
+      minBatteryPct: 30
+      requireIdleState: true
+    rollbackPolicy: Auto

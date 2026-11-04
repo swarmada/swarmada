@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-24
 - **Deciders:** Principal Architect, Kubernetes/controller maintainers
-- **Related:** RFC-0001 §9.1.6 (active probes), §9.2 (ControlStream command-push); ADR-0012 (probe debounce); AGENTS.md RA-1
+- **Related:** RFC-0001 "RobotProbe" (active probes), "Fleet Adapter Protocol" (ControlStream command-push); ADR-0012 (probe debounce); AGENTS.md RA-1
 
 ## Context
 
@@ -149,9 +149,9 @@ Reuse the hardware-probe machinery end-to-end; add only target selection and
   pending" doc-comments (`targetCapability`, `targetModel`, `syntheticInput`,
   `disableAllProbes`) are dropped when the controller lands (comment-only `api/v1`
   edit; regenerates CRD descriptions). Reference-implementation decision; the
-  normative behaviour lives in RFC-0001 §9.1.6.
+  normative behaviour lives in RFC-0001 "RobotProbe".
 
-## Implementation surface (file-by-file; no code written yet)
+## Implementation surface (as planned at acceptance)
 
 - `internal/probe/prober.go` — introduce `VerifyRequest{ProbeType, Target,
   Expected, SyntheticInput}`; change the `Prober.Verify` signature to take it.

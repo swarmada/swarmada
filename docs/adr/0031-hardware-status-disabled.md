@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** Control Plane / CRD-proto + controller capability
-- **Related:** RFC-0001 §5.2 (Robot hardware), §6.10 (capability derivation truth table), §9.1.11 (health), §9.3.8 (status-write throttle / RA-1); `fleet_adapter.v1 HardwareStatus`
+- **Related:** RFC-0001 "Robot" (hardware), "Capability Derivation Truth Table", "SwarmadaConfig" (health), "Telemetry Pipeline and the Two-Data-Plane Split" (status-write throttle / RA-1); `fleet_adapter.v1 HardwareStatus`
 
 ## Context
 
@@ -18,8 +18,9 @@ benign, reversible state with a fault, and it does real damage at two sites:
    user chose to turn off.
 2. **Status-write throttle** (`mergeHardware` in `projector.go`): `Failed`/
    `Degraded` deltas set the projector's `critical` flag, which **bypasses** the
-   RA-1 write throttle (§9.3.8). So a routine toggle-off writes status immediately
-   and reads as a hardware fault, and a user flipping a sensor can amplify writes.
+   RA-1 write throttle (RFC-0001, "Telemetry Pipeline and the Two-Data-Plane
+   Split"). So a routine toggle-off writes status immediately and reads as a
+   hardware fault, and a user flipping a sensor can amplify writes.
 
 Intentional-off and hard-failure are different states — one is expected and
 reversible, the other needs attention — and must be modeled as such. A reason

@@ -97,6 +97,8 @@ func TestEnvtest_AssignmentGate_OutOfRangeContractBlocksDispatch(t *testing.T) {
 				t.Fatalf("create robot: %v", err)
 			}
 			robot.Status.Phase = fleetv1.RobotPhaseIdle
+			// Candidate filter 2 matches status.currentZone, not spec.zone.
+			robot.Status.CurrentZone = robot.Spec.Zone
 			robot.Status.Connectivity = &fleetv1.ConnectivityStatus{
 				LastSeenAt: &metav1.Time{Time: time.Now()},
 			}

@@ -1,4 +1,11 @@
-# A FleetZone with a Zone Controller edge node (RFC-0001 §9.2.10, §9.6.2.5).
+# NOTE — these Robot documents assume a control plane with admission webhooks OFF
+# (ENABLE_WEBHOOKS=false), which is what the quickstart overlays and `make deploy-minimal`
+# ship. With webhooks serving, vrobot.swarmada.io refuses a Robot whose FleetAdapter is not already
+# Connected/Passed, and the robot arrives through discovery + `swarmctl admit` instead.
+# config/samples/README.md has both paths and the exact commands; config/samples/first-run
+# is the set for the webhooks-on path.
+
+# A FleetZone with a Zone Controller edge node (RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop).
 #
 # spec.edgeNode declares a facility-LAN edge node for this zone. The API Server
 # advertises spec.edgeNode.address in RegisterAck.edge_endpoints to every adapter
@@ -33,7 +40,7 @@ spec:
   edgeNode:
     # host:port the adapter dials on the facility LAN.
     address: "edge-warehouse-a.svc.cluster.local:9600"
-    # Secret (namespace CA tree, §9.5.2) holding the edge node's server cert. Its
+    # Secret (namespace CA tree, RFC-0001 #security-certificate-management) holding the edge node's server cert. Its
     # tls.crt / tls.key / ca.crt are projected onto the edge host and passed to
     # cmd/edge as --tls-cert-file / --tls-key-file / --tls-client-ca-file.
     tlsSecretRef: "edge-warehouse-a-tls"

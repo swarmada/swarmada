@@ -38,6 +38,9 @@ func newNamespaceEstop(t *testing.T, est *fakeEstopper, objs ...client.Object) (
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&fleetv1.Robot{}).WithObjects(objs...).Build()
+	if est != nil {
+		est.c = c
+	}
 	return &NamespaceEstopReconciler{Client: c, Estopper: est}, c
 }
 

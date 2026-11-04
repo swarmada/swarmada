@@ -35,7 +35,7 @@ import (
 	"strings"
 )
 
-// Cryptographic verification of a Rekor entry (RFC-0001 §9.1.7.3).
+// Cryptographic verification of a Rekor entry (RFC-0001 #swarmadaconfig-schema).
 //
 // WHY THIS EXISTS. The index-presence check (HasEntry) proves only that the endpoint returned a
 // non-empty UUID array for a hash. It does not prove an entry exists in the log, that the entry

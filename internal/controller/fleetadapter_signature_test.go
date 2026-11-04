@@ -82,7 +82,7 @@ func reconcileSignedConformance(t *testing.T, content, digest, sig string, pubPE
 	cfg := &fleetv1.SwarmadaConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "swarmada-config", Namespace: faNS},
 		Spec: fleetv1.SwarmadaConfigSpec{Signing: fleetv1.SwarmadaSigningConfig{
-			RequireSignatureVerification: require,
+			RequireSignatureVerification: &require,
 			TrustRoots: []fleetv1.SigningTrustRoot{{Name: "conformance-authority",
 				SecretRef: fleetv1.SigningSecretKeyRef{Name: "ca-secret", Key: "pub.pem"}}},
 		}},

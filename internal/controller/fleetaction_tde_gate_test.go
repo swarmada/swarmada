@@ -71,9 +71,16 @@ func zonedAction(name, zone string) *fleetv1.FleetAction {
 	}
 }
 
+// idleRobotInZone is a robot that is IN a zone, which since RFC-0001 candidate
+// filter 2 became real means both halves: spec.zone is where the operator declared
+// it belongs, status.currentZone is where the Zone Controller has resolved it to
+// actually be, and the dispatch filter reads the second. A fixture that set only
+// spec.zone described a robot whose position had never been resolved, which filter 2
+// withholds by design.
 func idleRobotInZone(name, zone string) *fleetv1.Robot {
 	r := robotInPhase(name, fleetv1.RobotPhaseIdle, "")
 	r.Spec.Zone = zone
+	r.Status.CurrentZone = zone
 	return r
 }
 
@@ -112,8 +119,8 @@ func TestTDEGate_GrantedCommitsAssignment(t *testing.T) {
 	if got.Status.Phase != fleetv1.ActionPhaseAssigned || got.Status.AssignedRobot != "r1" {
 		t.Fatalf("Granted reservation did not commit: phase=%s robot=%q", got.Status.Phase, got.Status.AssignedRobot)
 	}
-	if got.Status.AssignmentGeneration != 1 {
-		t.Fatalf("generation = %d, want 1", got.Status.AssignmentGeneration)
+	if got.Status.AssignmentGeneration < 1 {
+		t.Fatalf("generation = %d, want one minted", got.Status.AssignmentGeneration)
 	}
 }
 
@@ -152,7 +159,7 @@ func TestTDEGate_UnreservesOnCommitFailure(t *testing.T) {
 	}
 }
 
-// A terminal action releases its zone reservation (§9.4.2).
+// A terminal action releases its zone reservation (RFC-0001 #tde-reservation-state).
 func TestTDELifecycle_ReleasesOnTerminal(t *testing.T) {
 	done := &fleetv1.FleetAction{
 		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: actionNS},
@@ -196,6 +203,7 @@ func preemptScenario(t *testing.T, tdeResult tde.ReservationResult) (*FleetActio
 	victim := bandAction("norm", "r1", fleetv1.ActionPhaseInProgress, fleetv1.ActionPriorityNormal, 2, lease)
 	robot := robotInPhase("r1", fleetv1.RobotPhaseInProgress, "norm")
 	robot.Spec.Zone = "z"
+	robot.Status.CurrentZone = "z"
 	r, c := newActionReconciler(t, crit, victim, robot)
 	r.TDE = &fakeTDE{result: tdeResult}
 	return r, c

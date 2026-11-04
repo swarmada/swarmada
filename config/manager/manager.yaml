@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# The controller-manager Deployment. Applied via `make deploy` (kustomize
-# overlay in config/default/), which sets the real image (IMG from the
-# Makefile) and the target namespace.
+# The controller-manager Deployment. Applied through config/default/ (by
+# `make deploy`, via config/controlstream-tls, and by `make deploy-minimal`),
+# which sets the real image and the target namespace.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: Namespace
@@ -37,6 +37,11 @@ metadata:
     control-plane: controller-manager
 spec:
   replicas: 1
+  # Recreate, never a rolling update: the old manager stops before the new one starts, so an
+  # upgrade never runs a second manager process beside the leader. A single manager replica is
+  # the only supported safety configuration (RFC-0001 #safety-robot-stop-table).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       control-plane: controller-manager
@@ -56,6 +61,23 @@ spec:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
             - --leader-elect
+            # Durable safety audit sink (RFC-0001 #safety-log-entry-format). Without this flag
+            # cmd/manager falls back to internal/audit.MemorySink — a Go slice
+            # inside the process, discarded at exit — and warns at startup that
+            # it has. No shipped configuration took the option, so on every
+            # cluster this project deployed, every sealed safety event
+            # (PROBE_FAILURE, ESTOP_TRIGGERED, ROBOT_AUTHZ_DENIED, …) was
+            # unreadable by any tool.
+            #
+            # Reading it back needs the file, not a shell: the manager image is
+            # distroless, so `kubectl exec ... cat` and `kubectl cp` both fail with
+            # "executable file not found". Copy it off the node — on kind that is
+            #   docker exec <node> sh -c 'cat /var/lib/kubelet/pods/*/volumes/\
+            #     kubernetes.io~empty-dir/audit-log/audit.jsonl' | swarmctl get audit
+            # — because a sink only node access can reach is not yet an operator-facing
+            # surface. The control-plane audit read API behind the safetyauditlogs/read
+            # custom verb is what would make it one.
+            - --audit-log-file=/var/log/swarmada/audit.jsonl
           env:
             # Minikube/developer quickstart default: webhooks need serving certs
             # this manifest does not provision (no cert-manager wiring yet — see
@@ -64,6 +86,14 @@ spec:
             # unset) and wire real serving certs before doing so.
             - name: ENABLE_WEBHOOKS
               value: "false"
+            # The manager reads its TDE recovery settings
+            # (spec.trafficDeconfliction.recovery.*) from the SwarmadaConfig in its
+            # own namespace. Without this both are ignored and recovery runs on the
+            # built-in 30s wait and ReleaseAll fallback.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - containerPort: 9443
               name: webhook-server
@@ -92,4 +122,17 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            - name: audit-log
+              mountPath: /var/log/swarmada
+      volumes:
+        # emptyDir, not a PVC: the audit chain survives a container restart and is
+        # readable for the life of the pod, which is what makes an audit assertion
+        # verifiable at all. It is NOT retention —
+        # RFC-0001 #safety-retention-policy wants durable, per-namespace retention, and a
+        # production deployment replaces this with a PVC or a log-shipping sidecar. The
+        # chain is resumable either way: cmd/manager reads the sink back on start so
+        # per-namespace sequence numbers continue rather than restarting at genesis.
+        - name: audit-log
+          emptyDir: {}
       terminationGracePeriodSeconds: 10

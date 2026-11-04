@@ -146,7 +146,7 @@ func TestClient_CredentialApplied(t *testing.T) {
 	defer ts.Close()
 	host, c := hostOf(ts)
 
-	_, _ = c.ListTags(context.Background(), host, "r", &Credential{BearerToken: "tok"})
+	_, _ = c.ListTags(context.Background(), host, "r", &Credential{BearerToken: "tok", Hosts: []string{host}})
 	if gotAuth != "Bearer tok" {
 		t.Errorf("auth header = %q, want Bearer tok", gotAuth)
 	}

@@ -194,3 +194,67 @@ func TestRateCapHoldsNonCriticalButPassesCritical(t *testing.T) {
 		t.Fatal("held change should flush once the cap window elapses")
 	}
 }
+
+// TestForgetReestablishesStatusForARecreatedRobot is the regression assertion for
+// the defect Projector.Forget exists to fix: a Robot deleted and recreated under the
+// same wire robot_id starts with an EMPTY status, but the projector's per-robot cache
+// is keyed by robot_id alone — no UID, no object identity — so it outlives the object
+// and suppresses the re-establishing write, and the recreated robot never gets
+// batteryPercent or hardware back for as long as the manager process runs.
+//
+// The battery reading deliberately does not move between the two generations. That
+// is the real case, not a contrived one: the reference sim adapter starts every
+// robot at 100% and drains 0.01%/s, so across a demo-length run the reading never
+// leaves its bucket and NOTHING about the stream is material to the stale cache.
+func TestForgetReestablishesStatusForARecreatedRobot(t *testing.T) {
+	p := telemetry.NewProjector(telemetry.DefaultConfig())
+
+	// First generation of the Robot object: one establishing write, then quiet.
+	if upd := p.Project(baseFrame()); upd == nil || upd.BatteryPct == nil {
+		t.Fatalf("first-ever frame should establish battery, got %+v", upd)
+	}
+	if upd := p.Project(baseFrame()); upd != nil {
+		t.Fatalf("unchanged stream should be a no-op, got %+v", upd)
+	}
+
+	// The Robot object is deleted and recreated with an empty status. Without the
+	// reset, the identical stream stays a no-op and status is never re-established.
+	if upd := p.Project(baseFrame()); upd != nil {
+		t.Fatalf("stale-cache precondition broken: expected no-op, got %+v", upd)
+	}
+
+	if !p.Forget("", testRobot) {
+		t.Fatal("Forget reported nothing to drop for a robot the projector had recorded")
+	}
+
+	upd := p.Project(baseFrame())
+	if upd == nil {
+		t.Fatal("after Forget, the next frame must re-establish status; got nil")
+	}
+	if upd.BatteryPct == nil || *upd.BatteryPct != 80 {
+		t.Fatalf("re-established update must carry the battery reading, got %+v", upd.BatteryPct)
+	}
+	if upd.Hardware["lidar-main"] != fleetv1.HardwareHealthy {
+		t.Fatalf("re-established update must carry hardware, got %+v", upd.Hardware)
+	}
+
+	// RA-1: re-establishing is ONE write, not a per-tick unlock. The stream is
+	// unchanged, so every following frame must again be a no-op.
+	for i := 0; i < 20; i++ {
+		if again := p.Project(baseFrame()); again != nil {
+			t.Fatalf("frame %d after the establishing write must be a no-op, got %+v", i, again)
+		}
+	}
+}
+
+// TestForgetUnknownRobotIsANoOp checks Forget reports honestly rather than
+// creating an entry for a robot it has never seen.
+func TestForgetUnknownRobotIsANoOp(t *testing.T) {
+	p := telemetry.NewProjector(telemetry.DefaultConfig())
+	if p.Forget("", "warehouse-east/never-seen") {
+		t.Fatal("Forget claimed to drop state for a robot the projector never recorded")
+	}
+	if upd := p.Project(baseFrame()); upd == nil {
+		t.Fatal("a Forget of another robot must not consume this robot's first frame")
+	}
+}

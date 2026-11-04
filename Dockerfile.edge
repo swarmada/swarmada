@@ -1,0 +1,64 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Swarmada edge-node image (cmd/edge — see cmd/edge/README.md).
+# Multi-stage: Go 1.26 builder -> distroless static (nonroot) runtime.
+# Multi-arch: built by `make docker-build-edge` (local, host arch) or
+# `make docker-push-edge` (amd64+arm64, pushed directly — buildx cannot
+# --load a multi-platform image into the local daemon). IMG_EDGE defaults to
+# ghcr.io/swarmada/edge:latest. Edge hosts are commonly arm64
+# (Raspberry Pi-class / industrial ARM boxes) — this is why cmd/edge gets its
+# own Dockerfile and cross-compile targets rather than reusing Dockerfile.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+
+# Resolve dependencies first so the module layer caches independently of source.
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+# Copy what ./cmd/edge compiles. The generated proto stubs (proto/**/*.pb.go)
+# ARE imported transitively. They are committed, so a clean checkout's build
+# context already carries them and a bare `docker buildx build` works. After
+# editing a .proto, run `make proto` and commit the regenerated stubs; the
+# image builds whatever proto/ holds.
+COPY cmd/ cmd/
+COPY api/ api/
+COPY internal/ internal/
+COPY proto/ proto/
+
+# Static, CGO-free binary for the distroless/static base — same approach as
+# the controller-manager image, and required for a clean cross-arch build.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o edge ./cmd/edge
+
+# ─────────────────────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/edge /edge
+USER 65532:65532
+
+# cmd/edge/README.md documents the full flag set (mTLS certs, --config-file,
+# --kubeconfig for config sync, --safety-input-file for a local safety line).
+# Health/readiness are served on --health-address (default :9601 by
+# convention with the EdgeStream default of :9600) — wire livenessProbe /
+# readinessProbe to /healthz and /readyz respectively when deploying this
+# image (see cmd/edge/README.md's "Kubernetes deployment notes").
+ENTRYPOINT ["/edge"]

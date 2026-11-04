@@ -107,11 +107,14 @@ linters:
         linters:
           - gosec
 
-      # G118 in the dispatcher: both goroutines take `_ context.Context` DELIBERATELY and say so in
-      # their doc comments. Binding them to the caller's context would let one robot's closing
-      # stream cancel a best-effort push to a DIFFERENT robot's adapter — the bug the detachment
-      # exists to prevent. Scoped to that file.
-      - path: "internal/command/dispatcher\\.go"
+      # G118 in the dispatcher and in zoneconstraints.go: these goroutines take
+      # `_ context.Context` DELIBERATELY and say so in their doc comments. Binding them to the
+      # caller's context would let one robot's closing stream cancel a best-effort push to a
+      # DIFFERENT robot's adapter — the bug the detachment exists to prevent. NotifyZoneConstraints
+      # has a second reason on top: its caller is standing in a position-telemetry callback, and
+      # blocking that on one adapter's ack would stall zone derivation for every robot behind it.
+      # Scoped to those two files.
+      - path: "internal/command/(dispatcher|zoneconstraints)\\.go"
         text: "G118"
         linters:
           - gosec

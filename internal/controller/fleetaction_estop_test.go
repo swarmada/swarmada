@@ -34,7 +34,7 @@ func robotEstopped(name string, estop fleetv1.RobotEstopState, assignedAction st
 	return r
 }
 
-// Core §9.6.2.4: InProgress + estop → Paused, robot KEPT bound, lease retained.
+// Core RFC-0001 #safety-fleetaction-behaviour-during-estop: InProgress + estop → Paused, robot KEPT bound, lease retained.
 func TestEstop_InProgressPausesAndKeepsBinding(t *testing.T) {
 	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
@@ -49,15 +49,17 @@ func TestEstop_InProgressPausesAndKeepsBinding(t *testing.T) {
 		t.Fatalf("phase = %s, want Paused", ft.Status.Phase)
 	}
 	if ft.Status.AssignedRobot != "r1" {
-		t.Fatalf("robot released on InProgress estop (%q) — must stay bound (§9.6.2.4)", ft.Status.AssignedRobot)
+		t.Fatalf("robot released on InProgress estop (%q) — must stay bound (RFC-0001 #safety-fleetaction-behaviour-during-estop)", ft.Status.AssignedRobot)
 	}
 	if ft.Status.AssignmentGeneration != 4 || ft.Status.LeaseExpiresAt == nil {
 		t.Fatalf("lease not retained: gen=%d lease=%v", ft.Status.AssignmentGeneration, ft.Status.LeaseExpiresAt)
 	}
 }
 
-// Core §9.6.2.4: Assigned + estop → Paused, robot RELEASED (table row Assigned).
-func TestEstop_AssignedPausesAndReleasesRobot(t *testing.T) {
+// Core RFC-0001 #safety-fleetaction-behaviour-during-estop, row A1: Assigned + a confirmed stop →
+// Paused, and the binding, the lease and the robot's record are KEPT. A confirmed stop is not proof
+// the robot is off the action; only a row out of Paused (A2, A4, A5, A24, A25) releases them.
+func TestEstop_AssignedPausesAndKeepsItsRobot(t *testing.T) {
 	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	robot := robotEstopped("r1", fleetv1.RobotEstopStopped, "t1")
 	robot.Status.Phase = fleetv1.RobotPhaseAssigned
@@ -72,13 +74,12 @@ func TestEstop_AssignedPausesAndReleasesRobot(t *testing.T) {
 	if ft.Status.Phase != fleetv1.ActionPhasePaused {
 		t.Fatalf("phase = %s, want Paused", ft.Status.Phase)
 	}
-	if ft.Status.AssignedRobot != "" || ft.Status.LeaseExpiresAt != nil {
-		t.Fatalf("Assigned+estop must release binding+lease: robot=%q lease=%v", ft.Status.AssignedRobot, ft.Status.LeaseExpiresAt)
+	if ft.Status.AssignedRobot != "r1" || ft.Status.LeaseExpiresAt == nil {
+		t.Fatalf("Assigned+estop must keep binding+lease (A1): robot=%q lease=%v", ft.Status.AssignedRobot, ft.Status.LeaseExpiresAt)
 	}
-	// The robot's action pointer must be cleared so it is free for other work.
 	got := getRobot(t, c, "r1", actionNS)
-	if got.Status.AssignedAction != "" {
-		t.Fatalf("robot still bound to task: %q", got.Status.AssignedAction)
+	if got.Status.AssignedAction != "t1" {
+		t.Fatalf("the robot's record of the paused work was released while its stop stands: %q", got.Status.AssignedAction)
 	}
 }
 

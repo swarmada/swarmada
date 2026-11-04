@@ -59,7 +59,7 @@ func RobotColumns() []table.Column {
 	return []table.Column{
 		{Title: "NAME", Width: 14},
 		{Title: "PHASE", Width: 11},
-		// Estop is INDEPENDENT of Phase (RFC-0001 §9.6.2.3) — a robot can be
+		// Estop is INDEPENDENT of Phase (RFC-0001 #safety-estop-state-machine) — a robot can be
 		// Stopped while its Phase still reads Idle. Without this column an
 		// emergency stop is invisible on the default screen, which is the one
 		// the quickstart tells you to watch during the estop drill; it showed
@@ -135,7 +135,7 @@ func RobotRow(f k8sclient.Fleet, r k8sclient.RobotView, _ time.Time) table.Row {
 // the task prefix and reads identically for every member of that task, so the
 // cell could not say which step the robot was on. The OWNING task is deliberately
 // not here — the robot detail pane answers that, the same way the tasks screen's
-// narrow pane defers to detail (spec §3a).
+// narrow pane defers to detail.
 func actionCell(f k8sclient.Fleet, assigned string) string {
 	if assigned == "" {
 		return "—"

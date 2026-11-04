@@ -21,22 +21,19 @@ import (
 )
 
 // FleetAdapter declares a vendor Fleet Adapter — the per-manufacturer translation
-// layer (RFC-0001 §5.3) that the control plane connects to over gRPC
+// layer (RFC-0001 #fleet-adapter-protocol) that the control plane connects to over gRPC
 // (fleet_adapter.v1.FleetAdapterService). It is the admission keystone for
 // third-party robots: a Robot may only be admitted when a Connected, conformant
 // FleetAdapter serves its RobotClass, so an unverified or absent adapter cannot
 // silently drive physical hardware.
 //
-// NOTE: this is the twelfth CRD (RFC-0001 §5.2.12). The admission-gating webhook
-// that consumes this type IS implemented (internal/webhook/robot_webhook.go,
-// RobotAdmissionGate). The FleetAdapter status controller that sets
-// status.phase/status.conformance IS also implemented
-// (internal/controller/fleetadapter_controller.go: digest- and
-// signature-verified conformance report consumption per §9.1.12). The §5.3.7
-// conformance suite (adapters/conformance/) IS implemented as an executable
-// harness, but only drives the safety-critical subset C1-C6 (adapters/CONFORMANCE.md);
-// C7, C8, part of C4, and C9-C16 are not yet driven and report `skip`. Follow-on
-// work is widening that coverage, not building the harness from scratch.
+// NOTE (RFC-0001 #fleetadapter): the admission-gating webhook that consumes this type
+// is implemented (internal/webhook/robot_webhook.go, RobotAdmissionGate). The
+// FleetAdapter status controller that sets status.phase/status.conformance is also
+// implemented (internal/controller/fleetadapter_controller.go: digest- and
+// signature-verified conformance report consumption per RFC-0001 #fleetadapter-status-fields-and-phase-machine).
+// The RFC-0001 #fleet-adapter-protocol conformance suite (adapters/conformance/) is an
+// executable harness that drives checks C0 through C19 (adapters/CONFORMANCE.md).
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
 
@@ -49,8 +46,10 @@ const (
 	// FleetAdapterPhasePending means the control plane has not yet established a
 	// session with the adapter.
 	FleetAdapterPhasePending FleetAdapterPhase = "Pending"
-	// FleetAdapterPhaseConnected means the adapter is reachable, has passed
-	// conformance, and is eligible to drive robots.
+	// FleetAdapterPhaseConnected means the adapter has an established session (an
+	// accepted, verified handshake) and a current heartbeat. It says nothing about
+	// conformance, which status.conformance carries: Robot admission requires both
+	// Connected and conformance Passed.
 	FleetAdapterPhaseConnected FleetAdapterPhase = "Connected"
 	// FleetAdapterPhaseDegraded means the adapter is reachable but failing
 	// liveness probes or driving only a subset of its robots.
@@ -61,14 +60,17 @@ const (
 	// protocol version could not be negotiated, or the negotiated CONTRACT version is outside the
 	// range this control plane supports (ADR-0032).
 	//
-	// It bars WORK, not observation: a Rejected adapter keeps its session, keeps streaming telemetry
-	// and heartbeats, and always receives estop. Because it is a negotiation verdict rather than a
-	// liveness one, a heartbeat does not clear it — only a fresh, compatible handshake does.
+	// It bars WORK, not observation: a Rejected adapter always receives estop. One rejected on its
+	// contract version or on a failed conformance report keeps its session and keeps streaming
+	// telemetry and heartbeats; one whose ControlStream is refused on its package version sends
+	// neither, and its SafetyStream stays open (RFC-0001 #fleetadapter-admission-gating). Because
+	// it is a negotiation verdict rather than a liveness one, a heartbeat does not clear it — only a
+	// fresh, compatible handshake does.
 	FleetAdapterPhaseRejected FleetAdapterPhase = "Rejected"
 )
 
 // ConformanceState is the result of the last Fleet Adapter conformance check
-// (RFC-0001 §5.3.7).
+// (RFC-0001 #fleet-adapter-protocol).
 // +kubebuilder:validation:Enum=Unknown;Passed;Failed
 type ConformanceState string
 
@@ -94,8 +96,10 @@ type FleetAdapterSpec struct {
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// ProtocolVersion is the Fleet Adapter protocol version this adapter
-	// implements. The control plane refuses to drive robots through an adapter
-	// whose version it does not support.
+	// implements. Not consulted by any controller at v0.4: the package check runs
+	// on the version the adapter advertises in AdapterHello, where an empty value
+	// or "fleet_adapter.v1" is accepted and any other value is refused and the
+	// stream closed, without moving this FleetAdapter to Rejected.
 	// +kubebuilder:default="fleet_adapter.v1"
 	ProtocolVersion string `json:"protocolVersion,omitempty"`
 
@@ -106,24 +110,76 @@ type FleetAdapterSpec struct {
 	// +optional
 	ServesRobotClasses []string `json:"servesRobotClasses,omitempty"`
 
-	// TLSSecretRef names a Secret in this namespace holding the mTLS client
-	// material the control plane uses to authenticate to the adapter (§5.5.2).
+	// TLSSecretRef names a Secret in this namespace specified to pin the adapter's
+	// expected client-certificate identity. Read by no controller at v0.4: adapter
+	// identity is resolved from the client certificate's SAN alone, so this field
+	// pins nothing (RFC-0001 #fleetadapter-spec-fields).
 	// +optional
 	TLSSecretRef string `json:"tlsSecretRef,omitempty"`
 
 	// ConformanceReport references the signed result proving this adapter passes
-	// the §5.3.7 conformance suite. The control plane will not move the adapter to
-	// Connected without a verified, passing report.
+	// the RFC-0001 #fleet-adapter-protocol conformance suite. Its verification sets
+	// status.conformance, which admission and dispatch require to be Passed. It does
+	// not gate status.phase at v0.4: an adapter with no report, or a failed one,
+	// still reaches Connected.
 	// +optional
 	ConformanceReport *ConformanceReportRef `json:"conformanceReport,omitempty"`
 
-	// HeartbeatIntervalSeconds is how often the control plane probes adapter
-	// liveness. Missing this many consecutive probes moves the adapter to
-	// Disconnected.
+	// HeartbeatIntervalSeconds is the adapter's liveness staleness budget: an adapter
+	// silent for this long is Degraded, and silent for this long times the missed-probe
+	// threshold is Disconnected. The control plane pushes an adapter-scoped
+	// HeartbeatRequest at HALF this period so a live adapter is never judged on its own
+	// boundary (ADR-0054); it is the floor under ADR-0026's liveness projection, not
+	// only a timeout.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=10
 	HeartbeatIntervalSeconds int32 `json:"heartbeatIntervalSeconds,omitempty"`
+
+	// Simulated declares that this adapter drives simulated robots rather than
+	// physical hardware (ADR-0038). Purely informational: it never gates admission
+	// or dispatch, and RobotAdmissionGate treats a simulated adapter exactly as it
+	// treats a physical one. The Robot defaulting webhook reads it to stamp
+	// swarmada.io/robot-source onto each Robot bound to this adapter, so a
+	// conformance report earned against a simulated binding is distinguishable from
+	// one earned against hardware.
+	//
+	// false (the default) means physical: an adapter that does not declare itself is
+	// assumed physical, which is exactly what an undeclared adapter already means.
+	// +optional
+	// +kubebuilder:default=false
+	Simulated bool `json:"simulated,omitempty"`
 }
+
+// FleetAdapter status condition types and reasons.
+const (
+	// ConditionSpecFieldsIgnored is True when the FleetAdapter sets a spec field that no
+	// controller acts on in this release: spec.tlsSecretRef, or a spec.protocolVersion
+	// other than the protocol the control plane speaks. The message names each one.
+	// Implementing a field removes it from this condition.
+	ConditionSpecFieldsIgnored = "SpecFieldsIgnored"
+	// ReasonIgnoredFieldsSet is the reason when at least one such field is set.
+	ReasonIgnoredFieldsSet = "IgnoredFieldsSet"
+	// ReasonNoIgnoredFields is the reason when none is set.
+	ReasonNoIgnoredFields = "NoIgnoredFields"
+)
+
+// RobotSource is the provenance of the robots an adapter drives, stamped onto a
+// Robot as the swarmada.io/robot-source annotation by the Robot defaulting webhook
+// (ADR-0038). An ABSENT annotation means unknown — the bound FleetAdapter could not
+// be resolved — and MUST NOT be read as Physical.
+type RobotSource string
+
+// RobotSource values.
+const (
+	// RobotSourcePhysical: the bound FleetAdapter drives physical hardware.
+	RobotSourcePhysical RobotSource = "Physical"
+	// RobotSourceSimulated: the bound FleetAdapter declares spec.simulated.
+	RobotSourceSimulated RobotSource = "Simulated"
+)
+
+// RobotSourceAnnotation records the provenance of a Robot's adapter binding
+// (ADR-0038). Informational; never a safety signal and never an admission input.
+const RobotSourceAnnotation = "swarmada.io/robot-source"
 
 // ConformanceReportRef points at a signed conformance test result.
 type ConformanceReportRef struct {
@@ -152,12 +208,51 @@ type SupportedAction struct {
 	// +optional
 	// +listType=atomic
 	RequiredCapabilities []string `json:"requiredCapabilities,omitempty"`
-	// Params are coarse payload parameter descriptors.
+	// Params are coarse payload parameter descriptors — what the action TAKES.
 	// +optional
 	// +listType=atomic
 	Params []ActionParam `json:"params,omitempty"`
+
+	// Results are coarse descriptors for what the action EMITS, projected from
+	// fleet_adapter.v1 SupportedAction.results.
+	//
+	// Params declares inputs; until Results, nothing declared outputs, so a
+	// binding feeding one step's output into a later step's input could be checked
+	// at the consuming end only — the producing end was not checkable at all,
+	// because no descriptor said what a robot action emits. The binding validator
+	// reads THIS field, not the proto, so the proto field alone would change
+	// nothing: this mirror is the half that makes a static parameter-binding check
+	// possible for a binding onto a robot action.
+	//
+	// ADDITIVE, and empty means UNKNOWN. An adapter that declares no results is
+	// making no statement about its outputs, which is what every adapter built
+	// before this field meant. A checker MUST NOT read empty as "produces
+	// nothing" — that would reject every binding onto every adapter predating the
+	// field.
+	// +optional
+	// +listType=atomic
+	Results []ActionParam `json:"results,omitempty"`
+
 	// +optional
 	Description string `json:"description,omitempty"`
+
+	// CustomType is the one Custom verb this entry declares, projected from
+	// fleet_adapter.v1 SupportedAction.custom_type, and matched against
+	// FleetAction.spec.customType. Set only on an entry whose actionType is
+	// Custom; the control plane drops it from any other entry, which then reads
+	// as the type-only entry it always was.
+	//
+	// EMPTY ON A CUSTOM ENTRY MEANS EVERY VERB NO KEYED ENTRY NAMES — the meaning
+	// every Custom entry had before this field. For a verb V a reader uses the
+	// entry keyed V when there is one, and the unkeyed Custom entry otherwise.
+	//
+	// No validation beyond the bound spec.customType carries: a rule that refused
+	// one malformed entry would refuse the whole status write, and cost the
+	// adapter every valid entry beside it. The control plane drops an entry whose
+	// verb exceeds the bound (no FleetAction can name it) before it writes.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	CustomType string `json:"customType,omitempty"`
 }
 
 // ActionParam is a coarse parameter descriptor for a SupportedAction.
@@ -259,7 +354,7 @@ type FleetAdapterStatus struct {
 // FleetAdapter is the Schema for the fleetadapters API.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=fa
+// +kubebuilder:resource:scope=Namespaced,shortName=fadapt
 // +kubebuilder:printcolumn:name="Vendor",type=string,JSONPath=".spec.vendor"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Conformance",type=string,JSONPath=".status.conformance"

@@ -1,0 +1,16 @@
+# The external event bridge's cluster side: the four SemanticEventSources it raises
+# events for, the TaskTriggers that turn them into drafts, the bridge itself (a
+# Deployment the cluster starts), and the admission policy that holds it to its own
+# sources.
+#
+# Apply after examples/first-run has the control plane (and cert-manager) up and
+# namespace warehouse-a created, and after Secret event-bridge-keys exists;
+# examples/event-bridge/run.sh does all three.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sources.yaml
+  - triggers.yaml
+  - bridge.yaml
+  - bridge-policy.yaml

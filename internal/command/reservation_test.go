@@ -25,7 +25,7 @@ import (
 )
 
 // PushReservationGranted pushes a reservation_granted Command to the promoted
-// robot's adapter and binds the ReservationGrantedAck (§5.4.5).
+// robot's adapter and binds the ReservationGrantedAck (RFC-0001 #tde-shared-resource-queue-management).
 func TestPushReservationGranted_AcknowledgedRoundTrip(t *testing.T) {
 	d, _ := newDispatcher(t, cmdAdapter)
 	sender := &fakeSender{dispatch: d, respond: func(cmd *fav1.Command) *fav1.CommandResult {

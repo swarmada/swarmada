@@ -96,8 +96,8 @@ func TestEstopActorIdentity_MatchesTheAuditActor(t *testing.T) {
 //
 // The three cases the change has to get right: an authenticated trigger, an authenticated
 // clear, and the fallback when no identity was stamped. Each asserts the ENVELOPE actor —
-// never a Detail key, because scripts/specdiff.py's audit_detail_findings rejects
-// envelope-carried identity duplicated into Detail (_ENVELOPE_FIELDS).
+// never a Detail key, because the specification's drift check rejects envelope-carried
+// identity duplicated into Detail (its _ENVELOPE_FIELDS rule).
 
 // findEntry returns the recorded entry of the given type, or fails.
 func findEntry(t *testing.T, spy *auditSpy, eventType string) audit.Entry {
@@ -111,7 +111,7 @@ func findEntry(t *testing.T, spy *auditSpy, eventType string) audit.Entry {
 	return audit.Entry{}
 }
 
-// assertNoIdentityInDetail guards the §9.6.5.1 envelope rule mechanically: a writer that
+// assertNoIdentityInDetail guards the RFC-0001 #safety-required-events envelope rule mechanically: a writer that
 // helpfully copies the actor into Detail passes every behavioural test and fails the spec
 // gate, so the tests should catch it first.
 func assertNoIdentityInDetail(t *testing.T, e audit.Entry) {
@@ -119,7 +119,7 @@ func assertNoIdentityInDetail(t *testing.T, e audit.Entry) {
 	for _, k := range []string{"triggered_by", "cleared_by", "actor", "issued_by", "resumed_by"} {
 		if v, ok := e.Detail[k]; ok {
 			t.Errorf("Detail[%q] = %q duplicates envelope-carried identity "+
-				"(scripts/specdiff.py _ENVELOPE_FIELDS)", k, v)
+				"(the specification's _ENVELOPE_FIELDS rule)", k, v)
 		}
 	}
 }

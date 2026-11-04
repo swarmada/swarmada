@@ -1,0 +1,371 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: computeendpoints.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: ComputeEndpoint
+    listKind: ComputeEndpointList
+    plural: computeendpoints
+    shortNames:
+    - cep
+    singular: computeendpoint
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.binding
+      name: Binding
+      type: string
+    - jsonPath: .spec.contract
+      name: Contract
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ComputeEndpoint is the Schema for the computeendpoints API.
+
+          NO STATUS SUBRESOURCE, DELIBERATELY. ComputeEndpoint is reference-only
+          configuration, in the same shape as StorageClass or IngressClass: an administrator
+          installs it and a FleetAction names it in spec.executor.endpointRef. No controller
+          reconciles it, so there is nothing it could truthfully report.
+
+          There is no dispatch path at this version: nothing resolves the endpoint's
+          address, starts a run on it, or observes the executor behind it, and that
+          executor's readiness is reported nowhere, on this object or on a FleetAction. The
+          control plane reads it at admission only. The FleetAction admission webhook
+          refuses a FleetAction whose spec.executor.endpointRef names no ComputeEndpoint in
+          its namespace, or whose sinks do not accept the result fields this endpoint
+          declares. The FleetTask admission webhook checks bindings against spec.contract
+          and spec.emitsEvents when a task is created or its bindings change.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ComputeEndpointSpec is an administrator-installed reference to an addressable
+              executor: a binding, a provisioning mode, and a contract. A task
+              never describes an executor inline — it names a ComputeEndpoint by reference
+              (FleetAction.spec.executor.endpointRef).
+            properties:
+              binding:
+                description: |-
+                  Binding is the wire contract this endpoint speaks.
+                  There is no dispatch path at v0.4. Nothing in the reference control plane
+                  resolves an endpoint address, activates a run, or calls the compute runtime service.
+                enum:
+                - Grpc
+                - Http
+                - Mcp
+                type: string
+              contract:
+                description: |-
+                  Contract is the execution shape this endpoint implements. Besides the
+                  CEL rules on this type, the FleetTask admission webhook reads it when a task
+                  is created and when an update changes the task's spec.flow, spec.inputs or
+                  spec.actions: a binding that reads an event from an App producer, or a
+                  result from a Service producer, is refused with reason ExternalContractMismatch.
+                enum:
+                - App
+                - Service
+                type: string
+              emitsEvents:
+                description: |-
+                  EmitsEvents lists the semantic event types this endpoint may raise. The
+                  FleetTask admission webhook reads it on the same writes as Contract: an
+                  event binding naming a type not listed here is refused with reason
+                  UndeclaredEvent, including when the list is empty. Nothing checks a raised
+                  event against it.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              inputs:
+                description: |-
+                  Inputs are the non-scalar inputs this endpoint accepts (a sensor stream or
+                  an artifact). Descriptive only at v0.4 — see ComputeEndpointInputKind.
+                items:
+                  description: ComputeEndpointInput declares one non-scalar input
+                    a ComputeEndpoint accepts.
+                  properties:
+                    kind:
+                      description: Kind classifies the input.
+                      enum:
+                      - SensorStream
+                      - Artifact
+                      type: string
+                    mediaTypes:
+                      description: MediaTypes lists acceptable IANA media types (e.g.
+                        "video/mp4").
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    name:
+                      description: Name is the input name.
+                      type: string
+                    required:
+                      description: Required marks whether an action invoking this
+                        endpoint must supply this input.
+                      type: boolean
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              parameters:
+                description: |-
+                  Parameters are the scalar parameters this endpoint accepts, keyed by name
+                  in an action's spec.executor.parameters.
+                items:
+                  description: ComputeEndpointParameter declares one scalar parameter
+                    a ComputeEndpoint accepts.
+                  properties:
+                    allowed:
+                      description: Allowed enumerates permitted values when Kind is
+                        enum.
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    default:
+                      description: |-
+                        Default is a string-encoded default value. It is stored only: no controller
+                        applies it at v0.4, and spec.executor.onUnresolvedParameter, which names the
+                        case it is for, is itself read by no controller.
+                      type: string
+                    kind:
+                      description: Kind is the parameter's scalar type.
+                      enum:
+                      - string
+                      - number
+                      - bool
+                      - enum
+                      type: string
+                    max:
+                      description: Max is the maximum permitted value when Kind is
+                        number.
+                      type: number
+                    min:
+                      description: Min is the minimum permitted value when Kind is
+                        number.
+                      type: number
+                    name:
+                      description: Name is the parameter name.
+                      type: string
+                    required:
+                      description: Required marks whether a binding (or Default) must
+                        resolve this parameter.
+                      type: boolean
+                    unit:
+                      description: |-
+                        Unit is a free-form, non-normative unit label: warn-only until a unit
+                        vocabulary exists.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              probe:
+                description: |-
+                  Probe is specified as an active liveness check for an endpoint whose
+                  readiness is not otherwise observable (an Http or Mcp endpoint), modelled on
+                  RobotProbeSpec. No code reads it at v0.4: nothing probes the endpoint, and
+                  this kind has no status and no Ready condition.
+                properties:
+                  failureThreshold:
+                    default: 3
+                    description: |-
+                      FailureThreshold is the number of consecutive failing cycles specified
+                      before the endpoint is reported not ready.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  intervalSeconds:
+                    default: 30
+                    description: IntervalSeconds is how often the probe is specified
+                      to run.
+                    format: int32
+                    maximum: 3600
+                    minimum: 10
+                    type: integer
+                  path:
+                    description: |-
+                      Path is the HTTP path the probe is specified to check (e.g. "/healthz").
+                      For an Mcp binding the probe is specified as a tools/list call and Path is
+                      ignored.
+                    type: string
+                type: object
+              provision:
+                description: |-
+                  Provision is how this endpoint's address is obtained. The v0.4 schema
+                  declares `existing` and `workload` only; `address` and `onRobot` are not
+                  in it. No code reads this field at v0.4: there is no dispatch path.
+                properties:
+                  existing:
+                    description: |-
+                      Existing references a pre-created Kubernetes Service in a permitted
+                      namespace. Swarmada creates nothing for this mode.
+                    properties:
+                      namespace:
+                        description: |-
+                          Namespace is the Service's namespace. Empty means the ComputeEndpoint's own
+                          namespace.
+                        type: string
+                      port:
+                        description: Port is the named port on the Service to dial.
+                        minLength: 1
+                        type: string
+                      service:
+                        description: Service is the Service name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - port
+                    - service
+                    type: object
+                  workload:
+                    description: |-
+                      Workload specifies that the controller creates a Job or Deployment+Service
+                      per run, from an admin-installed ComputeWorkloadTemplate, owned by
+                      ownerReferences so garbage collection is the duty cycle. Specified, not
+                      implemented at v0.4: no controller creates a workload. This is the
+                      Extended conformance profile: a
+                      deployment that grants no workload-create RBAC and never sets this field
+                      still conforms fully at Core.
+                    properties:
+                      mode:
+                        description: |-
+                          Mode selects whether the controller creates a Job (RunToCompletion — App
+                          contract) or a Deployment+Service (Continuous — Service contract).
+                        enum:
+                        - Job
+                        - Deployment
+                        type: string
+                      templateRef:
+                        description: TemplateRef names a ComputeWorkloadTemplate in
+                          this namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - mode
+                    - templateRef
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: provision must set exactly one of existing or workload;
+                    there is no other mode
+                  rule: has(self.existing) != has(self.workload)
+              results:
+                description: |-
+                  Results are the scalar fields this endpoint's ActionResult.values may carry.
+                  Each declares a name and a kind only: a result declares no value domain (no
+                  allowed values, bounds or unit), so a result of kind enum names no members and
+                  nothing constrains the value an endpoint returns. Only the field names are
+                  checked, at admission, against the ResultSinks an action names.
+                items:
+                  description: |-
+                    ComputeEndpointResultField declares one scalar field a ComputeEndpoint's
+                    ActionResult.values may carry: its name and kind, and no value domain.
+                  properties:
+                    kind:
+                      description: |-
+                        Kind is the field's scalar type. For enum it names no members: nothing
+                        constrains the value returned.
+                      enum:
+                      - string
+                      - number
+                      - bool
+                      - enum
+                      type: string
+                    name:
+                      description: Name is the result field name.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              streamPolicy:
+                description: |-
+                  StreamPolicy governs a contract: Service endpoint's stream placement.
+                  REQUIRED (with PinEndpoint: true) when Contract is Service — see the
+                  struct-level CEL rule above. Meaningless, and left unset, for an App
+                  contract.
+                properties:
+                  onEndpointLoss:
+                    default: Replace
+                    description: |-
+                      OnEndpointLoss selects what happens when the pinned endpoint is lost.
+                      Replace re-places the run onto a newly resolved endpoint and raises a
+                      semantic event marking the temporal discontinuity — a
+                      consumer sees the discontinuity rather than inferring it. Fail ends the
+                      run instead of re-placing it.
+                    enum:
+                    - Replace
+                    - Fail
+                    type: string
+                  pinEndpoint:
+                    description: |-
+                      PinEndpoint, when true, requires the control plane to resolve ONE
+                      EndpointSlice address at activation and pin the stream to it for the
+                      run's lifetime, rather than handing an adapter the Service VIP — which
+                      would load-balance per connection/request and silently split the stream
+                      across replicas. REQUIRED true for contract: Service (CEL, above); the
+                      field exists (rather than being implied) so a reader sees the invariant
+                      stated on the object, not only enforced by it.
+                    type: boolean
+                required:
+                - pinEndpoint
+                type: object
+            required:
+            - binding
+            - contract
+            - provision
+            type: object
+            x-kubernetes-validations:
+            - message: 'contract: Service requires binding: Grpc — it is the only
+                binding that carries a sensor stream; this also rejects binding: Mcp
+                with contract: Service'
+              rule: self.contract != 'Service' || self.binding == 'Grpc'
+            - message: 'contract: Service requires streamPolicy.pinEndpoint: true
+                — splitting a stream across replicas silently degrades tracking, motion
+                estimates and pre-roll'
+              rule: self.contract != 'Service' || (has(self.streamPolicy) && self.streamPolicy.pinEndpoint)
+        type: object
+    served: true
+    storage: true
+    subresources: {}

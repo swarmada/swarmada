@@ -1,0 +1,44 @@
+# The robot class the admitted robot belongs to (swarmctl admit --class simbot-v1).
+#
+# Webhooks on means it must exist: the Robot admission gate resolves the class a Robot
+# names, and the ControlStream authorizes a robot's messages only when its class is in
+# the bound FleetAdapter's spec.servesRobotClasses. The mutating webhook stamps the
+# fields below onto the Robot at admission. The hardware and capabilities match what the
+# simulation adapter reports for its robot: navigation.2d and transport.payload are the
+# capabilities its declared actions require (FleetAdapter.status.supportedActions), named as
+# RFC-0001 names them. `navigation` is kept for tasks written against earlier samples.
+apiVersion: swarmada.io/v1
+kind: RobotClass
+metadata:
+  name: simbot-v1
+  namespace: warehouse-a
+spec:
+  manufacturer: SimBot
+  model: SimBot-250
+  baseAdapter:
+    name: sim-fleet-adapter
+    version: "0.1.0"
+  hardware:
+    - name: lidar_top
+      type: Lidar
+      model: sim-lidar-v1
+    - name: camera_front
+      type: Camera
+      model: sim-cam-v1
+  baseCapabilities:
+    - name: navigation.2d
+      type: hardware-native
+      pauseable: false
+    - name: transport.payload
+      type: hardware-native
+      pauseable: false
+    - name: navigation
+      type: hardware-native
+      pauseable: false
+    - name: camera_front
+      type: hardware-native
+      pauseable: false
+      requiredHardware:
+        - camera_front
+  defaultTelemetry:
+    telemetryIntervalSeconds: 5

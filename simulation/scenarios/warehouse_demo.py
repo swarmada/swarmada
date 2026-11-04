@@ -135,7 +135,10 @@ class WarehouseScenario:
         """Add a robot prim to the stage at (cfg.x, cfg.y, cfg.yaw)."""
         logger.info(
             "Spawning %s at (%.1f, %.1f, yaw=%.2f)",
-            cfg.robot_id, cfg.x, cfg.y, cfg.yaw,
+            cfg.robot_id,
+            cfg.x,
+            cfg.y,
+            cfg.yaw,
         )
         # prim_path = f"/World/Robots/{cfg.robot_id}"
         # omni.kit.commands.execute("CreateReferenceCommand", ...)

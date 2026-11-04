@@ -3,25 +3,25 @@
 - **Status:** accepted
 - **Date:** 2026-08-20
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.1.4 (`FleetAction.spec.desiredState`), §9.1.5 (`FleetTask` fan-out),
-  §9.6.2.4 (FleetAction behaviour during estop — the operator-gated `Paused` phase),
-  §9.6.3.5 (assignment lease and the single-executor guarantee); ADR-0007 (level-triggered
-  declarative intent); Audit 3 finding D3
+- **Related:** RFC-0001 "FleetAction" (`spec.desiredState`), "FleetTask" (fan-out),
+  "FleetAction Behaviour During Estop" (the operator-gated `Paused` phase),
+  "Assignment Lease and the Single-Executor Guarantee"; ADR-0047 (level-triggered
+  declarative intent)
 
 ## Context
 
 `FleetAction.spec.desiredState` is documented as level-triggered declarative intent: a write persists
 and re-converges after a disconnect, and re-writing the same value is idempotent, so a dropped edge is
-never a lost command (ADR-0007). Four values are defined — `Running`, `Paused`, `Returning`,
+never a lost command (ADR-0047). Four values are defined — `Running`, `Paused`, `Returning`,
 `Cancelled` — and `FleetTask` fans its own copy of the field onto every non-terminal child.
 
-Audit 3 found that no controller read the field at all. `Cancelled` has since been wired into the
+No controller read the field at all. `Cancelled` has since been wired into the
 existing confirmed-cancel path, which closed the composite's FailFast and Compensate cancellation.
 `Paused` and `Returning` were left unenacted for one reason: enacting them requires answering a
 question the specification had not answered, and answering it wrongly weakens a safety property.
 
 The question is what a subsequent write of `Running` means. Read as strictly level-triggered, it
-resumes the action. But §9.6.2.4 already defines a `Paused` phase whose defining property is that the
+resumes the action. But "FleetAction Behaviour During Estop" already defines a `Paused` phase whose defining property is that the
 control plane **never** auto-resumes it — an estop-paused action waits for a human, because the reason
 the robot stopped is not visible to the control plane. Two paths into the same phase with opposite
 resume rules would mean an operator could not tell, from a `Paused` FleetAction, whether it would move
@@ -35,7 +35,7 @@ every reconcile — a loop between two intents, on the safety path.
 
 **A hold is entered declaratively and lifted only by an operator.**
 
-- `spec.desiredState: Paused` enacts a safe hold, taking the same transitions §9.6.2.4 specifies for
+- `spec.desiredState: Paused` enacts a safe hold, taking the same transitions "FleetAction Behaviour During Estop" specifies for
   the estop path: an `Assigned` action releases its robot binding and its zone slot; an `InProgress`
   action keeps its robot bound and its lease renewed, because that robot is physically committed and
   no other robot may take the action.

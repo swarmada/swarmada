@@ -57,7 +57,7 @@ func TestRequestReservation_FailsClosedUntilRecovered(t *testing.T) {
 
 // The leader-elected RecoveryRunnable recovers on leadership acquisition (opening
 // the gate) and re-arms the fail-closed latch on leadership loss, so a promoted
-// standby always rebuilds state before serving grants (§9.4.7 + failover).
+// standby always rebuilds state before serving grants (RFC-0001 #tde-restart-recovery + failover).
 func TestRecoveryRunnable_RecoversOnLeadershipAndRearmsOnLoss(t *testing.T) {
 	c := recoveryClient(t, zoneWithReservations("z", 2))
 	e := New(c, DefaultConfig())

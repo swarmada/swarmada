@@ -18,21 +18,21 @@ package metrics
 
 import "time"
 
-// EstopScope is the `scope` label on the estop metrics (§9.3.8): which operator
+// EstopScope is the `scope` label on the estop metrics (RFC-0001 #control-plane-observability-prometheus-metrics-contract): which operator
 // action produced the stop, not which object was written. A typed value rather than
 // a bare string because every emit site previously hard-coded ScopeRobot — a zone or
 // namespace estop fans out per robot through the same dispatcher, so nothing in the
 // robot-level code path can tell the three apart and the label has to be carried in.
 type EstopScope string
 
-// Estop scope label values (§9.3.8 swarmada_estop_command* `scope`).
+// Estop scope label values (metrics-contract swarmada_estop_command* `scope`).
 const (
 	ScopeRobot     EstopScope = "robot"
 	ScopeZone      EstopScope = "zone"
 	ScopeNamespace EstopScope = "namespace"
 )
 
-// Estop command result label values (§9.3.8 swarmada_estop_commands_total `result`).
+// Estop command result label values (metrics-contract swarmada_estop_commands_total `result`).
 const (
 	ResultAckStopping = "ack_stopping"
 	ResultAckStopped  = "ack_stopped"
@@ -40,7 +40,7 @@ const (
 	ResultTimeout     = "timeout"
 )
 
-// ObserveEstopLatency records an estop send→EstopAck round-trip (§9.3.8).
+// ObserveEstopLatency records an estop send→EstopAck round-trip (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 //
 // This is a PER-ROBOT round trip and, for a fan-out, it is not the number that
 // matters: sequential dispatch delays each robot's SEND, so every robot in a
@@ -52,7 +52,7 @@ func ObserveEstopLatency(namespace, adapter, robot string, scope EstopScope, d t
 }
 
 // ObserveEstopFanout records one zone- or namespace-scoped estop episode end to end:
-// from the operator's trigger to the last robot in scope resolving (§9.6.2.2).
+// from the operator's trigger to the last robot in scope resolving (RFC-0001 #safety-timing-requirements).
 //
 // Observed ONCE per episode, by the fanning-out controller — not per robot. A
 // robot-scoped estop has no fan-out and must not observe it, or the histogram's
@@ -62,46 +62,46 @@ func ObserveEstopFanout(namespace string, scope EstopScope, d time.Duration) {
 	EstopFanoutDurationSeconds.WithLabelValues(namespace, string(scope)).Observe(d.Seconds())
 }
 
-// IncEstopLatencyViolation records an estop ACK that breached the 500ms SLA (§9.3.8).
+// IncEstopLatencyViolation records an estop ACK that breached the 500ms SLA (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 func IncEstopLatencyViolation(namespace, adapter, robot string) {
 	EstopLatencyViolationsTotal.WithLabelValues(namespace, adapter, robot).Inc()
 }
 
-// IncEstopCommand records one issued estop Command by terminal disposition (§9.3.8).
+// IncEstopCommand records one issued estop Command by terminal disposition (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 func IncEstopCommand(namespace, adapter string, scope EstopScope, result string) {
 	EstopCommandsTotal.WithLabelValues(namespace, adapter, string(scope), result).Inc()
 }
 
-// ── Telemetry pipeline emit helpers (§9.3.8) ──────────────────────────────────
+// ── Telemetry pipeline emit helpers (RFC-0001 #control-plane-observability-prometheus-metrics-contract) ──────────────────────────────────
 
 // IncTelemetryFramesReceived records one TelemetryPayload frame received on
-// ControlStream (§9.3.8, the write-amplification denominator).
+// ControlStream (RFC-0001 #control-plane-observability-prometheus-metrics-contract, the write-amplification denominator).
 func IncTelemetryFramesReceived(namespace, adapter string) {
 	TelemetryFramesReceivedTotal.WithLabelValues(namespace, adapter).Inc()
 }
 
 // IncTelemetryStatusWrite records one Robot.status write the projector emitted on
-// a material transition (§9.3.8). transitionType: phase_change,
+// a material transition (RFC-0001 #control-plane-observability-prometheus-metrics-contract). transitionType: phase_change,
 // hardware_health_change, battery_threshold, assigned_action_change, safety_critical.
 func IncTelemetryStatusWrite(namespace, transitionType string) {
 	TelemetryStatusWritesTotal.WithLabelValues(namespace, transitionType).Inc()
 }
 
-// IncTSDBWriteError records one TSDBWriter write failure (§9.3.8). error_class:
+// IncTSDBWriteError records one TSDBWriter write failure (RFC-0001 #control-plane-observability-prometheus-metrics-contract). error_class:
 // timeout, auth, schema, unknown; sink_type is the configured store.
 func IncTSDBWriteError(namespace, sinkType, errorClass string) {
 	TelemetryTSDBWriteErrorsTotal.WithLabelValues(namespace, sinkType, errorClass).Inc()
 }
 
 // IncTelemetryDroppedFrame records one telemetry frame not forwardable to the TSDB
-// sink (§9.3.8). It never fires when the sink is Drop/unset (NoopWriter never errors).
+// sink (RFC-0001 #control-plane-observability-prometheus-metrics-contract). It never fires when the sink is Drop/unset (NoopWriter never errors).
 func IncTelemetryDroppedFrame(namespace, adapter string) {
 	TelemetryDroppedFramesTotal.WithLabelValues(namespace, adapter).Inc()
 }
 
-// ── Resource-count gauge setters (§9.3.8) ─────────────────────────────────────
+// ── Resource-count gauge setters (RFC-0001 #control-plane-observability-prometheus-metrics-contract) ─────────────────────────────────────
 // Each writes the FULL enum label set for the key, so a phase/state with no
-// resources reads 0 rather than absent (§9.3.8 registration requirement) and a
+// resources reads 0 rather than absent (metrics-contract registration requirement) and a
 // value that emptied since the last set is de-staled to 0 within a present key.
 
 // SetFleetActionsByPhase sets swarmada_fleetactions_by_phase for a namespace from a
@@ -120,7 +120,7 @@ func SetRobotsByPhase(namespace string, counts map[string]int) {
 }
 
 // SetRobotsInEstop sets swarmada_robots_in_estop for a namespace over the active
-// estop states (Stopping, Stopped, Failed; Normal is excluded per §9.3.8).
+// estop states (Stopping, Stopped, Failed; Normal is excluded per RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 //
 // Failed is an ACTIVE state for this gauge's purpose: a robot whose estop could not be
 // confirmed is withheld from dispatch and is exactly what an operator is looking for.
@@ -132,9 +132,9 @@ func SetRobotsInEstop(namespace string, counts map[string]int) {
 	}
 }
 
-// ── Scheduler & assignment-lease emit helpers (§9.3.8) ────────────────────────
+// ── Scheduler & assignment-lease emit helpers (RFC-0001 #control-plane-observability-prometheus-metrics-contract) ────────────────────────
 
-// Assignment-failure reasons (§9.3.8 swarmada_scheduler_assignment_failures_total).
+// Assignment-failure reasons (metrics-contract swarmada_scheduler_assignment_failures_total).
 const (
 	FailureDeadlineExceeded           = "DeadlineExceeded"
 	FailureNoCandidates               = "NoCandidates"
@@ -144,35 +144,35 @@ const (
 )
 
 // ObserveAssignmentLatency records the time from a FleetAction entering Pending to
-// its Assigned transition (§9.3.8). priority: Critical, High, Normal, Low.
+// its Assigned transition (RFC-0001 #control-plane-observability-prometheus-metrics-contract). priority: Critical, High, Normal, Low.
 func ObserveAssignmentLatency(namespace, priority string, d time.Duration) {
 	SchedulerAssignmentLatencySeconds.WithLabelValues(namespace, priority).Observe(d.Seconds())
 }
 
-// IncLeaseRenewal records one successful assignment-lease renewal (§9.3.8).
+// IncLeaseRenewal records one successful assignment-lease renewal (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 func IncLeaseRenewal(namespace string) {
 	SchedulerLeaseRenewalsTotal.WithLabelValues(namespace).Inc()
 }
 
 // IncLeaseExpiry records one lease that expired past the horizon, driving a
-// Revoking→Pending reassignment (§9.3.8 — the robot self-stopped its action).
+// Revoking→Pending reassignment (RFC-0001 #control-plane-observability-prometheus-metrics-contract — the robot self-stopped its action).
 func IncLeaseExpiry(namespace string) {
 	SchedulerLeaseExpiriesTotal.WithLabelValues(namespace).Inc()
 }
 
-// IncAssignmentFailure records an assignment ending Failed or abandoned (§9.3.8).
+// IncAssignmentFailure records an assignment ending Failed or abandoned (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 func IncAssignmentFailure(namespace, reason string) {
 	SchedulerAssignmentFailuresTotal.WithLabelValues(namespace, reason).Inc()
 }
 
 // IncAdapterReconnect records one FleetAdapter ControlStream re-establishment
-// after a Disconnected/Degraded phase (§9.3.8).
+// after a Disconnected/Degraded phase (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 func IncAdapterReconnect(namespace, adapter string) {
 	FleetAdapterReconnectsTotal.WithLabelValues(namespace, adapter).Inc()
 }
 
 // ObserveRobotOfflineDuration records a completed Offline span, observed at
-// reconnect (§9.3.8 — a completion-time metric, not a live-staleness gauge).
+// reconnect (RFC-0001 #control-plane-observability-prometheus-metrics-contract — a completion-time metric, not a live-staleness gauge).
 func ObserveRobotOfflineDuration(namespace string, d time.Duration) {
 	RobotOfflineDurationSeconds.WithLabelValues(namespace).Observe(d.Seconds())
 }
@@ -185,7 +185,7 @@ func IncRobotConnectivityCritical(namespace string) {
 
 // SetFleetAdapterState sets swarmada_fleet_adapter_connected (1 iff phase is
 // Connected) and swarmada_fleet_adapter_phase (1 for the current phase, 0 for the
-// rest) for one adapter (§9.3.8).
+// rest) for one adapter (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
 func SetFleetAdapterState(namespace, adapter, phase string, connected bool) {
 	c := 0.0
 	if connected {

@@ -32,7 +32,7 @@ import (
 	"github.com/swarmada/swarmada/internal/metrics"
 )
 
-// Sink type label values (§9.1.11.1 / §9.3.8 sink_type). Kept as strings so this
+// Sink type label values (RFC-0001 #swarmadaconfig-schema / metrics-contract sink_type). Kept as strings so this
 // package does not depend on the api/v1 config type.
 const (
 	SinkUnset                 = ""
@@ -42,7 +42,7 @@ const (
 	SinkMimir                 = "Mimir"
 )
 
-// NewSink selects a [TSDBWriter] from the configured sink type (§9.1.11.1). An
+// NewSink selects a [TSDBWriter] from the configured sink type (RFC-0001 #swarmadaconfig-schema). An
 // unset or explicit Drop sink discards high-cadence telemetry ([NoopWriter], never
 // forced onto etcd, RA-1); the three real stores all speak the Prometheus
 // remote-write protocol, so one [RemoteWriteSink] serves them.
@@ -76,7 +76,7 @@ func NewRemoteWriteSink(endpoint, sinkType string) *RemoteWriteSink {
 }
 
 // WriteSamples POSTs the batch as a Prometheus remote-write request. On any failure
-// it records swarmada_telemetry_tsdb_write_errors_total (§9.3.8) and returns the
+// it records swarmada_telemetry_tsdb_write_errors_total (RFC-0001 #control-plane-observability-prometheus-metrics-contract) and returns the
 // error so the caller counts the dropped frame; it never blocks the ingest path
 // beyond the client timeout.
 func (s *RemoteWriteSink) WriteSamples(ctx context.Context, samples []Sample) error {
@@ -114,7 +114,7 @@ func (s *RemoteWriteSink) recordError(samples []Sample, class string) {
 	metrics.IncTSDBWriteError(ns, s.sinkType, class)
 }
 
-// ── error classification (§9.3.8 error_class) ─────────────────────────────────
+// ── error classification (metrics-contract error_class) ─────────────────────────────────
 
 const (
 	errorClassTimeout = "timeout"

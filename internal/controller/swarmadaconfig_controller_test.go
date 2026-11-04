@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -83,7 +84,7 @@ func TestSwarmadaConfig_UnsetSinkRaisesCondition(t *testing.T) {
 	if cond.Status != metav1.ConditionTrue || cond.Reason != fleetv1.ReasonSinkNotConfigured {
 		t.Fatalf("condition = %s/%s, want True/SinkNotConfigured", cond.Status, cond.Reason)
 	}
-	// A Warning event must be emitted while unconfigured (§9.3.7).
+	// A Warning event must be emitted while unconfigured (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split).
 	select {
 	case <-rec.Events:
 	default:
@@ -101,10 +102,13 @@ func TestSwarmadaConfig_DropSinkClearsCondition(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != fleetv1.ReasonSinkConfigured {
 		t.Fatalf("condition = %+v, want False/SinkConfigured", cond)
 	}
-	select {
-	case e := <-rec.Events:
-		t.Fatalf("unexpected event for Drop sink: %q", e)
-	default:
+	// Only the sink's Warning is in question here. This fixture leaves spec.signing at
+	// its default (verification required, no trust root), which correctly raises its
+	// own SigningIncomplete Warning; that one is covered where signing is the subject.
+	for _, e := range drainRecorder(rec) {
+		if strings.Contains(e, fleetv1.ConditionTelemetrySinkUnconfigured) {
+			t.Fatalf("unexpected event for Drop sink: %q", e)
+		}
 	}
 }
 

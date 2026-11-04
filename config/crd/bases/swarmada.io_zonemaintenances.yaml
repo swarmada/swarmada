@@ -37,7 +37,9 @@ spec:
 
           ZoneMaintenance represents a planned maintenance event for a zone or namespace.
           Creating this resource pauses robot activity in the targeted area.
-          Deleting it (or running swarmctl deactivate maintenance) resumes all robots.
+          Deleting it resumes every robot it paused. Setting spec.desiredState to Completed
+          requests an early close, which resumes the robots through the same estop gate as
+          the auto-resume deadline. swarmctl has no command that ends a window.
 
           ZoneMaintenance is distinct from estop:
             - Estop: safety-critical, immediate, requires per-robot acknowledgment.
@@ -68,16 +70,37 @@ spec:
               autoResumeAfterMinutes:
                 default: 0
                 description: |-
-                  AutoResumeAfterMinutes: if non-zero, the maintenance automatically
-                  deactivates this many minutes after activation: status.phase transitions
-                  to Completed and all paused/wound-down robots are resumed. The object
-                  itself is NOT deleted — it is terminal (the controller no longer acts on
-                  it) but remains until the operator deletes it; there is no automatic
-                  garbage collection. 0 means the operator must manually resume.
+                  AutoResumeAfterMinutes: if non-zero, the controller closes the window this
+                  many minutes after activation, through the same gated resume as
+                  spec.desiredState: Completed. A robot another Active window also covers
+                  stays paused. When requireEstopClearBeforeResume is true, a robot whose
+                  estop is not clear stays in Maintenance, and the window stays Active with
+                  ResumeBlockedByEstop True while any robot is held. A Completed window is
+                  NOT deleted — it is terminal (the controller no longer acts on it) but
+                  remains until the operator deletes it; there is no automatic garbage
+                  collection. 0 means the window stays open until an operator closes or
+                  deletes it.
                 format: int32
                 maximum: 1440
                 minimum: 0
                 type: integer
+              desiredState:
+                allOf:
+                - enum:
+                  - Active
+                  - Completed
+                - enum:
+                  - Active
+                  - Completed
+                default: Active
+                description: |-
+                  DesiredState is the operator's level-triggered intent for this window.
+                  Writing `Completed` closes it early, without waiting for
+                  autoResumeAfterMinutes. The close is REQUESTED, not performed: the
+                  controller resumes the robots it paused
+                  through the same gate the deadline uses, and the window stays Active while
+                  any of them is held (status.conditions ResumeBlockedByEstop says so).
+                type: string
               mode:
                 default: Graceful
                 description: Mode controls how robots are paused.
@@ -96,9 +119,9 @@ spec:
                   RequireEstopClearBeforeResume, when true, holds a paused robot's
                   administrative resume (Maintenance→Idle) until its observed estop is Clear.
                   This is an OPERATIONAL gate on the phase transition only — it never stops a
-                  robot and is separate from the hardware estop path. Defaults from
-                  SwarmadaConfig.spec.maintenance.requireEstopClearBeforeResume. Deletion-driven
-                  resume is never gated.
+                  robot and is separate from the hardware estop path. The API server defaults
+                  it to true, so SwarmadaConfig.spec.maintenance.requireEstopClearBeforeResume
+                  is never consulted. Deletion-driven resume is never gated.
                 type: boolean
               scheduledStart:
                 description: |-
@@ -143,10 +166,9 @@ spec:
                   CompletedAt is when the window closed, stamped once on the transition into
                   Completed and never rewritten.
 
-                  It is the window's own record of when robots came back into service. The
-                  Completed condition's lastTransitionTime is close but not equivalent: conditions
-                  are rewritten by later reconciles and are subject to their own retention, so a
-                  duration computed from them silently drifts. Empty while Scheduled or Active.
+                  It is the window's only record of when robots came back into service: no
+                  condition records the close (the conditions this controller writes are
+                  ScopeResolved and ResumeBlockedByEstop). Empty while Scheduled or Active.
                 format: date-time
                 type: string
               conditions:
@@ -262,12 +284,12 @@ spec:
                 - Cancelled
                 type: string
               windingDownRobots:
-                description: WindingDownRobots lists robots still finishing actions
-                  (Graceful mode only).
+                description: WindingDownRobots lists robots still on an action, in
+                  either mode; Immediate requeues it.
                 items:
                   description: |-
-                    WindingDownRobot describes a robot still finishing its current action
-                    during Graceful mode wind-down.
+                    WindingDownRobot describes a robot still on an action while the window
+                    winds down, in either mode.
                   properties:
                     assignedAction:
                       type: string

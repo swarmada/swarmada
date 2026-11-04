@@ -1,0 +1,30 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# DEMO overlay for examples/demo-ab-live/run.sh — the canonical, fully-honest
+# Demo A/B (UC-2.1/UC-2.2, Layered Demo Plan backlog #1): every robot in the
+# sample fleet is driven by its own real sim_adapter.py process over a real,
+# mutually-authenticated ControlStream. No status field in this path is ever
+# written by kubectl.
+#
+# Just ../quickstart-mtls (CA, Issuer, server cert, the manager mTLS patch,
+# and the FIRST adapter identity, sim-fleet-adapter/sim-fleet-adapter-client)
+# plus two more client-cert identities, sim-fleet-adapter-2 and -3, one per
+# additional robot that needs to be live at once. See
+# adapter-client-cert-2.yaml for why one shared identity can't carry more than
+# one concurrent live robot.
+resources:
+  - ../quickstart-mtls
+  - adapter-client-cert-2.yaml
+  - adapter-client-cert-3.yaml

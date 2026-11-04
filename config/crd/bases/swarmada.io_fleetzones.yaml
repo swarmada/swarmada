@@ -23,9 +23,6 @@ spec:
     - jsonPath: .spec.maxConcurrentRobots
       name: Max
       type: integer
-    - jsonPath: .status.activeActions
-      name: ActiveActions
-      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -52,7 +49,29 @@ spec:
           metadata:
             type: object
           spec:
-            description: FleetZoneSpec defines the layout and properties of a zone.
+            description: |-
+              FleetZoneSpec defines the layout and properties of a zone.
+
+              A zone carrying a non-empty MemberZones is a COMPOSITE zone (FZ-C1..C6,
+              RFC-0001 #fleetzone-composite-zones-and-zone-expansion). The two invariants a composite can violate within its own
+              spec are rejected here rather than left to a controller, per the cross-field
+              rule in docs/api-principles.md. The remaining FZ-C rules (FZ-C1's "not both a
+              containment parent and a composite", member existence, cycles, and the depth
+              bound) span OTHER objects and cannot be expressed in CEL over one spec. At v0.4
+              the admission webhook does not check them either, so a composite that breaks
+              them is accepted.
+
+              FZ-C4: composition edges are traversed for targeting only, and a composite
+              contains no physical space, so it holds no physical resource. A sharedResources
+              name is not resolved along either edge: the TDE looks it up across every FleetZone
+              in the namespace, and the zone whose name sorts first among those declaring it owns
+              it. An entry on a composite would make the composite the owner of a lift or
+              corridor it does not contain.
+
+              FZ-C6: capacity is enforced where robots are, and a robot is never IN a
+              composite (FZ-C2). status.robotCount does not sum a composite's members: it
+              counts the containment subtree only, so on a composite it counts only robots
+              placed in the composite itself, normally 0.
             properties:
               displayName:
                 description: DisplayName is a human-readable label for this zone (e.g.
@@ -61,7 +80,7 @@ spec:
               edgeNode:
                 description: |-
                   EdgeNode, when set, declares a Zone Controller edge node for this zone
-                  (§9.2.10, §9.6.2.5). The API Server advertises its address in
+                  (RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The API Server advertises its address in
                   RegisterAck.edge_endpoints to every adapter whose robots' zone chain
                   includes this zone; those adapters MUST open the EdgeStream.
                 properties:
@@ -72,8 +91,10 @@ spec:
                     type: string
                   tlsSecretRef:
                     description: |-
-                      TLSSecretRef names the Secret holding the edge node's server-certificate
-                      material, issued from the namespace CA tree (§9.5.2).
+                      TLSSecretRef is specified to name the Secret holding the edge node's
+                      server-certificate material, issued by a CA the operator provisions
+                      (RFC-0001 #security-certificate-management). No controller reads it at this
+                      version: the edge node's server certificate is not configured from this Secret.
                     type: string
                 required:
                 - address
@@ -81,14 +102,14 @@ spec:
               estopPolicy:
                 description: |-
                   EstopPolicy controls how an emergency stop on this zone propagates through
-                  the zone tree (§9.6.2.5). Absent = defaults (propagate to children, not to
+                  the zone tree (RFC-0001 #safety-estop-scopes). Absent = defaults (propagate to children, not to
                   parent).
                 properties:
                   propagateToChildren:
                     default: true
                     description: |-
                       PropagateToChildren: an estop on this zone also triggers estop on all
-                      descendant zones. Recommended true.
+                      descendant zones. Recommended true; unset means true.
                     type: boolean
                   propagateToParent:
                     default: false
@@ -102,22 +123,74 @@ spec:
                 description: |-
                   MaxConcurrentRobots caps how many robots may occupy this zone at once. The
                   TDE enforces it; a robot attempting to enter a full zone is held at the
-                  boundary (§9.4). 0 = no limit (default; typical for root zones that
+                  boundary (RFC-0001 #tde-requestreservation-algorithm). 0 = no limit (default; typical for root zones that
                   aggregate children).
                 format: int32
                 minimum: 0
                 type: integer
+              memberZones:
+                description: |-
+                  MemberZones lists the zones this zone GROUPS, by name, in this zone's own
+                  namespace. A zone with a non-empty MemberZones is a composite zone: a named
+                  group whose content is other zones, so a task can target "the whole floor"
+                  once instead of every consumer enumerating sub-zones by hand and drifting out
+                  of step as zones are added and removed (RFC-0001 #fleetzone-composite-zones-and-zone-expansion).
+
+                  COMPOSITION IS NOT CONTAINMENT. It is a second relation and it traverses
+                  differently:
+
+                    - ParentZone is bottom-up (the child names its parent), asserts that the
+                      child's physical space lies inside the parent's, forms a TREE, and is
+                      traversed for targeting AND estopPolicy propagation. A reservation does not
+                      walk it: the TDE looks a resource name up across the whole namespace (see
+                      sharedResources). Robot admission does: a Robot's spec.charging.dockName
+                      must name a ChargingDock declared in the robot's zone or one of its
+                      ancestors.
+                    - MemberZones is top-down (the composite names its members), asserts
+                      NOTHING physical, forms a DAG (a zone MAY belong to several composites),
+                      and is traversed for TARGETING ONLY.
+
+                  The top-down direction is what makes composition usable on zones this control
+                  plane did not author: rooms arriving from an adapter as identity-only zones
+                  can be grouped from outside, without editing the adapter-owned resources, so
+                  the adapter can keep reconciling them.
+
+                  Because composition asserts nothing physical, an estop on a composite would
+                  stop nothing — two zones grouped for scheduling convenience may be at opposite
+                  ends of a building. A silent no-op stop is a false assurance of the most
+                  dangerous kind, so the estop path REJECTS a composite target rather than
+                  accepting it (FZ-C5); stop the containment zone that physically contains them,
+                  each member, or the namespace.
+
+                  Bounds: entries are zone names in this namespace. Breadth is deliberately not
+                  capped here — RFC-0001 caps the expansion GRAPH at 8 edges deep (FZ-C3), not the
+                  member list. Self-reference, member existence, cycles and the depth bound are
+                  specified as admission checks. At v0.4 the admission webhook does not check any
+                  of them, so a self-referencing, cyclic, too-deep or dangling composite is
+                  accepted. A ZoneMaintenance scoped to such a composite reports the member as
+                  Cycle, DepthExceeded or NotFound when it expands the scope.
+                items:
+                  maxLength: 253
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               parentZone:
                 description: |-
                   ParentZone references a parent FleetZone for hierarchical zones.
                   Leave empty for top-level zones. The FleetZone admission webhook rejects a
-                  non-existent parent and any cycle A→B→A (§9.3.1).
+                  non-existent parent, a cycle A→B→A, and a chain that would give this zone or any zone
+                  below it more than 64 ancestors, the depth a zone's emergency stop reaches
+                  (RFC-0001 #control-plane-swarmada-api-server, #safety-estop-scopes). Each edit is judged
+                  against the zone tree as admission reads it, so two edits admitted at the same moment can
+                  together form a cycle or exceed that depth; a zone's stop then stops every robot whose
+                  zone chain it cannot walk. An edit that would take a zone below this one out of the reach
+                  of a stop that covers it is refused.
                 type: string
               physicalBounds:
                 description: |-
                   PhysicalBounds is the spatial extent of this zone. The Zone Controller uses
                   the polygon for point-in-polygon containment when deriving a robot's current
-                  zone from position telemetry (§9.3.4).
+                  zone from position telemetry (RFC-0001 #control-plane-zone-controller).
                 properties:
                   floor:
                     description: |-
@@ -127,19 +200,51 @@ spec:
                     maximum: 200
                     minimum: -10
                     type: integer
+                  frame:
+                    description: |-
+                      Frame is the coordinate frame the Polygon vertices are expressed in (§9.1.6).
+                      Specified as required whenever Polygon is set (FZ-G2). An absent Frame on a
+                      zone that carries a polygon is read as SiteAligned with an empty id: that is
+                      what every polygon written before this field existed meant, and reclassifying
+                      such a zone as unusable would withdraw containment from geometry that has it.
+                    properties:
+                      alignment:
+                        default: SiteAligned
+                        description: |-
+                          Alignment decides whether this polygon participates in containment (FZ-G3).
+                          The control plane NEVER transforms between frames.
+                        enum:
+                        - SiteAligned
+                        - FrameLocal
+                        type: string
+                      id:
+                        description: |-
+                          ID is meaningful to whoever produced the geometry: "site" for an
+                          operator-drawn floor plan in the namespace coordinate system, or a robot/SLAM
+                          frame name such as "map" or "amr-07/map" for a polygon exported from an
+                          occupancy grid. Free-form; never resolved by the control plane.
+                        maxLength: 253
+                        type: string
+                      source:
+                        description: |-
+                          Source is optional provenance, for operators tracing where a polygon came
+                          from. Informational; read by no controller.
+                        type: string
+                    type: object
                   maxAltitude:
                     type: number
                   minAltitude:
                     description: |-
-                      MinAltitude and MaxAltitude bound the zone's vertical extent in metres for
-                      geodetic (aerial) namespaces only — the drone altitude floor/ceiling.
-                      Unset for ground (Local) zones.
+                      MinAltitude and MaxAltitude are specified as the zone's vertical extent in
+                      metres for geodetic (aerial) namespaces only, and are unset for ground (Local)
+                      zones. No controller reads them at this version and they are not sent to any
+                      adapter or edge node, so no altitude floor or ceiling is enforced from them.
                     type: number
                   polygon:
                     description: |-
                       Polygon is the closed zone boundary (the last vertex connects back to the
                       first). At least 3 vertices are required; a self-intersecting polygon is
-                      rejected by the FleetZone admission webhook (§9.3.1).
+                      rejected by the FleetZone admission webhook (RFC-0001 #control-plane-swarmada-api-server).
                     items:
                       description: |-
                         Point is a 2-D coordinate in the site coordinate frame (metres from the site
@@ -161,8 +266,12 @@ spec:
                 type: object
               provisioningPolicy:
                 description: |-
-                  ProvisioningPolicy overrides SwarmadaConfig.spec.provisioning for robots in
-                  this zone. Absent = inherit the namespace default (§9.1.5.1).
+                  ProvisioningPolicy is specified as a per-zone override of
+                  SwarmadaConfig.spec.provisioning (RFC-0001 #fleetzone-schema-root-zone). No
+                  controller reads it at this version: it is validated and stored, and setting it
+                  changes nothing. Provisioning, including auto-admit, is governed by the namespace
+                  SwarmadaConfig alone, so a zone-level override does not suppress a namespace-wide
+                  auto-admit.
                 properties:
                   autoAdmitRobotClass:
                     description: AutoAdmitRobotClass overrides the namespace auto-admit
@@ -179,14 +288,293 @@ spec:
                     - DirectRegister
                     type: string
                 type: object
+              restrictions:
+                description: |-
+                  Restrictions are standing statements about what may happen in this zone:
+                  whether a robot may be here at all, whether it may perform a given job here,
+                  and what it may have RUNNING while it is here (ADR-0058).
+
+                  Every other field on this spec is about CAPACITY, GEOMETRY, TOPOLOGY or an
+                  EMERGENCY. None of them can say "no robots here": maxConcurrentRobots: 0 means
+                  the OPPOSITE (0 = no limit), estopPolicy models an emergency with a
+                  clear-and-resume lifecycle, and ZoneMaintenance is a window with a Completed
+                  phase. A permanent boundary modelled as any of those is indistinguishable from
+                  one that was forgotten.
+
+                  ABSENT MEANS THE ZONE STATES NO RESTRICTION, WHICH PERMITS EVERYTHING. That is
+                  what every FleetZone written before this field existed meant, and it is the
+                  whole compatibility story: the field is additive and optional, no existing
+                  object changes meaning, and no API version bump is required.
+
+                  At v0.4 the Zone Controller folds these rules and every ancestor's into
+                  status.restrictions.effective. The Scheduler fails an action whose target
+                  zone denies entry or a capability the action requires, and dispatches into a
+                  zone with operating rules only a robot whose adapter declares it honours them.
+                  The resolved operating rules are sent to the adapter on the assignment; the
+                  control plane cannot check that the robot honours them. entry.occupantAction
+                  moves no robot.
+                properties:
+                  capabilities:
+                    description: |-
+                      Capabilities is axis 2: may a robot perform THIS JOB here. Each entry names a
+                      capability identifier matched against FleetAction.spec.requiredCapabilities.
+
+                      A CAPABILITY RESTRICTION IS A DENIAL AND NOTHING ELSE (ADR-0058 §8). There is no
+                      Limited mode and no limits map on this axis; "may clean here, but at 0.4 m/s" is
+                      TWO RULES, ONE PER AXIS — a capability is not denied, and a speed is. Putting a
+                      bound under a capability name would duplicate the axis-3 subject vocabulary in a
+                      second place, with a second set of units, a second inheritance question and a
+                      second conformance target.
+
+                      A capability denial does NOT close the zone: the zone stays open and one
+                      capability does not. That distinction is what the ZoneCapabilityDenied refusal
+                      carries, and collapsing it into an entry denial costs the operator the room.
+                    items:
+                      description: |-
+                        ZoneCapabilityRestriction is axis 2 — whether a robot may perform a given job here
+                        (ADR-0058 §1, §8). Keyed by Name, so server-side apply merges per capability.
+                      properties:
+                        mode:
+                          description: Mode must be Denied (CEL, on this type). See
+                            ZoneRestrictions.Capabilities.
+                          enum:
+                          - Denied
+                          - Limited
+                          - Required
+                          type: string
+                        name:
+                          description: |-
+                            Name is the capability identifier this zone denies, matched against
+                            FleetAction.spec.requiredCapabilities (e.g. "clean.mop", "clean_area").
+
+                            Deliberately NOT pattern-validated beyond a length bound:
+                            FleetAction.spec.requiredCapabilities is an unvalidated []string, and capability
+                            identifiers in the field today take both dotted and underscored forms. A pattern
+                            here that the action side does not apply would make some capability impossible to
+                            deny, which is the one outcome this axis must not produce. Write the identifier
+                            exactly as it appears in requiredCapabilities; the match is literal.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        reason:
+                          description: |-
+                            Reason is the operator's own words for WHY, carried into the ZoneCapabilityDenied
+                            refusal alongside the capability and the declaring zone — and alongside the fact
+                            that the ZONE IS NOT CLOSED, one capability is. Optional; strongly recommended.
+                          maxLength: 512
+                          type: string
+                      required:
+                      - mode
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: 'spec.restrictions.capabilities[].mode must be Denied:
+                          mode Limited and mode Required are valid only on spec.restrictions.operating[],
+                          because a capability restriction carries no limits — a bound
+                          on what runs is an operating rule on its own subject'
+                        rule: self.mode == 'Denied'
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  entry:
+                    description: |-
+                      Entry is axis 1: may a robot be here at all. AT MOST ONE, AND ITS PRESENCE IS THE
+                      DENIAL — there is no entry rule that permits, because there is no permissive mode
+                      to write (see ZoneRestrictionMode). Absent means the zone takes no position on
+                      entry, which is permission.
+
+                      The denial applies to this zone AND EVERY DESCENDANT, following spec.parentZone
+                      only (FZ-R1). It is ABSORBING OVER THE TARGET RELATION: an action is refused
+                      whether it targets the denying zone directly or reaches it through an ancestor.
+                    properties:
+                      mode:
+                        description: |-
+                          Mode must be Denied (CEL, on this type). Limited and Required are valid only on
+                          operating rules — there is no bound or requirement that makes sense of "may a
+                          robot be here at all", and there is no permissive mode at any axis.
+
+                          The field exists even though only one value is admissible because the rule tuple
+                          is one shape in all three axes, and because a restriction an operator reads back
+                          should say what it does rather than leaving the reader to infer a denial from a
+                          key's existence.
+                        enum:
+                        - Denied
+                        - Limited
+                        - Required
+                        type: string
+                      occupantAction:
+                        default: Report
+                        description: |-
+                          OccupantAction selects what happens to robots already inside when this denial
+                          takes effect. ONLY Report is specified as implemented at v0.4; Graceful and
+                          Immediate are reserved (see ZoneOccupantAction).
+                        enum:
+                        - Report
+                        - Graceful
+                        - Immediate
+                        type: string
+                      reason:
+                        description: |-
+                          Reason is the operator's own words for WHY, carried verbatim into the
+                          ZoneEntryDenied refusal an operator reads when a robot is not moving
+                          ("…is marked off limits — {reason} — so I will not send the robot there, on its
+                          own or as part of anything else"). Optional, because a site may state a boundary
+                          without explaining it, but strongly recommended: the refusal is a sentence a
+                          person standing in a room reads, and without a reason it cannot say why.
+                        maxLength: 512
+                        type: string
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'spec.restrictions.entry.mode must be Denied: a rule
+                        exists only to restrict, and the presence of an entry rule
+                        IS the denial'
+                      rule: self.mode == 'Denied'
+                  operating:
+                    description: |-
+                      Operating is axis 3: what a robot may have RUNNING while it is here — camera,
+                      microphone, water, chemicals, UV, speed, noise. It constrains the robot's STATE
+                      WHILE PRESENT, including while merely transiting, and is therefore true or false
+                      of a robot that was asked to do nothing at all.
+
+                      THE PLANE CANNOT VERIFY THIS AXIS (ADR-0058 §12). Nothing in a control plane can
+                      physically switch off a camera. What it does: the ZONE DECLARES the constraint
+                      here; the ADAPTER DECLARES which subjects it can honour
+                      (Robot.status.honouredOperatingConstraints); the Scheduler dispatches into the
+                      zone only a robot whose adapter declares every subject in force, and the control
+                      plane CARRIES the resolved set on AssignAction; an adapter that CANNOT honour a
+                      constraint DECLINES the assignment naming the subject, and the action returns to
+                      Pending. The adapter is then expected to honour the constraint while the robot is
+                      in the zone.
+
+                      NOTHING REPORTS WHETHER IT DID. No outcome message carries which subjects were
+                      honoured, and the control plane records and checks nothing about it. A declared
+                      subject is a claim by the adapter, not a measurement.
+                    items:
+                      description: |-
+                        ZoneOperatingRestriction is axis 3 — what a robot may have RUNNING while it is in
+                        this zone (ADR-0058 §1, §7). Keyed by Subject, so server-side apply merges per
+                        subject.
+
+                        The two cross-field rules below are on the schema as CEL rather than in a
+                        controller, so the API server rejects a malformed rule before anything reads it:
+                        Max and Allowed are meaningful only under Limited, and a Limited rule sets exactly
+                        one of them — Max bounds a scalar, Allowed enumerates a set, and a subject is one or
+                        the other.
+                      properties:
+                        allowed:
+                          description: |-
+                            Allowed IS AN ALLOW-LIST: the subject is permitted ONLY as one of the values
+                            named here, and EVERYTHING NOT LISTED IS DENIED. This inverts the reading of
+                            every other field in this block — elsewhere absence is permission, and here
+                            absence from this list is denial — so it is called out rather than left to be
+                            inferred. `allowed: ["quat-ammonium-7"]` on a chemical rule denies every other
+                            chemical agent, including ones nobody had thought of when the rule was written,
+                            which is the point: a food-preparation surface is an allow-list case and a
+                            deny-list of known agents would be wrong the first time a new one arrives.
+
+                            Set only under mode: Limited, and never together with Max (CEL). Between two
+                            Limited rules on one subject in an ancestor chain the INTERSECTION of the lists
+                            wins (FZ-R1), for the same reason the tighter Max wins.
+                          items:
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                        max:
+                          description: |-
+                            Max is the upper bound a Limited rule permits, as a plain non-negative decimal
+                            string: "0.4" for a speed, "65" for a noise cap. Set only under mode: Limited,
+                            and never together with Allowed (CEL).
+
+                            THE UNIT IS A PROPERTY OF THE SUBJECT, NOT OF THIS VALUE. speed is in the
+                            namespace's distance unit per second (SwarmadaConfig.spec.coordinateSystem);
+                            noise is in dB(A). The pattern admits no suffix and no exponent for exactly that
+                            reason: a resource.Quantity-style "400m" would be ambiguous between milli- and
+                            metres in a field whose subjects include both a speed and a sound level, and the
+                            string round-trips an operator's site policy back verbatim rather than
+                            canonicalising what they wrote.
+
+                            Between two Limited rules on one subject in an ancestor chain the TIGHTER bound
+                            wins (FZ-R1) — bounds are intersected, never overridden, so a deep zone tree can
+                            become arbitrarily restrictive in a way no single object shows.
+                          maxLength: 32
+                          pattern: ^(0|[1-9][0-9]*)(\.[0-9]+)?$
+                          type: string
+                        mode:
+                          description: |-
+                            Mode is Denied, Limited or Required. All three are valid on this axis and only on
+                            this axis. Required is the inspection-zone mirror case: the subject MUST be
+                            running. Required under an ancestor's Denied (or the reverse) is a contradiction
+                            that resolves to Denied (FZ-R3).
+                          enum:
+                          - Denied
+                          - Limited
+                          - Required
+                          type: string
+                        reason:
+                          description: |-
+                            Reason is the operator's own words for WHY, carried into the
+                            ZoneOperatingConstraintUnmet refusal alongside the subject, the declaring zone,
+                            and which adapters were asked. Optional; strongly recommended.
+                          maxLength: 512
+                          type: string
+                        subject:
+                          description: |-
+                            Subject names what is constrained. A subject with no "/" MUST be one of the
+                            normative core seven — camera, microphone, water, chemical, uv, speed, noise
+                            (CEL, on this type). A subject with a "/" is an extension subject whose prefix is
+                            a DNS subdomain the extender controls, e.g. "example.com/leaf-blower" (pattern).
+
+                            These are NOT capability identifiers and the two vocabularies never meet; see the
+                            package comment on ZoneCoreOperatingSubjects. An unrecognised subject is NOT an
+                            absent subject — an adapter that does not recognise one MUST decline the
+                            assignment naming it, or the extension form becomes a universal bypass.
+                          maxLength: 128
+                          minLength: 1
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                      required:
+                      - mode
+                      - subject
+                      type: object
+                      x-kubernetes-validations:
+                      - message: 'spec.restrictions.operating[]: max and allowed are
+                          meaningful only when mode is Limited; a Denied or Required
+                          rule sets neither'
+                        rule: self.mode == 'Limited' || (!has(self.max) && !has(self.allowed))
+                      - message: 'spec.restrictions.operating[]: set exactly one of
+                          max or allowed on a Limited rule — max bounds a scalar,
+                          allowed enumerates a set, and a subject is one or the other'
+                        rule: self.mode != 'Limited' || (has(self.max) != has(self.allowed))
+                      - message: spec.restrictions.operating[].subject must be one
+                          of the normative core seven (camera, microphone, water,
+                          chemical, uv, speed, noise), or a namespaced extension subject
+                          such as 'example.com/lidar'
+                        rule: self.subject.contains('/') || self.subject in ['camera','microphone','water','chemical','uv','speed','noise']
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - subject
+                    x-kubernetes-list-type: map
+                type: object
               sharedResources:
                 description: |-
                   SharedResources are physical resources (lifts, corridors, docks) that robots
-                  in this zone AND all descendant zones may reserve before use (§9.4).
-                  Resources declared on a parent are visible to all child zones.
+                  reserve before use (RFC-0001 #fleetzone-sharedresource-types-and-reservation-policy).
+                  A reservation names a resource, and the name is looked up across the whole
+                  namespace, not up this zone's tree: a robot in any zone of the namespace can
+                  reserve a resource declared on any zone. Two zones that declare the same name
+                  declare one resource, owned by the zone whose name sorts first; the other
+                  declaration's capacity and reservationPolicy are not used. Give each resource a
+                  name unique in the namespace.
                 items:
-                  description: SharedResource declares a reservable physical resource
-                    (§9.1.5.1).
+                  description: 'SharedResource declares a reservable physical resource
+                    (RFC-0001 #fleetzone-sharedresource-types-and-reservation-policy).'
                   properties:
                     capacity:
                       default: 1
@@ -201,14 +589,19 @@ spec:
                       type: string
                     durationFallback:
                       default: FIFO
-                      description: DurationFallback applies only under PriorityWithDuration.
+                      description: |-
+                        DurationFallback is specified to apply only under PriorityWithDuration. No
+                        code reads it at this version, so FIFO and Deprioritize behave alike: a request
+                        without a duration is ordered last in its priority band, then by arrival.
                       enum:
                       - FIFO
                       - Deprioritize
                       type: string
                     name:
-                      description: Name is unique within the zone tree; robots reserve
-                        by this name.
+                      description: |-
+                        Name is the name robots reserve by. It is looked up across the whole
+                        namespace, so give each resource a name no other zone in the namespace
+                        declares (see FleetZoneSpec.sharedResources).
                       minLength: 1
                       type: string
                     reservationPolicy:
@@ -243,7 +636,8 @@ spec:
                     altitude:
                       description: |-
                         Altitude is the waypoint's vertical position in metres (geodetic/aerial
-                        namespaces only); frame-exclusive with the zone Floor. Unset for Local.
+                        namespaces only). It does not replace the zone Floor, which is required in
+                        every frame. Unset for Local.
                       type: number
                     name:
                       description: Name is the logical name used in FleetAction destinations.
@@ -267,26 +661,101 @@ spec:
                 - name
                 x-kubernetes-list-type: map
             type: object
+            x-kubernetes-validations:
+            - message: 'spec.sharedResources is not permitted on a composite zone:
+                a composite contains no physical space, and a shared resource is looked
+                up by name across the namespace, so the composite would own a resource
+                it does not contain'
+              rule: '!has(self.memberZones) || size(self.memberZones) == 0 || !has(self.sharedResources)
+                || size(self.sharedResources) == 0'
+            - message: 'spec.maxConcurrentRobots must be 0 on a composite zone: capacity
+                is enforced on the zones robots occupy'
+              rule: '!has(self.memberZones) || size(self.memberZones) == 0 || !has(self.maxConcurrentRobots)
+                || self.maxConcurrentRobots == 0'
           status:
             description: FleetZoneStatus describes the observed state of a FleetZone.
             properties:
               activeActions:
-                description: ActiveActions is the number of FleetActions currently
-                  running in this zone.
+                description: |-
+                  ActiveActions is specified as the number of FleetActions running in this
+                  zone. At v0.4 no controller writes it, so it always reads 0.
                 format: int32
                 type: integer
               childZones:
                 description: |-
                   ChildZones is the list of direct child zone names, written by the Zone
-                  Controller (§9.3.4).
+                  Controller (RFC-0001 #control-plane-zone-controller).
                 items:
                   type: string
                 type: array
                 x-kubernetes-list-type: set
+              composition:
+                description: |-
+                  Composition is specified as this zone's derived composition state, computed
+                  from spec.memberZones, on every zone (a terminal zone would report IsComposite
+                  false with ExpandedZones naming itself). No controller writes it at this
+                  version: it is absent on every zone, and a client MUST read its absence as "not
+                  computed", never as "not a composite" or "expands to nothing". Only
+                  ZoneMaintenance scope resolution expands a composite zone, from spec.memberZones
+                  directly.
+                properties:
+                  expandedZones:
+                    description: |-
+                      ExpandedZones is the resolved set of TERMINAL zones this zone denotes — the
+                      zones a robot can actually occupy. Expansion is a set union, so a zone
+                      reachable by two paths appears once, a robot in it counts once against
+                      capacity and holds one reservation, and the result is order-independent.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  isComposite:
+                    description: |-
+                      IsComposite is true when spec.memberZones is non-empty. Consumers read this
+                      rather than inspecting spec, so "is this a composite" is decided in one
+                      place — the same discipline status.geometry applies to geometry.
+                    type: boolean
+                  unresolvedMembers:
+                    description: |-
+                      UnresolvedMembers names the declared members expansion could not resolve,
+                      with a reason each. The CompositionResolved condition is specified to be True
+                      only when this list is empty; no controller publishes that condition (or this
+                      block) at this version. Read the type comment before consuming it: whether a
+                      non-empty list may be proceeded past depends on which consumer class you are.
+                    items:
+                      description: |-
+                        UnresolvedMember names a declared member zone that expansion could not resolve,
+                        and why.
+                      properties:
+                        name:
+                          description: Name is the member zone name as declared in
+                            spec.memberZones.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        reason:
+                          description: Reason is why it did not resolve.
+                          enum:
+                          - NotFound
+                          - Cycle
+                          - DepthExceeded
+                          type: string
+                      required:
+                      - name
+                      - reason
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               conditions:
                 description: |-
                   Conditions is the standard conditions list, written by the Zone Controller:
-                  ZoneReady (serviceability) and CapacityAvailable (room for another robot).
+                  ZoneReady (serviceability), CapacityAvailable (room for another robot),
+                  GeometryAvailable (whether geometry-derived behaviour applies, FZ-G7), and the
+                  two restriction conditions RestrictionsResolved and RestrictionsConsistent
+                  (FZ-R3/FZ-R6).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -348,8 +817,11 @@ spec:
               currentConcurrentRobots:
                 description: |-
                   CurrentConcurrentRobots is the number of Occupied reservations (robots
-                  physically confirmed in this zone). Written by the TDE (§9.4). MAY briefly
-                  exceed spec.maxConcurrentRobots by 1 during Critical preemption (TDE-3).
+                  physically confirmed in this zone). Written by the TDE (RFC-0001 #tde-normative-invariants).
+                  At v0.4 it does not exceed spec.maxConcurrentRobots. A Critical or High preemption
+                  of an Occupied reservation removes the evicted entry before it grants (TDE-3), so
+                  while the evicted robot is still in the zone, the zone holds one robot more than
+                  this count shows.
                 format: int32
                 type: integer
               edgeFeedUnavailable:
@@ -359,7 +831,7 @@ spec:
                   window — i.e. an adapter serving them never established its EdgeStream, so the
                   zone-boundary-breach trigger is degraded for those robots. Written by the edge
                   node; the Zone Controller emits an EdgeFeedUnavailable Warning event while this
-                  is non-empty. Empty when every expected feed is live (§9.2.10).
+                  is non-empty. Empty when every expected feed is live (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
                 items:
                   type: string
                 type: array
@@ -367,17 +839,35 @@ spec:
               estopStatus:
                 description: |-
                   EstopStatus is the zone's aggregate emergency-stop status, written by the
-                  zone-estop controller (§9.6.2.5). Empty is treated as Clear.
+                  zone-estop controller (RFC-0001 #control-plane-zone-controller). Empty is treated as Clear.
                 enum:
                 - Clear
                 - Triggered
                 - ChildTriggered
                 type: string
+              geometry:
+                description: |-
+                  Geometry is this zone's derived geometry state, written by the Zone Controller
+                  from spec.physicalBounds (§9.1.6). Consumers read this rather than inspecting
+                  spec, so that "has usable geometry" is decided in one place.
+                properties:
+                  frameId:
+                    description: FrameID echoes spec.physicalBounds.frame.id; empty
+                      when State is Absent.
+                    type: string
+                  state:
+                    description: State is the derived usability of this zone's geometry.
+                    enum:
+                    - Absent
+                    - FrameLocal
+                    - Containment
+                    type: string
+                type: object
               isLeaf:
                 description: |-
                   IsLeaf is true when this zone has no child zones. Computed by the Zone
                   Controller and recomputed whenever a child FleetZone is created or deleted
-                  (§9.3.4). A zone not yet reconciled reports false (safe default: not treated
+                  (RFC-0001 #control-plane-zone-controller). A zone not yet reconciled reports false (safe default: not treated
                   as a leaf until confirmed — the Robot admission gate requires a leaf zone).
                 type: boolean
               lastEstopAt:
@@ -388,12 +878,17 @@ spec:
                 type: string
               reservations:
                 description: |-
-                  Reservations is the per-action zone-capacity reservation state, written
-                  exclusively by the Traffic Deconfliction Engine (§9.4). Operator edits are
-                  rejected by the FleetZone admission webhook (TDE-4).
+                  Reservations is the per-action zone-capacity reservation state, written by the
+                  Traffic Deconfliction Engine (RFC-0001 #tde-normative-invariants). At v0.4 no
+                  admission webhook checks a write to it: the FleetZone webhook does not see the
+                  status subresource. The shipped swarmada:viewer, operator, fleet-manager and admin
+                  roles cannot write FleetZone status, so they cannot edit it. An identity that can
+                  (system:masters or another cluster-admin, the manager's and the edge node's
+                  service accounts) is not refused: its edit is stored and stays until the TDE's next
+                  write of this zone's status replaces it in part.
                 items:
-                  description: ZoneReservation is one action's zone-capacity reservation
-                    (§9.4.2). TDE-owned.
+                  description: 'ZoneReservation is one action''s zone-capacity reservation
+                    (RFC-0001 #tde-reservation-state). TDE-owned.'
                   properties:
                     actionID:
                       description: ActionID is the FleetAction owning this reservation.
@@ -437,20 +932,141 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              restrictions:
+                description: |-
+                  Restrictions is the RESOLVED restriction set in force at this zone: its own
+                  spec.restrictions folded together with every ancestor's, one entry per
+                  (axis, subject), each naming the zone it came from (FZ-R4).
+
+                  CONSUMERS READ THIS, NEVER THE TREE — the Scheduler's candidate filters
+                  included. "What is forbidden here" is decided in one place for the same reason
+                  status.geometry exists rather than leaving readers to interpret
+                  spec.physicalBounds: a second implementation of the fold is a second answer.
+
+                  Nil means the Zone Controller has not yet reconciled this zone. That is NOT the
+                  same as "nothing is restricted", which is a non-nil value with an empty
+                  effective list — and the difference is load-bearing, because a consumer that
+                  reads nil as unrestricted fails in the permissive direction. Read the
+                  RestrictionsResolved condition, which is published either way.
+                properties:
+                  effective:
+                    description: |-
+                      Effective is every restriction in force at this zone, from any zone in its
+                      ancestor chain including itself, already folded to one entry per
+                      (axis, subject).
+
+                      Empty means nothing is restricted here — which is what every zone with no
+                      restrictions anywhere in its chain reports, and is permission.
+
+                      The atomic list type is deliberate: this list is written only by the Zone
+                      Controller, never merged by server-side apply from two writers, so a map key
+                      would buy nothing and would force a key onto the Entry axis, which has no
+                      natural one.
+                    items:
+                      description: |-
+                        EffectiveZoneRestriction is one resolved rule: what is in force at this zone for
+                        one (axis, subject), and which zone put it there.
+                      properties:
+                        allowed:
+                          description: |-
+                            Allowed is the INTERSECTION of every allow-list found for this subject in the
+                            chain. It reads the same way it does in spec: everything not listed is denied,
+                            which inverts the reading of every other field here.
+
+                            An empty list is never published. When two allow-lists in one chain do not
+                            overlap, the chain permits nothing — and because this field carries omitempty,
+                            an empty list would serialise away and read back as "no allow-list", meaning
+                            permit EVERYTHING. So that case resolves to Mode: Denied instead, which is the
+                            only expressible answer that is not weaker than what the chain declared.
+                          items:
+                            type: string
+                          maxItems: 64
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        axis:
+                          description: Axis is which of the three axes this rule constrains.
+                          enum:
+                          - Entry
+                          - Capability
+                          - Operating
+                          type: string
+                        inheritedFrom:
+                          description: |-
+                            InheritedFrom names the zone that DECLARED the rule this entry resolved to —
+                            which is very often not this zone. It is the single most useful field here: an
+                            operator looking at a zone that denies cameras needs to know whether to edit
+                            this object or one three levels up, and FZ-R7 means they may not be able to
+                            weaken it from here at all.
+
+                            When several zones declared the same subject, this names the zone whose
+                            declaration is ACTUALLY IN FORCE — the one that supplied the winning mode, or
+                            for a Limited rule the one that supplied the binding bound. Ties go to the
+                            outermost (closest to the root), because that is the declaration a local edit
+                            cannot remove.
+
+                            Naming the merely-first declarer instead would be worse than naming nothing: an
+                            operator sent to edit a zone that declared a looser bound would change it and
+                            see no effect, because a tighter rule further down the chain was the one
+                            binding all along.
+                          minLength: 1
+                          type: string
+                        max:
+                          description: |-
+                            Max is the tightest bound found for this subject anywhere in the chain: two
+                            Limited rules INTERSECT rather than override, so a deep tree can become
+                            arbitrarily restrictive in a way no single object shows. That is exactly why
+                            this projection is load-bearing rather than a convenience.
+                          maxLength: 32
+                          type: string
+                        mode:
+                          description: |-
+                            Mode is the resolved mode — the most restrictive found anywhere in the chain.
+                            Denied is absorbing (FZ-R2). A Denied and a Required on one subject resolve
+                            HERE to Denied and are reported as a contradiction on
+                            RestrictionsConsistent (FZ-R3), because a zone where a camera must be off and
+                            must be on is a zone no robot may work in — and resolving the other way would
+                            switch a camera on in a patient room by operation of a merge rule.
+                          enum:
+                          - Denied
+                          - Limited
+                          - Required
+                          type: string
+                        reason:
+                          description: |-
+                            Reason is the operator's own words, carried from the zone named in
+                            InheritedFrom. It is what a refusal shows a person asking why a robot is not
+                            moving, so it travels with the rule rather than being looked up again.
+                          maxLength: 512
+                          type: string
+                        subject:
+                          description: |-
+                            Subject is the capability identifier (Capability) or operating subject
+                            (Operating) this rule constrains. EMPTY for Entry, which has no subject.
+                          maxLength: 253
+                          type: string
+                      required:
+                      - axis
+                      - inheritedFrom
+                      - mode
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                type: object
               robotCount:
                 description: |-
                   RobotCount is the number of robots whose currentZone is this zone or any
-                  descendant zone. Written by the Zone Controller (§9.3.4).
+                  zone below it in the parentZone tree. Composite members (spec.memberZones)
+                  are not counted. Written by the Zone Controller (RFC-0001 #control-plane-zone-controller).
                 format: int32
                 minimum: 0
                 type: integer
               sharedResourceQueues:
                 description: |-
                   SharedResourceQueues is the per-resource reservation/queue state, one entry
-                  per spec.sharedResources[]. Written exclusively by the TDE (§9.4).
+                  per spec.sharedResources[]. Written exclusively by the TDE (RFC-0001 #tde-normative-invariants).
                 items:
                   description: |-
-                    SharedResourceQueue is one shared resource's hold/queue state (§9.4.5). One
+                    SharedResourceQueue is one shared resource's hold/queue state (RFC-0001 #tde-shared-resource-queue-management). One
                     entry per spec.sharedResources[]. TDE-owned.
                   properties:
                     currentHolders:
@@ -458,8 +1074,8 @@ spec:
                         CurrentHolders are the robots currently holding the resource, up to the
                         resource's capacity (TDE-5). A capacity-1 resource degenerates to one holder.
                       items:
-                        description: ResourceHolder is the current holder of a shared
-                          resource (§9.4.5).
+                        description: 'ResourceHolder is the current holder of a shared
+                          resource (RFC-0001 #tde-shared-resource-queue-management).'
                         properties:
                           actionID:
                             type: string
@@ -476,7 +1092,7 @@ spec:
                             description: |-
                               ActionPriority is the named scheduling band for a FleetAction. Bands are compared
                               by rank (Critical > High > Normal > Low) by the scheduler and the Traffic
-                              Deconfliction Engine (RFC-0001 §5.5.6); the preemptor bands (Critical and High,
+                              Deconfliction Engine (RFC-0001 #tde); the preemptor bands (Critical and High,
                               see CanPreempt) may displace a lower Normal/Low band.
                             enum:
                             - Critical
@@ -502,13 +1118,15 @@ spec:
                       items:
                         description: |-
                           WaitQueueEntry is a pending shared-resource request, ordered by the resource's
-                          reservationPolicy (§9.4.5).
+                          reservationPolicy (RFC-0001 #tde-shared-resource-queue-management).
                         properties:
                           actionID:
                             type: string
                           estimatedDurationSeconds:
-                            description: EstimatedDurationSeconds drives PriorityWithDuration
-                              (SJF); nil → fallback.
+                            description: |-
+                              EstimatedDurationSeconds orders this entry under PriorityWithDuration
+                              (shortest first within a band); nil orders it last in its band, whatever
+                              durationFallback says. No FleetAction supplies it at this version, so it is nil.
                             format: int32
                             minimum: 0
                             type: integer
@@ -516,7 +1134,7 @@ spec:
                             description: |-
                               ActionPriority is the named scheduling band for a FleetAction. Bands are compared
                               by rank (Critical > High > Normal > Low) by the scheduler and the Traffic
-                              Deconfliction Engine (RFC-0001 §5.5.6); the preemptor bands (Critical and High,
+                              Deconfliction Engine (RFC-0001 #tde); the preemptor bands (Critical and High,
                               see CanPreempt) may displace a lower Normal/Low band.
                             enum:
                             - Critical

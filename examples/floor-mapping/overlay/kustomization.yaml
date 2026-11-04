@@ -1,0 +1,12 @@
+# The floor-mapping demo's cluster side: the artifact store the map is read through,
+# the zone-proposal worker, and the operator's floor-mapping ConfigMap.
+#
+# Apply after examples/first-run has the control plane up and namespace warehouse-a
+# created; examples/floor-mapping/run.sh does both.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - artifact-store.yaml
+  - worker.yaml
+  - floor-mapping-config.yaml

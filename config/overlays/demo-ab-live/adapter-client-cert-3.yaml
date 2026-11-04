@@ -1,0 +1,36 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Third of three per-robot adapter identities for demo-ab-live — see
+# adapter-client-cert-2.yaml for why a distinct SAN/FleetAdapter is required
+# per concurrently-live robot.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sim-fleet-adapter-3-client
+  namespace: system
+spec:
+  secretName: sim-fleet-adapter-3-client-tls
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: sim-fleet-adapter-3
+  dnsNames:
+    - sim-fleet-adapter-3.warehouse-a.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer

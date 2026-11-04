@@ -1,0 +1,131 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: semanticevents.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: SemanticEvent
+    listKind: SemanticEventList
+    plural: semanticevents
+    shortNames:
+    - sev
+    singular: semanticevent
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.source
+      name: Source
+      type: string
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.draftedTasks
+      name: Drafted
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: SemanticEvent is one semantic event raised by a SemanticEventSource.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: 'SemanticEventSpec is one occurrence: this source says this
+              happened.'
+            properties:
+              occurredAt:
+                description: |-
+                  OccurredAt is when the thing happened, as distinct from when the object was
+                  created. A bridge replaying a backlog sets it; nothing defaults it, because a
+                  defaulted timestamp would assert a time nobody observed.
+                format: date-time
+                type: string
+              payload:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Payload is the event's data, as flat string key/values.
+
+                  SCALARS ONLY AND BOUNDED, for the same reason ActionResult.values is: a payload
+                  is something a trigger reads and an operator scans, not a data channel. Nested
+                  structure invites a caller to put a point cloud in it, and this object lives in
+                  etcd.
+                maxProperties: 16
+                type: object
+              source:
+                description: Source names the SemanticEventSource in this namespace
+                  that raised it.
+                maxLength: 253
+                minLength: 1
+                type: string
+              type:
+                description: Type is the semantic event type, which MUST be one the
+                  source declared.
+                minLength: 1
+                type: string
+            required:
+            - source
+            - type
+            type: object
+          status:
+            description: SemanticEventStatus is the observed state of a SemanticEvent.
+            properties:
+              draftedTasks:
+                description: |-
+                  DraftedTasks names the FleetTasks drafted for this event (see FleetTaskSpec.Draft).
+                  It is written once, when the event is accepted, and is not updated afterwards: a
+                  listed task may since have been activated, dispatched or deleted. A name is listed
+                  also when a FleetTask of that name already existed, which may be another trigger's.
+                  Whether a listed task still waits for a person is on the FleetTask: spec.draft and
+                  status.phase.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              message:
+                description: Message says why, and is the whole diagnostic surface
+                  for a rejected event.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is how far this event got.
+                enum:
+                - Pending
+                - Accepted
+                - Rejected
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

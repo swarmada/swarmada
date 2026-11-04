@@ -4,6 +4,7 @@ vendor/
 *.test
 *.out
 coverage.txt
+.act-artifacts/
 
 # Module cache — present if GOPATH was ever mistakenly set to the project root.
 # Safe to delete: go mod tidy re-downloads to the real GOPATH (~/.go/pkg/mod).
@@ -81,3 +82,34 @@ _to_delete/
 # would be silently ignored, and the symptom is a file that never appears.
 !rfcs/dist/
 
+
+# Generated conformance reports (`make conformance-profiles`). A published result
+# is committed deliberately, into `adapters/REGISTRY.md`, not swept in by a run.
+conformance-reports/
+
+# Point-in-time snapshots of reviewed drafts. Never published, never linted.
+_backups/
+
+# Rendered demo video and its intermediates — MP4, asciinema cast, TTS voiceover.
+# Build artifacts of the production scripts, which are declared private separately.
+# Regenerate them from the shooting script; a published episode lives where video
+# is watched, not in the repository that produced it.
+#
+# Anchored with a leading slash so it matches ONLY the top-level directory. An
+# unanchored `media/` matches at every level and would silently swallow
+# `scripts/media/` — a different directory, kept out for a different reason, whose
+# ignore status should not be a side effect of this line.
+/media/
+
+# Patch backups and rejects: never source, never published.
+*.orig
+*.rej
+# Stale binaries at the root. `make build` writes to bin/, never here.
+/manager
+/swarmctl
+/edge
+/demo
+# kubectl watch captures.
+/watch_*
+# An AI assistant's working drafts. Not source; the publication guard denies the path too.
+/Claude outputs/

@@ -1,0 +1,12 @@
+# Plain-language limit 4a: a paragraph has at most four sentences.
+# Each list item is its own block and is held to the same limit.
+# The token counts sentence ends: a period, question mark or exclamation mark
+# followed by a non-lowercase start or by the end of the block. It adds one for
+# a block whose last sentence has no end mark.
+# A bold lead-in such as "**Report.**" counts as a sentence.
+extends: occurrence
+message: "This paragraph or list item has more than four sentences. Limit: four sentences per paragraph."
+level: error
+scope: [paragraph, list]
+max: 4
+token: '[.?!][)"''’”\]]*(?=\s+[^\p{Ll}\s]|\s*$)|[^.?!\s)"''’”\]][)"''’”\]]*\s*$'

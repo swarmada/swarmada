@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-08
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.4 (Traffic Deconfliction Engine), §9.6.3.5 (Assignment Lease and the Single-Executor Guarantee)
+- **Related:** RFC-0001 "Traffic Deconfliction Engine" and "Assignment Lease and the Single-Executor Guarantee"
 
 ## Context
 
@@ -63,7 +63,8 @@ any post-reserve failure → Unreserve (idempotent)          // reservationTTL i
 - The single-executor guarantee and deconfliction hold regardless of which (pluggable)
   scheduler chose the robot, because enforcement is at the one place the assignment is written.
 - The reservation lifecycle has a natural home in the FleetTask reconcile loop, reusing the
-  existing lease machinery (§9.6.3.5) and the Zone Controller's zone-entry signal.
+  existing lease machinery (RFC-0001, "Assignment Lease and the Single-Executor
+   Guarantee") and the Zone Controller's zone-entry signal.
 - The commit path must handle `Denied` as backpressure (requeue with bounded `RetryAfter`) and
   must `Unreserve` on any failure after reserving; correctness depends on reserve-before-write
   plus the reservation TTL, which are required, not optional.

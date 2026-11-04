@@ -31,7 +31,9 @@ Keeping this interface tiny is what makes the adapter multi-simulator.
 
 from __future__ import annotations
 
+import json
 import math
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -80,14 +82,32 @@ class _RobotState:
 
 
 class KinematicSim:
-    """A minimal, dependency-free kinematic simulator (the $0 backend)."""
+    """A minimal, dependency-free kinematic simulator (the $0 backend).
+
+    It can also serve as a MOTION WITNESS (conformance C5.7): given a path, every tick
+    appends each robot's true speed, from the physics state, to a JSON-lines file. That
+    record comes from the plant model and not from the adapter's confirmation path, which is
+    what lets a run compare the time the adapter said STOPPED with the time the robot came
+    to rest. It witnesses a simulated plant only, and says so in its first line.
+    """
 
     #: cruise speed in m/s and deceleration in m/s^2.
     SPEED = 1.0
     DECEL = 4.0
+    #: The largest interval between two witness samples: the adapter's telemetry tick. The
+    #: estop confirmation loop ticks faster, so samples around a stop are closer than this.
+    WITNESS_RESOLUTION_S = 0.2
 
-    def __init__(self) -> None:
+    def __init__(self, witness_path: str | None = None) -> None:
         self._robots: dict[str, _RobotState] = {}
+        self._witness = None
+        if witness_path:
+            self._witness = open(witness_path, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
+            self._witness.write(json.dumps({
+                "witness": "simulation adapter plant model (KinematicSim), simulated plant only",
+                "rest_noise_mps": 0.0, "hold_s": self.WITNESS_RESOLUTION_S,
+                "resolution_s": self.WITNESS_RESOLUTION_S,
+                "clock": "host epoch seconds"}) + "\n")
 
     def spawn(self, robot_id: str, x: float = 0.0, y: float = 0.0) -> None:
         self._robots[robot_id] = _RobotState(pose=Pose(x=x, y=y))
@@ -127,6 +147,11 @@ class KinematicSim:
             r.pose.x += r.vx * dt
             r.pose.y += r.vy * dt
             r.battery = max(0.0, r.battery - 0.01 * dt)
+        if self._witness is not None:
+            now = time.time()
+            for robot_id, r in self._robots.items():
+                self._witness.write(json.dumps({"t": now, "robot": robot_id,
+                                                "speed": math.hypot(r.vx, r.vy)}) + "\n")
 
     def is_stopped(self, robot_id: str) -> bool:
         r = self._robots[robot_id]
@@ -137,6 +162,11 @@ class KinematicSim:
 
     def battery_percent(self, robot_id: str) -> int:
         return int(self._robots[robot_id].battery)
+
+    def charge(self, robot_id: str, pct: float) -> None:
+        """Raise the battery reading by ``pct`` percent, to at most 100 (a Charge action)."""
+        r = self._robots[robot_id]
+        r.battery = min(100.0, r.battery + pct)
 
 
 class IsaacSimBackend:
@@ -162,10 +192,10 @@ class IsaacSimBackend:
         )
 
 
-def make_simulator(name: str) -> Simulator:
+def make_simulator(name: str, witness_path: str | None = None) -> Simulator:
     """Select a simulator backend by name (the multi-simulator entry point)."""
     if name == "kinematic":
-        return KinematicSim()
+        return KinematicSim(witness_path)
     if name == "isaac":
         return IsaacSimBackend()  # pragma: no cover — requires the Isaac runtime
     raise ValueError(f"unknown simulator {name!r}; expected 'kinematic' or 'isaac'")

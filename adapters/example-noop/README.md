@@ -1,10 +1,15 @@
 # example-noop adapter
 
-A reference Fleet Adapter that speaks the full `fleet_adapter.v1` protocol with
-**no real hardware behind it**. It exists to demonstrate the required stream
-topology and the safety-critical behaviors from
-[`../CONFORMANCE.md`](../CONFORMANCE.md) in the smallest possible correct form,
-so a real adapter can start from a working shape rather than a blank file.
+A reference Fleet Adapter skeleton that answers every `fleet_adapter.v1` command
+with **no real hardware behind it**. It exists to show the required stream
+topology and the handshake from [`../CONFORMANCE.md`](../CONFORMANCE.md) in the
+smallest possible form. It declares no action type, so it refuses every
+assignment `INVALID_ACTION` and registers no robot; the checks that need an
+accepted assignment — fencing (C3), the lease self-stop (C4), action status (C16)
+and the action catalog (C19) — are not supported for it
+([registry](../REGISTRY.md)). A new adapter is scaffolded from
+[`../template/`](../template/), which uses the shared `swarmada-sdk` safety
+primitives; read this skeleton alongside it.
 
 What it demonstrates:
 

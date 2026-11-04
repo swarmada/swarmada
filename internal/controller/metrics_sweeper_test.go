@@ -62,7 +62,7 @@ func swAdapter(ns, name string, phase fleetv1.FleetAdapterPhase) *fleetv1.FleetA
 }
 
 // One sweep sets every aggregate gauge from the live resources — including 0 for
-// enum values with no resources (§9.3.8 registration requirement).
+// enum values with no resources (metrics-contract registration requirement).
 func TestMetricsSweeper_SetsGaugesFromResources(t *testing.T) {
 	ns := "sweep-ns"
 	c := sweeperClient(t,

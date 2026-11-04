@@ -8,14 +8,19 @@ version = "0.1.0"
 description = "{{cookiecutter.adapter_name}} — a Swarmada Fleet Adapter for {{cookiecutter.robot_class}}"
 authors = [{ name = "{{cookiecutter.author}}" }]
 license = { text = "Apache-2.0" }
-# Matches the SDK and control plane (one floor across the repository). A scaffolded adapter's own
-# dependencies would run on 3.10; this is consistency, not a technical requirement.
-requires-python = ">=3.12"
+# 3.10 is the interpreter ROS 2 Humble ships, the current ROS 2 LTS, and the one most robots an
+# adapter runs on have. The SDK has the same floor; nothing here needs a newer interpreter.
+requires-python = ">=3.10"
 dependencies = [
-  # The audited safety primitives (C3/C4/C5) — never re-implement them.
-  "swarmada-sdk",
-  "grpcio>=1.60",
-  "protobuf>=4.25",
+  # swarmada-sdk, the shared safety primitives (C3/C4/C5) — never re-implement them — is
+  # deliberately NOT listed. It is not published on any index, and a bare name here lets pip
+  # install whatever an index serves under it. Install it from a checkout of the Swarmada
+  # repository in the same command as this adapter (README, "Develop"); without it the
+  # adapter stops at import.
+  # The oldest runtimes the Swarmada fleet_adapter.v1 Python stubs are tested against. A
+  # robot image that already carries these (or newer) needs nothing installed over them.
+  "grpcio>=1.64.1",
+  "protobuf>=3.20.3",
 ]
 
 [project.optional-dependencies]

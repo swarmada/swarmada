@@ -18,6 +18,8 @@ package controlstream
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +118,35 @@ func sendDiscover(t *testing.T, stream fav1.FleetAdapterService_ControlStreamCli
 	return ack
 }
 
+// newerMinorThanImplemented is the next minor after the one this build implements — always OUT of
+// range, because skew is backwards compatibility for older adapters and never a promise about a
+// contract that has not been built.
+//
+// DERIVED, NOT WRITTEN DOWN. It was the literal "1.2.0" while the contract was 1.1.0, and the bump
+// to 1.2.0 turned three assertions in this file into their own opposite: the case labelled "a
+// contract this build has not implemented" became the contract this build implements, so tests
+// asserting REFUSAL started asserting it against an adapter the gate correctly accepts. A fixture
+// pinned to a version goes stale on the next bump, for the same reason an adapter pinned to a
+// version can leave the N/N-1 window: the window moves with contract.Version (ADR-0032 Amendment 1
+// §A1.2).
+func newerMinorThanImplemented(t *testing.T) string {
+	t.Helper()
+	parts := strings.SplitN(contract.Version, ".", 3)
+	if len(parts) != 3 {
+		t.Fatalf("contract.Version = %q is not a major.minor.patch semver", contract.Version)
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		t.Fatalf("contract.Version = %q has a non-numeric minor", contract.Version)
+	}
+	next := fmt.Sprintf("%s.%d.0", parts[0], minor+1)
+	if ok, _ := contract.Supports(next); ok {
+		t.Fatalf("%s is IN range for contract.Version %q; this helper must produce an out-of-range "+
+			"version or every refusal assertion below is vacuous", next, contract.Version)
+	}
+	return next
+}
+
 // ── In range ──────────────────────────────────────────────────────────────────
 
 // The implemented version negotiates and registers.
@@ -163,17 +194,18 @@ func TestContractGate_IdentityCarriesTheNegotiatedVersion(t *testing.T) {
 // incompatible, never as an implicit pass.
 func TestContractGate_IncompatibleVersionsRefuseRegistration(t *testing.T) {
 	for _, tc := range []struct{ name, version string }{
-		{"missing", ""},                    // an adapter predating contract versioning
-		{"newer minor", "1.1.0"},           // a contract this build has not implemented
-		{"older major", "0.9.0"},           // a major bump is breaking in either direction
-		{"newer major", "2.0.0"},           //
-		{"major only", "1"},                // not a semver
-		{"major minor", "1.0"},             //
-		{"non numeric", "x.y.z"},           //
-		{"prerelease", "1.0.0-rc1"},        // never a released contract
-		{"build metadata", "1.0.0+build7"}, //
-		{"padded", " 1.0.0"},               // whitespace is not silently trimmed into a pass
-		{"four parts", "1.0.0.1"},          //
+		{"missing", ""}, // an adapter predating contract versioning
+		// DERIVED from contract.Version, never written down — see newerMinorThanImplemented.
+		{"newer minor", newerMinorThanImplemented(t)}, // a contract this build has not implemented
+		{"older major", "0.9.0"},                      // a major bump is breaking in either direction
+		{"newer major", "2.0.0"},                      //
+		{"major only", "1"},                           // not a semver
+		{"major minor", "1.0"},                        //
+		{"non numeric", "x.y.z"},                      //
+		{"prerelease", "1.0.0-rc1"},                   // never a released contract
+		{"build metadata", "1.0.0+build7"},            //
+		{"padded", " 1.0.0"},                          // whitespace is not silently trimmed into a pass
+		{"four parts", "1.0.0.1"},                     //
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := &fakeRegistrar{}
@@ -220,13 +252,14 @@ func TestContractGate_IncompatibleVersionsRefuseRegistration(t *testing.T) {
 // The refusal must name the range, or an operator reading only the ack cannot tell what to build
 // against. A bare "VERSION_MISMATCH" would send them to the source.
 func TestContractGate_RefusalNamesTheSupportedRange(t *testing.T) {
-	stream, _ := gateStream(t, &Server{Registrar: &fakeRegistrar{}}, "1.1.0")
+	reported := newerMinorThanImplemented(t)
+	stream, _ := gateStream(t, &Server{Registrar: &fakeRegistrar{}}, reported)
 	msg := sendRegister(t, stream).GetMessage()
 	if !strings.Contains(msg, contract.SupportedRange()) {
 		t.Errorf("register refusal = %q, want it to name the supported range %q", msg, contract.SupportedRange())
 	}
-	if !strings.Contains(msg, "1.1.0") {
-		t.Errorf("register refusal = %q, want it to quote the version the adapter reported", msg)
+	if !strings.Contains(msg, reported) {
+		t.Errorf("register refusal = %q, want it to quote the version the adapter reported (%q)", msg, reported)
 	}
 }
 
@@ -236,7 +269,7 @@ func TestContractGate_RefusalNamesTheSupportedRange(t *testing.T) {
 // into a blind spot — the operator would lose the very signal that shows what is connected.
 func TestContractGate_TelemetryAndHeartbeatStillFlowWhenIncompatible(t *testing.T) {
 	ing := &fakeIngestor{}
-	stream, ack := gateStream(t, &Server{Registrar: &fakeRegistrar{}, Ingestor: ing}, "1.1.0")
+	stream, ack := gateStream(t, &Server{Registrar: &fakeRegistrar{}, Ingestor: ing}, newerMinorThanImplemented(t))
 	if ack.GetNegotiatedContractVersion() != "" {
 		t.Fatalf("expected an incompatible handshake, got negotiated %q", ack.GetNegotiatedContractVersion())
 	}

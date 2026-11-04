@@ -26,7 +26,7 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// Single-object admission rules from RFC-0001 §9.3.1, enforced by the CRD schema rather
+// Single-object admission rules from RFC-0001 #control-plane-swarmada-api-server, enforced by the CRD schema rather
 // than by a controller. These run against a real API server (envtest) with the generated
 // CRDs installed, because that is the only thing that proves a CEL rule or a pattern is
 // actually in effect: a marker in a Go comment that failed to regenerate, or a rule the
@@ -42,6 +42,23 @@ func mustReject(t *testing.T, err error, want string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("rejected, but not for the expected reason.\n  want substring: %s\n  got: %v", want, err)
+	}
+}
+
+// mustRejectCleanly is mustReject plus the assertion that the rejection is a VALIDATION
+// message and not a CEL evaluation error.
+//
+// It exists because mustReject alone cannot tell them apart. The API server echoes the
+// rule's own message into the evaluation-error text — `no such key: hardware evaluating
+// rule: a capability's requiredHardware must reference a component declared in
+// spec.hardware` — so a Contains check on the message passes for BOTH the rule firing as
+// intended and the rule failing to evaluate. That is how the unguarded
+// installedModels rule kept a green test while producing "no such key" in the field.
+func mustRejectCleanly(t *testing.T, err error, want string) {
+	t.Helper()
+	mustReject(t, err, want)
+	if strings.Contains(err.Error(), "no such key") {
+		t.Fatalf("rule raised a CEL evaluation error instead of firing its message:\n  %v", err)
 	}
 }
 
@@ -76,15 +93,64 @@ func TestRobotSchema_ProvidingModelMustBeInstalled(t *testing.T) {
 	// A capability pointing at a model this robot does not have would derive as permanently
 	// inactive with no operator-visible reason — the model it names simply never appears.
 	err := envK8s.Create(ctx, robot("item-recognition-v3", "item-recognition-v4"))
-	mustReject(t, err, "providingModel must reference a model declared in spec.installedModels")
+	mustRejectCleanly(t, err, "providingModel must reference a model declared in spec.installedModels")
 
-	// Same, with no installedModels at all — the empty-list path must not be a loophole.
+	// Same, with no installedModels at all — the empty-list path must not be a loophole,
+	// and it gets its own message: "you declared no models" is a different mistake from
+	// "the name you referenced is not one of the ones you declared". Before the
+	// referenced side was guarded this case reached the API server's CEL evaluator and
+	// came back as "no such key: installedModels".
 	err = envK8s.Create(ctx, robot("", "item-recognition-v3"))
-	mustReject(t, err, "providingModel must reference a model declared in spec.installedModels")
+	mustRejectCleanly(t, err, "spec.installedModels declares no models")
 
 	// The matching case must be accepted, or the rule is just a ban on model-driven caps.
 	if err := envK8s.Create(ctx, robot("item-recognition-v3", "item-recognition-v3")); err != nil {
 		t.Fatalf("a capability naming an installed model must be accepted: %v", err)
+	}
+}
+
+// ── Robot: a capability's requiredHardware must name a declared component ─────────────
+
+// TestRobotSchema_RequiredHardwareMustBeDeclared covers the case a manifest hits most
+// often: a capability gated on a component the Robot declares no spec.hardware for at all.
+// The rule is right to reject it; it used to report `spec: Invalid value: "object": no such
+// key: hardware`, which reads like a broken CRD rather than a mistake in the manifest.
+func TestRobotSchema_RequiredHardwareMustBeDeclared(t *testing.T) {
+	requireEnvtest(t)
+	ns := envtestNamespace(t)
+	ctx := context.Background()
+
+	robot := func(declared, required string) *fleetv1.Robot {
+		r := &fleetv1.Robot{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "amr-", Namespace: ns},
+			Spec: fleetv1.RobotSpec{
+				Zone:         "zone-a",
+				Manufacturer: "acme",
+				Model:        "amr-100",
+				Adapter:      fleetv1.AdapterRef{Name: "acme-adapter", Version: "1.0.0"},
+				Capabilities: []fleetv1.ClassCapability{{
+					Name: "navigation", Type: "hardware-native", RequiredHardware: []string{required},
+				}},
+			},
+		}
+		if declared != "" {
+			r.Spec.Hardware = []fleetv1.HardwareComponent{{Name: declared, Type: "Lidar"}}
+		}
+		return r
+	}
+
+	// Declared inventory, wrong name: the reference rule fires.
+	err := envK8s.Create(ctx, robot("lidar_top", "lidar_rear"))
+	mustRejectCleanly(t, err, "requiredHardware must reference a component declared in spec.hardware")
+
+	// No spec.hardware at all — the case UC-1.6 hit. Its own message, and NOT
+	// "no such key: hardware".
+	err = envK8s.Create(ctx, robot("", "lidar_top"))
+	mustRejectCleanly(t, err, "spec.hardware declares no components")
+
+	// The matching case must be accepted, or the rule is just a ban on gated capabilities.
+	if err := envK8s.Create(ctx, robot("lidar_top", "lidar_top")); err != nil {
+		t.Fatalf("a capability naming a declared component must be accepted: %v", err)
 	}
 }
 

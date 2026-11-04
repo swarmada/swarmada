@@ -61,7 +61,7 @@ func registryWatchPolicy() *fleetv1.ModelPolicy {
 		ObjectMeta: metav1.ObjectMeta{Name: "item-recognition-policy", Namespace: rolloutNS},
 		Spec: fleetv1.ModelPolicySpec{
 			ModelName:           "item-recognition",
-			TargetRobotSelector: metav1.LabelSelector{MatchLabels: map[string]string{"fleet": "pickers"}},
+			TargetRobotSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"fleet": "pickers"}},
 			QualityGate:         strictGate(),
 			AutoDeployOn:        fleetv1.AutoDeployQualityGatePass,
 			Trigger: fleetv1.ModelPolicyTrigger{
@@ -109,7 +109,7 @@ func TestRegistryWatch_NewTagWritesTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 	if payload.ModelVersion != "4.1.0" || payload.ModelChecksum != "sha256:manifestABC" ||
-		payload.ModelURI != "reg.example:5000/item-recognition:4.1.0" || payload.Metrics["pick_success_rate"] != 0.961 {
+		payload.ModelURI != "oci://reg.example:5000/item-recognition:4.1.0" || payload.Metrics["pick_success_rate"] != 0.961 {
 		t.Fatalf("trigger payload = %+v", payload)
 	}
 }
@@ -132,7 +132,7 @@ func TestRegistryWatch_PollThenEvaluateCreatesRollout(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "item-recognition-policy-4-1-0", Namespace: rolloutNS}, ro); err != nil {
 		t.Fatalf("expected ModelRollout from the RegistryWatch trigger: %v", err)
 	}
-	if ro.Spec.NewVersion != "4.1.0" || ro.Spec.ModelURI != "reg.example:5000/item-recognition:4.1.0" {
+	if ro.Spec.NewVersion != "4.1.0" || ro.Spec.ModelURI != "oci://reg.example:5000/item-recognition:4.1.0" {
 		t.Fatalf("rollout spec = %+v", ro.Spec)
 	}
 }
