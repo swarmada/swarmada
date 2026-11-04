@@ -21,6 +21,12 @@ rules:
   - create
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
   - authorization.k8s.io
   resources:
   - subjectaccessreviews
@@ -41,6 +47,21 @@ rules:
 - apiGroups:
   - swarmada.io
   resources:
+  - computeendpoints
+  - fleetadapters
+  - resultsinks
+  - robotclasses
+  - robotprobes
+  - semanticevents
+  - semanticeventsources
+  - tasktriggers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
   - discoveredrobots
   verbs:
   - create
@@ -53,6 +74,7 @@ rules:
   resources:
   - discoveredrobots/status
   - firmwarerollouts/status
+  - fleetactions/status
   - fleetadapters/status
   - fleettasks/status
   - fleetzones/status
@@ -61,7 +83,10 @@ rules:
   - robotclasses/status
   - robotprobes/status
   - robots/status
+  - semanticevents/status
+  - semanticeventsources/status
   - swarmadaconfigs/status
+  - tasktriggers/status
   - zonemaintenances/status
   verbs:
   - get
@@ -71,18 +96,15 @@ rules:
   - swarmada.io
   resources:
   - firmwarerollouts
-  - fleetadapters
-  - robotclasses
-  - robotprobes
   verbs:
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - swarmada.io
   resources:
   - fleetactions
-  - fleettasks
   - robots
   verbs:
   - create
@@ -104,7 +126,15 @@ rules:
 - apiGroups:
   - swarmada.io
   resources:
-  - fleetactions/status
+  - fleettasks
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - swarmada.io
+  resources:
   - fleetzones
   - modelpolicies
   - zonemaintenances
@@ -122,6 +152,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - swarmada.io

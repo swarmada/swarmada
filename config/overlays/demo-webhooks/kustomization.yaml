@@ -1,0 +1,58 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# DEMO overlay for the admission-webhook demos: UC-1.7 (RobotClass defaulting on
+# admission) and UC-1.5 (ModelPolicy quality gate). Layered Demo Plan backlog #5.
+#
+# This overlay adds almost nothing, on purpose. Everything the webhooks need was
+# already built in config/controlstream-tls: ENABLE_WEBHOOKS=true, the webhook
+# Service, a cert-manager serving Certificate (reusing the ControlStream CA rather
+# than minting a second trust root), and the caBundle injection patch. Composing it
+# is the whole job: this overlay contributes only the adapter client certificates
+# beside it, and inherits everything that actually serves admission.
+#
+# WHY NOT ../quickstart-mtls (what examples/demo-ab-live/run.sh deploys):
+# that overlay pins ENABLE_WEBHOOKS=false deliberately, and its own comment says why
+# — with webhooks off it needs no webhook serving certs. That is the right call for a
+# demo that does not exercise admission. It is the wrong base here, and it is NOT
+# flipped: this overlay sits beside it, it does not repurpose it.
+#
+# PORTS: ControlStream listens on 9445 and the Service publishes 9445, as in every
+# overlay and the chart. controller-runtime hard-codes the webhook server on 9443, so
+# the two coexist in one pod.
+#
+# REQUIRES cert-manager. examples/demo-ab-live/run.sh already installs and waits for
+# it; the runbooks reuse that path rather than duplicating it.
+#
+# THE SIM ADAPTER RUNS IN THE CLUSTER (sim-adapter/). With webhooks on, a Robot is
+# admitted only while its FleetAdapter is Connected with conformance Passed, and that
+# needs a live adapter process. sim-adapter/ runs one as a Deployment, using the
+# first client identity below, so applying this overlay is what starts it. It needs
+# the image built from Dockerfile.sim-adapter and loaded into the cluster.
+#
+# APPLY TWICE on a fresh cluster. sim-adapter/ declares a FleetAdapter, and its CRD
+# is created by the same apply; kubectl resolves every kind before it sends anything,
+# so the first apply reports "no matches for kind FleetAdapter" and applies the rest.
+# Wait for the CRDs to be Established, then apply again:
+#   kubectl apply -k config/overlays/demo-webhooks --server-side --force-conflicts
+#   kubectl wait --for=condition=Established crd --all --timeout=120s
+#   kubectl apply -k config/overlays/demo-webhooks --server-side --force-conflicts
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../controlstream-tls
+  - adapter-client-certs.yaml
+  - sim-adapter

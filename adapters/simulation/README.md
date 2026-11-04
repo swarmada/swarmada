@@ -19,12 +19,29 @@ runnable adapter that costs **$0** to build and run.
   - **C5** confirmed emergency stop (`confirm_estop`): reports `STOPPED` only when
     the simulator confirms **zero velocity** (ground truth) — never inferred from a
     timeout. If it cannot confirm, it reports `FAILED`.
-- Honours `zone_admission` (§5.4.4 zone-capacity hold/admit) and declines the remaining optional commands with `unsupported = true` (C7), and dials the
+- With `--latch`, keeps the stop latch of contract `1.4.0` (RFC-0001
+  `#fleet-adapter-protocol-the-stop-latch`, conformance `C5.8`) and reports `1.4.0`: after a stop
+  it refuses work `ROBOT_UNAVAILABLE` until the stop's `EstopClear` lifts it. Without `--latch` it
+  keeps no latch and reports `1.3.0`. The latch is off by default because the reference control
+  plane ends no local set at v0.4, so a latching adapter there that took an edge stop takes no work
+  until it restarts. `make conformance-sim` runs it with `--latch`.
+- Honours `zone_admission` (RFC-0001 #control-plane-zone-controller zone-capacity hold/admit) and declines the remaining optional commands with `unsupported = true` (C7), and dials the
   **EdgeStream** with the same confirmed-estop discipline when a zone advertises an
   edge node (C8).
 
-The safety logic lives in [`safety.py`](safety.py) as pure, proto-free code and is
-unit-tested in [`tests/python/test_sim_adapter.py`](../../tests/python/test_sim_adapter.py).
+The safety logic is not in this directory. It comes from
+[`swarmada_sdk.safety`](../../sdk/python/src/swarmada_sdk/safety.py) — pure, proto-free
+code that every adapter shares, reference and vendor alike (ADR-0005). This adapter used
+to carry its own copy; that copy froze before `FenceGuard.adopt()` was added and C3.8
+failed here while passing for anything generated from `adapters/template/`, which has
+always imported the SDK. One audited implementation, no second copy to drift.
+
+It is unit-tested from two directions:
+[`sdk/python/tests/test_safety.py`](../../sdk/python/tests/test_safety.py) covers the
+primitives themselves, and the `tests/python/test_sim_adapter_*.py` files cover this
+adapter's behaviour on the wire: completing an action only on arrival and with the
+action's own fencing token, the cancel disposition, the action catalog, and the
+telemetry interval taken from `RegisterAck`. `make test-py` runs both.
 
 ## Multi-simulator
 
@@ -43,11 +60,14 @@ The adapter is simulator-agnostic — it drives a small `Simulator` interface
 # $0, dependency-free (KinematicSim):
 PYTHONPATH=proto python3 adapters/simulation/sim_adapter.py --endpoint localhost:9090
 
-# Validate against the conformance harness (C0–C16):
+# Validate against the conformance harness (C0–C19), with --latch:
 make conformance-sim
 
-# Run the safety unit tests (C3/C4/C5):
+# Run the safety unit tests (C3/C4/C5) — repo suite and the SDK's own:
 make test-py
+
+# The SDK suite alone (separate distribution, its own pytest config):
+make test-sdk
 ```
 
 Inside NVIDIA Isaac Sim's Python runtime, add `--simulator isaac` and wire

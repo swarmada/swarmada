@@ -25,7 +25,7 @@ import (
 	"github.com/swarmada/swarmada/internal/command"
 )
 
-// ModelRollout producers for the §9.6.5.1 chain.
+// ModelRollout producers for the RFC-0001 #safety-required-events chain.
 //
 // Model signature evidence differs in kind from firmware's: the control plane verifies a
 // firmware artifact itself before dispatch, but never sees a model's bytes — the adapter
@@ -89,7 +89,7 @@ func TestAuditMR_UpdateStartedAndSignatureVerified(t *testing.T) {
 }
 
 func TestAuditMR_SignatureFailureIsSealed(t *testing.T) {
-	// §9.2.8 requires a fail-closed signature refusal to decline with this reason.
+	// RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist requires a fail-closed signature refusal to decline with this reason.
 	rec := &recordingAudit{}
 	r, _ := newRolloutReconciler(t, pickerRollout(), targetRobot("r1", fleetv1.RobotPhaseIdle, 90))
 	r.Pusher = &signerPusher{ack: false, message: "SignatureVerificationFailed: trust root mismatch"}

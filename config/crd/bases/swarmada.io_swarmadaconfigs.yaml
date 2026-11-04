@@ -24,15 +24,19 @@ spec:
 
           Exactly one SwarmadaConfig per namespace, with the fixed name "swarmada-config".
           Auto-created with defaults when a namespace is initialized (first FleetZone created).
-          Provides namespace-level tunables for health tracking, re-scanning,
-          provisioning, scheduling, and maintenance behaviour.
+          Provides namespace-level tunables for health tracking, provisioning, scheduling,
+          maintenance, estop delivery and traffic deconfliction. Several fields are
+          validated and defaulted but read by no controller at this version; each one's
+          description says so.
 
-          The name MUST be "swarmada-config" (§9.3.1). Cross-field rules from §9.1.11
+          The name MUST be "swarmada-config" (RFC-0001 #control-plane-swarmada-api-server). Cross-field rules from RFC-0001 #swarmadaconfig
           (AfterTimeout ⇒ disconnectTimeoutSeconds; disconnectedReservationTTLSeconds >
           disconnectTimeoutSeconds; sink.endpoint required for a real store;
-          requireSignatureVerification ⇒ non-empty trustRoots) are enforced by a
-          SwarmadaConfig admission webhook — deferred, not yet built (§F). The empty
-          default sink.type is deliberately NOT rejected here: auto-creation (§9.1.11.3)
+          connectivityCriticalThresholdSeconds > connectivityOfflineThresholdSeconds;
+          referenceFrame Geodetic ⇔ geodetic block) are enforced by the SwarmadaConfig
+          admission webhook. requireSignatureVerification with no trustRoots is warned
+          about, not rejected. The empty
+          default sink.type is deliberately NOT rejected here: auto-creation (RFC-0001 #swarmadaconfig-auto-creation-on-namespace-initialization)
           produces a defaulted config the operator then completes.
         properties:
           apiVersion:
@@ -56,12 +60,16 @@ spec:
             description: SwarmadaConfigSpec defines the desired state of SwarmadaConfig.
             properties:
               actionCancellation:
-                description: ActionCancellation configures disconnect handling (§9.1.11.9).
+                description: 'ActionCancellation configures disconnect handling (RFC-0001
+                  #swarmadaconfig-action-cancellation-on-disconnect).'
                 properties:
                   disconnectTimeoutSeconds:
                     description: |-
-                      DisconnectTimeoutSeconds is the wall-clock ceiling before a Revoking action is
-                      auto-cancelled. Required when OnDisconnect is AfterTimeout.
+                      DisconnectTimeoutSeconds is the wait since status.disconnectedAt that row A9
+                      (RFC-0001 #safety-action-table) adds to its lease and estop
+                      gates before a Revoking action is reassigned to another robot; it is not
+                      cancelled, so a non-idempotent action can run twice. Required when
+                      OnDisconnect is AfterTimeout.
                     format: int32
                     minimum: 30
                     type: integer
@@ -77,8 +85,8 @@ spec:
                     type: string
                 type: object
               coordinateSystem:
-                description: CoordinateSystem declares facility-wide spatial conventions
-                  (§9.1.11.11).
+                description: 'CoordinateSystem declares facility-wide spatial conventions
+                  (RFC-0001 #swarmadaconfig-coordinate-system).'
                 properties:
                   angleUnit:
                     default: Radians
@@ -112,7 +120,7 @@ spec:
                     default: 0
                     description: |-
                       GroundFloor is the integer floor value that denotes ground level;
-                      Robot.status.position.floor and FleetZone.spec.floor are interpreted
+                      Robot.status.position.floor and FleetZone.spec.physicalBounds.floor are interpreted
                       relative to it. 0 = ground.
                     format: int32
                     type: integer
@@ -147,7 +155,7 @@ spec:
                     type: string
                 type: object
               estop:
-                description: Estop configures emergency-stop delivery (§9.1.11.8).
+                description: 'Estop configures emergency-stop delivery (RFC-0001 #swarmadaconfig-estop-delivery-configuration).'
                 properties:
                   delivery:
                     description: Delivery governs SafetyStream estop delivery and
@@ -155,8 +163,11 @@ spec:
                     properties:
                       partialDeliveryBehavior:
                         default: BlockNewActions
-                        description: PartialDeliveryBehavior selects the response
-                          when delivery is partial.
+                        description: |-
+                          PartialDeliveryBehavior is specified to select the response when some adapters
+                          have not ACKd an estop. No code reads it at this version: there is no
+                          partial-delivery aggregation, and each robot's unconfirmed stop is reported on
+                          its own estopState (Failed).
                         enum:
                         - BlockNewActions
                         - Alert
@@ -164,24 +175,31 @@ spec:
                       perAdapterTimeoutMs:
                         default: 500
                         description: |-
-                          PerAdapterTimeoutMs is the max wait for one adapter to ACK before retrying.
-                          ACK means stop INITIATED, not complete.
+                          PerAdapterTimeoutMs is the maximum wait for an adapter's EstopAck for a robot.
+                          ACK means stop INITIATED, not complete. When it passes with no ACK the robot's
+                          estopState becomes Failed (a dropped estop); the delivery is not retried.
                         format: int32
                         minimum: 100
                         type: integer
                       retryPolicy:
-                        description: RetryPolicy bounds redelivery.
+                        description: |-
+                          RetryPolicy is specified to bound redelivery. No code reads it at this
+                          version: the estop dispatcher makes a single delivery attempt per robot.
                         properties:
                           maxAttempts:
                             default: 0
-                            description: MaxAttempts is the retry ceiling; 0 = retry
-                              indefinitely until ACK or clear.
+                            description: |-
+                              MaxAttempts is specified as the redelivery ceiling (0 = retry until ACK or
+                              clear). No code reads it at this version: the estop dispatcher makes a single
+                              delivery attempt per robot and never retries.
                             format: int32
                             minimum: 0
                             type: integer
                           retryIntervalMs:
                             default: 250
-                            description: RetryIntervalMs is the delay between attempts.
+                            description: |-
+                              RetryIntervalMs is specified as the delay between redelivery attempts. No code
+                              reads it at this version: the estop dispatcher never retries a delivery.
                             format: int32
                             minimum: 50
                             type: integer
@@ -190,9 +208,11 @@ spec:
                   requireExplicitClearAfterEstop:
                     default: true
                     description: |-
-                      RequireExplicitClearAfterEstop is documented for traceability (always true):
-                      robots that ACKd an estop MUST NOT resume until an operator explicitly clears
-                      it.
+                      RequireExplicitClearAfterEstop records, for traceability, that a robot which ACKd an
+                      estop MUST NOT resume until an operator explicitly clears it. The prohibition is
+                      UNCONDITIONAL: there is no auto-clear path in the control plane, so this field
+                      describes the rule rather than controlling it, and setting it false changes nothing.
+                      Admission warns when it is set false rather than silently accepting the value.
                     type: boolean
                 type: object
               health:
@@ -202,32 +222,46 @@ spec:
                   capabilityRescanIntervalSeconds:
                     default: 300
                     description: |-
-                      CapabilityRescanIntervalSeconds: full capability snapshot via
-                      ScanCapabilities RPC. 0 disables periodic rescanning.
+                      CapabilityRescanIntervalSeconds is specified as the period of a full
+                      capability snapshot request (the ScanCapabilities command); 0 disables it. No
+                      controller reads it at this version and no ScanCapabilities command is ever
+                      sent, so no periodic rescan happens at any value.
                     format: int32
                     maximum: 3600
                     minimum: 0
                     type: integer
                   connectivityCriticalThresholdSeconds:
                     default: 120
-                    description: 'ConnectivityCriticalThresholdSeconds: seconds Offline
-                      before Critical.'
+                    description: |-
+                      ConnectivityCriticalThresholdSeconds is how long a Robot must have been
+                      Offline, measured from status.offlineSince, before the ConnectivityCritical
+                      condition is set True. It raises the condition, a metric and an audit entry;
+                      it does not change status.health or reassign work. Must exceed
+                      ConnectivityOfflineThresholdSeconds (enforced by the admission webhook).
                     format: int32
                     maximum: 86400
                     minimum: 30
                     type: integer
                   connectivityOfflineThresholdSeconds:
                     default: 30
-                    description: 'ConnectivityOfflineThresholdSeconds: seconds without
-                      telemetry before Offline.'
+                    description: |-
+                      ConnectivityOfflineThresholdSeconds is the age of a Robot's
+                      status.connectivity.lastSeenAt past which the Robot reconciler runs a
+                      confirming heartbeat exchange (three attempts, five seconds apart) and, if
+                      none is answered, sets the phase to Offline. lastSeenAt is stamped from the
+                      bound Fleet Adapter's ControlStream liveness, not from the robot's telemetry.
+                      Offline does not change status.health.
                     format: int32
                     maximum: 3600
                     minimum: 5
                     type: integer
                   defaultHardwareProbeIntervalSeconds:
                     default: 30
-                    description: 'DefaultHardwareProbeIntervalSeconds: default for
-                      RobotProbe resources.'
+                    description: |-
+                      DefaultHardwareProbeIntervalSeconds is the RobotProbe controller's fallback for
+                      a RobotProbe whose spec.intervalSeconds is not positive. That field carries a
+                      CRD default (60) the API server always applies, so this value is not used in
+                      practice.
                     format: int32
                     maximum: 3600
                     minimum: 10
@@ -250,7 +284,11 @@ spec:
                     type: integer
                   defaultProbeTimeoutSeconds:
                     default: 5
-                    description: DefaultProbeTimeoutSeconds is the default probe timeout.
+                    description: |-
+                      DefaultProbeTimeoutSeconds is the RobotProbe controller's fallback for a
+                      RobotProbe whose spec.timeoutSeconds is not positive. That field carries a CRD
+                      default (10) the API server always applies, so this value is not used in
+                      practice.
                     format: int32
                     maximum: 60
                     minimum: 1
@@ -264,8 +302,11 @@ spec:
                     type: boolean
                   telemetryIntervalSeconds:
                     default: 10
-                    description: 'TelemetryIntervalSeconds: default passive telemetry
-                      rate for robots.'
+                    description: |-
+                      TelemetryIntervalSeconds is specified as the namespace default passive
+                      telemetry rate for robots. No controller reads it at this version: the interval
+                      an adapter is acked with comes from Robot.spec.telemetryIntervalSeconds or
+                      RobotClass.spec.defaultTelemetry only.
                     format: int32
                     maximum: 60
                     minimum: 1
@@ -276,8 +317,11 @@ spec:
                 properties:
                   defaultAutoResumeMinutes:
                     default: 0
-                    description: 'DefaultAutoResumeMinutes: 0 means no auto-resume
-                      (operator must resume).'
+                    description: |-
+                      DefaultAutoResumeMinutes is specified as the namespace default for
+                      ZoneMaintenance.spec.autoResumeAfterMinutes (0 = no auto-resume). No controller
+                      reads it at this version: the ZoneMaintenance controller reads only the
+                      window's own spec.autoResumeAfterMinutes, which defaults to 0.
                     format: int32
                     maximum: 480
                     minimum: 0
@@ -294,11 +338,11 @@ spec:
                   requireEstopClearBeforeResume:
                     default: true
                     description: |-
-                      RequireEstopClearBeforeResume is the namespace default for the ZoneMaintenance
-                      field of the same name: block resume of a paused robot until any active estop
-                      on it is cleared.
-                      Enforced by the ZoneMaintenance controller as the namespace-level fallback
-                      when ZoneMaintenance.spec.requireEstopClearBeforeResume is unset.
+                      RequireEstopClearBeforeResume is specified as the namespace default for the
+                      ZoneMaintenance field of the same name: block resume of a paused robot until
+                      any active estop on it is cleared. It is unreachable at v0.4: the API server
+                      defaults ZoneMaintenance.spec.requireEstopClearBeforeResume to true, so a
+                      window that omits it is gated whatever this value says.
                     type: boolean
                 type: object
               provisioning:
@@ -329,7 +373,7 @@ spec:
                     description: |-
                       AutoRemoveOfflineRobots opts an auto-admitted Robot into automatic removal once its
                       adapter presence is gone (phase Offline) and any assigned action's lease is provably
-                      dead (§9.6.3.5). Off by default. Only Robots that were auto-admitted (ADR-0014) are
+                      dead (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee). Off by default. Only Robots that were auto-admitted (ADR-0014) are
                       eligible — operator-created robots are never removed, regardless of this setting.
                       This reclaims ephemeral robots (e.g. a robot) killed without a clean disconnect (ADR-0030).
                     type: boolean
@@ -342,7 +386,12 @@ spec:
                     type: integer
                   mode:
                     default: TwoPhase
-                    description: Mode controls the discovery-to-admission flow.
+                    description: |-
+                      Mode is specified to control the discovery-to-admission flow. No controller
+                      reads it at this version, and neither value changes behaviour: a robot that
+                      connects is recorded as a DiscoveredRobot and becomes a Robot only when it is
+                      admitted, and TwoPhase does not suppress auto-admit (autoAdmitRobotClass and
+                      autoAdmitZone govern that). Admission warns when it is set to DirectRegister.
                     enum:
                     - TwoPhase
                     - DirectRegister
@@ -353,8 +402,11 @@ spec:
                 properties:
                   actionRequeueBackoffSeconds:
                     default: 30
-                    description: 'ActionRequeueBackoffSeconds: wait time between action
-                      requeue attempts.'
+                    description: |-
+                      ActionRequeueBackoffSeconds is the backoff before a failed FleetAction is
+                      requeued to Pending, applied only to a FleetAction that sets no
+                      spec.retryPolicy. It does not set the re-check interval for a Pending
+                      action with no eligible robot.
                     format: int32
                     maximum: 3600
                     minimum: 0
@@ -362,9 +414,10 @@ spec:
                   clockSkewMarginSeconds:
                     default: 5
                     description: |-
-                      ClockSkewMarginSeconds is the margin added before a lease is treated as provably
-                      expired (§9.6.3.5 condition 3: now ≥ leaseExpiresAt + skew). It absorbs clock
-                      disagreement between the control plane and the robot.
+                      ClockSkewMarginSeconds is the clock-skew margin of the lease horizon, which RFC-0001
+                      #safety-action-table defines once (assignment-lease condition 3
+                      holds once that horizon has passed). It absorbs the delivery delay of an assignment
+                      or renewal and the drift between the control plane's clock and the robot's timer.
 
                       Also a safety bound: too small and the control plane may reassign an action while
                       the robot still believes its lease is live — a double-execution window; too large
@@ -393,18 +446,19 @@ spec:
                   leaseDurationSeconds:
                     default: 30
                     description: |-
-                      LeaseDurationSeconds is the task-lease horizon (§9.6.3.5): how long a robot may
+                      LeaseDurationSeconds is the task-lease duration (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee): how long a robot may
                       execute an assigned action without a renewal before it MUST self-stop.
 
                       This is a SAFETY bound, not a tuning knob. The resolved value is both written to
-                      FleetAction.status.leaseExpiresAt and sent to the robot as Command.lease_duration_ms,
-                      which arms the adapter's self-stop timer (§9.2.8 "Task-lease self-stop", §9.6.3.3
+                      FleetAction.status.leaseExpiresAt and sent to the robot as lease_duration_ms on
+                      AssignAction and RenewActionLease,
+                      which arms the adapter's self-stop timer (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist "Task-lease self-stop", RFC-0001 #safety-fleet-adapter-local-behaviour-during-connectivity-loss
                       item 1). Raising it directly extends how long a robot that has lost its link keeps
                       moving before halting itself — hence the 300s ceiling. The 10s floor keeps the
-                      horizon above the derived renewal interval by a workable margin.
+                      lease above the derived renewal interval by a workable margin.
 
-                      The renewal interval is always leaseDurationSeconds/3 (§9.3.2) and is NOT separately
-                      configurable: deriving it makes it impossible to widen the horizon without also
+                      The renewal interval is always leaseDurationSeconds/3 (RFC-0001 #control-plane-scheduler) and is NOT separately
+                      configurable: deriving it makes it impossible to lengthen the lease without also
                       renewing proportionally sooner (ADR-0044).
                     format: int32
                     maximum: 300
@@ -427,7 +481,8 @@ spec:
                     type: boolean
                 type: object
               signing:
-                description: Signing configures artifact signature trust roots (§9.1.11.1).
+                description: 'Signing configures artifact signature trust roots (RFC-0001
+                  #swarmadaconfig-schema).'
                 properties:
                   rekorPublicKey:
                     description: |-
@@ -439,8 +494,9 @@ spec:
                       MUST come from the operator. With it pinned, the entry's inclusion proof and
                       signed-entry-timestamp are verified cryptographically and a forged response fails closed.
 
-                      Optional for compatibility: when unset the check degrades to index presence only, and the
-                      controller reports that it did so rather than implying a verified entry.
+                      Optional for compatibility: when unset the check degrades to index presence only. The
+                      controller records that only in a debug-level log line; no condition, Event or status
+                      field reports it.
                     properties:
                       key:
                         description: Key is the data key holding the PEM material.
@@ -454,24 +510,29 @@ spec:
                     type: object
                   rekorUrl:
                     description: |-
-                      RekorURL, when set, requires the artifact's signature entry to appear in the
-                      named transparency log before acceptance.
+                      RekorURL, when set, requires a FirmwareRollout artifact's entry to appear in
+                      the named transparency log before the control plane dispatches it. Checked
+                      only by the FirmwareRollout controller, and only when signature verification
+                      is required; ModelRollout artifacts are not checked against the log.
                     type: string
                   requireSignatureVerification:
                     default: true
                     description: |-
-                      RequireSignatureVerification, when true (default), forces adapters to verify
-                      every firmware/model artifact against a trust root before install.
+                      RequireSignatureVerification, when true (default), makes the control plane verify a
+                      FirmwareRollout artifact's signature against a trust root before dispatch, requires a
+                      ModelRollout to name a signature the adapter verifies, and requires a signed conformance
+                      report. Set it to false to turn verification off for this namespace; unset means true.
                     type: boolean
                   trustRoots:
                     description: |-
-                      TrustRoots are the public-key anchors. At least one is required when
-                      RequireSignatureVerification is true (enforced by the SwarmadaConfig
-                      admission webhook — see the note on SwarmadaConfig).
+                      TrustRoots are the public-key anchors. At least one is needed for any artifact to
+                      verify when RequireSignatureVerification is true; a config with neither is
+                      INCOMPLETE rather than invalid, so admission warns instead of rejecting and every
+                      consumer fails closed until a root is added (ADR-0051).
                     items:
                       description: |-
                         SigningTrustRoot is a public-key anchor against which artifact signatures are
-                        verified (§9.1.11.1).
+                        verified (RFC-0001 #swarmadaconfig-schema).
                       properties:
                         name:
                           description: Name is a logical identifier, written to the
@@ -498,8 +559,9 @@ spec:
                     type: array
                 type: object
               telemetry:
-                description: Telemetry configures the two-data-plane split (§9.1.11.7,
-                  §9.3.7).
+                description: 'Telemetry configures the two-data-plane split (RFC-0001
+                  #swarmadaconfig-telemetry-pipeline-and-status-projection, RFC-0001
+                  #control-plane-telemetry-pipeline-and-the-two-data-plane-split).'
                 properties:
                   materialBatteryThresholds:
                     default:
@@ -555,7 +617,8 @@ spec:
                     type: integer
                 type: object
               trafficDeconfliction:
-                description: TrafficDeconfliction exposes the TDE tunables (§9.1.11.10).
+                description: 'TrafficDeconfliction exposes the TDE tunables (RFC-0001
+                  #swarmadaconfig-traffic-deconfliction-engine-configuration).'
                 properties:
                   disconnectedReservationTTLSeconds:
                     default: 360
@@ -582,8 +645,11 @@ spec:
                     type: integer
                   onReservationExpiry:
                     default: ReleaseAndRequeue
-                    description: OnReservationExpiry selects the action when a Reserved
-                      slot expires.
+                    description: |-
+                      OnReservationExpiry is specified to select the action when a Reserved slot
+                      expires. No code reads it at this version, and neither value is applied: an
+                      expired reservation stops counting against zone capacity, but nothing releases
+                      it from FleetZone status or returns its action to Pending.
                     enum:
                     - ReleaseAndRequeue
                     - ReleaseOnly
@@ -620,8 +686,9 @@ spec:
                   tdeCallTimeoutMs:
                     default: 200
                     description: |-
-                      TDECallTimeoutMs bounds a RequestReservation call; exceeding it denies the
-                      reservation and returns the action to Pending.
+                      TDECallTimeoutMs is specified to bound a RequestReservation call, denying the
+                      reservation when exceeded. No code reads it at this version: no TDE call site
+                      applies a timeout from it.
                     format: int32
                     minimum: 50
                     type: integer
@@ -698,9 +765,11 @@ spec:
               supportedContractRange:
                 description: |-
                   SupportedContractRange is the fleet-adapter contract-version range this control plane
-                  accepts (a semver range, e.g. ">=1.0.0 <1.1.0"): the implemented minor and its predecessor
-                  within the current major (ADR-0032). An adapter reporting a version outside it is rejected
-                  at the handshake with REGISTRATION_REJECTION_VERSION_MISMATCH.
+                  accepts, as a two-clause semver range ">=MAJOR.(N-1).0 <MAJOR.(N+1).0": the implemented
+                  minor N and its predecessor within the current major (ADR-0032); at minor 0, that minor
+                  alone. An adapter reporting a version outside it keeps its ControlStream connection
+                  (telemetry, heartbeat and estop are unaffected), and every RegisterRobot and DiscoverRobot
+                  it sends is refused with REGISTRATION_REJECTION_VERSION_MISMATCH.
 
                   It is ADVERTISED, not configured: the controller populates it from the compiled-in contract
                   version (internal/contract.Version), so an operator can answer "which adapters can this

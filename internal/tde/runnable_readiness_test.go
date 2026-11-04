@@ -42,7 +42,7 @@ func startRunnable(t *testing.T, r *RecoveryRunnable) func() {
 
 // When the Zone Controller is ready, recovery uses RecoverValidate: an Occupied
 // reservation whose robot is still in the zone is kept and the Reserved one is
-// released (§9.4.7).
+// released (RFC-0001 #tde-restart-recovery).
 func TestRecoveryRunnable_ZoneControllerReady_Validates(t *testing.T) {
 	c := recoveryClient(t,
 		zoneWithReservations("z", 3,
@@ -68,7 +68,7 @@ func TestRecoveryRunnable_ZoneControllerReady_Validates(t *testing.T) {
 // FAIL-SAFE: when the Zone Controller does NOT become ready within the timeout,
 // recovery falls back to the conservative action (ReleaseAll) — even an Occupied
 // whose robot is present is released, because currentZone cannot be trusted yet
-// (§9.4.7). Releasing (never over-retaining) is the safe direction.
+// (RFC-0001 #tde-restart-recovery). Releasing (never over-retaining) is the safe direction.
 func TestRecoveryRunnable_ZoneControllerNotReady_ConservativeFallback(t *testing.T) {
 	c := recoveryClient(t,
 		zoneWithReservations("z", 3,
@@ -92,7 +92,7 @@ func TestRecoveryRunnable_ZoneControllerNotReady_ConservativeFallback(t *testing
 	}
 }
 
-// An unset Fallback defaults to ReleaseAll (§9.4.7).
+// An unset Fallback defaults to ReleaseAll (RFC-0001 #tde-restart-recovery).
 func TestRecoveryRunnable_DefaultFallbackIsReleaseAll(t *testing.T) {
 	c := recoveryClient(t,
 		zoneWithReservations("z", 3,

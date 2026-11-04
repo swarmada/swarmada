@@ -27,7 +27,7 @@ import (
 
 // FileSink is a durable append-only [Sink] that persists each sealed [Entry] as
 // one JSON object per line (NDJSON) and fsyncs after every append, so a sealed
-// entry survives a crash (§9.6.5.4 durability). It is the production backing for
+// entry survives a crash (retention-policy durability). It is the production backing for
 // the tamper-evident chain; only the elected leader writes, and the mutex
 // serialises concurrent producers within that process.
 //

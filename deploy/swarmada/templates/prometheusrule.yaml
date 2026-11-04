@@ -8,11 +8,11 @@
 # neither installs Prometheus nor Alertmanager. Ensure your Prometheus's
 # ruleSelector matches metrics.prometheusRule.labels.
 #
-# The `expr` of every rule is the RFC-0001 §9.3.8 "Suggested minimum alert
-# expressions" block, VERBATIM. §9.3.8 defines SEVEN expressions (the two
+# The `expr` of every rule is the RFC-0001 #control-plane-observability-prometheus-metrics-contract "Suggested minimum alert
+# expressions" block, VERBATIM. RFC-0001 #control-plane-observability-prometheus-metrics-contract defines SEVEN expressions (the two
 # telemetry rules — dropped_frames and tsdb_write_errors — are distinct); all
 # seven are shipped. `for`/`severity` are chart-added, derived from each metric's
-# §9.3.8 alerting guidance.
+# RFC-0001 #control-plane-observability-prometheus-metrics-contract alerting guidance.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -27,7 +27,7 @@ spec:
   groups:
     - name: swarmada.control-plane
       rules:
-        # Estop latency SLO breach — safety timing requirements (§9.3.8).
+        # Estop latency SLO breach — safety timing requirements (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         - alert: SwarmadaEstopLatencySLOBreach
           expr: increase(swarmada_estop_latency_violations_total[5m]) > 0
           for: 0m
@@ -35,9 +35,9 @@ spec:
             severity: critical
           annotations:
             summary: "Estop ACK latency exceeded the 500ms SLA (namespace {{`{{ $labels.namespace }}`}})"
-            description: "swarmada_estop_latency_violations_total increased in the last 5m on adapter {{`{{ $labels.adapter }}`}}, robot {{`{{ $labels.robot_name }}`}}. Any non-zero rate is an SLO breach (RFC-0001 §9.3.8 / safety timing requirements)."
+            description: "swarmada_estop_latency_violations_total increased in the last 5m on adapter {{`{{ $labels.adapter }}`}}, robot {{`{{ $labels.robot_name }}`}}. Any non-zero rate is an SLO breach (RFC-0001 #control-plane-observability-prometheus-metrics-contract / safety timing requirements)."
 
-        # Silent telemetry drop with sink not explicitly Drop — telemetry pipeline Invariant 1 (§9.3.8).
+        # Silent telemetry drop with sink not explicitly Drop — telemetry pipeline Invariant 1 (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         - alert: SwarmadaTelemetryDroppedFrames
           expr: increase(swarmada_telemetry_dropped_frames_total[5m]) > 0
           for: 5m
@@ -45,9 +45,9 @@ spec:
             severity: warning
           annotations:
             summary: "Telemetry frames dropped (namespace {{`{{ $labels.namespace }}`}})"
-            description: "swarmada_telemetry_dropped_frames_total is increasing with sink.type not set to Drop — indicates TSDB sink failure/misconfiguration (RFC-0001 §9.3.8, telemetry pipeline Invariant 1)."
+            description: "swarmada_telemetry_dropped_frames_total is increasing with sink.type not set to Drop — indicates TSDB sink failure/misconfiguration (RFC-0001 #control-plane-observability-prometheus-metrics-contract, telemetry pipeline Invariant 1)."
 
-        # TSDB write errors (underlying cause of drops) — telemetry pipeline (§9.3.8).
+        # TSDB write errors (underlying cause of drops) — telemetry pipeline (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         - alert: SwarmadaTelemetryTSDBWriteErrors
           expr: increase(swarmada_telemetry_tsdb_write_errors_total[5m]) > 0
           for: 5m
@@ -55,9 +55,9 @@ spec:
             severity: warning
           annotations:
             summary: "TSDB write errors (namespace {{`{{ $labels.namespace }}`}})"
-            description: "swarmada_telemetry_tsdb_write_errors_total is increasing — the configured time-series sink is rejecting writes (RFC-0001 §9.3.8)."
+            description: "swarmada_telemetry_tsdb_write_errors_total is increasing — the configured time-series sink is rejecting writes (RFC-0001 #control-plane-observability-prometheus-metrics-contract)."
 
-        # Scheduler P99 assignment latency > 60s for Normal-priority tasks — scheduler (§9.3.8).
+        # Scheduler P99 assignment latency > 60s for Normal-priority tasks — scheduler (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         - alert: SwarmadaSchedulerAssignmentLatencyHigh
           expr: |-
             histogram_quantile(0.99,
@@ -68,9 +68,9 @@ spec:
             severity: warning
           annotations:
             summary: "Scheduler P99 assignment latency > 60s for Normal-priority tasks"
-            description: "P99 of swarmada_scheduler_assignment_latency_seconds for priority=Normal has exceeded 60s over 10m (RFC-0001 §9.3.8, scheduler)."
+            description: "P99 of swarmada_scheduler_assignment_latency_seconds for priority=Normal has exceeded 60s over 10m (RFC-0001 #control-plane-observability-prometheus-metrics-contract, scheduler)."
 
-        # Stuck Revoking task — double-execution risk, assignment lease (§9.3.8).
+        # Stuck Revoking task — double-execution risk, assignment lease (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         # The spec threshold is the lease horizon:
         #   SwarmadaConfig spec.scheduling.leaseDurationSeconds + clockSkewMarginSeconds
         # which is 35s at the schema defaults (30 + 5), so `for: 1m` clears it. Those
@@ -86,9 +86,9 @@ spec:
             severity: critical
           annotations:
             summary: "FleetAction stuck in Revoking (namespace {{`{{ $labels.namespace }}`}})"
-            description: "A FleetAction has been Revoking for over 1m — longer than the default lease horizon (spec.scheduling.leaseDurationSeconds + spec.scheduling.clockSkewMarginSeconds, 35s at the schema defaults). A single-executor / double-execution risk (RFC-0001 §9.3.8, assignment lease). If this namespace configures a lease horizon above 55s, raise this rule's `for` to match before treating the alert as real."
+            description: "A FleetAction has been Revoking for over 1m — longer than the default lease horizon (spec.scheduling.leaseDurationSeconds + spec.scheduling.clockSkewMarginSeconds, 35s at the schema defaults). A single-executor / double-execution risk (RFC-0001 #control-plane-observability-prometheus-metrics-contract, assignment lease). If this namespace configures a lease horizon above 55s, raise this rule's `for` to match before treating the alert as real."
 
-        # Estop-path outage: adapter disconnected — emergency stop protocol (§9.3.8).
+        # Estop-path outage: adapter disconnected — emergency stop protocol (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         - alert: SwarmadaFleetAdapterDisconnected
           expr: swarmada_fleet_adapter_connected == 0
           for: 2m
@@ -96,9 +96,9 @@ spec:
             severity: critical
           annotations:
             summary: "FleetAdapter disconnected — estop path down (adapter {{`{{ $labels.adapter }}`}})"
-            description: "swarmada_fleet_adapter_connected == 0: no Command — including estop — can reach this adapter's robots (RFC-0001 §9.3.8, emergency stop protocol)."
+            description: "swarmada_fleet_adapter_connected == 0: no Command — including estop — can reach this adapter's robots (RFC-0001 #control-plane-observability-prometheus-metrics-contract, emergency stop protocol)."
 
-        # Uncleared estop awaiting explicit operator action — estop state machine (§9.3.8).
+        # Uncleared estop awaiting explicit operator action — estop state machine (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
         - alert: SwarmadaRobotEstopUncleared
           expr: swarmada_robots_in_estop{estop_state="Stopped"} > 0
           for: 15m
@@ -106,5 +106,5 @@ spec:
             severity: warning
           annotations:
             summary: "Robot estop uncleared (namespace {{`{{ $labels.namespace }}`}})"
-            description: "A robot has been in estop_state=Stopped beyond the alert window — an uncleared estop requires explicit operator action (RFC-0001 §9.3.8, estop state machine)."
+            description: "A robot has been in estop_state=Stopped beyond the alert window — an uncleared estop requires explicit operator action (RFC-0001 #control-plane-observability-prometheus-metrics-contract, estop state machine)."
 {{- end }}

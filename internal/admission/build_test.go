@@ -25,7 +25,7 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// The §9.1.2.5 merge order — discovered values, then the class template, then operator
+// The RFC-0001 #discoveredrobot-controller-behavior-on-admit merge order — discovered values, then the class template, then operator
 // overrides, then the zone. Both admission paths run through this, so a mistake here is a
 // mistake in every robot the fleet admits.
 
@@ -35,7 +35,7 @@ func discoveredFixture() *fleetv1.DiscoveredRobot {
 		Status: fleetv1.DiscoveredRobotStatus{
 			Manufacturer:   "Acme",
 			Model:          "Origin",
-			AdapterVersion: "1.0",
+			AdapterVersion: "1.0.0",
 			ReportedHardware: []fleetv1.DiscoveredHardwareComponent{
 				{Name: "cam", Type: fleetv1.HardwareTypeCamera, Status: fleetv1.HardwareHealthy},
 			},
@@ -48,7 +48,7 @@ func classFixture() *fleetv1.RobotClass {
 		ObjectMeta: metav1.ObjectMeta{Name: "acme-class", Namespace: "warehouse-a"},
 		Spec: fleetv1.RobotClassSpec{
 			Manufacturer: "Acme", Model: "Origin",
-			BaseAdapter: fleetv1.BaseAdapterRef{Name: "acme-adapter", Version: "2.0"},
+			BaseAdapter: fleetv1.BaseAdapterRef{Name: "acme-adapter", Version: "2.0.0"},
 			Hardware:    []fleetv1.HardwareComponent{{Name: "lidar", Type: fleetv1.HardwareTypeLidar}},
 		},
 	}
@@ -65,7 +65,7 @@ func TestBuildRobot_ClassAppliesWholesaleAndHardwareUnions(t *testing.T) {
 	}
 	// The class pins the adapter version, overriding the version the robot reported: the
 	// class is a statement about what this fleet runs, not about what the robot arrived with.
-	if robot.Spec.Adapter.Name != "acme-adapter" || robot.Spec.Adapter.Version != "2.0" {
+	if robot.Spec.Adapter.Name != "acme-adapter" || robot.Spec.Adapter.Version != "2.0.0" {
 		t.Errorf("adapter = %+v, want acme-adapter/2.0 from the class", robot.Spec.Adapter)
 	}
 	if robot.Spec.Manufacturer != "Acme" || robot.Spec.Zone != "zone-aisle-c1" || robot.Spec.RobotClass != "acme-class" {
@@ -83,7 +83,7 @@ func TestBuildRobot_ClassAppliesWholesaleAndHardwareUnions(t *testing.T) {
 }
 
 func TestMergeHardware_ReportedEntryWinsOverTheTemplate(t *testing.T) {
-	// The safety-relevant direction (§9.1.2.5 Step 2). A class that overstates a component —
+	// The safety-relevant direction (RFC-0001 #discoveredrobot-controller-behavior-on-admit Step 2). A class that overstates a component —
 	// here a 45 kg platform on a robot that reports 40 kg — would let the scheduler assign a
 	// payload the machine cannot carry.
 	forty, fortyFive := 40.0, 45.0
@@ -164,7 +164,7 @@ func TestBuildRobot_WithoutAClassCarriesDiscoveredHardware(t *testing.T) {
 	if len(robot.Spec.Hardware) != 1 || robot.Spec.Hardware[0].Name != "cam" {
 		t.Errorf("hardware = %+v, want the discovered inventory", robot.Spec.Hardware)
 	}
-	if robot.Spec.Adapter.Version != "1.0" {
+	if robot.Spec.Adapter.Version != "1.0.0" {
 		t.Errorf("adapter version = %q, want the reported 1.0", robot.Spec.Adapter.Version)
 	}
 	// Capabilities and models come only from a class. Inventing them from discovered string
@@ -243,7 +243,7 @@ func TestMergeCharging_EmptyWhenNeitherSourceExists(t *testing.T) {
 	}
 }
 
-// The payload clamp (§9.1.2.5). spec.hardware being right is not enough — this is the number
+// The payload clamp (RFC-0001 #discoveredrobot-controller-behavior-on-admit). spec.hardware being right is not enough — this is the number
 // the scheduler consults at dispatch, so a class that overstates capacity here puts a load on
 // a robot that cannot carry it.
 

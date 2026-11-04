@@ -32,7 +32,7 @@ import (
 )
 
 // `swarmctl modelpolicy reset` — the operator recovery path for a FailedRepeatedly suspension
-// (§9.1.9.4). Before this existed, clearing a suspension meant hand-editing status, which bypassed
+// (RFC-0001 #modelpolicy-repeated-failure-handling). Before this existed, clearing a suspension meant hand-editing status, which bypassed
 // both the RBAC gate and the audit trail; the CLI is the enforcement point, as for admit/reject.
 //
 // The property that matters most is the DENIED case: the verb gate must run before anything is
@@ -103,9 +103,19 @@ func TestModelPolicyReset_DeniedWritesNothing(t *testing.T) {
 	}
 }
 
-// The gate runs BEFORE the Get, so a denied caller cannot probe for existence: resetting a
-// nonexistent policy must fail with the authorization error, not a not-found.
-func TestModelPolicyReset_DeniedBeforeLookup(t *testing.T) {
+// The Get runs BEFORE the gate (the package rule in lifecycle.go), so the true
+// condition is the one reported: a policy that is not there is not there, whatever
+// the caller's verbs.
+//
+// This test asserted the opposite until 2026-09-14, on the reasoning that gating
+// first stopped a denied caller probing for existence. It never did: the Get is
+// enforced server-side against the caller's read RBAC, so a caller without read
+// receives Forbidden and learns nothing, and a caller with read could have run
+// `swarmctl get modelpolicy` and learned the same thing. What gate-first did
+// produce was an authorization error for an object that does not exist — the same
+// defect `cancel` was fixed for on 2026-09-08, still live here because that pass
+// reordered only the two `cancel` paths.
+func TestModelPolicyReset_AbsentPolicyReportedNotPermissionDenied(t *testing.T) {
 	o := mpOptions()
 	c := mpClient(t) // no policies at all
 
@@ -114,8 +124,11 @@ func TestModelPolicyReset_DeniedBeforeLookup(t *testing.T) {
 	if err == nil {
 		t.Fatal("must be refused")
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "not found") {
-		t.Errorf("denied caller learned the policy does not exist: %v", err)
+	if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		t.Errorf("absent policy reported as something other than absent: %v", err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "not authorized") {
+		t.Errorf("reported a permission failure for a policy that is not there: %v", err)
 	}
 }
 

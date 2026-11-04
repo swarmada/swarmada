@@ -16,13 +16,13 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 # DEV/DEMO ONLY — never apply this overlay in production. Builds on top of
-# config/default (the same developer/prototype base `make deploy` uses) and
+# config/default (the base `make deploy-minimal` applies) and
 # adds:
 #   1. --fleet-adapter-insecure-authz=true on the manager (see
 #      cmd/manager/main.go's flag help) — disables ControlStream per-robot
 #      authorization so a plaintext adapter with no mTLS identity is
 #      authorized for every message. Off by default everywhere else.
-#   2. A Service exposing the ControlStream port (9443) so a local demo
+#   2. A Service exposing the ControlStream port (9445) so a local demo
 #      adapter can reach it without a pod-direct port-forward hack.
 #
 # Used by examples/warehouse-quickstart/run.sh's live-scenario path (the

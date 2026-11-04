@@ -45,8 +45,8 @@ is proven end-to-end and there is external demand to install it standalone.
   `git filter-repo` of `tools/swarmtop/` and the `replace` becomes a tagged
   `require` — no import rewriting. This is the ADR-0002 growth seam, exercised
   later.
-- **Publication:** `tools/swarmtop/` is **not** part of the core repo's public
-  `PUBLICATION.yaml` surface and does not gate core releases. For an initial demo
+- **Publication:** `tools/swarmtop/` is **not** part of the core repository's published
+  surface and does not gate core releases. For an initial demo
   release it may be published in-tree as demo tooling (labeled demo-only), or
   left private and built locally — decided at publish time, not here.
 

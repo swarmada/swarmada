@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** API Designer, Distributed Systems Reviewer, Security Reviewer
-- **Related:** RFC-0001 §9.2.5 / §9.3.1 (two-phase discovery), §9.5.1.2 / §9.2.7 (per-message authorization, mTLS), §9.1.11 (provisioning); ADR-0014 (zero-touch auto-admit); ADR-0025 (mTLS ControlStream — the verified identity source)
+- **Related:** RFC-0001 "The Two-Phase Discovery Model", "FleetAdapter" and "Transport security" (per-message authorization, mTLS), "SwarmadaConfig" (provisioning); ADR-0014 (zero-touch auto-admit); ADR-0025 (mTLS ControlStream — the verified identity source)
 
 ## Context
 

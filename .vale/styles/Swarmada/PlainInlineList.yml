@@ -1,0 +1,24 @@
+# Plain-language limit 7: three or more conditions become bullets.
+# Heuristic, tuned for few false positives. Flags:
+# (a) a condition word (if, when, whenever, while, unless, once; not "at once"
+#     or an adverbial "once,") followed, later in the same sentence and before
+#     any colon or semicolon, by a serial list of short items:
+#       ", B, or C"       (Oxford comma: two commas, then or/and/nor), or
+#       ", B, C or D"     (two commas, then a short item and or/and/nor),
+#     where each item B, C is at most six words with no parenthesis, colon,
+#     semicolon or RFC 2119 keyword. Requiring short items keeps a main clause after the condition
+#     ("If A, the adapter halts the robot and logs it, and ...") from counting
+#     as a list. The first item before the first comma is not inspected.
+#     Only the first condition word of the sentence is flagged, so one
+#     sentence counts once.
+# (b) a second semicolon in one sentence: an inline list of three or more
+#     items or clauses ("Any of: A; B; C"). The second semicolon is flagged.
+# Scope: the same as PlainKeywordPerSentence (Vale 3.23).
+extends: existence
+message: "'%s' marks an inline list of three or more conditions or items in one sentence. Limit: two inline; write three or more as a bulleted list."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+nonword: true
+tokens:
+  - '(?<!\b(?:[Ii]f|[Ww]hen|[Ww]henever|[Ww]hile|[Uu]nless|(?<![Aa]t )[Oo]nce(?![,.;:]| never))\b(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[^;:])*)\b(?:[Ii]f|[Ww]hen|[Ww]henever|[Ww]hile|[Uu]nless|(?<![Aa]t )[Oo]nce(?![,.;:]| never))\b(?=(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[^;:])*?,(?:\s+(?!(?:MUST|SHALL|SHOULD|MAY|REQUIRED)\b)[^\s,.;:?!()]+){1,6},\s+(?:(?:or|and|nor)\s|(?:(?!(?:MUST|SHALL|SHOULD|MAY|REQUIRED)\b)[^\s,.;:?!()]+\s+){1,6}(?:or|and|nor)\s))'
+  - '(?<=;(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[^;])*);'

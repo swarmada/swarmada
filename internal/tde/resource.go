@@ -26,7 +26,7 @@ import (
 )
 
 // ResourceState is the outcome of an adapter-initiated shared-resource reservation
-// (§5.4.5). It maps onto the wire ReservationState.
+// (RFC-0001 #tde-shared-resource-queue-management). It maps onto the wire ReservationState.
 type ResourceState string
 
 // ResourceState values.
@@ -51,12 +51,12 @@ type ResourceOutcome struct {
 }
 
 // ReserveResource reserves a single shared resource for a robot on its behalf
-// (§5.4.5), resolving the resource's owning zone within the namespace. It is
+// (RFC-0001 #tde-shared-resource-queue-management), resolving the resource's owning zone within the namespace. It is
 // idempotent (an existing hold/queued entry for the robot returns its current
 // state) and FAILS CLOSED: an unknown resource, or an engine that has not yet
 // recovered reservation state, is Denied — never granted.
 func (e *Engine) ReserveResource(ctx context.Context, namespace, resourceName, robotID string) (ResourceOutcome, error) {
-	// Fail closed until reservation state has been recovered (§9.4.7): a resource
+	// Fail closed until reservation state has been recovered (RFC-0001 #tde-restart-recovery): a resource
 	// grant is a grant, and must not race an unrebuilt queue.
 	if !e.recovered.Load() {
 		return ResourceOutcome{State: ResourceDenied, Message: "TDE recovering"}, nil
@@ -119,7 +119,7 @@ func (e *Engine) ReserveResource(ctx context.Context, namespace, resourceName, r
 }
 
 // ReleaseResource releases a robot's hold (or queued entry) on a shared resource,
-// promoting the next waiter to holder if the holder was released (§5.4.5). An
+// promoting the next waiter to holder if the holder was released (RFC-0001 #tde-shared-resource-queue-management). An
 // unknown resource is Denied; a robot with no hold/entry reports Released=false.
 func (e *Engine) ReleaseResource(ctx context.Context, namespace, resourceName, robotID string) (ResourceOutcome, error) {
 	zone, ok := e.resourceZone(ctx, namespace, resourceName)
@@ -164,7 +164,7 @@ func (e *Engine) ReleaseResource(ctx context.Context, namespace, resourceName, r
 }
 
 // resourceZone finds the zone in namespace that declares resourceName — the owning
-// zone for a shared resource (§5.4.5). A SharedResource (a lift, a corridor) is
+// zone for a shared resource (RFC-0001 #tde-shared-resource-queue-management). A SharedResource (a lift, a corridor) is
 // declared once, so a namespace scan yields the same owner the up-tree walk would;
 // ambiguity is resolved deterministically by the lowest zone name. Returns
 // ("", false) when no zone declares it (a fail-closed "unknown resource").

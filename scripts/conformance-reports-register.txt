@@ -1,0 +1,36 @@
+# conformance-reports-register.txt — the gate-integrity entries for the conformance reports.
+#
+# `make conformance-profiles` writes the reports into conformance-reports/ and installs this file
+# beside them as conformance-reports/gate-integrity-register.txt, which
+# scripts/check-gate-integrity.py loads as an overlay with scripts/gate-integrity-register.txt.
+# Format, kinds, keys and the four-way ratchet are that file's; read its header. An entry named
+# here AND there is exit 2. Edit THIS file; the copy is overwritten on every run.
+#
+# ONLY LEVELS conformance/profiles.yaml DECLARES. An entry for a level that exists only because a
+# registry overlay (rfcs/*/conformance-registry.yaml, which a tree may not carry) declares it
+# goes beside that overlay, in conformance-reports-register.txt, and is installed with this file
+# only where the overlay is (the Makefile's CONFORMANCE_REGISTER_SOURCES). Listed here, it reports
+# REPAIRED on every tree without the overlay.
+#
+# WHY IT IS COPIED, NOT LOADED FROM HERE. The reports are generated artefacts and
+# conformance-reports/ is not published, so a clone has no reports until it runs the target. In
+# the published register every entry below reported REPAIRED on such a clone; kept only beside
+# the reports, where the target never wrote them, every entry reported NEW once it had run. The
+# target writes both, so the counts travel with the reports they describe: absent together,
+# present together.
+# ── inert · a graded obligation reported notApplicable ───────────────────────────────────
+# notApplicable leaves the pass/fail counts entirely: the level neither passed nor failed the
+# check, and a reader scanning statistics sees no debt. Each one is listed so that a profile
+# reporting away exactly the obligation it owes is a visible change and not a quiet one.
+inert :: conformance-reports/compute-endpoint-plate-watcher-grpc.yaml::verdict :: 1 :: a LEVEL verdict of notApplicable — every check in it was inapplicable. Reported as such rather than as a pass earned by having nothing to do; the register is where "nothing to do" is counted
+inert :: conformance-reports/compute-endpoint-plate-watcher-grpc.yaml::statistics :: 3 :: three checks reported away across this surface's levels. Since suite 2026.10.13 CE6.3 and CE6.4 (request/response rules, inapplicable to this resident endpoint) are in no level: CE6.1-CE6.5 are registered excluded
+inert :: conformance-reports/fleet-adapter.yaml::statistics :: 1 :: one check reported away: C5.6 (the other permitted estop shape). C19.4 is measured since suite 2026.09.28's recording: the simulation adapter now declares an enum parameter (Custom operation)
+
+# ── skip · the conformance reports' own arithmetic ───────────────────────────────────────
+# Not a recount: these are the `skip:` numbers the reports themselves publish. A regenerated
+# report that skips one more check than the last one fails this gate instead of informing it.
+skip :: conformance-reports/fleet-adapter.yaml::statistics :: 7 :: the adapter surface's published skip count (C6.3 moved to the control-plane surface as CP8.1; C19.2 unestablished: the simulation adapter declares no required parameter)
+skip :: conformance-reports/control-plane.yaml::statistics :: 7 :: the control-plane surface's published skip count (includes CP8.1, moved from the adapter surface's C6.3; CP2.3-CP2.5 are in no level since suite 2026.10.13, registered excluded)
+skip :: conformance-reports/compute-endpoint-plate-watcher-grpc.yaml::statistics :: 8 :: this endpoint's published skip count
+skip :: conformance-reports/compute-endpoint-plate-reader-grpc.yaml::statistics :: 5 :: this endpoint's published skip count
+

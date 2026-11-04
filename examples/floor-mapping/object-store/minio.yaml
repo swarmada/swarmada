@@ -1,0 +1,96 @@
+# The floor-mapping demo's object store: one MinIO server, in its own namespace, on a
+# volume of the kind node. The image is built from source by Dockerfile.minio beside this
+# file and loaded into kind; it is never pulled.
+#
+# The root credential is a Secret setup.sh generates for this cluster and never prints. No
+# person or robot uses it: setup.sh signs in with it once, inside the pod, to make the bucket
+# and the two scoped users, and nothing else reads it. The bucket has no anonymous access.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: swarmada-store
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: swarmada-store
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: swarmada-store
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio
+          image: swarmada-demo-minio:RELEASE.2025-09-07T16-13-09Z
+          imagePullPolicy: Never
+          args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: {secretKeyRef: {name: minio-root, key: user}}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: minio-root, key: password}}
+            - name: MINIO_BROWSER
+              value: "off"
+            - name: HOME
+              value: /tmp
+          ports:
+            - {name: s3, containerPort: 9000}
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: 9000}
+            periodSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: swarmada-store
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - {name: s3, port: 9000, targetPort: 9000}

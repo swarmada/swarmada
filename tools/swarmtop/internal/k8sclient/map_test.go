@@ -228,7 +228,7 @@ func TestMapFleetZone(t *testing.T) {
 }
 
 // The health column was blank for every robot in every cluster until the Robot
-// reconciler started deriving status.health (RFC-0001 §9.3.3): mapRobot nil-guards the
+// reconciler started deriving status.health (RFC-0001 #control-plane-robot-health-and-connectivity): mapRobot nil-guards the
 // field, so an unwritten one silently produced an empty column rather than an error.
 // This pins what the guard now receives.
 func TestMapRobot_PopulatesHealthColumn(t *testing.T) {

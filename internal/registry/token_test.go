@@ -140,11 +140,11 @@ func TestTokenCache_NotReusedAcrossCredentials(t *testing.T) {
 	host, c := m.client(nil)
 
 	if _, err := c.ListTags(context.Background(), host, "models/item",
-		&Credential{Username: "alice", Password: "secret"}); err != nil {
+		&Credential{Username: "alice", Password: "secret", Hosts: []string{host}}); err != nil {
 		t.Fatalf("alice: %v", err)
 	}
 	if _, err := c.ListTags(context.Background(), host, "models/item",
-		&Credential{Username: "mallory", Password: "guess"}); err != nil {
+		&Credential{Username: "mallory", Password: "guess", Hosts: []string{host}}); err != nil {
 		t.Fatalf("mallory: %v", err)
 	}
 	if ex, _ := m.counts(); ex != 2 {

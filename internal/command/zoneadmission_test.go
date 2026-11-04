@@ -25,7 +25,7 @@ import (
 )
 
 // PushZoneAdmission pushes a zone_admission hold/admit Command and binds the
-// ZoneAdmissionAck (§9.3.4).
+// ZoneAdmissionAck (RFC-0001 #control-plane-zone-controller).
 func TestPushZoneAdmission_AcknowledgedRoundTrip(t *testing.T) {
 	d, _ := newDispatcher(t, cmdAdapter)
 	sender := &fakeSender{dispatch: d, respond: func(cmd *fav1.Command) *fav1.CommandResult {

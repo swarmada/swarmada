@@ -28,10 +28,10 @@ import (
 	"github.com/swarmada/swarmada/internal/metrics"
 )
 
-// defaultSweepInterval is how often the aggregate §9.3.8 gauges are recomputed.
+// defaultSweepInterval is how often the aggregate metrics-contract gauges are recomputed.
 const defaultSweepInterval = 15 * time.Second
 
-// MetricsSweeper periodically recomputes the RFC-0001 §9.3.8 resource-count
+// MetricsSweeper periodically recomputes the metrics-contract resource-count
 // gauges — swarmada_fleetactions_by_phase, swarmada_robots_by_phase,
 // swarmada_robots_in_estop, swarmada_fleet_adapter_connected, and
 // swarmada_fleet_adapter_phase — from the live resource set.
@@ -129,7 +129,7 @@ func (s *MetricsSweeper) sweep(ctx context.Context) {
 				phaseByNS[ns][phase]++
 			}
 			// Only the active estop states are counted (Normal and Resuming are
-			// excluded, §9.3.8). The set MUST match RFC-0001 filter 10 and
+			// excluded, RFC-0001 #control-plane-observability-prometheus-metrics-contract). The set MUST match RFC-0001 filter 10 and
 			// robotUnderEstop: a robot withheld from dispatch for an estop that
 			// this gauge does not count is invisible to the operator debugging it.
 			switch robots.Items[i].Status.EstopState {

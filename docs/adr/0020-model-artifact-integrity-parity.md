@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-23
 - **Deciders:** Security Reviewer, API Designer, Principal Software Architect
-- **Related:** RFC-0001 §9.1.7.1 and §9.2.8 (firmware signing and verification), §9.1.9 (ModelPolicy quality gate), ADR-0006 (north side is the Kubernetes API)
+- **Related:** RFC-0001 "FirmwareRollout" and the "Fleet Adapter compliance checklist" (firmware signing and verification), "ModelPolicy" (quality gate), ADR-0006 (north side is the Kubernetes API)
 
 ## Context
 
@@ -12,7 +12,7 @@ requires `firmwareChecksum` (a `sha256:<hex>` digest the robot re-verifies over
 the downloaded bytes before install) and supports `firmwareSignatureRef`, a
 detached signature verified against `SwarmadaConfig.spec.signing.trustRoots`
 before any dispatch; when `requireSignatureVerification` is set, an unsigned
-firmware rollout fails closed (§9.1.7.1, §9.2.8).
+firmware rollout fails closed (RFC-0001, "FirmwareRollout" and the "Fleet Adapter compliance checklist").
 
 `ModelRolloutSpec` carries only `modelUri` and a version string. There is no
 checksum, no signature reference, and no trust-root verification before the
@@ -100,7 +100,7 @@ root rather than introducing a second trust system.
 - Leaves a clean seam: metric-to-artifact attestation can ship optional and be
   tightened to required per namespace later without another schema change.
 
-## Follow-up test obligations
+## Test obligations
 
 - An unauthenticated webhook call is rejected unless `allowUnauthenticated` is
   explicitly set.

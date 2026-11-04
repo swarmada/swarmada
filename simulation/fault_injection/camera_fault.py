@@ -83,6 +83,7 @@ def list_faults(robot_id: str | None = None) -> None:
 
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Inject or clear hardware faults on Swarmada simulated robots."

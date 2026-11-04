@@ -70,7 +70,7 @@ estop:                          # trigger: none | on_command | at_seconds (estop
 |---|---|---|
 | `healthy-fleet` (default) | N robots, full capability set, slow drain, nothing degrades. | — |
 | `hardware-fault` | `camera_front` DEGRADED at T+30s, recovers at T+90s — Demo B (reroute + recovery). | `TelemetryPayload.hardware`, `CapabilitiesSnapshot` |
-| `battery-edge` | One robot starts low (22%) and drains fast past a task's `minBatteryPct`; the scheduler avoids it. | `TelemetryPayload.battery.percent` |
+| `battery-edge` | One robot starts low (22%) and drains fast to 0 while it keeps its task: in the quickstart it is the only candidate, so the scheduler's battery tie-break is not exercised (the quickstart's `battery-handoff` scenario stages that comparison). | `TelemetryPayload.battery.percent` |
 | `comms-flaky` | One robot's ControlStream drops at T+20s and reconnects at T+35s (Hello/Register re-handshake). | stream torn down + reconnected; `TelemetryPayload` withheld while down |
 | `estop-drill` | After a timer the robot performs a confirmed emergency stop via `confirm_estop` (never faked). | `AdapterSafetyMessage.estop_ack` |
 
@@ -79,7 +79,7 @@ Two scope notes on the last two, both surfaced deliberately:
 - **`estop-drill`** is adapter-initiated (a demo affordance) and reports an
   `EstopAck` with a synthetic `drill-<robot>` id. The *stop itself* is real —
   `safety.confirm_estop` waits on the simulator's ground-truth `is_stopped`, never a
-  timeout. On a live cluster the control plane initiates estop (RA-6/C5); the drill's
+  timeout. On a live cluster the control plane initiates estop (the dedicated safety channel, C5); the drill's
   unsolicited ack is for the local demo, while the safe-hold is genuine.
 - **`comms-flaky`** does a full **bidirectional stream drop**: at `comms.drop.at_seconds`
   the adapter cancels the ControlStream RPC and, at `reconnect_seconds`, re-establishes
@@ -118,8 +118,8 @@ warning and runs in pure safety/telemetry mode, so the conformance gate stays gr
 ## Running under conformance
 
 ```
-make conformance-sim         # C0–C16, healthy-fleet (default)
-make conformance-sim-fault   # C0–C16 while exercising the hardware-fault path
+make conformance-sim         # C0–C19, healthy-fleet (default)
+make conformance-sim-fault   # C0–C19 while exercising the hardware-fault path
 ```
 
 `conformance-sim-fault` uses fast timers (`FAULT_AT=2 RECOVER_AT=4`, overridable).
@@ -131,8 +131,8 @@ with more than one Python (a system/Homebrew install alongside your project `.ve
 interpreters, and only one may have all deps:
 
 - the scenario loader needs **PyYAML** (declared in `pyproject.toml` dependencies);
-- the conformance harness/adapter needs **grpcio ≥ 1.81.1** (matching the generated
-  stubs).
+- the conformance harness/adapter needs **grpcio ≥ 1.64.1** and **protobuf ≥ 3.20.3**
+  (the oldest runtimes the generated stubs import on).
 
 Activate your project `.venv` (Python 3.12) so both resolve to it:
 
@@ -145,11 +145,13 @@ make PYTHON=/path/to/python3 conformance-sim-fault
 
 If an interpreter is missing PyYAML the adapter still runs (degraded, no scenario);
 if it is missing a compatible grpcio the harness itself won't start — upgrade with
-`python3 -m pip install -U "grpcio>=1.81.1"`.
+`python3 -m pip install -U "grpcio>=1.64.1"`.
 
 ## Tests
 
-- `tests/python/test_scenarios.py` — the pure loader/engine (timeline, overrides,
-  delta compression, errors). Proto-free; runs on any interpreter.
-- `tests/python/test_sim_adapter_scenario.py` — asserts the adapter maps the fault
-  onto the proto fields. Skips automatically if the interpreter lacks grpc.
+- `tests/python/test_hardware_attrs.py` — the physical hardware attributes a
+  manifest declares travel through the loader and the engine, including across a
+  fault, onto the wire; an attribute the manifest does not declare is omitted, not
+  sent as `0`. Needs `grpcio` on the interpreter `pytest` runs under.
+- `make conformance-sim-fault` exercises the fault path end to end against the
+  simulation adapter.

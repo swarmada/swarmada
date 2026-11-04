@@ -92,15 +92,16 @@ func TestHTTPFetcher_BearerAndBasicAuth(t *testing.T) {
 	}))
 	defer ts.Close()
 	f := &HTTPFetcher{Client: ts.Client()}
+	listed := []string{hostOfServer(ts)}
 
-	if _, err := f.Fetch(context.Background(), httpsURL(ts), &Credential{BearerToken: "tok123"}); err != nil {
+	if _, err := f.Fetch(context.Background(), httpsURL(ts), &Credential{BearerToken: "tok123", Registries: listed}); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer tok123" {
 		t.Errorf("bearer auth header = %q", gotAuth)
 	}
 
-	if _, err := f.Fetch(context.Background(), httpsURL(ts), &Credential{Username: "u", Password: "p"}); err != nil {
+	if _, err := f.Fetch(context.Background(), httpsURL(ts), &Credential{Username: "u", Password: "p", Registries: listed}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(gotAuth, "Basic ") {
@@ -108,7 +109,7 @@ func TestHTTPFetcher_BearerAndBasicAuth(t *testing.T) {
 	}
 
 	// Bearer wins when both are set.
-	if _, err := f.Fetch(context.Background(), httpsURL(ts), &Credential{BearerToken: "t", Username: "u", Password: "p"}); err != nil {
+	if _, err := f.Fetch(context.Background(), httpsURL(ts), &Credential{BearerToken: "t", Username: "u", Password: "p", Registries: listed}); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer t" {
@@ -126,3 +127,6 @@ func TestHTTPFetcher_BearerAndBasicAuth(t *testing.T) {
 
 // httpsURL returns the test server's URL (already https for a TLS server).
 func httpsURL(ts *httptest.Server) string { return ts.URL }
+
+// hostOfServer returns the test server's host:port, as a `registries` entry names it.
+func hostOfServer(ts *httptest.Server) string { return strings.TrimPrefix(ts.URL, "https://") }

@@ -3,7 +3,7 @@
 # full-surface — the coverage scenario. Its ONLY goal is to touch every field the
 # control plane consumes from a Fleet Adapter at least once, in a single timed run,
 # so the integration/visual/metrics harness (make demo / make demo-test) can watch
-# a value flow through every swarmtop view and assert every §9.3.8 alert fires and
+# a value flow through every swarmtop view and assert every metrics-contract alert fires and
 # clears. It is NOT a "story" demo (hardware-fault/battery-edge/estop-drill each tell
 # one clean story) — it deliberately does everything, once.
 #
@@ -50,8 +50,8 @@
 #                                Succeeded is projected; Paused via a pause Command).
 #   - FleetAdapter Pending/Rejected — Rejected needs a refused handshake; out of a single
 #                                healthy run's scope (a negative-path fixture, not here).
-#   - RobotEstopState Resuming→Normal (estop CLEAR) — operator action under RFC-0006
-#                                supervised estop clear; make demo-test issues the clear.
+#   - RobotEstopState Resuming→Normal (estop CLEAR) — an operator action (the
+#                                estop-clear verb); make demo-test issues the clear.
 #
 # NOTE FOR THE HARNESS (make demo / make demo-test): the multi-step fault_timeline below
 # (DEGRADED→FAILED→HEALTHY, three events) is INCOMPATIBLE with sim_adapter.py's default

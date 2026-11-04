@@ -13,20 +13,29 @@ certification program and issues no mark (see
 
 ## Scope
 
-This cut covers the safety-critical subset **C1–C6** — the checks
-[`REGISTRY.md`](../REGISTRY.md) expects a submission to demonstrate. Checks that
-the harness does not yet drive (C7 optional-command decline, C8 edge stream, and
-the timer-driven parts of C4) are reported as `skip` with a reason, so the report
-always states exactly what was and was not verified.
+The harness drives the full `C0`–`C19` catalog in [`../CONFORMANCE.md`](../CONFORMANCE.md) and
+records a result for every check id it defines. A check the run could not exercise is recorded
+`skip` with an enumerated cause (`SkipCause` in `report.py`), so the report states exactly what
+was and was not verified.
 
-| Area | Coverage in this cut |
-| :--- | :------------------- |
-| C1 handshake | Both streams opened together; `AdapterHello` first; protocol version |
-| C2 lifecycle | Observed only if the adapter self-registers (else `skip`) |
-| C3 fencing tokens | MISSING / STALE rejection, accept + echo, idempotent re-delivery |
-| C4 leases | Reported `skip` — self-stop is a timer-driven on-robot behavior |
+| Area | What the harness does |
+| :--- | :-------------------- |
+| C0 report integrity | Self-checks on the run and its context; `C0.1` fails the suite if a skip contradicts its recorded cause |
+| C1 handshake | Both streams opened together; `AdapterHello` first; protocol version. `C1.3` (client certificate) is recorded `skip`: the harness listens on a plaintext port (see mTLS below) |
+| C2 lifecycle | Registration and the redial, when the adapter registers a robot (else `skip`) |
+| C3 fencing tokens | MISSING / STALE rejection, accept + echo, idempotent re-delivery, adoption of the control plane's token, a cancel naming a preempted action leaving the preemptor running |
+| C4 leases | Self-stop when a lease is not renewed (`C4.2`), renewal, stale `lease_generation` |
 | C5 estop | Confirmed `EstopAck` on `SafetyStream`; estop not on `ControlStream` |
-| C6 telemetry | Observed only if the adapter streams telemetry (else `skip`) |
+| C6 telemetry | Telemetry and status discipline, when the adapter streams telemetry (else `skip`) |
+| C7 optional commands | Decline via `unsupported=true`, and artefact verification |
+| C8 edge stream | Serves `EdgeService`, advertises an edge endpoint on `RegisterAck`, checks the adapter dials it and confirms an edge-issued estop |
+| C9–C10 | `verify_*` results and update progress, owed only by an adapter that accepts the command |
+| C11–C12 | Pause / resume and capability scan |
+| C13–C15 | Contract-version negotiation, estop version-invariance, version-bound report |
+| C16 | Task status reporting, terminal states included |
+| C17 | Zone operating constraints: declaration well formed; an unhonourable rule is declined naming the subject |
+| C18 | Sensor streams and the duty cycle |
+| C19 | An assignment outside the adapter's declared action catalog is declined `INVALID_ACTION` |
 
 ## Running
 
@@ -64,15 +73,15 @@ ran. Record the result and the protocol version in [`../REGISTRY.md`](../REGISTR
 
 ## mTLS
 
-Production connections use mutual TLS and the adapter's client certificate is its
-identity (C1.3, RFC-0001 §5.5). This cut runs over an insecure local channel to
-keep the check logic the focus; certificate-identity and per-robot authorization
-checks are a planned addition and are tracked as such in the report.
+Production connections use mutual TLS, and the adapter's client certificate is its
+identity (`C1.3`). The harness listens on a plaintext port (`add_insecure_port`), so it
+does not grade `C1.3`: the report records it `skip` with the cause `deployment-property`,
+and certificate identity is asserted in the control plane's own `ControlStream` tests.
 
 ## Layout
 
 | File | Purpose |
 | :--- | :------ |
 | `report.py` | The result model (`CheckResult`, `Report`) and JSON/text rendering. |
-| `harness.py` | The control-plane test server and the C1–C6 scenario driver. |
+| `harness.py` | The control-plane test server and the C0–C19 scenario driver. |
 | `__main__.py` | CLI: start server, launch the adapter, run, report, exit. |

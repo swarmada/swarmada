@@ -25,7 +25,7 @@ import (
 )
 
 // TelemetryFrame translates a wire TelemetryPayload (RFC-0001 §9.2.3) into the
-// proto-free telemetry.Frame the projector consumes (§9.3.7). It is the
+// proto-free telemetry.Frame the projector consumes (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split). It is the
 // integration seam documented in the telemetry package: the ControlStream server
 // calls it once per received TelemetryPayload before invoking the Ingestor.
 //

@@ -1,0 +1,22 @@
+# Plain-language limit 9a: a term is defined once, in a Terms block, never in
+# passing. Flags definitional phrases in normative paragraphs and list items.
+# Terms blocks are lists of "- **term**: definition"; write the definition
+# directly there ("- **lease horizon**: the time after which ..."), without
+# these phrases either.
+# Scope: the same as PlainKeywordPerSentence (Vale 3.23).
+extends: existence
+message: "'%s' defines a term in passing. Define each term once, in the Terms block, as '- **term**: definition'."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+ignorecase: true
+tokens:
+  - (?:is|are) called(?! out)
+  - (?:is|are) defined as
+  - (?:is|are) defined to be
+  - (?:is|are) known as
+  - (?:is|are) referred to as
+  - (?:is|are) termed
+  - we call
+  - hereafter
+  - hereinafter
+  - means that

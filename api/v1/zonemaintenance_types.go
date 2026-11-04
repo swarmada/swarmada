@@ -25,7 +25,8 @@ type ZoneMaintenanceMode string
 const (
 	// ZoneMaintenanceModeGraceful — no new actions assigned; robots finish current actions then pause.
 	ZoneMaintenanceModeGraceful ZoneMaintenanceMode = "Graceful"
-	// ZoneMaintenanceModeImmediate — robots pause now; in-progress actions are requeued as Pending.
+	// ZoneMaintenanceModeImmediate — robots pause now; an in-progress action is marked for requeue
+	// (RFC-0001 row A20). Held work, which a stop held, is not marked (row A6; not met at v0.4 after the release: A20).
 	ZoneMaintenanceModeImmediate ZoneMaintenanceMode = "Immediate"
 )
 
@@ -33,7 +34,7 @@ const (
 // +kubebuilder:validation:Enum=Scheduled;Active;Completed;Cancelled
 type ZoneMaintenancePhase string
 
-// ZoneMaintenancePhase values (§9.1.11): a window is Scheduled until its start, Active while robots
+// ZoneMaintenancePhase values (RFC-0001 #zonemaintenance-schema): a window is Scheduled until its start, Active while robots
 // are wound down and held, and Completed once the zone resumes.
 const (
 	ZoneMaintenancePhaseScheduled ZoneMaintenancePhase = "Scheduled"
@@ -42,7 +43,35 @@ const (
 	ZoneMaintenancePhaseCancelled ZoneMaintenancePhase = "Cancelled"
 )
 
-// MaintenanceScopeType selects what a ZoneMaintenance applies to (§9.1.10).
+// ZoneMaintenanceDesiredState is the operator's declarative intent for a
+// maintenance window. Before it existed, `Completed` was reachable only through
+// the auto-resume deadline, so a window created with the default
+// autoResumeAfterMinutes: 0 could be activated and never closed — the field's own
+// documentation said "0 means the operator must manually resume" and no mechanism
+// for that resume existed.
+//
+// LEVEL-TRIGGERED, like FleetAction/FleetTask spec.desiredState (ADR-0047): a
+// write persists and re-converges after a disconnect, and re-writing the same
+// value is idempotent.
+//
+// `Completed` REQUESTS a close; it does not perform one. The controller runs the
+// same gated resume the deadline path runs, and the window reaches Completed only
+// once every robot it paused is actually resumable. A robot whose estop is not
+// Clear holds the close exactly as it holds the deadline — an operator's early
+// close cannot strand a robot the deadline would not have stranded.
+// +kubebuilder:validation:Enum=Active;Completed
+type ZoneMaintenanceDesiredState string
+
+// ZoneMaintenanceDesiredState values.
+const (
+	// ZoneMaintenanceDesiredStateActive — run the window to its deadline (default).
+	ZoneMaintenanceDesiredStateActive ZoneMaintenanceDesiredState = "Active"
+	// ZoneMaintenanceDesiredStateCompleted — close the window as soon as every
+	// robot it paused can be resumed.
+	ZoneMaintenanceDesiredStateCompleted ZoneMaintenanceDesiredState = "Completed"
+)
+
+// MaintenanceScopeType selects what a ZoneMaintenance applies to (RFC-0001 #zonemaintenance-schema).
 // +kubebuilder:validation:Enum=Zone;Namespace
 type MaintenanceScopeType string
 
@@ -65,8 +94,8 @@ type ZoneMaintenanceScope struct {
 	ZoneName string `json:"zoneName,omitempty"`
 }
 
-// WindingDownRobot describes a robot still finishing its current action
-// during Graceful mode wind-down.
+// WindingDownRobot describes a robot still on an action while the window
+// winds down, in either mode.
 type WindingDownRobot struct {
 	Name                  string       `json:"name"`
 	AssignedAction        string       `json:"assignedAction"`
@@ -98,6 +127,17 @@ type ZoneMaintenanceSpec struct {
 	// +kubebuilder:default=Graceful
 	Mode ZoneMaintenanceMode `json:"mode,omitempty"`
 
+	// DesiredState is the operator's level-triggered intent for this window.
+	// Writing `Completed` closes it early, without waiting for
+	// autoResumeAfterMinutes. The close is REQUESTED, not performed: the
+	// controller resumes the robots it paused
+	// through the same gate the deadline uses, and the window stays Active while
+	// any of them is held (status.conditions ResumeBlockedByEstop says so).
+	// +optional
+	// +kubebuilder:validation:Enum=Active;Completed
+	// +kubebuilder:default=Active
+	DesiredState ZoneMaintenanceDesiredState `json:"desiredState,omitempty"`
+
 	// Reason is a human-readable description of why maintenance is occurring.
 	// Included in operator notifications and audit logs.
 	// +optional
@@ -108,12 +148,16 @@ type ZoneMaintenanceSpec struct {
 	// +optional
 	ScheduledStart *metav1.Time `json:"scheduledStart,omitempty"`
 
-	// AutoResumeAfterMinutes: if non-zero, the maintenance automatically
-	// deactivates this many minutes after activation: status.phase transitions
-	// to Completed and all paused/wound-down robots are resumed. The object
-	// itself is NOT deleted — it is terminal (the controller no longer acts on
-	// it) but remains until the operator deletes it; there is no automatic
-	// garbage collection. 0 means the operator must manually resume.
+	// AutoResumeAfterMinutes: if non-zero, the controller closes the window this
+	// many minutes after activation, through the same gated resume as
+	// spec.desiredState: Completed. A robot another Active window also covers
+	// stays paused. When requireEstopClearBeforeResume is true, a robot whose
+	// estop is not clear stays in Maintenance, and the window stays Active with
+	// ResumeBlockedByEstop True while any robot is held. A Completed window is
+	// NOT deleted — it is terminal (the controller no longer acts on it) but
+	// remains until the operator deletes it; there is no automatic garbage
+	// collection. 0 means the window stays open until an operator closes or
+	// deletes it.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1440
 	// +kubebuilder:default=0
@@ -122,9 +166,9 @@ type ZoneMaintenanceSpec struct {
 	// RequireEstopClearBeforeResume, when true, holds a paused robot's
 	// administrative resume (Maintenance→Idle) until its observed estop is Clear.
 	// This is an OPERATIONAL gate on the phase transition only — it never stops a
-	// robot and is separate from the hardware estop path. Defaults from
-	// SwarmadaConfig.spec.maintenance.requireEstopClearBeforeResume. Deletion-driven
-	// resume is never gated.
+	// robot and is separate from the hardware estop path. The API server defaults
+	// it to true, so SwarmadaConfig.spec.maintenance.requireEstopClearBeforeResume
+	// is never consulted. Deletion-driven resume is never gated.
 	// +optional
 	// +kubebuilder:default=true
 	RequireEstopClearBeforeResume *bool `json:"requireEstopClearBeforeResume,omitempty"`
@@ -139,10 +183,9 @@ type ZoneMaintenanceStatus struct {
 	// CompletedAt is when the window closed, stamped once on the transition into
 	// Completed and never rewritten.
 	//
-	// It is the window's own record of when robots came back into service. The
-	// Completed condition's lastTransitionTime is close but not equivalent: conditions
-	// are rewritten by later reconciles and are subject to their own retention, so a
-	// duration computed from them silently drifts. Empty while Scheduled or Active.
+	// It is the window's only record of when robots came back into service: no
+	// condition records the close (the conditions this controller writes are
+	// ScopeResolved and ResumeBlockedByEstop). Empty while Scheduled or Active.
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 
@@ -160,7 +203,7 @@ type ZoneMaintenanceStatus struct {
 	// +optional
 	PausedRobots []PausedRobotEntry `json:"pausedRobots,omitempty"`
 
-	// WindingDownRobots lists robots still finishing actions (Graceful mode only).
+	// WindingDownRobots lists robots still on an action, in either mode; Immediate requeues it.
 	// +optional
 	WindingDownRobots []WindingDownRobot `json:"windingDownRobots,omitempty"`
 
@@ -179,7 +222,9 @@ type ZoneMaintenanceStatus struct {
 //
 // ZoneMaintenance represents a planned maintenance event for a zone or namespace.
 // Creating this resource pauses robot activity in the targeted area.
-// Deleting it (or running swarmctl deactivate maintenance) resumes all robots.
+// Deleting it resumes every robot it paused. Setting spec.desiredState to Completed
+// requests an early close, which resumes the robots through the same estop gate as
+// the auto-resume deadline. swarmctl has no command that ends a window.
 //
 // ZoneMaintenance is distinct from estop:
 //   - Estop: safety-critical, immediate, requires per-robot acknowledgment.

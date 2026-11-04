@@ -1,5 +1,5 @@
 # swarmada:admin — full access including SwarmadaConfig, robots/status, CRD
-# management, and the ONLY role granted estop-clear (RFC-0001 §9.5.3.1/.2, the
+# management, and the ONLY role granted estop-clear (RFC-0001 #security-role-definitions and #security-permission-matrix, the
 # admin-only safety constraint). Suitable for the fleet platform team.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -34,7 +34,7 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["discoveredrobots"]
     verbs: ["admit", "reject"]
-  # policy-reset (§9.1.9.4): an operator override of an AUTOMATED decision — clearing a
+  # policy-reset (RFC-0001 #security-permission-matrix): an operator override of an AUTOMATED decision — clearing a
   # FailedRepeatedly suspension so a ModelPolicy resumes evaluation. Scoped like admit/reject
   # rather than like estop-clear: it is a model-quality call, not a safety one, so it does not
   # need to be admin-only.
@@ -53,15 +53,49 @@ rules:
     verbs: ["cancel"]
   - apiGroups: ["swarmada.io"]
     resources: ["fleettasks"]
-    verbs: ["append"]
+    verbs: ["append", "cancel", "activate"]
+  # Estop at every scope: robots (robot), fleetzones (zone), swarmadaconfigs (namespace —
+  # the webhook authorizes a namespace estop against the SwarmadaConfig that carries it).
   - apiGroups: ["swarmada.io"]
-    resources: ["fleetzones", "robots"]
+    resources: ["fleetzones", "robots", "swarmadaconfigs"]
     verbs: ["estop-trigger", "estop-clear"]
   # Safety audit log: read + export + verify.
   - apiGroups: ["swarmada.io"]
     resources: ["safetyauditlogs"]
     verbs: ["read", "export", "verify"]
-  # CRD management.
+  # CRD management: read any CRD; write only Swarmada's own, by name. No create and no
+  # deletecollection, because RBAC cannot narrow either by name: the identity that installs
+  # the chart installs and upgrades the CRDs. The names are every CRD in config/crd/bases.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames:
+      - artifactstores.swarmada.io
+      - computeendpoints.swarmada.io
+      - computeworkloadtemplates.swarmada.io
+      - discoveredrobots.swarmada.io
+      - edgenodes.swarmada.io
+      - firmwarerollouts.swarmada.io
+      - fleetactions.swarmada.io
+      - fleetadapters.swarmada.io
+      - fleettasks.swarmada.io
+      - fleetzones.swarmada.io
+      - modelpolicies.swarmada.io
+      - modelrollouts.swarmada.io
+      - resultsinks.swarmada.io
+      - robotclasses.swarmada.io
+      - robotprobes.swarmada.io
+      - robots.swarmada.io
+      - semanticevents.swarmada.io
+      - semanticeventsources.swarmada.io
+      - swarmadaconfigs.swarmada.io
+      - tasktriggers.swarmada.io
+      - zonemaintenances.swarmada.io
+    verbs: ["update", "patch", "delete"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]

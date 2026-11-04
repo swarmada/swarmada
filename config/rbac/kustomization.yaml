@@ -5,11 +5,11 @@ resources:
   - role.yaml
   # Binds the manager's ServiceAccount (config/manager/) to the role above.
   - manager_role_binding.yaml
-  # The five built-in user/adapter roles (RFC-0001 §9.5.3), hand-authored.
+  # The five built-in user/adapter roles (RFC-0001 #security-role-definitions), hand-authored.
   - swarmada_viewer_role.yaml
   - swarmada_operator_role.yaml
   - swarmada_fleet_manager_role.yaml
   - swarmada_admin_role.yaml
   - swarmada_robot_role.yaml
-  # The Zone Controller edge node's service-account role (RFC-0001 §9.2.10).
+  # The Zone Controller edge node's service-account role (RFC-0001 #security-role-definitions).
   - swarmada_edge_role.yaml

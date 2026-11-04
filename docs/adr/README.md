@@ -89,3 +89,24 @@ An ADR has one status at a time:
 | [0044](0044-configurable-lease-horizon.md) | Make the assignment-lease horizon namespace-configurable, bounded, and resolved once | accepted |
 | [0045](0045-desiredstate-hold-is-operator-lifted.md) | A `desiredState` hold is entered declaratively and lifted only by an operator | accepted |
 | [0046](0046-estop-actor-stamped-at-admission.md) | Stamp the authenticated operator at admission; never let attribution block a stop | accepted |
+| [0050](0050-probe-cycles-are-paced-by-intervalseconds.md) | A probe cycle is issued once per `intervalSeconds`, so ADR-0012's debounce is also a duration | accepted |
+| [0051](0051-a-namespace-is-born-with-signing-on-and-incomplete.md) | A namespace is born with signature verification ON and incomplete, and incompleteness is a warning rather than a rejection | accepted (decision 6 superseded by ADR-0053) |
+| [0053](0053-an-absent-swarmadaconfig-enforces-signature-verification.md) | An absent `SwarmadaConfig` enforces signature verification — supersedes ADR-0051 decision 6 | accepted |
+| [0057](0057-operator-intent-into-a-controller-owned-lifecycle-is-a-spec-desiredstate.md) | Operator intent into a controller-owned lifecycle is `spec.desiredState`, and it can only add a hold | accepted |
+| [0056](0056-workload-template-containment-is-pss-baseline-split-across-cel-and-a-webhook.md) | A workload template's pod spec is bounded by Pod Security Standards Baseline, enforced across CEL and a webhook | accepted |
+| [0059](0059-a-robot-is-bound-by-every-zone-that-contains-it-and-is-told-continuously.md) | A robot is bound by every zone that contains it, and is told what may run there continuously | accepted |
+| [0060](0060-preemption-disposition-is-selected-by-action-type.md) | The disposition of a preemption is selected by action type, and neither an e-stop nor a paused action is preemptable | accepted |
+| [0061](0061-one-cancel-intent-decides-four-surfaces.md) | One cancel intent decides the object, the wire, the event and the audit entry — and an unattributable cancel stays unattributed | accepted |
+| [0062](0062-a-semantic-event-produces-a-draft-fleettask.md) | A semantic event produces a draft FleetTask, and the draft gate is forced by the controller | accepted |
+| [0063](0063-a-field-this-tree-cannot-evaluate-is-absent-not-inert.md) | A declared field that nothing evaluates is absent, not inert | accepted |
+| [0064](0064-composite-zone-validity-splits-across-cel-and-the-webhook.md) | Composite-zone validity splits across CEL and the webhook, and partial resolution is asymmetric | accepted |
+| [0065](0065-supportedaction-results-reuses-actionparam-and-empty-is-silence.md) | `SupportedAction.results[]` reuses `ActionParam`, and an empty `results` is silence rather than a claim of no output | accepted |
+| [0066](0066-profile-assignment-is-total-and-the-drift-guard-runs-in-make-test.md) | Every catalog check is assigned to a profile, and the drift guard runs in `make test` | accepted |
+| [0067](0067-a-measurement-gate-refuses-a-run-rather-than-widening-the-floor.md) | A measurement gate refuses a run rather than widening the floor, and the kinematic constants belong to the plant under test | accepted |
+| [0068](0068-capability-loss-reroute-is-a-confirmed-stop-requeue.md) | A capability-loss reroute is a confirmed-stop requeue, and the adapter's `CancelDisposition` decides the outcome | accepted |
+| [0069](0069-exclusions-are-child-zones-with-denial-semantics.md) | An excluded region is a child zone whose entry restriction is `Denied`, not an interior ring in `PhysicalBounds.Polygon` | accepted |
+| [0070](0070-a-conformance-report-grades-each-row-and-names-its-unlock.md) | A conformance report grades each row, names what would unlock it, and does not pass on a skip | accepted |
+| [0071](0071-a-stop-is-confirmed-by-a-channel-that-can-see-motion.md) | A stop is confirmed by a channel that can see motion, any channel can veto it, and the estop receipt is never a stop | accepted |
+| [0072](0072-estop-events-are-ordered-by-a-monotonic-per-robot-epoch.md) | A trigger and a clear are ordered by a monotonic per-robot estop epoch, and only the release direction is gated | accepted |
+| [0073](0073-a-rollout-is-failed-at-settle-time-and-the-phase-is-derived-not-latched.md) | A rollout reaches terminal `Failed` when every targeted robot has settled and at least one settled as a failure, and the phase is derived per reconcile rather than latched | accepted |
+| [0074](0074-a-flow-tree-carries-a-depth-and-a-node-ceiling-and-every-constraint-is-re-enforced-at-every-depth.md) | A flow tree carries a depth ceiling of 32 and a node ceiling of 1024, and every constraint the schema declares is re-enforced at every depth | accepted |

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- /*
+Render-time refusals. This file renders no object; each check stops `helm template`
+and `helm install` with the reason, instead of installing a control plane that
+starts but cannot do what its values say.
+*/ -}}
+
+{{- if and .Values.controlStream.enabled (gt (int .Values.replicaCount) 1) }}
+{{- fail (printf "replicaCount=%d with controlStream.enabled=true is refused. Every replica accepts adapter streams, but commands are issued by the leading replica and pushed only to the streams that replica holds in memory; the Service spreads adapter connections across replicas, so an adapter connected to any other replica receives no commands. Set replicaCount=1 (multi-replica command delivery is not implemented)." (int .Values.replicaCount)) }}
+{{- end }}
+
+{{- if and .Values.controlStream.enabled (not .Values.controlStream.tls.existingSecret) (not .Values.controlStream.tls.certManager.enabled) }}
+{{- fail "controlStream.enabled=true needs mTLS material: set controlStream.tls.certManager.enabled=true, or controlStream.tls.existingSecret to a Secret holding tls.crt, tls.key and ca.crt. Without it the manager logs \"NOT serving ControlStream (fail closed)\" and no adapter can connect." }}
+{{- end }}
+
+{{- if .Values.controlStream.enabled }}
+{{- range .Values.manager.extraArgs }}
+{{- if hasPrefix "--fleet-adapter-insecure-authz" (toString .) }}
+{{- fail "manager.extraArgs sets --fleet-adapter-insecure-authz, and this chart always serves ControlStream with mTLS. The manager refuses that pair at startup: authorization is per robot, by the FleetAdapter's spec.servesRobotClasses." }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if and .Values.webhooks.enabled (eq (toString .Values.webhooks.failurePolicy) "Ignore") (not .Values.webhooks.acknowledgeFailOpenSecurity) }}
+{{- /* The webhook list is generated with webhook.yaml (hack/sync-helm-webhooks.py), so a webhook added there is named here. */ -}}
+{{- fail (printf "webhooks.failurePolicy=Ignore is refused unless webhooks.acknowledgeFailOpenSecurity=true. Ignore admits every request while the webhook server is unreachable, to every webhook whose failurePolicy follows this value: %s. That opens: the estop verb and estop-marker checks (vrobot, vfleetzone, vswarmadaconfig), the robots/status guard (vrobotstatus: a status write, from any identity but the manager's, that moves estopState or estopBaseline, an estop release included, takes a robot out of Error, moves it into or out of Maintenance or Offline, clears a Failed component, changes its capabilities or changes a component's or a model's state or the capabilities a model grants), the Robot admission gate (vrobot: a Robot whose adapter is not Connected with conformance Passed, a change to a Robot's swarmada.io/robot-id, and the removal of the last finalizer of a Robot that holds an estop, Error or a Failed component), the RobotClass merge (mrobot: a Robot stored without its class's safety limits), and the zone-delete check (vfleetzone). The Robot delete guard (vrobotdelete) is Ignore whatever this value is: while no manager replica serves, a Robot that holds a stop can be deleted." (include "swarmada.webhooksFollowingFailurePolicy" .)) }}
+{{- end }}

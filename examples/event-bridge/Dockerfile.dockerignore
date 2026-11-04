@@ -1,0 +1,8 @@
+*
+!go.mod
+!go.sum
+!api/
+!examples/event-bridge/
+**/*_test.go
+**/*.md
+examples/event-bridge/overlay/

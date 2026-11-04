@@ -50,7 +50,7 @@ func policyWithGate(autoDeploy fleetv1.AutoDeployCondition, gate *fleetv1.Qualit
 		},
 		Spec: fleetv1.ModelPolicySpec{
 			ModelName:           "item-recognition",
-			TargetRobotSelector: metav1.LabelSelector{MatchLabels: map[string]string{"fleet": "pickers"}},
+			TargetRobotSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"fleet": "pickers"}},
 			QualityGate:         gate,
 			AutoDeployOn:        autoDeploy,
 			RolloutTemplate: &fleetv1.RolloutTemplateSpec{

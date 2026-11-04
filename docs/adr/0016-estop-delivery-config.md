@@ -3,8 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** Security Reviewer, Distributed Systems Reviewer, API Designer
-- **Related:** RFC-0001 §9.1.11.8 (estop delivery config), §9.6.2 (confirmed estop
-  delivery over SafetyStream), the RA-1 discipline
+- **Related:** RFC-0001 "Estop Delivery Configuration", "Emergency Stop Protocol"
+  (confirmed estop delivery over SafetyStream), the RA-1 discipline
 
 ## Context
 
@@ -73,7 +73,8 @@ must never lengthen or weaken delivery beyond the built-in defaults.
   finally has a defined, safe response instead of silence.
 - **Safety.** Fail-safe throughout: unreadable config → built-in defaults; partial
   delivery defaults to `BlockNewTasks`. The dispatcher's confirmed-delivery invariant
-  (record STOPPED only on adapter-CONFIRMED ACK, §9.6.2) is unchanged — this ADR
+  (record STOPPED only on adapter-CONFIRMED ACK — RFC-0001, "Emergency Stop
+   Protocol") is unchanged — this ADR
   tunes timing and adds a partial-delivery response, never relaxes confirmation.
 - **Obligation.** Thread namespace-resolved config through the dispatcher episode
   (tests: honored value, fail-safe). Build partial-delivery detection + response with

@@ -50,7 +50,7 @@ const (
 	modeActionDetail
 	// modeTaskDetail is the full-screen detail for a composite row that is NOT an
 	// action — a FleetTask, or a member with no child action yet. Action rows keep
-	// going to modeActionDetail, unchanged, per spec §3 rule 6.
+	// going to modeActionDetail, unchanged.
 	modeTaskDetail
 	// modeAdapters is the Fleet Adapter health table.
 	modeAdapters

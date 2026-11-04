@@ -82,6 +82,33 @@ func TestTaskCancelSetsDesiredStateOnly(t *testing.T) {
 	}
 }
 
+// A task that has ended is not reconciled again, so the CLI must not say its members will be
+// cancelled: it says the task has ended and names the command that stops a running member.
+func TestTaskCancelOnAnEndedTaskPromisesNothing(t *testing.T) {
+	ns := "warehouse-a"
+	for _, phase := range []fleetv1.FleetTaskPhase{
+		fleetv1.FleetTaskPhaseSucceeded, fleetv1.FleetTaskPhaseFailed,
+		fleetv1.FleetTaskPhaseCancelled, fleetv1.FleetTaskPhaseCompensated,
+	} {
+		task := testTask(ns, "restock-7", fleetv1.DesiredStateRunning, 2)
+		task.Status.Phase = phase
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(task).Build()
+		out := &bytes.Buffer{}
+		o := newTestOptions(out, cli.OutputTable)
+		if err := o.taskCancel(context.Background(), c, authorizer(true), ns, "restock-7", "", true); err != nil {
+			t.Fatalf("%s: cancel task: %v", phase, err)
+		}
+		if strings.Contains(out.String(), "will be cancelled") {
+			t.Errorf("%s: output promises a cancel the controller never makes: %q", phase, out.String())
+		}
+		for _, want := range []string{"has already ended (" + string(phase) + ")", "swarmctl cancel action <name>"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("%s: output does not say %q: %q", phase, want, out.String())
+			}
+		}
+	}
+}
+
 // Fail closed: a denied cancel writes nothing.
 func TestTaskCancelDeniedFailsClosed(t *testing.T) {
 	ns := "warehouse-a"

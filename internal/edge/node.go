@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package edge is the Zone Controller edge node (RFC-0001 §9.6.2.5, §9.2.10;
+// Package edge is the Zone Controller edge node (RFC-0001 #safety-edge-headless-emergency-stop, #fleet-adapter-protocol-the-edge-stream;
 // the site connectivity boundary, ADR-0010). It
 // runs on facility-LAN hardware and serves the EdgeService.EdgeStream — a channel
 // that survives a control-plane partition. It detects zone-boundary breaches from
@@ -33,6 +33,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
+	"google.golang.org/grpc/peer"
+
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
 	"github.com/swarmada/swarmada/internal/zone"
@@ -42,7 +45,7 @@ import (
 // eventEdgeEstop is the local audit event for a headless estop.
 const eventEdgeEstop = "EDGE_ESTOP_TRIGGERED"
 
-// Default edge timings mirror §9.6.2.3 (confirmed within the window, else Failed).
+// Default edge timings mirror RFC-0001 #safety-estop-state-machine (confirmed within the window, else Failed).
 const (
 	defaultDeliveryTimeout = 2 * time.Second
 	defaultConfirmTimeout  = 10 * time.Second
@@ -66,8 +69,9 @@ type Config struct {
 	Namespace string
 	// Zones are the boundaries this node evaluates positions against.
 	Zones []ZonePolygon
-	// RobotZone maps a robot to its assigned zone name. A frame for a robot absent
-	// from this map is ignored (the edge cannot act on an unknown/forged robot).
+	// RobotZone maps a robot, by the wire robot_id its adapter reports positions
+	// under (not its Robot object name), to its assigned zone name. A frame for a robot
+	// absent from this map is ignored (the edge cannot act on an unknown/forged robot).
 	RobotZone map[string]string
 	// EdgeZones is the set of zone names that declare an edge node, so the feed
 	// reporter knows which zones expect an EdgeStream feed. A robot whose zone is
@@ -90,6 +94,9 @@ type Node struct {
 	cfg   atomic.Pointer[configView] // hot-swappable via SetConfig; reads are lock-free
 	audit audit.Recorder
 
+	// Log is the structured logger. The zero (unset) value discards output.
+	Log logr.Logger
+
 	now             func() time.Time
 	deliveryTimeout time.Duration
 	confirmTimeout  time.Duration
@@ -97,7 +104,7 @@ type Node struct {
 
 	mu      sync.Mutex
 	conns   map[*conn]struct{}
-	pending map[string]chan *fav1.EstopAck
+	pending map[string]pendingEstop
 	issued  map[string]bool // robotID → an edge estop has already been issued
 	idc     uint64
 
@@ -109,7 +116,7 @@ type Node struct {
 	expectedSince map[string]time.Time
 }
 
-// New builds an edge Node with the §9.6.2 default timings.
+// New builds an edge Node with the RFC-0001 #safety-emergency-stop-protocol default timings.
 func New(cfg Config, auditLog audit.Recorder) *Node {
 	n := &Node{
 		audit:           auditLog,
@@ -117,7 +124,7 @@ func New(cfg Config, auditLog audit.Recorder) *Node {
 		confirmTimeout:  defaultConfirmTimeout,
 		feedGrace:       defaultFeedGrace,
 		conns:           map[*conn]struct{}{},
-		pending:         map[string]chan *fav1.EstopAck{},
+		pending:         map[string]pendingEstop{},
 		issued:          map[string]bool{},
 		everSeen:        map[string]struct{}{},
 		expectedSince:   map[string]time.Time{},
@@ -161,7 +168,7 @@ func (n *Node) markSeen(robotID string) {
 // MissingFeeds reports, per edge-node zone, the robots assigned to it from which no
 // EdgeStream PositionFrame has arrived within the feed-grace window since they first
 // appeared in the synced config — i.e. an adapter serving them never established its
-// EdgeStream (§9.2.10). Every EdgeZone is present in the result (an empty slice when
+// EdgeStream (RFC-0001 #fleet-adapter-protocol-the-edge-stream). Every EdgeZone is present in the result (an empty slice when
 // all its feeds are live), so a caller can both raise and clear the report. The
 // grace window is seeded lazily on first observation, so a just-synced robot is
 // never flagged before it has had a chance to connect.
@@ -245,7 +252,7 @@ func (n *Node) EdgeStream(stream fav1.EdgeService_EdgeStreamServer) error {
 		case *fav1.AdapterEdgeMessage_Position:
 			n.onPosition(ctx, c, m.Position)
 		case *fav1.AdapterEdgeMessage_EstopAck:
-			n.routeAck(m.EstopAck)
+			n.routeAck(c, m.EstopAck)
 		}
 	}
 }
@@ -260,7 +267,7 @@ func (n *Node) onPosition(ctx context.Context, c *conn, frame *fav1.PositionFram
 		return // unknown/forged robot: the edge cannot act on it
 	}
 	// The feed exists: this robot's adapter established its EdgeStream, so it can
-	// never be reported as feed-unavailable (§9.2.10).
+	// never be reported as feed-unavailable (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
 	n.markSeen(robotID)
 	zp, ok := v.zoneByName[zoneName]
 	if !ok {
@@ -282,7 +289,7 @@ func (n *Node) onPosition(ctx context.Context, c *conn, frame *fav1.PositionFram
 
 // TriggerLocalEstop issues a zone-wide headless estop on every connected stream —
 // the path for a hardware safety input (light curtain, e-stop button, safety PLC)
-// wired to the edge node (§9.6.2.5).
+// wired to the edge node (RFC-0001 #safety-edge-headless-emergency-stop).
 func (n *Node) TriggerLocalEstop(ctx context.Context, reason string) {
 	n.mu.Lock()
 	conns := make([]*conn, 0, len(n.conns))
@@ -312,7 +319,7 @@ func (n *Node) triggerEstop(ctx context.Context, c *conn, robotID, reason string
 
 	estopID := n.nextEstopID(robotID)
 	ch := make(chan *fav1.EstopAck, 4)
-	n.setPending(estopID, ch)
+	n.setPending(estopID, pendingEstop{conn: c, robotID: robotID, ch: ch})
 	defer n.clearPending(estopID)
 
 	sentAt := n.clock()
@@ -327,7 +334,7 @@ func (n *Node) triggerEstop(ctx context.Context, c *conn, robotID, reason string
 	n.recordEstop(robotID, reason, state, confirmed)
 }
 
-// awaitConfirmed applies the §9.6.2.3 confirmed-only discipline. STOPPED is
+// awaitConfirmed applies the estop-state-machine confirmed-only discipline. STOPPED is
 // returned only on an explicit EstopAck.state=STOPPED; every other path (no ack,
 // FAILED, or STOPPING with no STOPPED in the window) returns Failed.
 func (n *Node) awaitConfirmed(ctx context.Context, ch chan *fav1.EstopAck) (fleetv1.RobotEstopState, bool) {
@@ -365,8 +372,9 @@ func (n *Node) awaitConfirmed(ctx context.Context, ch chan *fav1.EstopAck) (flee
 	}
 }
 
-// recordEstop appends the headless estop to the tamper-evident local audit log
-// (§9.6.5), for later sync to the control plane when connectivity resumes.
+// recordEstop appends the headless estop to the edge node's local audit log
+// (RFC-0001 #safety-safety-audit-log). Nothing sends it to the control plane: an edge
+// estop is not recorded there (RFC-0001 #safety-edge-headless-emergency-stop).
 func (n *Node) recordEstop(robotID, reason string, state fleetv1.RobotEstopState, confirmed bool) {
 	if n.audit == nil {
 		return
@@ -413,9 +421,17 @@ func (n *Node) nextEstopID(robotID string) string {
 	return fmt.Sprintf("edge-estop-%s-%d", robotID, n.idc)
 }
 
-func (n *Node) setPending(id string, ch chan *fav1.EstopAck) {
+// pendingEstop is a headless estop awaiting its EstopAck: the connection it was pushed
+// down and the robot it was issued for ("" for a zone-wide local estop).
+type pendingEstop struct {
+	conn    *conn
+	robotID string
+	ch      chan *fav1.EstopAck
+}
+
+func (n *Node) setPending(id string, p pendingEstop) {
 	n.mu.Lock()
-	n.pending[id] = ch
+	n.pending[id] = p
 	n.mu.Unlock()
 }
 
@@ -425,17 +441,61 @@ func (n *Node) clearPending(id string) {
 	n.mu.Unlock()
 }
 
-func (n *Node) routeAck(ack *fav1.EstopAck) {
+// routeAck resolves a pending estop from an EstopAck that arrived on c.
+//
+// The EdgeStream carries no identity once the handshake is done, and an EstopAck names
+// no robot, so the ack is tied to the adapter that was told to stop by the one thing the
+// edge does know: the connection. An ack resolves an estop only when it arrives on the
+// connection the estop was pushed down. One on any other connection is refused and
+// recorded, and the estop keeps waiting for its own adapter, which resolves it Failed if
+// it never answers (RFC-0001 #safety-edge-headless-emergency-stop).
+func (n *Node) routeAck(c *conn, ack *fav1.EstopAck) {
 	if ack == nil {
 		return
 	}
 	n.mu.Lock()
-	ch := n.pending[ack.GetEstopId()]
+	p, ok := n.pending[ack.GetEstopId()]
 	n.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- ack:
-		default:
-		}
+	if !ok {
+		return
 	}
+	if p.conn != c {
+		n.refuseAck(c, p, ack)
+		return
+	}
+	select {
+	case p.ch <- ack:
+	default:
+	}
+}
+
+// refuseAck logs and audits an EstopAck that named a pending estop from a connection the
+// estop was not sent down.
+func (n *Node) refuseAck(c *conn, p pendingEstop, ack *fav1.EstopAck) {
+	const reason = "EstopAck arrived on an EdgeStream other than the one the estop was sent down"
+	source := ""
+	if pr, ok := peer.FromContext(c.stream.Context()); ok && pr.Addr != nil {
+		source = pr.Addr.String()
+	}
+	n.logger().Info("PERMISSION_DENIED: "+reason, "estopID", ack.GetEstopId(), "robot", p.robotID, "peer", source)
+	if n.audit == nil {
+		return
+	}
+	ns := n.Namespace()
+	_, _ = n.audit.Record(audit.Entry{
+		Namespace: ns,
+		EventType: audit.EventRobotAuthzDenied,
+		Action:    "estop-ack",
+		Outcome:   audit.OutcomeDenied,
+		Actor:     audit.Actor{Type: audit.ActorRobot, SourceIP: source},
+		Resource:  audit.Resource{Kind: "Robot", Namespace: ns, Name: p.robotID},
+		Detail:    map[string]string{"reason": reason, "estopId": ack.GetEstopId(), "source": "edge-node"},
+	})
+}
+
+func (n *Node) logger() logr.Logger {
+	if n.Log.GetSink() == nil {
+		return logr.Discard()
+	}
+	return n.Log
 }

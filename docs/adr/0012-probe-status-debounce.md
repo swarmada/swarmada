@@ -3,9 +3,12 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** API Designer, Distributed Systems Reviewer, Test Engineer
-- **Related:** RFC-0001 §9.1.6 (active health probing), §9.1.11 (SwarmadaConfig
-  health tunables), ADR-0011 (connectivity-critical condition), the RA-1
+- **Related:** RFC-0001 "RobotProbe" (active health probing), "SwarmadaConfig"
+  (health tunables), ADR-0011 (connectivity-critical condition), the RA-1
   status-write discipline
+- **Paced by:** ADR-0050 — this ADR's threshold is a count of *cycles*; ADR-0050
+  records that a cycle is issued once per `spec.intervalSeconds`, which is what
+  makes the count a duration. Nothing in the Decision below is changed by it.
 
 ## Context
 

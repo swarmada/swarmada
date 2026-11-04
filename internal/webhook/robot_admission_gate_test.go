@@ -18,6 +18,7 @@ package webhook
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ import (
 	"github.com/swarmada/swarmada/internal/contract"
 )
 
-// The FleetAdapter admission keystone (RFC-0001 §5.2.12, §9.5) plus the ADR-0032 assignment gate.
+// The FleetAdapter admission keystone (RFC-0001 #fleetadapter, #security-fleet-adapter-authentication-robot-identity) plus the ADR-0032 assignment gate.
 // A Robot is admissible only against its NAMED adapter being Connected, conformance-Passed, and
 // qualified against a contract version this control plane can drive.
 //
@@ -119,7 +120,10 @@ func TestAdmissionGate_RefusesUnsupportedConformanceContractVersion(t *testing.T
 		{"missing", ""},
 		{"older major", "0.9.0"},
 		{"newer major", "2.0.0"},
-		{"newer minor", "1.1.0"},
+		// Derived, not hardcoded: "the minor after the one we implement" is the property under
+		// test, and a literal here silently becomes the IMPLEMENTED minor at the next bump —
+		// which is how this case read after 1.0.0 → 1.1.0.
+		{"newer minor", contractMinorOffset(t, +1)},
 		{"unparseable", "one.oh.oh"},
 		{"prerelease", "1.0.0-rc1"},
 	} {
@@ -139,7 +143,7 @@ func TestAdmissionGate_RefusesUnsupportedConformanceContractVersion(t *testing.T
 	}
 }
 
-// The gate is anchored on the NAMED binding (§9.5): a different healthy adapter confers no authority.
+// The gate is anchored on the NAMED binding (RFC-0001 #fleetadapter-admission-gating): a different healthy adapter confers no authority.
 // Re-asserted here because the new condition reads status off that one resolved adapter.
 func TestAdmissionGate_UnknownAdapterRefused(t *testing.T) {
 	robot := gateRobot()
@@ -169,5 +173,40 @@ func TestAdmissionGate_UnchangedBindingSkipsTheGate(t *testing.T) {
 	rebound.Spec.Adapter.Name = "acme-2"
 	if _, err := g.ValidateUpdate(context.Background(), old, rebound); err == nil {
 		t.Error("re-pointing spec.adapter must re-run the gate")
+	}
+}
+
+// contractMinorOffset returns contract.Version with its minor moved by delta, so a test can name
+// a neighbouring contract version without a literal that rots on the next bump.
+func contractMinorOffset(t *testing.T, delta int) string {
+	t.Helper()
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(contract.Version, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		t.Fatalf("contract.Version = %q, want major.minor.patch: %v", contract.Version, err)
+	}
+	return fmt.Sprintf("%d.%d.0", major, minor+delta)
+}
+
+// ADR-0032 Decision, as amended by Amendment 1 §A1.2: "A minor release never invalidates a
+// qualification" (a control plane two minors past an adapter's reported version refuses it). The
+// N-1 half of the supported range is load-bearing, so the DISPATCH gate — not only
+// contract.Supports — is asserted to still admit a robot against an adapter qualified at the
+// previous minor. The in-tree example-noop adapter declares the previous minor; the simulation
+// adapter declares contract.Version.
+func TestAdmissionGate_AdmitsAgainstThePreviousMinor(t *testing.T) {
+	prev := contractMinorOffset(t, -1)
+	if prev == contractMinorOffset(t, 0) {
+		t.Skipf("contract.Version %s is at minor 0; there is no previous minor to admit", contract.Version)
+	}
+	// The patch component is ignored by the gate, so any patch of the previous minor qualifies.
+	for _, version := range []string{prev, strings.TrimSuffix(prev, "0") + "7"} {
+		t.Run(version, func(t *testing.T) {
+			a := gateAdapter()
+			a.Status.ConformanceContractVersion = version
+			if _, err := gateFor(t, a).ValidateCreate(context.Background(), gateRobot()); err != nil {
+				t.Fatalf("robot refused against an adapter qualified at contract %q: %v — a MINOR "+
+					"bump must not invalidate an existing qualification (ADR-0032 Decision, as amended by §A1.2)", version, err)
+			}
+		})
 	}
 }

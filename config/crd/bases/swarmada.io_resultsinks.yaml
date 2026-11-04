@@ -1,0 +1,144 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: resultsinks.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: ResultSink
+    listKind: ResultSinkList
+    plural: resultsinks
+    shortNames:
+    - rs
+    singular: resultsink
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.kind
+      name: Kind
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ResultSink is the Schema for the resultsinks API.
+
+          NO STATUS SUBRESOURCE, DELIBERATELY. ResultSink is reference-only configuration,
+          in the same shape as StorageClass or IngressClass: an administrator installs it and
+          a FleetAction names it in spec.executor.sinks. No controller reconciles it, so
+          there is nothing it could truthfully report.
+
+          There is no dispatch path at this version: nothing writes a result to a sink, and
+          the readiness of the store behind it is reported nowhere, on this object or on a
+          FleetAction. The control plane reads it at admission only: the FleetAction
+          admission webhook refuses a FleetAction naming a ResultSink that does not exist in
+          its namespace, or whose declared columns do not accept the result fields of the
+          action's ComputeEndpoint.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ResultSinkSpec is an administrator-installed, operator-configured egress
+              destination for a run's result — the same
+              TelemetrySink precedent (SwarmadaConfig.spec.telemetry.sink: "High-cadence
+              telemetry goes to the TSDB sink, never to etcd"), scoped per-namespace and
+              per-task rather than cluster-wide.
+
+              THE CONTROL PLANE NEVER PROXIES THE ROW. It is specified to resolve
+              CredentialRef and pass the runtime a short-lived, sink-scoped grant that
+              expires with the run's lease; the runtime writes the record itself, on the
+              data path. At v0.4 there is no egress path: nothing writes a result to a sink,
+              nothing reads CredentialRef, and no grant is issued. No connection string,
+              and no credential, can appear in a FleetTask or a FleetAction, because no
+              field exists there to carry one — Endpoint and CredentialRef live ONLY here,
+              on an administrator-installed object.
+            properties:
+              credentialRef:
+                description: |-
+                  CredentialRef names the Secret that holds write credentials for this sink.
+                  At v0.4 the control plane does not read it and gives these credentials to
+                  no executor; a writer must obtain its own. It is never carried in a task
+                  spec.
+                properties:
+                  key:
+                    description: Key is the data key holding the credential.
+                    type: string
+                  name:
+                    description: Name is the Secret name in the same namespace.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              endpoint:
+                description: Endpoint is the sink's address (e.g. "postgres://evidence.internal:5432/detections").
+                minLength: 1
+                type: string
+              kind:
+                description: Kind selects the sink's protocol.
+                enum:
+                - Database
+                - ObjectStore
+                - Webhook
+                type: string
+              retention:
+                description: |-
+                  Retention declares how long written records should be kept. This is a
+                  DECLARATION at the destination, not an enforcement
+                  Swarmada performs — whether it is actually enforced depends entirely on
+                  the destination the operator chose (e.g. a Postgres retention job), and
+                  this field does not claim otherwise.
+                properties:
+                  maxAgeDays:
+                    description: MaxAgeDays is the retention period.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - maxAgeDays
+                type: object
+              schema:
+                description: Schema declares what the runtime may write.
+                properties:
+                  columns:
+                    description: Columns lists the permitted column/field names.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  table:
+                    description: |-
+                      Table names the destination table (Database kind) or a logical
+                      equivalent for other kinds.
+                    type: string
+                type: object
+            required:
+            - endpoint
+            - kind
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

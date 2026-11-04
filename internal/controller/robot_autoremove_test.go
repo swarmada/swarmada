@@ -19,7 +19,7 @@ package controller
 // ADR-0030: opt-in auto-removal of Offline auto-admitted Robots. The Robot controller removes a
 // Robot only when ALL hold: the namespace opted in (autoRemoveOfflineRobots), the Robot is
 // auto-admitted (swarmada.io/auto-admitted), it is Offline (adapter presence gone), the offline
-// dwell has elapsed, and any assigned action's lease is provably dead (§9.6.3.5; nil/transient ⇒
+// dwell has elapsed, and any assigned action's lease is provably dead (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee; nil/transient ⇒
 // not dead). Operator-created robots (no marker) are never removed — the warehouse gate.
 // (robotBound / livenessScheme / configWithSpec / faNS live in the sibling *_test.go files.)
 

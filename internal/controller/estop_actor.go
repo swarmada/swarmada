@@ -28,7 +28,8 @@ import (
 
 const (
 	// annEstopActor is written by the mutating webhooks in internal/webhook
-	// (AnnEstopActor there) and read here. Never written by a controller.
+	// (AnnEstopActor there) and read here. A controller never writes it; it removes it
+	// once the entry it attributes is sealed (consumeEstopActor).
 	annEstopActor = "swarmada.io/estop-actor"
 
 	// unattributedPrefix marks an actor the control plane could NOT resolve to a person.
@@ -61,12 +62,28 @@ const (
 // treat an unverified string as evidence.
 //
 // This function never fails. An estop is a safe stop, and a safe stop is always honoured —
-// unresolvable identity degrades the record, never the response (§9.6.2).
+// unresolvable identity degrades the record, never the response (RFC-0001 #safety-emergency-stop-protocol).
 func estopActor(annotations map[string]string, scope string) audit.Actor {
 	if user := annotations[annEstopActor]; user != "" {
 		return audit.Actor{Type: audit.ActorUser, Identity: user}
 	}
 	return audit.Actor{Type: audit.ActorServiceAccount, Identity: unattributedPrefix + scope}
+}
+
+// consumeEstopActor removes the operator stamp once the entry it attributes has been
+// sealed. Called in the same patch that records the edge as processed (the estop marker
+// set or dropped, or the rollout-resume marker set), so it costs no extra write.
+//
+// Without it a stamp outlives the edge it was written for. The stampers on FleetZone,
+// SwarmadaConfig and the two rollouts are failurePolicy Ignore (ADR-0046 decision 4), so
+// when one is skipped on the NEXT edge the previous operator's name is still on the
+// object, and estopActor would seal that edge as theirs, as a user, which ADR-0046
+// decision 5 forbids. Once consumed, a skipped stamp reads as absent and the edge is
+// sealed unattributed. The one cost runs the safe way: a stamp written while an earlier
+// edge is still being fanned out is removed with the earlier one, so that later edge is
+// recorded unattributed, never as someone else's.
+func consumeEstopActor(annotations map[string]string) {
+	delete(annotations, annEstopActor)
 }
 
 // estopActorIdentity is the identity string for the wire/state fields that carry an

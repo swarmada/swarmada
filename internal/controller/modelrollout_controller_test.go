@@ -58,8 +58,8 @@ func pickerRollout() *fleetv1.ModelRollout {
 			NewVersion:         "3.2.1",
 			ModelURI:           "oci://registry/models/item-recognition:3.2.1",
 			GrantsCapabilities: []string{"item-pick.ai-guided", "inspect.defects"},
-			Strategy:           fleetv1.RolloutStrategy{RollingUpdate: &fleetv1.RollingUpdateStrategy{MaxUnavailable: "1", PauseOnError: true}},
-			SafetyConstraints:  fleetv1.RolloutSafetyConstraints{MinBatteryPct: 30, RequireIdleState: true},
+			Strategy:           fleetv1.RolloutStrategy{RollingUpdate: &fleetv1.RollingUpdateStrategy{MaxUnavailable: "1", PauseOnError: apiBool(true)}},
+			SafetyConstraints:  fleetv1.RolloutSafetyConstraints{MinBatteryPct: 30, RequireIdleState: apiBool(true)},
 		},
 	}
 }

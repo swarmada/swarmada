@@ -37,7 +37,7 @@ import (
 var zoneMaintenanceGK = schema.GroupKind{Group: fleetv1.GroupVersion.Group, Kind: "ZoneMaintenance"}
 
 // ZoneMaintenanceValidator enforces the cross-resource invariant that per-field CEL
-// cannot express (RFC-0001 §9.3.1): when spec.scope.type is Zone, spec.scope.zoneName
+// cannot express (RFC-0001 #control-plane-swarmada-api-server): when spec.scope.type is Zone, spec.scope.zoneName
 // must name a FleetZone that exists in the same namespace.
 //
 // Why this is worth rejecting at admission rather than reporting later: a ZoneMaintenance
@@ -45,7 +45,7 @@ var zoneMaintenanceGK = schema.GroupKind{Group: fleetv1.GroupVersion.Group, Kind
 // indistinguishable at a glance from a window that is working and has nothing to pause.
 // The resource reaches phase Active, `status.pausedRobots` stays empty, and the operator
 // reads that as "the zone is quiet" — while every robot they meant to stop keeps working.
-// A technician entering that zone is the hazard this catches. §9.6.1 is explicit that
+// A technician entering that zone is the hazard this catches. RFC-0001 #safety-scope-and-responsibility-boundary is explicit that
 // ZoneMaintenance does not create a physically safe zone, but an operator relying on it as
 // a precondition should at least be told the window targets nothing.
 //
@@ -84,7 +84,7 @@ func (v *ZoneMaintenanceValidator) ValidateUpdate(ctx context.Context, _, newObj
 }
 
 // ValidateDelete allows deletion. Deleting a ZoneMaintenance resumes its paused robots
-// through the resume finalizer (§9.1.10); refusing the delete would strand them paused.
+// through the resume finalizer (RFC-0001 #zonemaintenance-resume-behavior); refusing the delete would strand them paused.
 func (v *ZoneMaintenanceValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
 	return nil, nil
 }
@@ -117,7 +117,7 @@ func (v *ZoneMaintenanceValidator) validate(ctx context.Context, zm *fleetv1.Zon
 		return nil, fmt.Errorf("resolving spec.scope.zoneName %q: %w", name, err)
 	}
 
-	// A parent zone is deliberately allowed: §9.1.10 resolves a Zone scope to the target
+	// A parent zone is deliberately allowed: RFC-0001 #zonemaintenance-schema resolves a Zone scope to the target
 	// zone AND its descendants, so maintaining a whole branch is a supported intent — unlike
 	// Robot.spec.zone, which places one robot and must therefore be a leaf.
 	return nil, nil

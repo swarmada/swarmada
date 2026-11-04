@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-24
 - **Deciders:** Principal Architect, Kubernetes/controller maintainers
-- **Related:** RFC-0001 §9.3.6 (Model Update Manager), §9.3.4/§9.1.5 (Zone Controller), §9.1.11 (ZoneMaintenance), §9.6.2 (estop); ADR-0013 (graceful drain timeout); AGENTS.md RA-1
+- **Related:** RFC-0001 "OTA/Model Update Manager", "Zone Controller" and "FleetZone", "ZoneMaintenance", "Emergency Stop Protocol"; ADR-0013 (graceful drain timeout); AGENTS.md RA-1
 
 ## Context
 
@@ -36,8 +36,9 @@ telemetry tick.
    `SwarmadaConfig.spec.maintenance.requireEstopClearBeforeResume`) to gate a
    paused robot's resume (`Maintenance → Idle`) until its estop is Clear. **This
    is an operational convenience gate, not a safety mechanism** — it must not be
-   coupled to or conflated with the hardware estop path (§9.6.2), and must never
-   be represented as something that stops or holds a robot.
+   coupled to or conflated with the hardware estop path (RFC-0001, "Emergency
+   Stop Protocol"), and must never be represented as something that stops or
+   holds a robot.
 
 4. **`ZoneMaintenance.status.pausedRobotsCount` / `windingDownRobotsCount`** —
    print-column convenience counts that must mirror the already-computed
@@ -92,7 +93,8 @@ In `ZoneController.Reconcile`, after topology is computed and before the existin
 **Framing (normative for this decision):** this gate only delays the
 administrative `Maintenance → Idle` **phase transition**. It does **not** stop,
 hold, slow, or otherwise affect a robot; it does **not** participate in the
-hardware estop path (§9.6.2), which is entirely separate and authoritative. It
+hardware estop path (RFC-0001, "Emergency Stop Protocol"), which is entirely
+separate and authoritative. It
 *reads* the already-published estop projection to decide whether to flip a phase,
 nothing more. It must never be documented, logged, or surfaced as a safety
 interlock.
@@ -181,7 +183,7 @@ where the lists are cleared. The values ride the existing
   change). This is a reference-implementation decision; the normative fields live
   in `api/v1` and RFC-0001.
 
-## Implementation surface (file-by-file; no code written yet)
+## Implementation surface (as planned at acceptance)
 
 - `internal/controller/firmwarerollout_controller.go` — add `stampSuspended bool`
   to `buildRolloutBatch`; new entrant sets `CapabilitiesSuspendedAt` only when

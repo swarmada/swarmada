@@ -3,8 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** API Designer, Distributed Systems Reviewer, Kubernetes Expert
-- **Related:** RFC-0001 §9.1.11 (SwarmadaConfig health tunables), §9.3.8 (offline
-  accounting), ADR-0006 (north side is the Kubernetes API), the RA-1 status-write
+- **Related:** RFC-0001 "SwarmadaConfig" (health tunables), "Robot Health and
+  Connectivity" (offline accounting), ADR-0006 (north side is the Kubernetes API), the RA-1 status-write
   discipline
 
 ## Context

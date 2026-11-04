@@ -1,0 +1,1886 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: tasktriggers.swarmada.io
+spec:
+  group: swarmada.io
+  names:
+    kind: TaskTrigger
+    listKind: TaskTriggerList
+    plural: tasktriggers
+    shortNames:
+    - tt
+    singular: tasktrigger
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.source.semanticEventSource
+      name: Source
+      type: string
+    - jsonPath: .spec.source.eventType
+      name: Event
+      type: string
+    - jsonPath: .spec.suspend
+      name: Suspended
+      type: boolean
+    - jsonPath: .status.draftCount
+      name: Drafts
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: TaskTrigger drafts a FleetTask when a semantic event arrives.
+          It never dispatches.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              TaskTriggerSpec binds a semantic event to a FleetTask that a human may then run.
+
+              # THE WHOLE POINT IS THAT IT DOES NOT DISPATCH
+
+              A firing produces a DRAFT FleetTask — `spec.draft: true`, which the FleetTask
+              controller holds at phase Draft, generating no child actions and dispatching
+              nothing. A human activates it by clearing that flag. Until they do, no robot has
+              been asked to do anything.
+
+              This is not timidity about automation; it is where the authority sits. A semantic
+              event is evidence that something happened, produced by a sensor, a bridge, or a
+              model — none of which is accountable for what a robot then does in a shared physical
+              space. Auto-dispatch would place a physical-world decision behind whatever produced
+              the event, and the failure mode is not a wrong API call but a machine moving because
+              a door sensor glitched. The draft keeps the machine still and puts a person between
+              the observation and the motion, while still doing the tedious part — composing the
+              task, grounded in the real schema — automatically.
+
+              The control plane holds only this controller to drafts. Any other client that
+              creates a FleetTask sets spec.draft itself, and RBAC alone cannot require it to.
+            properties:
+              source:
+                description: Source selects the events that fire this trigger.
+                properties:
+                  eventType:
+                    description: |-
+                      EventType is the single event type that fires this trigger. One type per
+                      trigger, deliberately: a trigger that matched a SET of types would have to
+                      decide which template each produced, and the answer is a second trigger.
+                    minLength: 1
+                    type: string
+                  semanticEventSource:
+                    description: SemanticEventSource names the source, in this namespace,
+                      to watch.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - eventType
+                - semanticEventSource
+                type: object
+              suspend:
+                default: false
+                description: |-
+                  Suspend stops this trigger firing without deleting it. A suspended trigger
+                  records nothing: an event it would have matched is accepted with the message
+                  "accepted; no TaskTrigger matched", the same as when no trigger exists.
+                type: boolean
+              taskTemplate:
+                description: |-
+                  TaskTemplate is the FleetTask spec to draft when this trigger fires.
+
+                  It is drafted as written. This controller performs NO parameter substitution
+                  from the event payload — see the type comment on TaskTriggerStatus for why that
+                  is a deliberate omission rather than an oversight.
+                properties:
+                  actions:
+                    description: |-
+                      Actions is the member set. APPEND-ONLY after creation: existing entries (spec and recorded
+                      status) are immutable; new entries may be appended before the task is terminal via the
+                      scoped `append` RBAC verb (enforced by the validating webhook). Keyed by name.
+                    items:
+                      description: FleetTaskAction is one member action of a composite
+                        FleetTask.
+                      properties:
+                        action:
+                          description: |-
+                            Action is a full FleetActionSpec, embedded verbatim and copied unchanged onto the child
+                            FleetAction the controller generates for this member.
+                          properties:
+                            acceptDegradedCapabilities:
+                              description: |-
+                                AcceptDegradedCapabilities, when true, lets the Scheduler satisfy this action's
+                                requiredCapabilities with entries in Degraded status, not only Active. When
+                                nil (unset), the namespace default
+                                SwarmadaConfig.spec.scheduling.defaultAcceptDegradedCapabilities applies, and
+                                a per-action value overrides that default — so this is a pointer with no static
+                                CRD default (a plain defaulted bool could not distinguish unset from false).
+                                This relaxes only the capability-status requirement; degraded parametric
+                                constraints additionally require a capability-level degradedPolicy.
+                              type: boolean
+                            constraints:
+                              additionalProperties:
+                                type: number
+                              description: |-
+                                Constraints are parametric filter predicates (§6.10.3): each entry maps a
+                                capability parameter name to the MINIMUM value a candidate robot must resolve.
+                                A robot matches only if it has an Active capability whose
+                                status.capabilities[].resolvedParameters[<name>] is >= the constraint (e.g.
+                                constraints.maxPayloadKg: 30 requires an Active transport.payload resolving
+                                maxPayloadKg >= 30). A parameter no Active capability resolves is treated as
+                                unsatisfied (fail-closed), so the robot is excluded.
+                              type: object
+                            customType:
+                              description: |-
+                                CustomType names the verb a Custom action actually performs (e.g.
+                                "disinfect_area", "shelf_audit"). Accepted ONLY when Type is Custom (CEL, above);
+                                setting it alongside a named verb is rejected rather than ignored, because this
+                                field is a printer column and a Navigate action advertising customType: clean
+                                would print a claim the type contradicts.
+
+                                THIS IS THE ANSWER TO "what stops the next device class". ActionType is a closed
+                                set meeting an open world; Custom plus RequiredCapabilities is the intended
+                                extension point, and the reason it kept losing to requests for a new enum value
+                                was not that it failed to express the work — requiredCapabilities: [clean_area]
+                                expresses it exactly — but that it was OPAQUE ON THE OPERATOR SURFACE. The verb
+                                survived in requiredCapabilities and payload, and neither is a printer column, so
+                                every Custom action read as the same undifferentiated "Custom" in kubectl get.
+                                The request that arrives as "please add our verb to the enum" is, every time, a
+                                request to see the verb in a column. This field is that column.
+
+                                DELIBERATELY OPTIONAL, NOT REQUIRED-WHEN-CUSTOM. HardwareComponent's
+                                type/customType pair (api/v1/robotclass_types.go) requires it, and that is the
+                                shape this field otherwise copies — but that field was born with its type, and
+                                Custom has already shipped. Requiring customType on Custom would tighten
+                                validation on a published CRD and reject, on their next update, every Custom
+                                action already in the field (docs/api-principles.md, Versioning and
+                                compatibility). Forbidding it on a non-Custom type cannot break anything: no
+                                stored object can carry a field that did not exist. The field stays optional when
+                                type is Custom; it is not made required.
+                              maxLength: 63
+                              minLength: 1
+                              type: string
+                            deadline:
+                              description: |-
+                                Deadline is the latest time by which this action must be assigned. A Pending
+                                action whose deadline passes is moved to Failed with failureReason "deadline
+                                exceeded before scheduling". An action that is already Assigned is not failed
+                                on its deadline, even if it never reaches InProgress. The deadline is sent to
+                                the adapter on the assignment.
+                              format: date-time
+                              type: string
+                            desiredState:
+                              allOf:
+                              - enum:
+                                - Running
+                                - Paused
+                                - Returning
+                                - Cancelled
+                              - enum:
+                                - Running
+                                - Paused
+                                - Returning
+                                - Cancelled
+                              default: Running
+                              description: |-
+                                DesiredState is the declarative control intent (Running/Paused/Returning/Cancelled),
+                                reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
+                                standalone action; for an action owned by a FleetTask the composite is authoritative and
+                                reconciles it to the action's desiredState. Paused on an Assigned or InProgress action
+                                sends the robot cancel_action so that it stops where it is, with the adapter's answer
+                                in status.message. The exits from Paused, and the proof a requeue waits for, are rows
+                                A2 to A6 of RFC-0001 #safety-action-table.
+
+                                LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                                Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                                action leaves Paused only by the rows that table lists (a requeue or cancel through
+                                the verb-gated intake, or the move of unstarted work off an unconfirmed stop),
+                                because Paused has one set of exits whatever produced it —
+                                an estop or this field — and an operator reading phase: Paused must never have to
+                                ask which path produced it before deciding whether it will move on its own.
+                                Cancelled is the one value that is level-triggered in both directions, because
+                                cancellation is terminal and there is nothing to lift.
+                              type: string
+                            estimatedDurationSeconds:
+                              description: |-
+                                EstimatedDurationSeconds is an optional hint specified for the Traffic
+                                Deconfliction Engine's PriorityWithDuration policy (shortest-job-first within a
+                                band, RFC-0001 #tde-shared-resource-queue-management). No code reads it at this
+                                version: no assignment path passes it to the TDE, so it changes neither
+                                shared-resource queue order nor preemption.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            executor:
+                              description: |-
+                                Executor directs this action to a ComputeEndpoint instead of to a robot.
+                                There is no dispatch path at v0.4. Nothing in the reference control plane
+                                resolves an endpoint address, activates a run, or calls the compute runtime service.
+                                Its presence is the discriminator: spec.type MUST be External, and the
+                                eight robot-scheduling fields plus Payload MUST be unset (CEL, above).
+                                Zone keeps its meaning when Executor is set: it
+                                still names the edge zone context for endpoint resolution, not a robot
+                                scheduling constraint.
+                              properties:
+                                completionMode:
+                                  description: |-
+                                    CompletionMode is RunToCompletion for an App contract and Continuous for a
+                                    Service contract. Specified to be defaulted from the referenced
+                                    ComputeEndpoint's contract, with an explicit value that contradicts it
+                                    rejected. Neither is implemented at v0.4: no webhook or controller reads
+                                    this field or the endpoint's contract for it, so an omitted value stays
+                                    absent and any value in the enum is accepted, whatever the endpoint's
+                                    contract.
+                                  enum:
+                                  - RunToCompletion
+                                  - Continuous
+                                  type: string
+                                endpointRef:
+                                  description: |-
+                                    EndpointRef names a ComputeEndpoint in this namespace. The endpoint is
+                                    pre-created by an administrator; a task never describes an executor inline.
+                                  minLength: 1
+                                  type: string
+                                inputs:
+                                  description: |-
+                                    Inputs are the non-scalar inputs this run supplies: a sensor stream, or
+                                    an artifact reference.
+                                  items:
+                                    description: ExecutorInput is one non-scalar input
+                                      bound to a run.
+                                    properties:
+                                      name:
+                                        description: |-
+                                          Name matches a name the referenced ComputeEndpoint declares in
+                                          spec.inputs[].
+                                        type: string
+                                      sensorStream:
+                                        description: |-
+                                          SensorStream binds this input to a named robot sensor stream. It is the
+                                          only input kind at v0.4, and a CEL rule on ExecutorInput requires it on
+                                          every entry.
+                                        properties:
+                                          rateHz:
+                                            description: |-
+                                              RateHz requests an activation rate. Unset defers to the stream's
+                                              native_rate_hz. Shared activation is specified to take the MAX rate_hz any
+                                              live consumer of the same (robot, stream) requests. At v0.4 no controller
+                                              reads this field or activates a stream for an executor.
+                                            type: number
+                                          robotRef:
+                                            description: RobotRef addresses which
+                                              robot's stream to consume.
+                                            properties:
+                                              fromMember:
+                                                description: |-
+                                                  FromMember names a sibling FleetTask member; the robot assigned to that
+                                                  member is the stream's source. The common case: "the robot doing the
+                                                  patrolling".
+                                                type: string
+                                              name:
+                                                description: Name pins a specific
+                                                  robot by name.
+                                                type: string
+                                            type: object
+                                            x-kubernetes-validations:
+                                            - message: exactly one of fromMember or
+                                                name must be set
+                                              rule: has(self.fromMember) != has(self.name)
+                                          streamId:
+                                            description: StreamID names the stream
+                                              on that robot (Robot.status.sensorStreams[*].streamId).
+                                            minLength: 1
+                                            type: string
+                                          window:
+                                            description: |-
+                                              Window selects continuous / snapshot / clip framing. Unset defaults to
+                                              Continuous.
+                                            properties:
+                                              mode:
+                                                default: Continuous
+                                                description: Mode selects the framing.
+                                                enum:
+                                                - Continuous
+                                                - Snapshot
+                                                - Clip
+                                                type: string
+                                              postSeconds:
+                                                description: PostSeconds is the post-roll
+                                                  window. Meaningful only for Clip.
+                                                format: int32
+                                                minimum: 0
+                                                type: integer
+                                              preSeconds:
+                                                description: |-
+                                                  PreSeconds is the pre-roll window. Meaningful only for Clip; bounded by
+                                                  the source stream's declared clipPreSecondsMax at activation.
+                                                format: int32
+                                                minimum: 0
+                                                type: integer
+                                            type: object
+                                            x-kubernetes-validations:
+                                            - message: preSeconds/postSeconds are
+                                                meaningful only when mode is Clip
+                                              rule: self.mode == 'Clip' || (!has(self.preSeconds)
+                                                && !has(self.postSeconds))
+                                        required:
+                                        - robotRef
+                                        - streamId
+                                        type: object
+                                    required:
+                                    - name
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: inputs[].sensorStream is the only input
+                                        kind implemented; an input without sensorStream,
+                                        an artifact input included, is refused
+                                      rule: has(self.sensorStream)
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
+                                onUnresolvedParameter:
+                                  description: |-
+                                    OnUnresolvedParameter is specified to select the consequence when a
+                                    binding cannot be resolved at activation: Fail, UseDefault or Omit, and
+                                    when unset, Fail for a required parameter, UseDefault for an optional one
+                                    with a default, Omit otherwise. At v0.4 the value is checked against that
+                                    enum and stored, and no controller reads it: no controller activates an
+                                    executor run, so none of the three is applied, whatever the field is set
+                                    to. What happens to an unresolved binding at v0.4 does not depend on this
+                                    field. On a member that a FleetTask spec.flow starts, the FleetTask
+                                    controller creates the child FleetAction anyway, leaves each unresolved
+                                    fromMember binding in the child's spec.executor.parameters as written,
+                                    and records the miss and its reason in the child's
+                                    status.parameterResolution (resolved: false). A fromMember binding on any
+                                    other action, and every fromTaskInput binding, is resolved by no
+                                    controller and gets no status.parameterResolution entry; it stays in the
+                                    spec as written.
+                                  enum:
+                                  - Fail
+                                  - UseDefault
+                                  - Omit
+                                  type: string
+                                parameters:
+                                  additionalProperties:
+                                    description: |-
+                                      ParameterBinding is a discriminated union: exactly one source is set. The
+                                      exactly-one-of constraint is specified, not enforced in CEL at v0.4; it is
+                                      deferred to the same release that adds the parameter-resolution webhook checks.
+                                    properties:
+                                      fromContext:
+                                        description: FromContext reads a closed set
+                                          of ambient values.
+                                        enum:
+                                        - assignedRobot
+                                        - zone
+                                        - taskName
+                                        - memberName
+                                        - iteration
+                                        - activatedAt
+                                        type: string
+                                      fromMember:
+                                        description: FromMember reads a value a sibling
+                                          FleetTask member produced.
+                                        properties:
+                                          artifact:
+                                            description: Artifact names an artifact
+                                              the producer's result referenced.
+                                            type: string
+                                          event:
+                                            description: Event names a semantic event
+                                              type raised by the producer (Service
+                                              contract).
+                                            type: string
+                                          field:
+                                            description: Field names a field within
+                                              the named Event's payload. Required
+                                              with Event.
+                                            type: string
+                                          iteration:
+                                            description: Iteration disambiguates a
+                                              producer inside a loop read from outside
+                                              it.
+                                            enum:
+                                            - Latest
+                                            - First
+                                            - All
+                                            type: string
+                                          name:
+                                            description: Name is the sibling member's
+                                              name (FleetTaskAction.Name).
+                                            type: string
+                                          result:
+                                            description: Result names a field in the
+                                              producer's declared result (App contract).
+                                            type: string
+                                        required:
+                                        - name
+                                        type: object
+                                      fromTaskInput:
+                                        description: FromTaskInput names a FleetTask-level
+                                          input (spec.inputs) to read.
+                                        type: string
+                                      value:
+                                        description: Value is a literal, taken as-is.
+                                        type: string
+                                    type: object
+                                  description: |-
+                                    Parameters binds each declared ComputeEndpoint parameter to exactly one
+                                    source. Keyed by the parameter name the endpoint declares.
+                                  type: object
+                                sinks:
+                                  description: |-
+                                    Sinks names ResultSinks this run may write to. Each MUST
+                                    exist in this namespace and accept the endpoint's declared results —
+                                    admission checks this (G1). There is no field ANYWHERE in a FleetAction
+                                    carrying a connection string or a credential. The control plane is specified
+                                    to resolve a named Sink's credentialRef and pass a short-lived, sink-scoped,
+                                    lease-bounded grant to the executor, which writes the row itself. At v0.4
+                                    no controller starts an executor run, and no grant is issued.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: set
+                              required:
+                              - endpointRef
+                              type: object
+                            minBatteryPct:
+                              description: |-
+                                MinBatteryPct requires a candidate robot's status.batteryPercent to be at or
+                                above this value (scheduler hard filter). Unset imposes no battery floor.
+                              format: int32
+                              maximum: 100
+                              minimum: 0
+                              type: integer
+                            onFailure:
+                              allOf:
+                              - enum:
+                                - Requeue
+                                - Alert
+                                - Abandon
+                              - enum:
+                                - Requeue
+                                - Alert
+                                - Abandon
+                              default: Requeue
+                              description: |-
+                                OnFailure selects what happens when the action reaches the Failed phase.
+                                Requeue resets the action to Pending and applies RetryPolicy; Alert leaves it
+                                Failed and emits a FleetActionFailed event for operator review; Abandon leaves
+                                it Failed silently. An exhausted Requeue falls through to Alert behaviour.
+                              type: string
+                            payload:
+                              description: Payload carries action-type-specific parameters
+                                as free-form JSON.
+                              properties:
+                                raw:
+                                  description: Raw is the raw JSON bytes of the payload.
+                                  format: byte
+                                  type: string
+                              type: object
+                              x-kubernetes-preserve-unknown-fields: true
+                            preferredManufacturer:
+                              description: |-
+                                PreferredManufacturer is a soft scheduling preference: among otherwise-eligible
+                                robots, those whose manufacturer matches are ranked first. Not a hard filter.
+                              type: string
+                            preferredRobot:
+                              description: |-
+                                PreferredRobot is a soft scheduling preference naming ONE robot: among
+                                otherwise-eligible robots, that robot is ranked first. Not a hard filter, and
+                                deliberately not RobotSelector.
+
+                                The distinction is the whole point. RobotSelector PINS: the named robot or
+                                nothing. PreferredRobot expresses "this one if it can, otherwise whoever can" —
+                                which is what a person means when they start a task on their own device. Because
+                                it ranks rather than filters, every eligibility filter still applies to the
+                                preferred robot: it wins only if it is genuinely able to do the work, and the
+                                fleet silently takes over when it is busy, out of zone, or lacks the capability.
+
+                                Honoured only when the namespace sets
+                                SwarmadaConfig.spec.scheduling.honorPreferredRobot (default true). Naming a robot
+                                that does not exist, or one that is not eligible, is not an error — the hint
+                                simply has no effect.
+                              type: string
+                            priority:
+                              default: Normal
+                              description: |-
+                                Priority is the named scheduling band for this action (Critical/High/Normal/Low).
+                                The scheduler and Traffic Deconfliction Engine compare bands by rank; Critical
+                                and High may preempt a Normal or Low action on the only eligible robot
+                                (RFC-0001 #fleetaction-priority-semantics) and a Normal or Low reservation at
+                                a zone at capacity (RFC-0001 #tde-preemption-algorithm).
+                              enum:
+                              - Critical
+                              - High
+                              - Normal
+                              - Low
+                              type: string
+                            requiredCapabilities:
+                              description: |-
+                                RequiredCapabilities is the list of capabilities a robot must have
+                                for this action to be assigned to it (e.g. ["navigation", "arm"]).
+                              items:
+                                type: string
+                              type: array
+                            retryPolicy:
+                              description: |-
+                                RetryPolicy governs requeue-on-failure and is only consulted when OnFailure
+                                is Requeue. When omitted, the controller applies the field defaults
+                                (maxRetries=3, backoffSeconds=30).
+                              properties:
+                                backoffSeconds:
+                                  default: 30
+                                  description: |-
+                                    BackoffSeconds is how long to wait after a failure before requeueing, giving
+                                    the robot time to recover or another robot time to become available.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                maxRetries:
+                                  default: 3
+                                  description: |-
+                                    MaxRetries is the maximum number of times the action may be requeued after a
+                                    failure. When status.retryCount reaches it, the action remains Failed and
+                                    Alert behaviour is applied.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                            robotSelector:
+                              description: |-
+                                RobotSelector pins the action to a specific robot by name.
+                                When set, the scheduler skips capability/zone matching.
+                              type: string
+                            timeoutSeconds:
+                              description: |-
+                                TimeoutSeconds is the maximum duration, measured from status.startedAt, in
+                                which this action must complete. An InProgress action whose window has passed
+                                is failed once its robot is proven off it, and not while a stop holds the robot,
+                                Resuming included (RFC-0001 #fleetaction-state-machine). For held work, which a
+                                stop held, only its adapter's acknowledgement of the cancel proves it off.
+                                It is also consulted by
+                                SwarmadaConfig.actionCancellation.onDisconnect=WhenActionExpired (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect): a
+                                Revoking (disconnected) action whose completion window has passed is
+                                auto-cancelled rather than reassigned, since expiry renders completion moot,
+                                unless it is held work (RFC-0001 #safety-action-table, Terms).
+                                A action with no TimeoutSeconds, or one that never started, cannot expire.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            type:
+                              description: Type classifies the action.
+                              enum:
+                              - Navigate
+                              - PickUp
+                              - DropOff
+                              - Patrol
+                              - Charge
+                              - Clean
+                              - Custom
+                              - External
+                              type: string
+                            zone:
+                              description: |-
+                                Zone constrains which zone the action must be executed in.
+                                If empty, the scheduler may assign any robot regardless of zone.
+                              type: string
+                          required:
+                          - type
+                          type: object
+                          x-kubernetes-validations:
+                          - message: spec.executor and spec.type=External require
+                              each other, and requiredCapabilities/constraints/acceptDegradedCapabilities/estimatedDurationSeconds/robotSelector/minBatteryPct/preferredRobot/preferredManufacturer/payload
+                              must be unset when spec.executor is set
+                            rule: (has(self.executor) == (self.type == 'External'))
+                              && (!has(self.executor) || (!has(self.requiredCapabilities)
+                              && !has(self.constraints) && !has(self.acceptDegradedCapabilities)
+                              && !has(self.estimatedDurationSeconds) && !has(self.robotSelector)
+                              && !has(self.minBatteryPct) && !has(self.preferredRobot)
+                              && !has(self.preferredManufacturer) && !has(self.payload)))
+                          - message: spec.customType names the verb a Custom action
+                              performs and is accepted only when spec.type is Custom
+                            rule: '!has(self.customType) || self.type == ''Custom'''
+                        compensation:
+                          description: |-
+                            Compensation is an OPTIONAL FleetActionSpec run to undo this action's effect if it reached
+                            Succeeded but the task later fails under failurePolicy: Compensate.
+
+                            EXCLUDED for an external action: a member whose Action
+                            carries spec.executor MUST NOT set this. Swarmada cannot compensate what
+                            it never observed — an external executor writes to its sink on the data
+                            path and the control plane never sees the row — so an unbacked rollback
+                            promise is refused at admission rather than discovered at rollback time.
+
+                            A compensation carries no spec.executor either, for the same reason: an
+                            external undo would report a rollback the control plane never observed.
+                          properties:
+                            acceptDegradedCapabilities:
+                              description: |-
+                                AcceptDegradedCapabilities, when true, lets the Scheduler satisfy this action's
+                                requiredCapabilities with entries in Degraded status, not only Active. When
+                                nil (unset), the namespace default
+                                SwarmadaConfig.spec.scheduling.defaultAcceptDegradedCapabilities applies, and
+                                a per-action value overrides that default — so this is a pointer with no static
+                                CRD default (a plain defaulted bool could not distinguish unset from false).
+                                This relaxes only the capability-status requirement; degraded parametric
+                                constraints additionally require a capability-level degradedPolicy.
+                              type: boolean
+                            constraints:
+                              additionalProperties:
+                                type: number
+                              description: |-
+                                Constraints are parametric filter predicates (§6.10.3): each entry maps a
+                                capability parameter name to the MINIMUM value a candidate robot must resolve.
+                                A robot matches only if it has an Active capability whose
+                                status.capabilities[].resolvedParameters[<name>] is >= the constraint (e.g.
+                                constraints.maxPayloadKg: 30 requires an Active transport.payload resolving
+                                maxPayloadKg >= 30). A parameter no Active capability resolves is treated as
+                                unsatisfied (fail-closed), so the robot is excluded.
+                              type: object
+                            customType:
+                              description: |-
+                                CustomType names the verb a Custom action actually performs (e.g.
+                                "disinfect_area", "shelf_audit"). Accepted ONLY when Type is Custom (CEL, above);
+                                setting it alongside a named verb is rejected rather than ignored, because this
+                                field is a printer column and a Navigate action advertising customType: clean
+                                would print a claim the type contradicts.
+
+                                THIS IS THE ANSWER TO "what stops the next device class". ActionType is a closed
+                                set meeting an open world; Custom plus RequiredCapabilities is the intended
+                                extension point, and the reason it kept losing to requests for a new enum value
+                                was not that it failed to express the work — requiredCapabilities: [clean_area]
+                                expresses it exactly — but that it was OPAQUE ON THE OPERATOR SURFACE. The verb
+                                survived in requiredCapabilities and payload, and neither is a printer column, so
+                                every Custom action read as the same undifferentiated "Custom" in kubectl get.
+                                The request that arrives as "please add our verb to the enum" is, every time, a
+                                request to see the verb in a column. This field is that column.
+
+                                DELIBERATELY OPTIONAL, NOT REQUIRED-WHEN-CUSTOM. HardwareComponent's
+                                type/customType pair (api/v1/robotclass_types.go) requires it, and that is the
+                                shape this field otherwise copies — but that field was born with its type, and
+                                Custom has already shipped. Requiring customType on Custom would tighten
+                                validation on a published CRD and reject, on their next update, every Custom
+                                action already in the field (docs/api-principles.md, Versioning and
+                                compatibility). Forbidding it on a non-Custom type cannot break anything: no
+                                stored object can carry a field that did not exist. The field stays optional when
+                                type is Custom; it is not made required.
+                              maxLength: 63
+                              minLength: 1
+                              type: string
+                            deadline:
+                              description: |-
+                                Deadline is the latest time by which this action must be assigned. A Pending
+                                action whose deadline passes is moved to Failed with failureReason "deadline
+                                exceeded before scheduling". An action that is already Assigned is not failed
+                                on its deadline, even if it never reaches InProgress. The deadline is sent to
+                                the adapter on the assignment.
+                              format: date-time
+                              type: string
+                            desiredState:
+                              allOf:
+                              - enum:
+                                - Running
+                                - Paused
+                                - Returning
+                                - Cancelled
+                              - enum:
+                                - Running
+                                - Paused
+                                - Returning
+                                - Cancelled
+                              default: Running
+                              description: |-
+                                DesiredState is the declarative control intent (Running/Paused/Returning/Cancelled),
+                                reconciled to the safe-hold / cancel / recover paths. Operator- and trigger-settable on a
+                                standalone action; for an action owned by a FleetTask the composite is authoritative and
+                                reconciles it to the action's desiredState. Paused on an Assigned or InProgress action
+                                sends the robot cancel_action so that it stops where it is, with the adapter's answer
+                                in status.message. The exits from Paused, and the proof a requeue waits for, are rows
+                                A2 to A6 of RFC-0001 #safety-action-table.
+
+                                LEVEL-TRIGGERED IN ONE DIRECTION ONLY, and this asymmetry is deliberate (ADR-0045).
+                                Paused and Returning ENTER a hold; writing Running back does NOT lift one. A held
+                                action leaves Paused only by the rows that table lists (a requeue or cancel through
+                                the verb-gated intake, or the move of unstarted work off an unconfirmed stop),
+                                because Paused has one set of exits whatever produced it —
+                                an estop or this field — and an operator reading phase: Paused must never have to
+                                ask which path produced it before deciding whether it will move on its own.
+                                Cancelled is the one value that is level-triggered in both directions, because
+                                cancellation is terminal and there is nothing to lift.
+                              type: string
+                            estimatedDurationSeconds:
+                              description: |-
+                                EstimatedDurationSeconds is an optional hint specified for the Traffic
+                                Deconfliction Engine's PriorityWithDuration policy (shortest-job-first within a
+                                band, RFC-0001 #tde-shared-resource-queue-management). No code reads it at this
+                                version: no assignment path passes it to the TDE, so it changes neither
+                                shared-resource queue order nor preemption.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            executor:
+                              description: |-
+                                Executor directs this action to a ComputeEndpoint instead of to a robot.
+                                There is no dispatch path at v0.4. Nothing in the reference control plane
+                                resolves an endpoint address, activates a run, or calls the compute runtime service.
+                                Its presence is the discriminator: spec.type MUST be External, and the
+                                eight robot-scheduling fields plus Payload MUST be unset (CEL, above).
+                                Zone keeps its meaning when Executor is set: it
+                                still names the edge zone context for endpoint resolution, not a robot
+                                scheduling constraint.
+                              properties:
+                                completionMode:
+                                  description: |-
+                                    CompletionMode is RunToCompletion for an App contract and Continuous for a
+                                    Service contract. Specified to be defaulted from the referenced
+                                    ComputeEndpoint's contract, with an explicit value that contradicts it
+                                    rejected. Neither is implemented at v0.4: no webhook or controller reads
+                                    this field or the endpoint's contract for it, so an omitted value stays
+                                    absent and any value in the enum is accepted, whatever the endpoint's
+                                    contract.
+                                  enum:
+                                  - RunToCompletion
+                                  - Continuous
+                                  type: string
+                                endpointRef:
+                                  description: |-
+                                    EndpointRef names a ComputeEndpoint in this namespace. The endpoint is
+                                    pre-created by an administrator; a task never describes an executor inline.
+                                  minLength: 1
+                                  type: string
+                                inputs:
+                                  description: |-
+                                    Inputs are the non-scalar inputs this run supplies: a sensor stream, or
+                                    an artifact reference.
+                                  items:
+                                    description: ExecutorInput is one non-scalar input
+                                      bound to a run.
+                                    properties:
+                                      name:
+                                        description: |-
+                                          Name matches a name the referenced ComputeEndpoint declares in
+                                          spec.inputs[].
+                                        type: string
+                                      sensorStream:
+                                        description: |-
+                                          SensorStream binds this input to a named robot sensor stream. It is the
+                                          only input kind at v0.4, and a CEL rule on ExecutorInput requires it on
+                                          every entry.
+                                        properties:
+                                          rateHz:
+                                            description: |-
+                                              RateHz requests an activation rate. Unset defers to the stream's
+                                              native_rate_hz. Shared activation is specified to take the MAX rate_hz any
+                                              live consumer of the same (robot, stream) requests. At v0.4 no controller
+                                              reads this field or activates a stream for an executor.
+                                            type: number
+                                          robotRef:
+                                            description: RobotRef addresses which
+                                              robot's stream to consume.
+                                            properties:
+                                              fromMember:
+                                                description: |-
+                                                  FromMember names a sibling FleetTask member; the robot assigned to that
+                                                  member is the stream's source. The common case: "the robot doing the
+                                                  patrolling".
+                                                type: string
+                                              name:
+                                                description: Name pins a specific
+                                                  robot by name.
+                                                type: string
+                                            type: object
+                                            x-kubernetes-validations:
+                                            - message: exactly one of fromMember or
+                                                name must be set
+                                              rule: has(self.fromMember) != has(self.name)
+                                          streamId:
+                                            description: StreamID names the stream
+                                              on that robot (Robot.status.sensorStreams[*].streamId).
+                                            minLength: 1
+                                            type: string
+                                          window:
+                                            description: |-
+                                              Window selects continuous / snapshot / clip framing. Unset defaults to
+                                              Continuous.
+                                            properties:
+                                              mode:
+                                                default: Continuous
+                                                description: Mode selects the framing.
+                                                enum:
+                                                - Continuous
+                                                - Snapshot
+                                                - Clip
+                                                type: string
+                                              postSeconds:
+                                                description: PostSeconds is the post-roll
+                                                  window. Meaningful only for Clip.
+                                                format: int32
+                                                minimum: 0
+                                                type: integer
+                                              preSeconds:
+                                                description: |-
+                                                  PreSeconds is the pre-roll window. Meaningful only for Clip; bounded by
+                                                  the source stream's declared clipPreSecondsMax at activation.
+                                                format: int32
+                                                minimum: 0
+                                                type: integer
+                                            type: object
+                                            x-kubernetes-validations:
+                                            - message: preSeconds/postSeconds are
+                                                meaningful only when mode is Clip
+                                              rule: self.mode == 'Clip' || (!has(self.preSeconds)
+                                                && !has(self.postSeconds))
+                                        required:
+                                        - robotRef
+                                        - streamId
+                                        type: object
+                                    required:
+                                    - name
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: inputs[].sensorStream is the only input
+                                        kind implemented; an input without sensorStream,
+                                        an artifact input included, is refused
+                                      rule: has(self.sensorStream)
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
+                                onUnresolvedParameter:
+                                  description: |-
+                                    OnUnresolvedParameter is specified to select the consequence when a
+                                    binding cannot be resolved at activation: Fail, UseDefault or Omit, and
+                                    when unset, Fail for a required parameter, UseDefault for an optional one
+                                    with a default, Omit otherwise. At v0.4 the value is checked against that
+                                    enum and stored, and no controller reads it: no controller activates an
+                                    executor run, so none of the three is applied, whatever the field is set
+                                    to. What happens to an unresolved binding at v0.4 does not depend on this
+                                    field. On a member that a FleetTask spec.flow starts, the FleetTask
+                                    controller creates the child FleetAction anyway, leaves each unresolved
+                                    fromMember binding in the child's spec.executor.parameters as written,
+                                    and records the miss and its reason in the child's
+                                    status.parameterResolution (resolved: false). A fromMember binding on any
+                                    other action, and every fromTaskInput binding, is resolved by no
+                                    controller and gets no status.parameterResolution entry; it stays in the
+                                    spec as written.
+                                  enum:
+                                  - Fail
+                                  - UseDefault
+                                  - Omit
+                                  type: string
+                                parameters:
+                                  additionalProperties:
+                                    description: |-
+                                      ParameterBinding is a discriminated union: exactly one source is set. The
+                                      exactly-one-of constraint is specified, not enforced in CEL at v0.4; it is
+                                      deferred to the same release that adds the parameter-resolution webhook checks.
+                                    properties:
+                                      fromContext:
+                                        description: FromContext reads a closed set
+                                          of ambient values.
+                                        enum:
+                                        - assignedRobot
+                                        - zone
+                                        - taskName
+                                        - memberName
+                                        - iteration
+                                        - activatedAt
+                                        type: string
+                                      fromMember:
+                                        description: FromMember reads a value a sibling
+                                          FleetTask member produced.
+                                        properties:
+                                          artifact:
+                                            description: Artifact names an artifact
+                                              the producer's result referenced.
+                                            type: string
+                                          event:
+                                            description: Event names a semantic event
+                                              type raised by the producer (Service
+                                              contract).
+                                            type: string
+                                          field:
+                                            description: Field names a field within
+                                              the named Event's payload. Required
+                                              with Event.
+                                            type: string
+                                          iteration:
+                                            description: Iteration disambiguates a
+                                              producer inside a loop read from outside
+                                              it.
+                                            enum:
+                                            - Latest
+                                            - First
+                                            - All
+                                            type: string
+                                          name:
+                                            description: Name is the sibling member's
+                                              name (FleetTaskAction.Name).
+                                            type: string
+                                          result:
+                                            description: Result names a field in the
+                                              producer's declared result (App contract).
+                                            type: string
+                                        required:
+                                        - name
+                                        type: object
+                                      fromTaskInput:
+                                        description: FromTaskInput names a FleetTask-level
+                                          input (spec.inputs) to read.
+                                        type: string
+                                      value:
+                                        description: Value is a literal, taken as-is.
+                                        type: string
+                                    type: object
+                                  description: |-
+                                    Parameters binds each declared ComputeEndpoint parameter to exactly one
+                                    source. Keyed by the parameter name the endpoint declares.
+                                  type: object
+                                sinks:
+                                  description: |-
+                                    Sinks names ResultSinks this run may write to. Each MUST
+                                    exist in this namespace and accept the endpoint's declared results —
+                                    admission checks this (G1). There is no field ANYWHERE in a FleetAction
+                                    carrying a connection string or a credential. The control plane is specified
+                                    to resolve a named Sink's credentialRef and pass a short-lived, sink-scoped,
+                                    lease-bounded grant to the executor, which writes the row itself. At v0.4
+                                    no controller starts an executor run, and no grant is issued.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: set
+                              required:
+                              - endpointRef
+                              type: object
+                            minBatteryPct:
+                              description: |-
+                                MinBatteryPct requires a candidate robot's status.batteryPercent to be at or
+                                above this value (scheduler hard filter). Unset imposes no battery floor.
+                              format: int32
+                              maximum: 100
+                              minimum: 0
+                              type: integer
+                            onFailure:
+                              allOf:
+                              - enum:
+                                - Requeue
+                                - Alert
+                                - Abandon
+                              - enum:
+                                - Requeue
+                                - Alert
+                                - Abandon
+                              default: Requeue
+                              description: |-
+                                OnFailure selects what happens when the action reaches the Failed phase.
+                                Requeue resets the action to Pending and applies RetryPolicy; Alert leaves it
+                                Failed and emits a FleetActionFailed event for operator review; Abandon leaves
+                                it Failed silently. An exhausted Requeue falls through to Alert behaviour.
+                              type: string
+                            payload:
+                              description: Payload carries action-type-specific parameters
+                                as free-form JSON.
+                              properties:
+                                raw:
+                                  description: Raw is the raw JSON bytes of the payload.
+                                  format: byte
+                                  type: string
+                              type: object
+                              x-kubernetes-preserve-unknown-fields: true
+                            preferredManufacturer:
+                              description: |-
+                                PreferredManufacturer is a soft scheduling preference: among otherwise-eligible
+                                robots, those whose manufacturer matches are ranked first. Not a hard filter.
+                              type: string
+                            preferredRobot:
+                              description: |-
+                                PreferredRobot is a soft scheduling preference naming ONE robot: among
+                                otherwise-eligible robots, that robot is ranked first. Not a hard filter, and
+                                deliberately not RobotSelector.
+
+                                The distinction is the whole point. RobotSelector PINS: the named robot or
+                                nothing. PreferredRobot expresses "this one if it can, otherwise whoever can" —
+                                which is what a person means when they start a task on their own device. Because
+                                it ranks rather than filters, every eligibility filter still applies to the
+                                preferred robot: it wins only if it is genuinely able to do the work, and the
+                                fleet silently takes over when it is busy, out of zone, or lacks the capability.
+
+                                Honoured only when the namespace sets
+                                SwarmadaConfig.spec.scheduling.honorPreferredRobot (default true). Naming a robot
+                                that does not exist, or one that is not eligible, is not an error — the hint
+                                simply has no effect.
+                              type: string
+                            priority:
+                              default: Normal
+                              description: |-
+                                Priority is the named scheduling band for this action (Critical/High/Normal/Low).
+                                The scheduler and Traffic Deconfliction Engine compare bands by rank; Critical
+                                and High may preempt a Normal or Low action on the only eligible robot
+                                (RFC-0001 #fleetaction-priority-semantics) and a Normal or Low reservation at
+                                a zone at capacity (RFC-0001 #tde-preemption-algorithm).
+                              enum:
+                              - Critical
+                              - High
+                              - Normal
+                              - Low
+                              type: string
+                            requiredCapabilities:
+                              description: |-
+                                RequiredCapabilities is the list of capabilities a robot must have
+                                for this action to be assigned to it (e.g. ["navigation", "arm"]).
+                              items:
+                                type: string
+                              type: array
+                            retryPolicy:
+                              description: |-
+                                RetryPolicy governs requeue-on-failure and is only consulted when OnFailure
+                                is Requeue. When omitted, the controller applies the field defaults
+                                (maxRetries=3, backoffSeconds=30).
+                              properties:
+                                backoffSeconds:
+                                  default: 30
+                                  description: |-
+                                    BackoffSeconds is how long to wait after a failure before requeueing, giving
+                                    the robot time to recover or another robot time to become available.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                maxRetries:
+                                  default: 3
+                                  description: |-
+                                    MaxRetries is the maximum number of times the action may be requeued after a
+                                    failure. When status.retryCount reaches it, the action remains Failed and
+                                    Alert behaviour is applied.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                            robotSelector:
+                              description: |-
+                                RobotSelector pins the action to a specific robot by name.
+                                When set, the scheduler skips capability/zone matching.
+                              type: string
+                            timeoutSeconds:
+                              description: |-
+                                TimeoutSeconds is the maximum duration, measured from status.startedAt, in
+                                which this action must complete. An InProgress action whose window has passed
+                                is failed once its robot is proven off it, and not while a stop holds the robot,
+                                Resuming included (RFC-0001 #fleetaction-state-machine). For held work, which a
+                                stop held, only its adapter's acknowledgement of the cancel proves it off.
+                                It is also consulted by
+                                SwarmadaConfig.actionCancellation.onDisconnect=WhenActionExpired (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect): a
+                                Revoking (disconnected) action whose completion window has passed is
+                                auto-cancelled rather than reassigned, since expiry renders completion moot,
+                                unless it is held work (RFC-0001 #safety-action-table, Terms).
+                                A action with no TimeoutSeconds, or one that never started, cannot expire.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            type:
+                              description: Type classifies the action.
+                              enum:
+                              - Navigate
+                              - PickUp
+                              - DropOff
+                              - Patrol
+                              - Charge
+                              - Clean
+                              - Custom
+                              - External
+                              type: string
+                            zone:
+                              description: |-
+                                Zone constrains which zone the action must be executed in.
+                                If empty, the scheduler may assign any robot regardless of zone.
+                              type: string
+                          required:
+                          - type
+                          type: object
+                          x-kubernetes-validations:
+                          - message: spec.executor and spec.type=External require
+                              each other, and requiredCapabilities/constraints/acceptDegradedCapabilities/estimatedDurationSeconds/robotSelector/minBatteryPct/preferredRobot/preferredManufacturer/payload
+                              must be unset when spec.executor is set
+                            rule: (has(self.executor) == (self.type == 'External'))
+                              && (!has(self.executor) || (!has(self.requiredCapabilities)
+                              && !has(self.constraints) && !has(self.acceptDegradedCapabilities)
+                              && !has(self.estimatedDurationSeconds) && !has(self.robotSelector)
+                              && !has(self.minBatteryPct) && !has(self.preferredRobot)
+                              && !has(self.preferredManufacturer) && !has(self.payload)))
+                          - message: spec.customType names the verb a Custom action
+                              performs and is accepted only when spec.type is Custom
+                            rule: '!has(self.customType) || self.type == ''Custom'''
+                        dependsOn:
+                          description: |-
+                            DependsOn lists member names that gate this action's start. Empty = a root action, eligible
+                            immediately. Multiple entries are an AND-join: eligible only
+                            when EVERY predecessor has reached this action's StartCondition. Must be acyclic and name
+                            existing members. Specified to be enforced at admission; at v0.4 this is validated by
+                            validateGraph on every non-terminal reconcile of a task that is not a draft instead, not by
+                            the admission webhook — a cyclic or dangling entry is currently admitted and fails on the
+                            next reconcile. See crds/fleettask.md.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
+                        name:
+                          description: Name is unique within the task and stable for
+                            the life of the task.
+                          type: string
+                        startCondition:
+                          allOf:
+                          - enum:
+                            - Pending
+                            - Assigned
+                            - InProgress
+                            - Succeeded
+                            - Failed
+                            - Cancelled
+                            - Paused
+                            - Revoking
+                            - Preempted
+                          - enum:
+                            - Assigned
+                            - InProgress
+                            - Succeeded
+                          default: Succeeded
+                          description: |-
+                            StartCondition is the predecessor phase that satisfies each dependency, in the FleetAction
+                            phase vocabulary. Succeeded (default) is a strict pipeline; InProgress is a relay; Assigned
+                            is "as soon as a robot commits."
+                          type: string
+                        trigger:
+                          allOf:
+                          - enum:
+                            - Auto
+                            - OnEvent
+                          - enum:
+                            - Auto
+                            - OnEvent
+                          default: Auto
+                          description: |-
+                            Trigger controls eligibility. Auto (default): eligible when DependsOn is satisfied. OnEvent:
+                            dormant until an authorized append/patch activates it. Specified to allow an existing entry's
+                            Trigger to be flipped OnEvent -> Auto post-creation as the sole exception to Actions being
+                            otherwise immutable once created; at v0.4 this is not implemented — ValidateUpdate's
+                            append-only check rejects any change to an existing action, including a Trigger-only flip.
+                            See crds/fleettask.md.
+                          type: string
+                      required:
+                      - action
+                      - name
+                      type: object
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  completionPolicy:
+                    allOf:
+                    - enum:
+                      - All
+                      - Any
+                      - Quorum
+                    - enum:
+                      - All
+                      - Any
+                      - Quorum
+                    default: All
+                    description: CompletionPolicy decides when the task is Succeeded
+                      given member outcomes.
+                    type: string
+                  desiredState:
+                    allOf:
+                    - enum:
+                      - Running
+                      - Paused
+                      - Returning
+                      - Cancelled
+                    - enum:
+                      - Running
+                      - Paused
+                      - Returning
+                      - Cancelled
+                    default: Running
+                    description: |-
+                      DesiredState is the declarative, level-triggered intent for the whole task, reconciled onto
+                      its non-terminal child actions. A write persists and re-converges after a disconnect;
+                      re-writing the same value is idempotent (RFC-0001 §9.1.5, ADR-0047).
+                    type: string
+                  draft:
+                    default: false
+                    description: |-
+                      Draft holds this task as a proposal. While true the FleetTask controller
+                      generates NO child actions and dispatches nothing; the task sits at phase
+                      Draft. A human activates it by setting this false. Where the admission
+                      webhooks are served, that write needs the activate verb on fleettasks, and
+                      it is refused to every ServiceAccount whatever its roles hold.
+
+                      # WHY THIS IS NOT desiredState: Paused
+
+                      Paused already means something, and it is a different thing: a HOLD on work
+                      under way, entered through an estop or spec.desiredState and, after an estop,
+                      governed by rules about who may lift it. A draft has never run, holds no
+                      robot, and has no lease. Overloading Paused would have put an approval gate and
+                      an emergency stop on the same field, so an operator clearing one would be
+                      working the same control as an operator clearing the other — and the estop
+                      rules exist precisely to stop a hold being lifted casually.
+
+                      The default is false, so every FleetTask written before this field existed, and
+                      every one an operator writes directly, behaves exactly as before. Only a
+                      producer that sets it gets the gate: at v0.4 that is the TaskTrigger
+                      controller; any other client that creates a FleetTask sets it itself.
+                    type: boolean
+                  failurePolicy:
+                    allOf:
+                    - enum:
+                      - FailFast
+                      - ContinueOthers
+                      - Compensate
+                    - enum:
+                      - FailFast
+                      - ContinueOthers
+                      - Compensate
+                    default: FailFast
+                    description: |-
+                      FailurePolicy decides the response to a terminally-failed action completionPolicy cannot
+                      absorb. Immutable after creation (a graph's failure semantics must not shift mid-run).
+                    type: string
+                  flow:
+                    description: |-
+                      Flow is an optional structured control-flow tree over Actions:
+                      sequence, parallel+join, loop, select. spec.actions
+                      keeps its meaning as the member INVENTORY; Flow supplies the SCHEDULE
+                      over it. Mutually exclusive with any member's dependsOn (CEL, above).
+                      When Flow is unset the controller's flow branch is not entered, and the
+                      task is scheduled by the dependsOn/completionPolicy reconciliation path
+                      alone; a nil Flow changes nothing on that path.
+                    properties:
+                      loop:
+                        description: Loop repeats Body.
+                        properties:
+                          body:
+                            description: |-
+                              Body is the node repeated on each iteration (Schemaless; see
+                              FlowNode.Sequence).
+                            x-kubernetes-preserve-unknown-fields: true
+                          interruptRunning:
+                            description: |-
+                              InterruptRunning, when true, confirmed-cancels the in-flight child on an
+                              Until match rather than waiting for it to settle between iterations.
+                              Defaults to false — the conservative choice, since interrupting
+                              mid-execution costs a full cancel-to-confirmed-rest cycle and an author
+                              should opt into paying it.
+                            type: boolean
+                          maxDurationSeconds:
+                            description: |-
+                              MaxDurationSeconds bounds a Forever loop by wall-clock duration since
+                              the loop's first iteration started.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          maxIterations:
+                            description: MaxIterations bounds a Forever loop by iteration
+                              count.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          mode:
+                            description: |-
+                              Mode selects the repetition bound. REQUIRED, and required at every
+                              depth: the schema cannot see a nested loop, and an unset Mode skips the
+                              Forever bound check below (which keys on the literal value) while the
+                              evaluator treats it as Forever — an unbounded loop admitted by the very
+                              rule that forbids it. The structural validator
+                              refuses an unset or unenumerated Mode wherever it appears.
+                            enum:
+                            - Once
+                            - Times
+                            - Forever
+                            type: string
+                          retention:
+                            description: |-
+                              Retention bounds this loop's status and child-object growth.
+                              Unset applies the built-in defaults (keepIterationRecords: 10,
+                              keepChildren: 20, keepFailedChildren: 5) — the bound ships with the loop
+                              construct itself, not as an operator afterthought.
+                            properties:
+                              keepChildren:
+                                default: 20
+                                description: |-
+                                  KeepChildren bounds how many completed iteration child FleetActions are
+                                  kept before the controller deletes the oldest (owner-referenced, so
+                                  deletion is a normal Delete call, not a GC race).
+                                format: int32
+                                minimum: 1
+                                type: integer
+                              keepFailedChildren:
+                                default: 5
+                                description: |-
+                                  KeepFailedChildren bounds how many FAILED iteration children are kept,
+                                  separately from KeepChildren — the failures are the ones worth keeping,
+                                  so they are not evicted merely because more recent successes exist.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                              keepIterationRecords:
+                                default: 10
+                                description: |-
+                                  KeepIterationRecords bounds status.actions[].recentIterations. Full
+                                  history is still available as the iterationsCompleted/iterationsFailed
+                                  scalar counters, which never truncate.
+                                format: int32
+                                maximum: 100
+                                minimum: 1
+                                type: integer
+                            type: object
+                          times:
+                            description: Times is the iteration count, REQUIRED iff
+                              Mode is Times (CEL).
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          until:
+                            description: |-
+                              Until is the exit condition, evaluated between iterations (or mid-
+                              iteration when InterruptRunning is true). At least one of Until,
+                              MaxIterations, MaxDurationSeconds is required when Mode is Forever
+                              (CEL).
+                            properties:
+                              anyOf:
+                                description: AnyOf is the list of conditions; the
+                                  loop exits when any one matches.
+                                items:
+                                  description: |-
+                                    UntilCondition is one exit-condition test. Exactly one of Event or Result
+                                    is set.
+                                  properties:
+                                    event:
+                                      description: Event matches a semantic event
+                                        raised by a Service-contract producer.
+                                      properties:
+                                        from:
+                                          description: From names the member the event
+                                            must come from.
+                                          type: string
+                                        type:
+                                          description: Type is the TaskEvent.type
+                                            to match.
+                                          type: string
+                                      required:
+                                      - from
+                                      - type
+                                      type: object
+                                    result:
+                                      description: Result matches a field in an App-contract
+                                        producer's terminal result.
+                                      properties:
+                                        equals:
+                                          description: Equals is the string-encoded
+                                            value that satisfies the condition.
+                                          type: string
+                                        field:
+                                          description: Field names the result.values
+                                            entry to read.
+                                          type: string
+                                        member:
+                                          description: Member names the producer.
+                                          type: string
+                                      required:
+                                      - equals
+                                      - field
+                                      - member
+                                      type: object
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: exactly one of event or result must be
+                                      set
+                                    rule: has(self.event) != has(self.result)
+                                minItems: 1
+                                type: array
+                            required:
+                            - anyOf
+                            type: object
+                        required:
+                        - body
+                        - mode
+                        type: object
+                        x-kubernetes-validations:
+                        - message: times is required when mode is Times
+                          rule: self.mode != 'Times' || has(self.times)
+                        - message: 'mode: Forever requires until, maxIterations or
+                            maxDurationSeconds — an unbounded loop is not admitted'
+                          rule: self.mode != 'Forever' || has(self.until) || has(self.maxIterations)
+                            || has(self.maxDurationSeconds)
+                      parallel:
+                        description: Parallel runs concurrent branches with an explicit
+                          join.
+                        properties:
+                          branches:
+                            description: |-
+                              Branches are the concurrent nodes. At least one is required — enforced
+                              by the validating webhook (Schemaless; see FlowNode.Sequence).
+                            x-kubernetes-preserve-unknown-fields: true
+                          join:
+                            description: 'Join configures the join semantics. Unset
+                              defaults to mode: All.'
+                            properties:
+                              mode:
+                                default: All
+                                description: Mode selects the join semantics.
+                                enum:
+                                - All
+                                - Any
+                                - Quorum
+                                - First
+                                type: string
+                              quorum:
+                                description: Quorum is REQUIRED when Mode is Quorum,
+                                  ignored otherwise (CEL).
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            type: object
+                            x-kubernetes-validations:
+                            - message: quorum is required when mode is Quorum
+                              rule: self.mode != 'Quorum' || has(self.quorum)
+                          onBranchFailure:
+                            default: FailNode
+                            description: OnBranchFailure selects the node's response
+                              to one branch failing.
+                            enum:
+                            - FailNode
+                            - Ignore
+                            type: string
+                          onJoin:
+                            default: CancelSiblings
+                            description: |-
+                              OnJoin selects what happens to still-running branches once the join is
+                              satisfied.
+                            enum:
+                            - CancelSiblings
+                            - LetRunToCompletion
+                            type: string
+                        required:
+                        - branches
+                        type: object
+                      run:
+                        description: Run executes one member of spec.actions by name
+                          — the leaf.
+                        type: string
+                      select:
+                        description: Select branches on a value a previous member
+                          produced.
+                        properties:
+                          cases:
+                            description: |-
+                              Cases are tried in order; the first matching case's Then runs. Case
+                              order is significant: a `present` case is evaluated before any value
+                              comparison, so a `present: false` case never falls through to an
+                              `equals` test on an absent value.
+                            items:
+                              description: |-
+                                SelectCase is one branch of a SelectNode. Exactly one predicate
+                                (Equals/In/Range/Present/When) is set — enforced by the validating webhook,
+                                not CEL: `in` is a CEL RESERVED WORD (the `in` operator), so `self.in` is a
+                                parse error and the has() macro also rejects bracket/index syntax
+                                (`self['in']`) as an argument, and a bare index expression on a typed
+                                object (as opposed to a genuine open map) has no evaluator overload either
+                                — there is no CEL spelling of "does this object have an `in` field" left to
+                                try. See FlowNode's comment for the parallel `loop` case and the general
+                                webhook-does-recursion rationale.
+                              properties:
+                                equals:
+                                  description: Equals matches the subject against
+                                    a literal string.
+                                  type: string
+                                in:
+                                  description: In matches the subject against a set
+                                    of literal strings.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                present:
+                                  description: |-
+                                    Present matches whether the producer wrote a value for the subject
+                                    field at all — a producer may settle Succeeded having produced no value
+                                    (e.g. a classifier that recognised nothing), which is a different
+                                    outcome from a failure. Evaluated BEFORE any value comparison case
+                                    (case order in Cases), so a `present: false` case never falls through
+                                    to a comparison on an absent value.
+                                  type: boolean
+                                range:
+                                  description: Range matches the subject (or, if set,
+                                    Range.Field) against numeric bounds.
+                                  properties:
+                                    field:
+                                      description: |-
+                                        Field overrides Subject.Field for this comparison only (so a rule can
+                                        compare `confidence` while branching on a different subject).
+                                        Unset compares Subject.Field itself.
+                                      type: string
+                                    gt:
+                                      type: number
+                                    gte:
+                                      type: number
+                                    lt:
+                                      type: number
+                                    lte:
+                                      type: number
+                                  type: object
+                                then:
+                                  description: Then runs when this case matches (Schemaless;
+                                    see FlowNode.Sequence).
+                                  x-kubernetes-preserve-unknown-fields: true
+                                when:
+                                  description: |-
+                                    When is an optional CEL clause for compound conditions. It is validated and
+                                    stored, but no CEL environment is wired into the flow evaluator, so it is not
+                                    evaluated: a select whose evaluation reaches a `when` case fails rather than
+                                    falling through to the next case (RFC-0001 #fleettask-structured-control-flow-spec-flow).
+                                  type: string
+                              required:
+                              - then
+                              type: object
+                            type: array
+                          default:
+                            description: |-
+                              Default runs when no case matches. REQUIRED — the key must be present
+                              in the object (still enforced structurally: PreserveUnknownFields makes
+                              the VALUE schemaless, not the key's presence) — use `{}` for an
+                              explicit no-op (Schemaless; see FlowNode.Sequence).
+                            x-kubernetes-preserve-unknown-fields: true
+                          subject:
+                            description: Subject is the value to branch on.
+                            properties:
+                              event:
+                                description: |-
+                                  Event names the semantic event type a Service-contract producer raises,
+                                  whose payload carries Field. Set together with From. Exactly one of
+                                  Member or Event is set.
+                                type: string
+                              field:
+                                description: |-
+                                  Field names the entry to read — from the producer's result (the Member
+                                  form) or from the matching event's payload (the Event form).
+                                minLength: 1
+                                type: string
+                              from:
+                                description: |-
+                                  From names the member that raises Event. Required with Event, meaningless
+                                  without it — the result binding names its producer in Member.
+                                type: string
+                              member:
+                                description: |-
+                                  Member names an App-contract producer whose terminal status.result.values
+                                  carries Field. Exactly one of Member or Event is set.
+                                type: string
+                            required:
+                            - field
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one of member (result binding, App
+                                producer) or event (event binding, Service producer)
+                                must be set
+                              rule: has(self.event) != has(self.member)
+                            - message: 'from is required with event: it names the
+                                member that raises it'
+                              rule: '!has(self.event) || has(self.from)'
+                            - message: from is meaningful only with event; the result
+                                binding names its producer in member
+                              rule: '!has(self.from) || has(self.event)'
+                        required:
+                        - default
+                        - subject
+                        type: object
+                      sequence:
+                        description: |-
+                          Sequence runs each node in order; the next starts when the previous
+                          settles Succeeded. Any non-Succeeded settlement short-circuits the
+                          remainder (they were never started, so nothing to cancel) and the
+                          sequence settles with that outcome.
+
+                          Schemaless: CRD structural schemas cannot express true recursion (no
+                          $ref survives structural-schema flattening), so a genuinely
+                          self-referential type like FlowNode can only be schema-validated one
+                          level deep. The validating webhook performs the full recursive
+                          structural validation (every rule this file's CEL markers state,
+                          applied at every depth) that the schema cannot, and bounds the tree's
+                          total node count and nesting depth — nothing else does.
+                        x-kubernetes-preserve-unknown-fields: true
+                    type: object
+                  inputs:
+                    description: |-
+                      Inputs declares the named, typed values supplied WITH this task, which a
+                      member's parameter binding reads via `fromTaskInput` — source 2 of the
+                      closed six a `ParameterBinding` admits.
+
+                      # IT EXISTS SO THAT A SUPPLIED VALUE IS NOT A LITERAL EDITED INTO THE FLOW
+
+                      "A person said go to the loading dock" needs somewhere to land that is not
+                      a string spliced into a member's spec. That matters most where the task
+                      template is fixed and only the inputs vary: with declared inputs, the
+                      template is a reusable object and the variable part is data; without them,
+                      every variation is a new object that differs from the last one somewhere in
+                      its middle.
+
+                      # WITHOUT IT, `fromTaskInput` NAMED NOTHING
+
+                      `ParameterBinding.FromTaskInput` (api/v1/fleetaction_types.go) has said
+                      "names a FleetTask-level input (spec.inputs) to read" since it was added,
+                      and `spec.inputs` did not exist — a field in this API whose documentation
+                      pointed at a field in this API that was not there. A FleetTask whose
+                      binding names an undeclared input is refused at admission, on create and
+                      on every update that changes spec.actions: an appended member whose
+                      binding names an input the task does not declare is refused.
+                      spec.inputs and spec.flow are immutable after a FleetTask is created, and
+                      the API server refuses an update that changes either, so no update can
+                      remove an input a binding still reads. A TaskTrigger's taskTemplate stays
+                      editable, and is not checked when the trigger is
+                      written; the check runs when the trigger creates the FleetTask. No
+                      controller resolves a fromTaskInput binding at v0.4: it is copied onto
+                      the child FleetAction as written, and no value in this list is read
+                      outside admission.
+
+                      VALUES ARE STRING-ENCODED, like every other scalar in this grammar
+                      (`ParameterBinding.Value`, `ComputeEndpointParameter.Default`). One
+                      encoding for one concept: a number that is a string in one field and a
+                      float in the next is a number two consumers will parse differently.
+                    items:
+                      description: |-
+                        TaskInput declares one named, typed value supplied with a FleetTask, which a
+                        member's `parameters` block reads by name via `fromTaskInput`.
+
+                        Deliberately the SAME shape as ComputeEndpointParameter
+                        (api/v1/computeendpoint_types.go) minus the endpoint-specific fields: same
+                        ValueKind vocabulary, same string-encoded Default, same Allowed set for an
+                        enum, same numeric bounds. A second, subtly different way to declare "a named
+                        scalar with a type and a default" is a second thing to learn and a second
+                        place for the two to disagree about what `number` means.
+                      properties:
+                        allowed:
+                          description: Allowed enumerates permitted values when Kind
+                            is enum.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
+                        default:
+                          description: |-
+                            Default is the string-encoded value specified to be used when none is
+                            supplied. Absent is NOT the same as empty: an input with no default that
+                            is not supplied is UNRESOLVED, not "" — writing "" for it would silently
+                            turn "nobody said" into "somebody said nothing". At v0.4 no controller
+                            resolves a fromTaskInput binding, so this default is stored and not
+                            applied.
+                          type: string
+                        kind:
+                          description: Kind is the input's scalar type.
+                          enum:
+                          - string
+                          - number
+                          - bool
+                          - enum
+                          type: string
+                        max:
+                          description: Max is the maximum permitted value when Kind
+                            is number.
+                          type: number
+                        min:
+                          description: Min is the minimum permitted value when Kind
+                            is number.
+                          type: number
+                        name:
+                          description: Name is the input name a `fromTaskInput` binding
+                            reads.
+                          minLength: 1
+                          type: string
+                        required:
+                          description: |-
+                            Required marks whether this input must be supplied. An input that is
+                            Required with no Default is one a task cannot run without, and a binding
+                            onto it resolves only when the value is actually present.
+                          type: boolean
+                      required:
+                      - kind
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: allowed must list at least one value when kind is
+                          enum
+                        rule: self.kind != 'enum' || size(self.allowed) > 0
+                      - message: allowed is meaningful only when kind is enum
+                        rule: '!has(self.allowed) || size(self.allowed) == 0 || self.kind
+                          == ''enum'''
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  quorum:
+                    description: |-
+                      Quorum is REQUIRED when CompletionPolicy is Quorum, ignored otherwise (CEL-enforced).
+                      The controller re-checks it on every non-terminal reconcile and fails the task
+                      CLOSED (condition CompletionPolicyValid=False, reason QuorumUnset) if it is absent —
+                      a nil threshold read as 0 made `succeeded >= 0` true on the first pass, reporting
+                      Succeeded having run nothing.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - actions
+                type: object
+                x-kubernetes-validations:
+                - message: quorum is required when completionPolicy is Quorum
+                  rule: self.completionPolicy != 'Quorum' || has(self.quorum)
+                - message: 'spec.flow and a member''s dependsOn are mutually exclusive:
+                    with flow present, every action''s dependsOn must be empty'
+                  rule: '!has(self.flow) || self.actions.all(a, !has(a.dependsOn)
+                    || size(a.dependsOn) == 0)'
+                - message: spec.flow supplies the task's outcome (the root node's);
+                    admission rejects a task that sets both a non-default completionPolicy
+                    and a flow
+                  rule: '!has(self.flow) || self.completionPolicy == ''All'''
+                - message: spec.compensation must not be set on a member whose action
+                    carries spec.executor — external actions are excluded from Compensate
+                  rule: self.actions.all(a, !has(a.compensation) || !has(a.action.executor))
+                - message: spec.compensation must not carry spec.executor — an external
+                    undo is excluded from Compensate
+                  rule: self.actions.all(a, !has(a.compensation) || !has(a.compensation.executor))
+            required:
+            - source
+            - taskTemplate
+            type: object
+          status:
+            description: |-
+              TaskTriggerStatus is the observed state of a TaskTrigger.
+
+              # WHAT THIS TYPE DELIBERATELY DOES NOT CARRY
+
+              It has no `spec.condition` — a CEL expression evaluated against a closed context,
+              with which a trigger would scope itself to one vendor's robots in one zone — and the
+              absence is deliberate: this tree vendors no CEL evaluator, and a condition field that
+              nothing evaluates would be strictly worse than none — an operator would write a scope,
+              the apply would succeed, and the trigger would fire on every event regardless. A field
+              that is specified but inert is more dangerous here than usually, because the field's
+              whole purpose is to NARROW what fires.
+
+              The same reasoning covers payload substitution into the template: there is no
+              `paramsFrom` mapping event payload fields into action parameters, because a half-done
+              version that silently dropped unmapped fields would produce a task that looks
+              parameterised and is not. A human reviewing the draft can fill values in; that is
+              what the draft is for.
+            properties:
+              conditions:
+                description: Conditions is the standard conditions list.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              draftCount:
+                description: DraftCount is how many drafts this trigger has produced.
+                format: int64
+                minimum: 0
+                type: integer
+              lastEventName:
+                description: LastEventName is the SemanticEvent that last fired it.
+                type: string
+              lastFiredAt:
+                description: LastFiredAt is when this trigger last drafted a task.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
+              pendingDrafts:
+                description: |-
+                  PendingDrafts names the drafted FleetTasks that are still awaiting a human.
+                  This is the operator's work queue, and a growing list is the signal that
+                  events are arriving faster than anyone is acting on them.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

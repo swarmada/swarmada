@@ -57,12 +57,27 @@ func (f *fakeSender) Send(msg *fav1.ControlPlaneMessage) error {
 		return f.sendErr
 	}
 	cmd := msg.GetCommand()
+	if cmd == nil {
+		// Not a Command push. The periodic adapter-liveness HeartbeatRequest
+		// (adapter_liveness.go) rides the same sender, and recording it here would
+		// put nils into every test's expected Command sequence.
+		f.mu.Unlock()
+		return nil
+	}
 	f.sent = append(f.sent, cmd)
 	respond := f.respond
 	f.mu.Unlock()
 	if respond != nil {
 		// Reply asynchronously, exactly as a real adapter would over its stream.
-		go f.dispatch.RouteResult(respond(cmd))
+		// A result carries the robot_id of the command it answers, as a conformant
+		// adapter's does: the ControlStream gate refuses an empty one before it could
+		// reach RouteResult, which matches it against the command's robot. A test
+		// that leaves it unset is given the command's.
+		res := respond(cmd)
+		if res != nil && res.GetRobotId() == "" {
+			res.RobotId = cmd.GetRobotId()
+		}
+		go func() { _ = f.dispatch.RouteResult(f, res) }()
 	}
 	return nil
 }
@@ -244,8 +259,8 @@ func TestVerify_ContextCancelled(t *testing.T) {
 func TestRouteResult_StaleCommandIDDropped(t *testing.T) {
 	d, _ := newDispatcher(t, cmdAdapter)
 	// A result for a command_id nobody is waiting on must be a harmless no-op.
-	d.RouteResult(&fav1.CommandResult{CommandId: 9999})
-	d.RouteResult(nil)
+	_ = d.RouteResult(nil, &fav1.CommandResult{CommandId: 9999})
+	_ = d.RouteResult(nil, nil)
 }
 
 func TestRegisterStream_UnverifiedNotRegistered(t *testing.T) {

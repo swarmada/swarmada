@@ -49,11 +49,20 @@ func TestInTreeAdaptersReportASupportedContractVersion(t *testing.T) {
 		"mavlink":      "../../adapters/external/fleet-adapter-mavlink/fleet_adapter_mavlink/adapter.py",
 	} {
 		t.Run(name, func(t *testing.T) {
-			// Only adapters/simulation/ ships in this repo; example-noop, template and the
-			// external reference adapters are released separately. Skip the ones that are not
-			// present here rather than failing — an adapter that IS in the tree is still checked.
+			// THE SKIP IS COVERED ELSEWHERE, AND SAYS SO. The external reference adapters are
+			// released separately (ADR-0005) and their source is not in this checkout, so this
+			// test cannot read them — and for three sessions a skip here was the ONLY thing the
+			// suite said about them while all three were out of range. A skip is a green test.
+			//
+			// TestRegistryRowsDeclareASupportedContractVersion (registry_versions_test.go) makes
+			// the same assertion from adapters/REGISTRY.md, which IS in this tree and records all
+			// six adapters. It is a weaker claim — the registry records what a vendor DECLARED,
+			// not what their code holds — and it cannot skip, which is the property this skip
+			// destroyed. Do not delete this skip; do not delete that test either.
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				t.Skipf("%s is not part of this repository", path)
+				t.Skipf("%s is not in this repository, so its source cannot be read here. Its "+
+					"DECLARED version is checked from adapters/REGISTRY.md by "+
+					"TestRegistryRowsDeclareASupportedContractVersion, which cannot skip", path)
 			}
 			body, err := os.ReadFile(path) // #nosec G304 -- fixed in-repo path from the table above
 			if err != nil {
@@ -72,11 +81,31 @@ func TestInTreeAdaptersReportASupportedContractVersion(t *testing.T) {
 					path, declared, reason)
 			}
 
+			// An adapter that keeps the stop latch only when asked (the simulation adapter, with
+			// --latch) declares the version it reports then as LATCH_CONTRACT_VERSION. That one
+			// must be supported too.
+			latch := regexp.MustCompile(`(?m)^LATCH_CONTRACT_VERSION\s*=\s*"([^"]*)"`).FindSubmatch(body)
+			if latch != nil {
+				if ok, reason := Supports(string(latch[1])); !ok {
+					t.Errorf("%s declares LATCH_CONTRACT_VERSION = %q, which this control plane "+
+						"would refuse: %s", path, string(latch[1]), reason)
+				}
+			}
+
 			// Declaring the constant is not enough — it has to reach the wire. A constant that is
-			// never passed to AdapterHello is the same outage with a passing grep.
-			if !regexp.MustCompile(`contract_version=CONTRACT_VERSION`).Match(body) {
-				t.Errorf("%s never passes contract_version=CONTRACT_VERSION to AdapterHello; the "+
-					"constant alone does not reach the handshake", path)
+			// never passed to AdapterHello is the same outage with a passing grep. An adapter with
+			// both constants passes the one it chose, self._contract_version, which it sets once,
+			// from those two constants and nothing else.
+			direct := regexp.MustCompile(`contract_version=CONTRACT_VERSION`).Match(body)
+			chosen := latch != nil &&
+				regexp.MustCompile(`contract_version=self\._contract_version\b`).Match(body) &&
+				len(regexp.MustCompile(`self\._contract_version\s*=[^=]`).FindAll(body, -1)) == 1 &&
+				regexp.MustCompile(`(?m)^\s*self\._contract_version = LATCH_CONTRACT_VERSION `+
+					`if \w+ else CONTRACT_VERSION$`).Match(body)
+			if !direct && !chosen {
+				t.Errorf("%s never passes contract_version=CONTRACT_VERSION to AdapterHello, nor "+
+					"one version it set once from CONTRACT_VERSION and LATCH_CONTRACT_VERSION; "+
+					"the constant alone does not reach the handshake", path)
 			}
 		})
 	}

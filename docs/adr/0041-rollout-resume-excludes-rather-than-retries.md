@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-08-19 (proposed) · decided 2026-08-20
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.1.8 / §9.1.10 (FirmwareRollout, ModelRollout), §9.5.3 (RBAC custom verbs), §9.5.4 and §9.6.5.1 (required audit events), ADR-0021 (`policy-reset`: the operator-override precedent this mirrors), §6.7 (Auto model rollback, whose `rolledBackRobots` carries the same exclude-not-retry semantics)
+- **Related:** RFC-0001 "FirmwareRollout" and "ModelRollout", "Permission Matrix" (RBAC custom verbs), "Audit Logging" and "Required Events" (required audit events), ADR-0021 (`policy-reset`: the operator-override precedent this mirrors), "Why Is ModelRollout Rollback `Manual` by Default?" (auto model rollback, whose `rolledBackRobots` carries the same exclude-not-retry semantics)
 
 ## Context
 
@@ -116,3 +116,18 @@ discard the state that restores the fleet.
 
 **Auto-resume after a timeout.** Rejected: `pauseOnError` is a safety halt on a fleet-wide
 firmware or model dispatch. Something that undoes a safety halt without a human is not a pause.
+
+## Amendment 1 — a reverted robot halts the rollout, and resume acknowledges it
+
+- **Date:** 2026-09-28
+- **Basis:** `docs/adr/README.md` — the decision is unchanged (resume excludes, it does not
+  retry), so no superseding ADR. What resume excludes is extended.
+- **What changes.** Under `rollbackPolicy: Auto` a `ModelRollout` robot whose update failed is
+  reverted, and the revert took it out of `failed` before the `pauseOnError` halt was judged. A
+  model that failed on every robot was therefore pushed to every robot in turn and the rollout
+  ended `Succeeded`. A revert is now an error for `pauseOnError`: a reverted robot not yet in
+  `status.excludedRobots` holds the halt, and resume adds the robots in
+  `status.rolledBackRobots` to `status.excludedRobots` together with the failed ones.
+- **What is unchanged:** a reverted robot stays rolled back, is never pushed the model again,
+  and counts as settled toward `Succeeded` once its revert lands, so the terminal phase is the
+  one ADR-0073 derives. `pauseOnError: false` still tries every robot.

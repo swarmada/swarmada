@@ -29,8 +29,8 @@ spec:
     control-plane: controller-manager
   ports:
     - name: fleet-adapter
-      port: 9443
-      # The container listens on 9445 (see manager-mtls-patch.yaml); the published port stays
-      # 9443 so the adapter endpoint in every chart and runbook keeps working unchanged.
+      # 9445 is the ControlStream port everywhere: the manager's default, every overlay,
+      # the chart and the simulation adapter. 9443 is the admission webhook server's.
+      port: 9445
       targetPort: 9445
       protocol: TCP

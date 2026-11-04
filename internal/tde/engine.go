@@ -42,15 +42,19 @@ type Engine struct {
 	now    func() time.Time
 
 	// resolver, when non-nil, supplies a per-namespace Config from SwarmadaConfig
-	// tunables (§9.1.11.10); nil falls back to cfg. It is consulted off the hot path
+	// tunables (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration); nil falls back to cfg. It is consulted off the hot path
 	// (once per reservation/phase change), never per telemetry tick.
 	resolver func(namespace string) Config
 
 	// recovered gates the grant path: RequestReservation fails closed until the
-	// engine has rebuilt reservation state from FleetZone.status (§9.4.7), so a
+	// engine has rebuilt reservation state from FleetZone.status (RFC-0001 #tde-restart-recovery), so a
 	// freshly started or freshly promoted leader never over-grants against empty or
 	// stale in-memory state.
 	recovered atomic.Bool
+
+	// notify tells an adapter its queued reservation was granted when the engine itself
+	// promotes the waiter (WithGrantNotifier). Nil skips the push.
+	notify GrantNotifier
 
 	mapMu sync.Mutex
 	zones map[string]*zoneState // key: namespace/zone
@@ -80,7 +84,7 @@ func New(c client.Client, cfg Config) *Engine {
 func (e *Engine) WithClock(now func() time.Time) *Engine { e.now = now; return e }
 
 // WithConfigResolver installs a per-namespace [Config] resolver (SwarmadaConfig
-// tunables, §9.1.11.10). It MUST be fail-safe — return [DefaultConfig] on any
+// tunables, RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration). It MUST be fail-safe — return [DefaultConfig] on any
 // problem — so an unreadable policy never zeroes a reservation TTL.
 func (e *Engine) WithConfigResolver(f func(namespace string) Config) *Engine {
 	e.resolver = f
@@ -158,11 +162,11 @@ func (zs *zoneState) counts(now time.Time) (occupied, reserved int) {
 	return occupied, reserved
 }
 
-// RequestReservation implements the §9.4.4 zone-capacity gate plus §9.4.6 Critical
-// preemption, and grants/queues any requested shared resources (§9.4.5).
+// RequestReservation implements the RFC-0001 #tde-requestreservation-algorithm zone-capacity gate plus RFC-0001 #tde-preemption-algorithm Critical
+// preemption, and grants/queues any requested shared resources (RFC-0001 #tde-shared-resource-queue-management).
 func (e *Engine) RequestReservation(ctx context.Context, req ReservationRequest) (ReservationResult, error) {
 	// Fail closed until reservation state has been recovered from FleetZone.status
-	// (§9.4.7). Denying (never granting) is the safe direction; the caller requeues.
+	// (RFC-0001 #tde-restart-recovery). Denying (never granting) is the safe direction; the caller requeues.
 	if !e.recovered.Load() {
 		return ReservationResult{Status: Denied, DeniedReason: DeniedTDEUnavailable}, nil
 	}
@@ -192,9 +196,9 @@ func (e *Engine) RequestReservation(ctx context.Context, req ReservationRequest)
 
 		if maxC != 0 && occupied+reserved >= int(maxC) {
 			// Full. A preemptor band (Critical or High) may preempt a lower-priority
-			// reservation (§9.4.6).
+			// reservation (RFC-0001 #tde-preemption-algorithm).
 			if req.Priority.CanPreempt() {
-				if preempted := e.preempt(zs); preempted != nil {
+				if preempted := e.preempt(zs, req.MayEvict); preempted != nil {
 					// A preempted reservation's shared-resource holds go with it.
 					// preempt() drops the entry from zs.reservations and nothing else,
 					// so before this the evicted action stayed the recorded holder of
@@ -239,19 +243,25 @@ func (e *Engine) appendReservation(zs *zoneState, req ReservationRequest, now ti
 	})
 }
 
-// preempt evicts the lowest-priority non-Critical reservation to free a slot
-// (§9.4.6). It prefers a Reserved victim (clean eviction) over an Occupied one
-// (transient +1), then lowest priority, then most-recently-granted. Returns the
-// evicted entry, or nil if none is preemptible.
-func (e *Engine) preempt(zs *zoneState) *fleetv1.ZoneReservation {
+// preempt evicts the lowest-priority Normal or Low reservation to free a slot
+// (RFC-0001 #tde-preemption-algorithm). It prefers a Reserved victim (clean eviction) over an Occupied one
+// (transient +1), then lowest priority, then most-recently-granted. A reservation mayEvict
+// refuses is no candidate (nil admits all). Returns the evicted entry, or nil if none is
+// preemptible.
+func (e *Engine) preempt(zs *zoneState, mayEvict func(actionID string) bool) *fleetv1.ZoneReservation {
 	best := -1
 	for i := range zs.reservations {
 		r := &zs.reservations[i]
 		if !isPreemptibleBand(r.Priority) {
-			// Same rule as the §C controller preemption: a preemptor band (Critical or
-			// High) may evict only a Normal/Low reservation — never another Critical or
-			// High (FIFO within the preemptor bands). This is intentionally stricter
-			// than §9.4.6's literal "priority != Critical".
+			// RFC-0001 #tde-preemption-algorithm, and the same rule as the FleetAction
+			// controller's preemption: a preemptor band (Critical or High) may evict only
+			// a Normal/Low reservation — never another Critical or High (FIFO within the
+			// preemptor bands).
+			continue
+		}
+		if mayEvict != nil && !mayEvict(r.ActionID) {
+			// The caller's victim condition (row A11): a Paused, operator-gated action, or
+			// one whose robot a stop holds, keeps its slot.
 			continue
 		}
 		if best < 0 {
@@ -304,7 +314,7 @@ func (e *Engine) earliestExpiry(zs *zoneState, now time.Time, cfg Config) time.D
 	return time.Second
 }
 
-// grantResources grants or enqueues each requested shared resource (§9.4.5).
+// grantResources grants or enqueues each requested shared resource (RFC-0001 #tde-shared-resource-queue-management).
 func (e *Engine) grantResources(ctx context.Context, req ReservationRequest, states map[string]*zoneState, now time.Time) {
 	for _, r := range req.Resources {
 		zs := states[zoneKey(req.Namespace, r.ZoneName)]
@@ -335,7 +345,7 @@ func (e *Engine) grantResources(ctx context.Context, req ReservationRequest, sta
 }
 
 // insertByPolicy inserts a wait-queue entry ordered per the resource's policy
-// (§9.4.5).
+// (RFC-0001 #tde-shared-resource-queue-management).
 func insertByPolicy(q *fleetv1.SharedResourceQueue, entry fleetv1.WaitQueueEntry, policy fleetv1.ReservationPolicy) {
 	if policy == fleetv1.ReservationFIFO || policy == "" {
 		q.WaitQueue = append(q.WaitQueue, entry)
@@ -483,7 +493,7 @@ func removeByAction(rs []fleetv1.ZoneReservation, actionID string) []fleetv1.Zon
 }
 
 // releaseHolder releases a resource held by actionID and promotes the head of the
-// wait queue (§9.4.5 onResourceHolderReleased).
+// wait queue (RFC-0001 #tde-shared-resource-queue-management onResourceHolderReleased).
 func releaseHolder(q *fleetv1.SharedResourceQueue, actionID string, now time.Time, capacity int32) {
 	// Remove any holder matching actionID.
 	held := false

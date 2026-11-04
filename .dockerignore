@@ -14,9 +14,8 @@ coverage.txt
 # Python / docs / specs — not used by the controller-manager image.
 # NOTE: proto/ is intentionally NOT excluded here — internal/controlstream
 # imports the generated proto/fleet_adapter/v1 stubs, so the Dockerfile's
-# `COPY proto/ proto/` needs it in the build context. `make docker-build`
-# regenerates those stubs (via the `proto` target) before the image build;
-# a bare `docker build` needs `make proto` run manually first.
+# `COPY proto/ proto/` needs it in the build context. The stubs are committed,
+# so a bare `docker build` from a clean checkout has them.
 ml/
 simulation/
 scripts/

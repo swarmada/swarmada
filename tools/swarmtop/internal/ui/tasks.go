@@ -80,8 +80,8 @@ func (r taskListRow) isTask() bool { return r.task != nil }
 // .OwnerTask — never by walking ownerReferences. The label is already on the
 // object the informer delivered, so this is a single pass with no join.
 //
-// Member ORDER and member SET come from the task's own status.actions[] (spec
-// §4), not from the name-sorted action list. That matters for more than
+// Member ORDER and member SET come from the task's own status.actions[],
+// not from the name-sorted action list. That matters for more than
 // ordering: the controller only generates a child once its dependencies are met,
 // so a task with a dependency graph has members with no FleetAction yet. Driving
 // the list off the label alone would render a three-step task as a single row
@@ -149,7 +149,7 @@ func taskListRows(f k8sclient.Fleet) []taskListRow {
 // taskNoteParts is the trailing annotation on a task row, in DESCENDING order of
 // importance, so a narrow terminal drops the least valuable part first.
 //
-//  1. the current member — spec §3 rule 3 makes this the headline of a task row
+//  1. the current member — the headline of a task row
 //  2. the desired state — task-owned intent, and the one kubectl print column
 //     with no home in the grid
 //  3. the action summary — LAST because it is the least additive: the PROG cell
@@ -184,7 +184,7 @@ type notePart struct{ full, short string }
 
 // minNoteRoom is the width the annotation is guaranteed when any task row has
 // one. Without a reserve the columns take everything at their natural widths and
-// the current member — which spec §3 rule 3 requires on the task row — silently
+// the current member — which the task row must show — silently
 // vanishes at ordinary terminal widths. Sized for the short form ("→ " plus a
 // typical member name), not the full one.
 const minNoteRoom = 18
@@ -263,7 +263,7 @@ func memberDisplayName(a *k8sclient.FleetActionView) string {
 }
 
 // actionCells builds the cells of one action row. This is the single row
-// renderer the equivalence invariant rests on (spec §3b): a member row and a
+// renderer the equivalence invariant rests on: a member row and a
 // standalone row differ ONLY in what this function derives from the view struct
 // — OwnerTask empty means standalone — never in which section called it. There
 // is deliberately no parameter saying "render me as a member".
@@ -310,7 +310,7 @@ func (m Model) taskCells(t *k8sclient.FleetTaskView) []string {
 // dependsOn.
 //
 // This is NOT a second action renderer, and it does not weaken the equivalence
-// invariant (spec §3b): there is no FleetAction here to render, so there is no
+// invariant: there is no FleetAction here to render, so there is no
 // standalone counterpart it could differ from. What it must not do is fabricate
 // values — a child that does not exist has no priority, no progress and no retry
 // count, so those cells are dashed rather than defaulted to "Normal 0% 0", which
@@ -404,7 +404,7 @@ func (m Model) selectedTask() *k8sclient.FleetTaskView {
 // nowhere to go. Sizing to content and leaving the remainder for the annotation
 // is what lets both fit — and an over-wide NAME full of padding buys nothing.
 //
-// DEADLINE is not a column on this screen. Spec §3a names it as the one to drop
+// DEADLINE is not a column on this screen. It is the column dropped
 // if KIND and TASK make the row too wide, and it is "—" on every sample action
 // and already present in the detail pane.
 func (m Model) taskColWidths(cells [][]string, reserve int) []int {
@@ -516,7 +516,7 @@ func (m Model) viewTasks() string {
 	b.WriteByte('\n')
 
 	// Section headers appear ONLY when the section has content, so a fleet with no
-	// composites renders as the flat action list it renders today (spec §3 rule 4).
+	// composites renders as the flat action list, with no composite chrome.
 	hasTasks := len(m.fleet.Tasks) > 0
 	if hasTasks {
 		b.WriteString(m.styles.colHeader.Render("FLEETTASKS"))
@@ -549,7 +549,7 @@ func (m Model) viewTasks() string {
 	return b.String()
 }
 
-// titleBarTasks is the composite screen's header. Spec §3 rule 7 folds the old
+// titleBarTasks is the composite screen's header. This screen folds in the old
 // "swarmtop · actions" title into this screen; the count states both shapes so
 // the header never implies the fleet holds only one of them.
 func (m Model) titleBarTasks() string {
@@ -577,7 +577,7 @@ func plural(n int, noun string) string {
 func runeLen(s string) int { return len([]rune(s)) }
 
 // currentMemberMark is the cursor-independent marker for the member a task is
-// currently working (spec §3 rule 3). Distinct from the selection highlight, so
+// working. Distinct from the selection highlight, so
 // "the row I am on" and "the action the task is running" never look alike.
 const currentMemberMark = "▸ "
 
@@ -596,13 +596,13 @@ func (m Model) compositeDetailLines() []string {
 	case r.pending != nil:
 		return m.pendingMemberDetailLines(r.owner, r.pending)
 	default:
-		// Spec §3 rule 6: an action row — member or standalone — opens the EXISTING
+		// An action row — member or standalone — opens the EXISTING
 		// action detail, unchanged.
 		return m.actionDetailLines(r.action)
 	}
 }
 
-// taskDetailLines is the composite's detail pane (spec §3 rule 5): every member
+// taskDetailLines is the composite's detail pane: every member
 // recorded in status.actions[] with the current one marked, plus the policies and
 // timestamps that have no column on the list.
 func (m Model) taskDetailLines(t *k8sclient.FleetTaskView) []string {

@@ -57,7 +57,7 @@ spec:
           spec:
             description: |-
               RobotClassSpec is the shared template merged into a Robot's spec at admission
-              (§5.2.1.2). Scalar fields: the Robot value wins if present, else the class
+              (RFC-0001 #robotclass). Scalar fields: the Robot value wins if present, else the class
               value. List fields (hardware, defaultModels, baseCapabilities) merge
               union-by-name — a Robot entry with the same name fully replaces the class
               entry; there is no partial per-field merge within a list element.
@@ -92,19 +92,24 @@ spec:
                   properties:
                     degradedPolicy:
                       description: |-
-                        DegradedPolicy governs whether this capability may still be scheduled while
-                        in Degraded status. When absent (or Schedulable=false) a Degraded instance is
-                        treated as Inactive for scheduling. When Schedulable=true, the Scheduler may
-                        satisfy a action's parametric constraints using the capability's currently
-                        resolved (reduced) parameters — so a degraded capability serves lower-
-                        constraint actions but is excluded from those it can no longer meet.
+                        DegradedPolicy governs whether a Degraded instance of this capability can
+                        satisfy an action's parametric constraints. It does not decide whether the
+                        capability itself counts: a FleetAction with acceptDegradedCapabilities (or
+                        the namespace default) set can be matched to a robot whose required
+                        capability is Degraded, whatever this policy says. When Schedulable=true, the
+                        Scheduler uses the capability's currently resolved (reduced) parameters — so
+                        a degraded capability serves lower-constraint actions but is excluded from
+                        those it can no longer meet. When absent (or Schedulable=false), a Degraded
+                        instance satisfies no parametric constraint.
                       properties:
                         schedulable:
                           default: false
                           description: |-
                             Schedulable allows the Scheduler to satisfy parametric constraints with this
                             capability while it is Degraded, using its current (reduced) resolved
-                            parameters. Default false: a Degraded capability is not schedulable.
+                            parameters. Default false: a Degraded instance satisfies no parametric
+                            constraint. Whether it satisfies a required capability is decided by the
+                            FleetAction's acceptDegradedCapabilities, not by this field.
                           type: boolean
                       required:
                       - schedulable
@@ -181,16 +186,17 @@ spec:
                 properties:
                   minBatteryPctToCharge:
                     description: |-
-                      MinBatteryPctToCharge is the battery level below which the robot initiates
-                      autonomous docking.
+                      MinBatteryPctToCharge is the battery level below which the robot is
+                      specified to initiate autonomous docking. Not acted on at v0.4: no
+                      controller uses it and no Fleet Adapter protocol message carries it.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   targetBatteryPct:
                     description: |-
-                      TargetBatteryPct is the level at which the robot leaves the dock; it MUST be
-                      greater than MinBatteryPctToCharge.
+                      TargetBatteryPct is the level at which the robot is specified to leave the
+                      dock; it MUST be greater than MinBatteryPctToCharge. Not acted on at v0.4.
                     format: int32
                     maximum: 100
                     minimum: 0
@@ -206,14 +212,18 @@ spec:
                   class; any field may be overridden per-robot.
                 properties:
                   maxPayloadKg:
-                    description: MaxPayloadKg caps the load the robot will accept,
-                      in kilograms.
+                    description: |-
+                      MaxPayloadKg is the declared load limit in kilograms. Admission fills it
+                      onto a Robot that leaves it unset; no controller or dispatch filter acts on
+                      it. The dispatch path checks an action's payload against a capability
+                      parameter resolved from hardware, not against this field.
                     minimum: 0
                     type: number
                   maxSpeedMs:
                     description: |-
-                      MaxSpeedMs is the maximum commanded speed in metres per second; the Fleet
-                      Adapter enforces this limit.
+                      MaxSpeedMs is the declared maximum speed in metres per second. Admission
+                      fills it onto a Robot that leaves it unset; no controller acts on it and no
+                      Fleet Adapter protocol message carries it, so no adapter is told this limit.
                     minimum: 0
                     type: number
                   minBatteryPctForAction:
@@ -235,8 +245,12 @@ spec:
                   properties:
                     grantsCapabilities:
                       description: |-
-                        GrantsCapabilities lists capabilities unlocked when the model is Active.
-                        MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+                        GrantsCapabilities lists the capabilities this model provides. At v0.4 it
+                        is read only by candidate filter 7 (a robot is withheld from an action
+                        needing one of these names while the model is Updating). It adds nothing
+                        to spec.capabilities[] or status.capabilities[]: a model-granted capability
+                        comes from a ModelRollout's own grantsCapabilities. MaxItems bounds CEL
+                        cost (see Robot.spec.hardware's comment).
                       items:
                         type: string
                       maxItems: 32
@@ -247,7 +261,7 @@ spec:
                         ModelURI is where the Robot Agent fetches the model artifact
                         (e.g. "oci://registry.swarmada.io/models/item-recognition:3.2.1").
                         Scheme-constrained to match ModelRollout.spec.modelUri so a model URI is
-                        validated identically wherever it is declared (RFC-0001 D3).
+                        validated identically wherever it is declared.
                       minLength: 1
                       pattern: ^(oci|s3|https)://
                       type: string
@@ -260,9 +274,11 @@ spec:
                       type: string
                     requiredHardware:
                       description: |-
-                        RequiredHardware lists component names that must be Healthy for the model to
-                        run; a degraded dependency moves the model — and the capabilities it grants
-                        — Inactive. MaxItems bounds CEL cost (see Robot.spec.hardware's comment).
+                        RequiredHardware lists component names specified to be Healthy for the
+                        model to run, a degraded dependency moving the model Inactive. Not
+                        implemented at v0.4: no controller reads this list; capability derivation
+                        uses each capability's own requiredHardware. MaxItems bounds CEL cost (see
+                        Robot.spec.hardware's comment).
                       items:
                         type: string
                       maxItems: 32
@@ -285,12 +301,12 @@ spec:
                 description: |-
                   DefaultTelemetry are the telemetry-cadence defaults inherited by all robots of
                   this class; any field may be overridden per-robot. Fields a robot leaves unset
-                  are filled from here by the RobotDefaulter merge (§9.1.11).
+                  are filled from here by the RobotDefaulter merge (RFC-0001 #robotclass-inheritance-and-merge-behavior).
                 properties:
                   maxIdleIntervalSeconds:
                     description: |-
                       MaxIdleIntervalSeconds is the default ceiling on how long a stationary robot may
-                      go without sending a position frame.
+                      go without sending a position frame. Not sent to any adapter at v0.4.
                     format: int32
                     maximum: 300
                     minimum: 1
@@ -298,13 +314,13 @@ spec:
                   motionThresholdMeters:
                     description: |-
                       MotionThresholdMeters is the default minimum position change before a new
-                      position frame is sent.
+                      position frame is sent. Not sent to any adapter at v0.4 (see the Robot field).
                     minimum: 0
                     type: number
                   telemetryIntervalSeconds:
                     description: |-
                       TelemetryIntervalSeconds is the default telemetry reporting interval (the
-                      ceiling between frames; basis for Offline detection).
+                      ceiling between frames). It is not an input to Offline detection.
                     format: int32
                     maximum: 30
                     minimum: 1
@@ -315,7 +331,7 @@ spec:
                   Hardware is the physical component inventory present on every robot of this
                   class. Keyed by name; a Robot overrides one entry by declaring a hardware
                   item with the same name. A Robot cannot remove a class entry — omission
-                  means inheritance. See §5.2.3 for the authoritative per-type field list.
+                  means inheritance. See RFC-0001 #robot for the authoritative per-type field list.
                 items:
                   description: |-
                     HardwareComponent declares one physical component. Type-specific attributes are
@@ -469,12 +485,15 @@ spec:
           status:
             description: |-
               RobotClassStatus is the observed state of a RobotClass. A RobotClass is a
-              template and carries little runtime state; status is used to surface
-              validation problems (e.g. an unreachable model URI), an observed generation,
-              and how many Robots currently inherit from this class.
+              template and carries little runtime state. The RobotClass controller writes
+              two values: the observed generation and how many Robots currently reference this
+              class. It writes no condition and validates nothing about the class (an
+              unreachable model URI, for example, is not reported here).
             properties:
               conditions:
-                description: Conditions is the standard conditions list.
+                description: |-
+                  Conditions is the standard conditions list. No controller writes a condition
+                  on a RobotClass at this version, so it is empty.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -536,7 +555,7 @@ spec:
               observedGeneration:
                 description: |-
                   ObservedGeneration is the .metadata.generation this status was computed from.
-                  It is the RobotClass generation the admission-time merge (§5.2.1.2) draws from —
+                  It is the RobotClass generation the admission-time merge (RFC-0001 #robotclass) draws from —
                   the "last merge generation" a newly-admitted Robot of this class inherits.
                 format: int64
                 type: integer

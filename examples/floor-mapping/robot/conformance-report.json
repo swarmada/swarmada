@@ -1,0 +1,514 @@
+{
+  "adapter": "fleet-adapter-ros2",
+  "protocol_version": "fleet_adapter.v1",
+  "contract_version": "1.4.0",
+  "suite_revision": "2026.10.17",
+  "honoured_operating_constraints": [],
+  "measurements": {},
+  "measurement_checks": {},
+  "conformant": true,
+  "counts": {
+    "pass": 53,
+    "fail": 1,
+    "skip": 17
+  },
+  "results": [
+    {
+      "check_id": "C1.1",
+      "title": "Open ControlStream and SafetyStream together",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "ControlStream and SafetyStream both established within 10.0s"
+    },
+    {
+      "check_id": "C1.2",
+      "title": "AdapterHello is the first message",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "first ControlStream message was AdapterHello, protocol_version='fleet_adapter.v1'"
+    },
+    {
+      "check_id": "C13.1",
+      "title": "AdapterHello reports a supported contract_version",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "contract_version='1.4.0'"
+    },
+    {
+      "check_id": "C0.2",
+      "title": "Harness context: negotiated contract version on HelloAck",
+      "status": "pass",
+      "level": "MAY",
+      "detail": "negotiated_contract_version='1.4.0' (harness-set)"
+    },
+    {
+      "check_id": "C2.1",
+      "title": "DiscoverRobot vs RegisterRobot used correctly",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "RegisterRobot for an admitted robot is acked"
+    },
+    {
+      "check_id": "C12.1",
+      "title": "scan answers with a CapabilitiesSnapshot",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "CapabilitiesSnapshot returned, declaring 0 honoured operating subject(s) and 0 sensor stream(s)"
+    },
+    {
+      "check_id": "C12.2",
+      "title": "A CapabilitiesSnapshot is pushed at registration, carrying the scan reply's catalog",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "1 snapshot(s) pushed for 'robot-conformance-1'; the latest declares ['Navigate', 'Custom', 'Charge'], identical to the scan reply (types, required capabilities, parameters)"
+    },
+    {
+      "check_id": "C19.1",
+      "title": "An action type the adapter did not declare is declined INVALID_ACTION",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "action_type='Clean' (declared: ['Charge', 'Custom', 'Navigate']): declined INVALID_ACTION; control (action_type='Navigate'): accepted"
+    },
+    {
+      "check_id": "C19.2",
+      "title": "An assignment missing a declared required parameter is declined INVALID_ACTION",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "Navigate without 'x' (declared required: ['x', 'y']): declined INVALID_ACTION; control (Navigate with every required parameter): accepted"
+    },
+    {
+      "check_id": "C19.3",
+      "title": "An assignment that states no action type is declined INVALID_ACTION",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "no action_type (declared: ['Charge', 'Custom', 'Navigate']): declined INVALID_ACTION; control (action_type='Navigate'): accepted"
+    },
+    {
+      "check_id": "C19.4",
+      "title": "A parameter value outside its declared allowed values is declined INVALID_ACTION",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "Custom with operation='conformance-not-allowed' (declared allowed: ['explore-floor']): declined INVALID_ACTION; control (operation='explore-floor'): accepted"
+    },
+    {
+      "check_id": "C19.5",
+      "title": "A Custom action that names its verb only in the payload is accepted",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "Custom with no custom_type and operation='explore-floor': accepted. The verb was read from the payload, as RFC-0001 states for an action with no custom_type"
+    },
+    {
+      "check_id": "C3.3",
+      "title": "Reject AssignAction with absent fencing token (MISSING)",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "AssignAction with no fencing_token: accepted=False, rejection MISSING_FENCING_TOKEN"
+    },
+    {
+      "check_id": "C0.4",
+      "title": "Harness context: a fresh (higher) fencing token is accepted",
+      "status": "pass",
+      "level": "MAY",
+      "detail": ""
+    },
+    {
+      "check_id": "C3.5",
+      "title": "Echo the fenced token in AssignActionResult",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "AssignActionResult echoed accepted_fencing_token=10 for token 10"
+    },
+    {
+      "check_id": "C3.2",
+      "title": "Reject a stale (<= highest) fencing token (STALE)",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "token 3 after token 10 was accepted: accepted=False, rejection STALE_FENCING_TOKEN"
+    },
+    {
+      "check_id": "C3.4",
+      "title": "Idempotently re-ack identical re-delivery",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "identical re-delivery of t1 at token 10: accepted=True"
+    },
+    {
+      "check_id": "C3.6",
+      "title": "cancel_action reports a valid CancelDisposition",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "disposition=CANCEL_DISPOSITION_STOPPED_SAFELY"
+    },
+    {
+      "check_id": "C4.2",
+      "title": "Self-stop when the assignment lease is not renewed",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "reported ACTION_STATE_STOPPED within 4s of lease expiry. LIMIT: this establishes that the stop was REPORTED, not that rest was CONFIRMED before it was reported \u2014 nothing on ActionStatusUpdate attests confirmation, so an announced stop and a confirmed one are the same trace here"
+    },
+    {
+      "check_id": "C4.1",
+      "title": "Reports the task still running across lease renewals",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "renewed=True running=True after each of 4 renewals at lease_generation 3, 0.2s apart"
+    },
+    {
+      "check_id": "C0.3",
+      "title": "Harness context: a matching lease generation renews",
+      "status": "pass",
+      "level": "MAY",
+      "detail": ""
+    },
+    {
+      "check_id": "C4.3",
+      "title": "Ignore a RenewActionLease with a stale lease_generation",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "RenewActionLease at lease_generation 1, below the current 7: renewed=False"
+    },
+    {
+      "check_id": "C4.4",
+      "title": "Report running=false once the task is no longer executing",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "after CancelAction, RenewActionLease at the current generation 7 reported running=False"
+    },
+    {
+      "check_id": "C16.1",
+      "title": "ActionStatusUpdate at a task phase transition, terminal states included",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "transition state=ACTION_STATE_RUNNING; terminal state=ACTION_STATE_CANCELLED for the cancelled task 't1'"
+    },
+    {
+      "check_id": "C6.4",
+      "title": "Echo the assigned fencing_token in ActionStatusUpdate",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "ActionStatusUpdate fencing_token=14, the accepted token"
+    },
+    {
+      "check_id": "C5.5",
+      "title": "EstopAck within the 500 ms SafetyStream budget",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "measured 1 ms to the first EstopAck naming 'e1' (budget 500 ms, harness transport included); passed over ['local_stop'] to reach it"
+    },
+    {
+      "check_id": "C5.1",
+      "title": "Accept Estop on SafetyStream and act on it",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "EstopAck for estop_id 'e1' returned on SafetyStream; passed over ['local_stop'] to reach it"
+    },
+    {
+      "check_id": "C5.2",
+      "title": "Confirmed EstopAck (STOPPED) on SafetyStream",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "terminal ack STOPPED on the first ack"
+    },
+    {
+      "check_id": "C5.6",
+      "title": "A STOPPING EstopAck reaches a terminal state",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "legal-alternative-path: the adapter answered with a terminal ack directly and never sent STOPPING, which is equally conformant. C5.6 grades the two-phase shape; this adapter took the one-phase one, so the check was never an obligation of it (ADR-0048 rule B). did-not-reach-state would be false here -- a terminal state WAS reached"
+    },
+    {
+      "check_id": "C5.3",
+      "title": "STOPPED is adapter-confirmed, not inferred",
+      "status": "pass",
+      "level": "MUST NOT",
+      "detail": "attested via stop_initiated_at (necessary evidence, not proof that no inference occurred)"
+    },
+    {
+      "check_id": "C5.7",
+      "title": "An early STOPPED fails: STOPPED is not sent before the witnessed moment of rest",
+      "status": "skip",
+      "level": "MUST NOT",
+      "detail": "no-motion-witness: the run was given no motion witness (--witness-file), so the time of STOPPED could not be compared with the robot's rest"
+    },
+    {
+      "check_id": "C5.4",
+      "title": "Estop traffic not carried on ControlStream",
+      "status": "pass",
+      "level": "MUST NOT",
+      "detail": "a fence (Command.estop for 'e-control-probe') was acknowledged with an EstopAck on SafetyStream"
+    },
+    {
+      "check_id": "C6.2",
+      "title": "Preserve proto3 explicit presence on safety scalars",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "floor=0 sent WITH explicit presence (absent != ground is preserved)"
+    },
+    {
+      "check_id": "C6.3",
+      "title": "No Robot status write per telemetry tick (RA-1)",
+      "status": "skip",
+      "level": "MUST NOT",
+      "detail": "not-observable-on-wire: RA-1 governs the control plane's write policy, not adapter output, and is graded on the ControlPlane surface as CP8.1. Telemetry was observed, so the projection path is live."
+    },
+    {
+      "check_id": "C7.1",
+      "title": "Decline optional commands via unsupported=true",
+      "status": "pass",
+      "level": "MAY",
+      "detail": "verify_hardware declined with unsupported=true"
+    },
+    {
+      "check_id": "C8.1",
+      "title": "Adapter dials the advertised edge endpoint",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "EdgeStream established within 3.0s of the RegisterAck that advertised edge_endpoints"
+    },
+    {
+      "check_id": "C8.2",
+      "title": "Tee a PositionFrame per robot to the edge node",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "PositionFrame observed on the EdgeStream"
+    },
+    {
+      "check_id": "C9.1",
+      "title": "verify_* answers with actualMetrics",
+      "status": "skip",
+      "level": "SHOULD",
+      "detail": "optional-declined: adapter declined verify_* (conformant; see C7)"
+    },
+    {
+      "check_id": "C10.1",
+      "title": "push_firmware may emit UpdateProgress",
+      "status": "skip",
+      "level": "MAY",
+      "detail": "optional-declined: adapter declined it with unsupported=true (conformant; see C7)"
+    },
+    {
+      "check_id": "C10.2",
+      "title": "Every install answered reports a terminal outcome",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "optional-declined: adapter answered neither push_firmware nor model_update \u2014 both were declined with unsupported=true, which is conformant (C7.1), so no install carried a terminal obligation"
+    },
+    {
+      "check_id": "C11.1",
+      "title": "pause/resume answered with a result",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "pause answered with a PauseResult, resume with a ResumeResult"
+    },
+    {
+      "check_id": "C3.9",
+      "title": "A cancel naming a preempted action leaves the preemptor running to completion",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "assigned 't-preempted' at token 15, then 't-preemptor' in place at 16, then cancel_action('t-preempted') at tokens 15 and 16: 't-preemptor' still running=True after both cancels, then SUCCEEDED. Cancel answers (not graded): token 15: acknowledged=True stale=False disposition=CANCEL_DISPOSITION_STOPPED_SAFELY; token 16: acknowledged=True stale=False disposition=CANCEL_DISPOSITION_STOPPED_SAFELY"
+    },
+    {
+      "check_id": "C17.3",
+      "title": "The honoured-operating-subject declaration is well formed",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "declares no honoured operating subject, which FA-R1 states is not a breach. Its robots are simply withheld from zones restricting a subject. This row asserts the SHAPE of a declaration and nothing about whether a declared subject is honoured -- that is FA-R3/FA-R4, and it is not verifiable from the wire"
+    },
+    {
+      "check_id": "C17.1",
+      "title": "Decline an assignment carrying an operating constraint it cannot honour",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "declined OPERATING_CONSTRAINT_UNMET naming ['camera', 'microphone', 'water', 'chemical', 'uv', 'speed', 'noise']; probed ['camera', 'microphone', 'water', 'chemical', 'uv', 'speed', 'noise'] (declared honoured: none, read from the CapabilitiesSnapshot)"
+    },
+    {
+      "check_id": "C17.2",
+      "title": "Decline an assignment whose operating subject it does not recognise",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "declined OPERATING_CONSTRAINT_UNMET naming ['example.com/leaf-blower']; probed 'example.com/leaf-blower'. AN UNRECOGNISED SUBJECT IS NOT AN ABSENT SUBJECT: treating it as absent would make the namespaced extension form a universal bypass, since any vendor could then route around every operating rule by inventing a subject"
+    },
+    {
+      "check_id": "C17.4",
+      "title": "An assignment carrying only subjects it declared is ACCEPTED, not refused",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-declares-no-operating-subject: this run could construct no rule the adapter claims to honour, so there is no way to tell a decline that READ the constraint set from one that refuses reflexively (declared honoured: none, read from the CapabilitiesSnapshot)"
+    },
+    {
+      "check_id": "C18.1",
+      "title": "The sensor-stream declaration is well formed",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "declares no sensor stream, which is conformant: a robot with nothing to offer offers nothing, and the duty cycle below is then not applicable to it"
+    },
+    {
+      "check_id": "C18.2",
+      "title": "No sensor-stream bytes on the control plane while a stream runs",
+      "status": "skip",
+      "level": "MUST NOT",
+      "detail": "adapter-declares-no-sensor-stream"
+    },
+    {
+      "check_id": "C18.3",
+      "title": "A stream stops on lease expiry when the control plane goes silent",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-declares-no-sensor-stream"
+    },
+    {
+      "check_id": "C18.4",
+      "title": "Clip windows are refused or bounded, per the declaration",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-declares-no-sensor-stream"
+    },
+    {
+      "check_id": "C18.5",
+      "title": "DeactivateStream stops a live stream",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-declares-no-sensor-stream"
+    },
+    {
+      "check_id": "C7.2",
+      "title": "Verify MODEL artifact checksum and signature, fail closed",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "optional-declined: adapter declines model_update (conformant, C7.1), so artifact verification was not exercised"
+    },
+    {
+      "check_id": "C7.3",
+      "title": "Verify FIRMWARE artifact body and signature before flashing, fail closed",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "optional-declined: adapter declines push_firmware (conformant, C7.1), so body re-verify was not exercised"
+    },
+    {
+      "check_id": "C15.1",
+      "title": "Report carries the contract version the result was earned against",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "contract_version=1.4.0 (suite attests 1.4.0; recorded beside it as suiteRevision, never folded into it)"
+    },
+    {
+      "check_id": "C15.2",
+      "title": "A non-conformant report stays version-bound and fully observable",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "a failed MUST yields conformant=false while keeping contract_version and the per-check detail; assignability itself is asserted in internal/controller/assignment_gate_envtest_test.go"
+    },
+    {
+      "check_id": "C2.4",
+      "title": "Re-register on reconnect; never re-discover",
+      "status": "pass",
+      "level": "MUST NOT",
+      "detail": "the redial re-registered, with no discover attempt"
+    },
+    {
+      "check_id": "C6.1",
+      "title": "First TelemetryPayload after reconnect is a full snapshot",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "all 2 component(s) named by scan were re-sent: ['camera_front', 'lidar_top']. LIMIT: if scan itself under-reports, both paths agree and this check is blind -- an empty snapshot cannot say whether it means 'no hardware' or 'none observed yet'."
+    },
+    {
+      "check_id": "C2.2",
+      "title": "Adopt authoritative_action_state from RegisterAck",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "reported ACTION_STATE_CANCELLED"
+    },
+    {
+      "check_id": "C3.8",
+      "title": "Adopt RobotActionState.fencing_token as the high-water mark",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "a token of 20, below the 22 the RegisterAck declared authoritative, was refused STALE"
+    },
+    {
+      "check_id": "C2.3",
+      "title": "Honour telemetry_interval_seconds from RegisterAck",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "inter-payload gaps [1.0, 1.0]s against an advertised 1s"
+    },
+    {
+      "check_id": "C5.8",
+      "title": "A stop holds the robot's work until its EstopClear lifts it",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "the adapter acknowledged stop 'e-latch' (ESTOP_STATE_STOPPED); work at token 24 was refused ROBOT_UNAVAILABLE while it was latched; the clear (fence, then EstopClear at leader term 1) drew its EstopClearAck; work at token 25 was then accepted"
+    },
+    {
+      "check_id": "C14.2",
+      "title": "Estop/EstopAck schema is unchanged across supported contract versions",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "field numbers and names match the pinned estop schema"
+    },
+    {
+      "check_id": "C3.1",
+      "title": "Highest accepted fencing token survives a reconnect",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "token 6 after the reconnect, below the pre-reconnect high-water mark: rejection STALE_FENCING_TOKEN"
+    },
+    {
+      "check_id": "C3.7",
+      "title": "Highest accepted fencing token survives an adapter RESTART",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "needs-adapter-restart: the suite spawns the adapter once and never restarts it, so a passing report attests NOTHING about durability across a restart"
+    },
+    {
+      "check_id": "C13.2",
+      "title": "No work accepted after a VERSION_MISMATCH registration refusal",
+      "status": "fail",
+      "level": "SHOULD",
+      "detail": "adapter ACCEPTED an AssignAction after its registration was refused VERSION_MISMATCH. Not blocking: C13.2 is a SHOULD, not a MUST, in the contract, and a real control plane withholds the dispatch itself (the assignment gate). Recorded as defence-in-depth that is absent"
+    },
+    {
+      "check_id": "C14.1",
+      "title": "Estop honored against an adapter that failed the version gate",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "EstopAck for 'e-refused' reached STOPPED after the VERSION_MISMATCH refusal"
+    },
+    {
+      "check_id": "C8.3",
+      "title": "Confirmed EstopAck for an edge-issued estop",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "EstopAck state STOPPED on the EdgeStream"
+    },
+    {
+      "check_id": "C1.3",
+      "title": "Present a client certificate and treat that identity as authoritative",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "deployment-property: the harness calls add_insecure_port; mTLS identity is asserted in the control plane's own ControlStream tests"
+    },
+    {
+      "check_id": "C1.4",
+      "title": "Do not declare healthy when SafetyStream cannot be established",
+      "status": "skip",
+      "level": "MUST NOT",
+      "detail": "not-observable-on-wire: an adapter's own health signal is not a protocol concept"
+    },
+    {
+      "check_id": "C1.5",
+      "title": "Reconnect with bounded exponential backoff on stream loss",
+      "status": "skip",
+      "level": "SHOULD",
+      "detail": "needs-extended-run: one faulted stream shows reconnect (C13.2) but not the backoff curve"
+    },
+    {
+      "check_id": "C0.1",
+      "title": "Skip reasons are consistent with the run",
+      "status": "pass",
+      "level": "MUST",
+      "detail": "5 of 17 recorded skip cause(s) are of a kind this run can contradict, and none was contradicted (telemetry observed; declined arms ['model_update', 'push_firmware', 'verify_hardware']). The other 12 are recorded, not checked: ['adapter-declares-no-operating-subject', 'adapter-declares-no-sensor-stream', 'deployment-property', 'legal-alternative-path', 'needs-adapter-restart', 'needs-extended-run', 'no-motion-witness', 'not-observable-on-wire']"
+    }
+  ]
+}

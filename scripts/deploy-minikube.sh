@@ -72,7 +72,9 @@ step "4/6 — Install CRDs"
 make install
 
 step "5/6 — Deploy the controller-manager"
-make deploy IMG="$IMG"
+# The minimal deploy (no webhooks, no ControlStream): this script installs no
+# cert-manager, which `make deploy` needs.
+make deploy-minimal
 
 step "6/6 — Wait for the manager pod to be ready"
 kubectl -n system wait --for=condition=Available deployment/swarmada-controller-manager --timeout=120s
@@ -84,7 +86,7 @@ echo "  kubectl logs -n system deployment/swarmada-controller-manager"
 echo
 echo "Try it:"
 echo "  kubectl create namespace warehouse-a"
-echo "  kubectl apply -f config/samples/"
+echo "  kubectl apply -f config/samples/ -l 'swarmada.io/sample-posture!=webhooks-on'"
 echo "  kubectl get robots,fleetactions -n warehouse-a"
 echo
 echo "Tear down:"

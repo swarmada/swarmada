@@ -3,17 +3,24 @@
 
 {{- if .Values.rbac.clusterRoles -}}
 # ─────────────────────────────────────────────────────────────────────────────
-# The five built-in Swarmada ClusterRoles (RFC-0001 §9.5.3), mirrored VERBATIM
-# from config/rbac/swarmada_{viewer,operator,fleet-manager,admin,robot}_role.yaml.
+# The built-in Swarmada ClusterRoles (RFC-0001 #security-role-definitions): the
+# five user/adapter roles and the edge node's swarmada:edge, copied VERBATIM from
+# config/rbac/{viewer,operator,fleet_manager,admin,robot,edge}_role.yaml.
+# The copy is ENFORCED: `make helm-verify-sync` renders this chart and fails if any
+# role here differs from its config/rbac file, or if one is missing.
 #
-# Names are FIXED (swarmada:viewer / :operator / :fleet-manager / :admin / :robot)
-# because they are the contract the server-side SubjectAccessReview checks against
-# (e.g. the FleetZone estop-verb webhook). They are therefore cluster SINGLETONS —
-# NOT release-prefixed. Installing this chart into more than one namespace on the
-# same cluster should enable `rbac.clusterRoles` on only ONE release to avoid
-# ownership conflicts. Bind these to your subjects yourself (this chart does not
-# create RoleBindings for humans/automation).
+# Names are FIXED (swarmada:viewer / :operator / :fleet-manager / :admin / :robot /
+# :edge) because they are the contract the server-side SubjectAccessReview checks
+# against (e.g. the FleetZone estop-verb webhook). They are therefore cluster
+# SINGLETONS — NOT release-prefixed. Installing this chart into more than one
+# namespace on the same cluster should enable `rbac.clusterRoles` on only ONE
+# release to avoid ownership conflicts. Bind these to your subjects yourself (this
+# chart does not create RoleBindings for humans/automation).
 # ─────────────────────────────────────────────────────────────────────────────
+# ── config/rbac/swarmada_viewer_role.yaml ──
+# swarmada:viewer — read-only access to all Swarmada resources (RFC-0001 #security-role-definitions).
+# Suitable for dashboards, monitoring, and read-only tooling. No write, no custom
+# verbs, no audit access.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -28,6 +35,7 @@ rules:
       - discoveredrobots
       - robotclasses
       - fleetactions
+      - fleettasks
       - fleetzones
       - zonemaintenances
       - robotprobes
@@ -37,7 +45,16 @@ rules:
       - swarmadaconfigs
       - fleetadapters
     verbs: ["get", "list", "watch"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
 ---
+# ── config/rbac/swarmada_operator_role.yaml ──
+# swarmada:operator — can create and manage FleetActions; read everything else
+# (RFC-0001 #security-role-definitions). Cannot modify robots, zones, or configuration; cannot
+# trigger or clear estops. Suitable for shift supervisors.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -53,6 +70,7 @@ rules:
       - discoveredrobots
       - robotclasses
       - fleetactions
+      - fleettasks
       - fleetzones
       - zonemaintenances
       - robotprobes
@@ -62,11 +80,26 @@ rules:
       - swarmadaconfigs
       - fleetadapters
     verbs: ["get", "list", "watch"]
-  # Full FleetAction management, including the `cancel` custom verb (§9.5.3.2).
+  # Full FleetAction management, including the `cancel` custom verb (RFC-0001 #security-permission-matrix).
   - apiGroups: ["swarmada.io"]
     resources: ["fleetactions"]
     verbs: ["create", "update", "patch", "delete", "cancel"]
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleettasks"]
+    verbs: ["create", "update", "patch", "delete", "append", "cancel", "activate"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
 ---
+# ── config/rbac/swarmada_fleet_manager_role.yaml ──
+# swarmada:fleet-manager — full fleet management (RFC-0001 #security-role-definitions): robots,
+# rollouts, probes, zones, maintenance, and the admit/reject/cancel/estop-trigger
+# custom verbs. estop-trigger is held at robot and zone scope, each with the patch that
+# delivers it. Deliberately EXCLUDES estop-clear (admin-only, RFC-0001 #security-permission-matrix), robots/
+# status writes, SwarmadaConfig writes, and therefore namespace-scope estop. Suitable for
+# fleet operations engineers.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -82,6 +115,7 @@ rules:
       - discoveredrobots
       - robotclasses
       - fleetactions
+      - fleettasks
       - fleetzones
       - zonemaintenances
       - robotprobes
@@ -108,23 +142,65 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["fleetactions"]
     verbs: ["create", "update", "patch", "delete", "cancel"]
-  # Zone management incl. the estop-trigger custom verb — but NOT estop-clear.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleettasks"]
+    verbs: ["create", "update", "patch", "delete", "append", "cancel", "activate"]
+  # Zone management incl. the estop-trigger custom verb — but NOT estop-clear. `patch` is
+  # the write a zone estop is delivered by: `swarmctl estop trigger` and `kubectl annotate`
+  # merge-patch the swarmada.io/estop-triggered annotation, and RBAC authorizes that write
+  # before the FleetZone webhook's estop-trigger SubjectAccessReview runs. Without it the
+  # verb cannot be exercised.
   - apiGroups: ["swarmada.io"]
     resources: ["fleetzones"]
-    verbs: ["create", "update", "delete", "estop-trigger"]
-  # estop-trigger on individual robots (§9.6.2.3 — robot or FleetZone scope).
+    verbs: ["create", "update", "patch", "delete", "estop-trigger"]
+  # estop-trigger on individual robots (RFC-0001 #safety-estop-state-machine — robot or FleetZone scope).
   - apiGroups: ["swarmada.io"]
     resources: ["robots"]
     verbs: ["estop-trigger"]
-  # DiscoveredRobot admit/reject custom verbs.
+  # No estop verb on swarmadaconfigs. A namespace estop is a write to the namespace's
+  # SwarmadaConfig, and SwarmadaConfig writes are admin-only, so the verb alone would be
+  # refused by RBAC before admission. Namespace-scope estop belongs to swarmada:admin.
+  # DiscoveredRobot admit/reject custom verbs, plus the write they actually perform.
+  #
+  # `admit`/`reject` are SAR-gated virtual verbs: they carry the authorization decision but
+  # no API effect of their own. `reject` marks the object with swarmada.io/rejected so the
+  # manager can seal ROBOT_REJECTED (RFC-0001 #safety-required-events) before deleting it, and that mark is a plain
+  # patch — without this verb the SAR passes and the write is then refused.
+  #
+  # `patch`, not `delete`: the removal belongs to the control plane, which is what keeps an
+  # operator's refusal distinguishable from a TTL sweep. A fleet manager deliberately cannot
+  # delete a DiscoveredRobot outright.
   - apiGroups: ["swarmada.io"]
     resources: ["discoveredrobots"]
-    verbs: ["admit", "reject"]
-  # Safety audit log: read + verify (NOT export — admin only, §9.5.3.2).
+    verbs: ["admit", "reject", "patch"]
+  # policy-reset (RFC-0001 #security-permission-matrix): an operator override of an AUTOMATED decision — clearing a
+  # FailedRepeatedly suspension so a ModelPolicy resumes evaluation. Scoped like admit/reject
+  # rather than like estop-clear: it is a model-quality call, not a safety one, so it does not
+  # need to be admin-only.
+  - apiGroups: ["swarmada.io"]
+    resources: ["modelpolicies"]
+    verbs: ["policy-reset"]
+  # rollout-resume (ADR-0041): an operator override of an AUTOMATED safety halt — releasing a
+  # rollout that pauseOnError stopped. It EXCLUDES the robots that failed rather than retrying
+  # them, so it abandons work rather than repeating it; scoped like policy-reset because it is
+  # a fleet-update call, not a safety-stop one.
+  - apiGroups: ["swarmada.io"]
+    resources: ["firmwarerollouts", "modelrollouts"]
+    verbs: ["rollout-resume"]
+  # Safety audit log: read + verify (NOT export — admin only, RFC-0001 #security-permission-matrix).
   - apiGroups: ["swarmada.io"]
     resources: ["safetyauditlogs"]
     verbs: ["read", "verify"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
 ---
+# ── config/rbac/swarmada_admin_role.yaml ──
+# swarmada:admin — full access including SwarmadaConfig, robots/status, CRD
+# management, and the ONLY role granted estop-clear (RFC-0001 #security-role-definitions and #security-permission-matrix, the
+# admin-only safety constraint). Suitable for the fleet platform team.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -140,6 +216,7 @@ rules:
       - discoveredrobots
       - robotclasses
       - fleetactions
+      - fleettasks
       - fleetzones
       - zonemaintenances
       - robotprobes
@@ -157,21 +234,81 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["discoveredrobots"]
     verbs: ["admit", "reject"]
+  # policy-reset (RFC-0001 #security-permission-matrix): an operator override of an AUTOMATED decision — clearing a
+  # FailedRepeatedly suspension so a ModelPolicy resumes evaluation. Scoped like admit/reject
+  # rather than like estop-clear: it is a model-quality call, not a safety one, so it does not
+  # need to be admin-only.
+  - apiGroups: ["swarmada.io"]
+    resources: ["modelpolicies"]
+    verbs: ["policy-reset"]
+  # rollout-resume (ADR-0041): an operator override of an AUTOMATED safety halt — releasing a
+  # rollout that pauseOnError stopped. It EXCLUDES the robots that failed rather than retrying
+  # them, so it abandons work rather than repeating it; scoped like policy-reset because it is
+  # a fleet-update call, not a safety-stop one.
+  - apiGroups: ["swarmada.io"]
+    resources: ["firmwarerollouts", "modelrollouts"]
+    verbs: ["rollout-resume"]
   - apiGroups: ["swarmada.io"]
     resources: ["fleetactions"]
     verbs: ["cancel"]
   - apiGroups: ["swarmada.io"]
-    resources: ["fleetzones", "robots"]
+    resources: ["fleettasks"]
+    verbs: ["append", "cancel", "activate"]
+  # Estop at every scope: robots (robot), fleetzones (zone), swarmadaconfigs (namespace —
+  # the webhook authorizes a namespace estop against the SwarmadaConfig that carries it).
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones", "robots", "swarmadaconfigs"]
     verbs: ["estop-trigger", "estop-clear"]
   # Safety audit log: read + export + verify.
   - apiGroups: ["swarmada.io"]
     resources: ["safetyauditlogs"]
     verbs: ["read", "export", "verify"]
-  # CRD management.
+  # CRD management: read any CRD; write only Swarmada's own, by name. No create and no
+  # deletecollection, because RBAC cannot narrow either by name: the identity that installs
+  # the chart installs and upgrades the CRDs. The names are every CRD in config/crd/bases.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames:
+      - artifactstores.swarmada.io
+      - computeendpoints.swarmada.io
+      - computeworkloadtemplates.swarmada.io
+      - discoveredrobots.swarmada.io
+      - edgenodes.swarmada.io
+      - firmwarerollouts.swarmada.io
+      - fleetactions.swarmada.io
+      - fleetadapters.swarmada.io
+      - fleettasks.swarmada.io
+      - fleetzones.swarmada.io
+      - modelpolicies.swarmada.io
+      - modelrollouts.swarmada.io
+      - resultsinks.swarmada.io
+      - robotclasses.swarmada.io
+      - robotprobes.swarmada.io
+      - robots.swarmada.io
+      - semanticevents.swarmada.io
+      - semanticeventsources.swarmada.io
+      - swarmadaconfigs.swarmada.io
+      - tasktriggers.swarmada.io
+      - zonemaintenances.swarmada.io
+    verbs: ["update", "patch", "delete"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
 ---
+# ── config/rbac/swarmada_robot_role.yaml ──
+# swarmada:robot — the Fleet Adapter's service-account role (RFC-0001 #security-role-definitions).
+# Bind via a namespace-scoped RoleBinding. It may read robots and the tasks/zones it
+# serves, and nothing else. It CANNOT write robot status: an adapter reports telemetry,
+# phase, hardware and capabilities over ControlStream, and the control plane writes
+# Robot.status from those reports. It CANNOT create resources, cannot act
+# cross-namespace, and holds NO custom verbs (no admit/reject/cancel/estop-*).
+# WHICH robots it may act on is enforced server-side per message (the robot_id
+# check, RFC-0001 #security-fleet-adapter-authentication-robot-identity) — not by this role, since RBAC cannot select objects by label.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -183,8 +320,36 @@ rules:
   - apiGroups: ["swarmada.io"]
     resources: ["robots", "fleetactions", "fleetzones"]
     verbs: ["get", "list", "watch"]
-  # Write robot status (telemetry projection); scoped to owned robots server-side.
+---
+# ── config/rbac/swarmada_edge_role.yaml ──
+# swarmada:edge — the Zone Controller edge node's service-account role (RFC-0001
+# #security-role-definitions, RFC-0001 #safety-edge-headless-emergency-stop). Bind via a namespace-scoped RoleBinding to the edge node's
+# ServiceAccount. The edge node runs on facility-LAN hardware, so its cluster
+# access is deliberately minimal: it READS the FleetZones and Robots it guards to
+# keep its cached zone polygons / robot→zone map current (config sync). Its one
+# write is a merge patch of fleetzones/status.edgeFeedUnavailable, reporting robots
+# whose adapter never established its EdgeStream, so it holds patch and nothing else
+# on the status subresource. RBAC cannot narrow that verb to one field or one zone:
+# a holder can patch any field of the status of every FleetZone in the namespace it
+# is bound in. Bind it to the edge node's ServiceAccount only. It CANNOT create or
+# delete resources, cannot write any spec, and holds no custom verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: swarmada:edge
+  labels:
+    app.kubernetes.io/part-of: swarmada
+    swarmada.io/builtin-role: "true"
+rules:
+  # Config sync: read the zones the node guards and their robot→zone assignments.
   - apiGroups: ["swarmada.io"]
-    resources: ["robots/status"]
-    verbs: ["update", "patch"]
+    resources: ["fleetzones", "robots"]
+    verbs: ["get", "list", "watch"]
+  # Feed reporting: raise/clear status.edgeFeedUnavailable on an edge-node zone so
+  # the Zone Controller can emit the EdgeFeedUnavailable Warning (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
+  # The reporter reads the zone above and merge-patches the one field; it never
+  # replaces the status, so update is not granted.
+  - apiGroups: ["swarmada.io"]
+    resources: ["fleetzones/status"]
+    verbs: ["patch"]
 {{- end }}

@@ -37,7 +37,7 @@ import (
 	"github.com/swarmada/swarmada/internal/safety"
 )
 
-// The §9.3.8 `scope` label and the fan-out histogram (ADR-0042).
+// The RFC-0001 #control-plane-observability-prometheus-metrics-contract `scope` label and the fan-out histogram (ADR-0042).
 //
 // TWO DEFECTS, one visible and one structural. Every estop metric emit site hard-coded
 // scope="robot", so a zone or namespace estop was indistinguishable from a single-robot one.
@@ -71,7 +71,7 @@ func fanoutCount(t *testing.T, ns string, scope metrics.EstopScope) uint64 {
 func TestZoneEstop_CarriesZoneScope(t *testing.T) {
 	est := &fakeEstopper{}
 	r, _ := newZEReconciler(t, est, nil,
-		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true}, "e1"),
+		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true)}, "e1"),
 		zeRobot("r-a", "floor-1"), zeRobot("r-b", "floor-1"),
 	)
 
@@ -124,7 +124,7 @@ func TestZoneEstop_ObservesFanoutOncePerEpisode(t *testing.T) {
 
 	est := &fakeEstopper{}
 	r, _ := newZEReconciler(t, est, nil,
-		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true}, "e1"),
+		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true)}, "e1"),
 		zeRobot("r-a", "floor-1"), zeRobot("r-b", "floor-1"), zeRobot("r-c", "floor-1"),
 	)
 	reconcileZE(t, r, "floor-1")
@@ -158,7 +158,7 @@ func TestZoneEstop_ObservesFanoutEvenWhenNothingConfirms(t *testing.T) {
 
 	est := &fakeEstopper{state: fleetv1.RobotEstopFailed}
 	r, _ := newZEReconciler(t, est, nil,
-		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true}, "e1"),
+		zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true)}, "e1"),
 		zeRobot("r-a", "floor-1"),
 	)
 	reconcileZE(t, r, "floor-1")
@@ -184,7 +184,7 @@ func TestSetRobotsInEstop_ExposesFailed(t *testing.T) {
 	}
 }
 
-// ── Parallel fan-out (§9.6.2.1) ────────────────────────────────────────────────
+// ── Parallel fan-out (RFC-0001 #safety-estop-scopes) ────────────────────────────────────────────────
 
 // blockingEstopper holds every TriggerEstop call until all of them have arrived. If dispatch
 // is sequential this deadlocks — robot 2's send never happens because robot 1's call has not
@@ -199,7 +199,7 @@ type blockingEstopper struct {
 }
 
 func (b *blockingEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
-	_ metrics.EstopScope) (safety.Result, error) {
+	_ metrics.EstopScope, carrier safety.Carrier) (safety.Result, error) {
 	b.mu.Lock()
 	b.robots = append(b.robots, robotID)
 	b.mu.Unlock()
@@ -209,11 +209,11 @@ func (b *blockingEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ stri
 	return safety.Result{State: fleetv1.RobotEstopStopped, Confirmed: true, Delivered: true}, nil
 }
 
-func (b *blockingEstopper) ClearEstop(_ context.Context, _, _, _ string) (fleetv1.RobotEstopState, error) {
+func (b *blockingEstopper) ClearEstop(_ context.Context, _, _, _ string, _ safety.Ends) (fleetv1.RobotEstopState, error) {
 	return fleetv1.RobotEstopNormal, nil
 }
 
-// THE GAP THIS CLOSES. §9.6.2.1 requires every in-scope robot's estop to be issued in
+// THE GAP THIS CLOSES. estop-scope requires every in-scope robot's estop to be issued in
 // parallel "so that a slow acknowledgement from one robot does not delay the estop signal to
 // others". The reference implementation dispatched sequentially: on a 50-robot zone the last
 // robot was commanded tens of seconds after the trigger, while every per-robot round trip
@@ -222,7 +222,7 @@ func TestZoneEstop_FansOutInParallel(t *testing.T) {
 	const n = 3
 	est := &blockingEstopper{arrived: make(chan struct{}, n), release: make(chan struct{})}
 
-	objs := []client.Object{zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: true}, "e1")}
+	objs := []client.Object{zeZone("floor-1", "", &fleetv1.ZoneEstopPolicy{PropagateToChildren: apiBool(true)}, "e1")}
 	for _, name := range []string{"r-a", "r-b", "r-c"} {
 		objs = append(objs, zeRobot(name, "floor-1"))
 	}
@@ -314,7 +314,7 @@ func TestEstopFanout_ResultsAreOrderedByRobotNotByCompletion(t *testing.T) {
 	}}
 	robots := []fleetv1.Robot{*zeRobot("r-a", "z"), *zeRobot("r-b", "z"), *zeRobot("r-c", "z")}
 
-	out, dur := estopFanout(context.Background(), est, zeNS, robots, "why", "who", metrics.ScopeZone)
+	out, dur := estopFanout(context.Background(), est, zeNS, robots, "why", "who", metrics.ScopeZone, safety.Carrier{})
 
 	want := []string{"r-a", "r-b", "r-c"}
 	for i := range want {
@@ -333,11 +333,11 @@ func TestEstopFanout_ResultsAreOrderedByRobotNotByCompletion(t *testing.T) {
 type staggeredEstopper struct{ delays map[string]time.Duration }
 
 func (s *staggeredEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
-	_ metrics.EstopScope) (safety.Result, error) {
+	_ metrics.EstopScope, carrier safety.Carrier) (safety.Result, error) {
 	time.Sleep(s.delays[robotID])
 	return safety.Result{State: fleetv1.RobotEstopStopped, Confirmed: true, Delivered: true}, nil
 }
 
-func (s *staggeredEstopper) ClearEstop(_ context.Context, _, _, _ string) (fleetv1.RobotEstopState, error) {
+func (s *staggeredEstopper) ClearEstop(_ context.Context, _, _, _ string, _ safety.Ends) (fleetv1.RobotEstopState, error) {
 	return fleetv1.RobotEstopNormal, nil
 }

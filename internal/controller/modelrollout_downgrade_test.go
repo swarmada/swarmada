@@ -25,7 +25,7 @@ import (
 )
 
 // Batch selection must refuse a target whose newVersion is not strictly greater than the
-// version a robot already runs (RFC-0001 §9.3.1). Before this, the controller compared for
+// version a robot already runs (RFC-0001 #control-plane-swarmada-api-server). Before this, the controller compared for
 // equality only: anything not exactly equal counted as "still needs updating", so a rollout
 // naming an older version downgraded every robot already past it.
 //
@@ -146,7 +146,7 @@ func TestRolloutStatus_RefusedRobotsAreReportedNotHidden(t *testing.T) {
 	}
 	done := []*fleetv1.Robot{robotRunningModel("amr-3", "m", "4.0.0", fleetv1.ModelStatusActive)}
 
-	st := computeRolloutStatus("m", 3, done, nil, nil, nil, newer, nil, false, nil, nil)
+	st := computeRolloutStatus("m", 3, done, nil, nil, nil, nil, newer, nil, false, nil, nil)
 	if st.RobotsIneligible != 2 {
 		t.Fatalf("refused robots must be counted ineligible, got %d", st.RobotsIneligible)
 	}
@@ -165,7 +165,7 @@ func TestRolloutStatus_AllRefusedStillSettles(t *testing.T) {
 		robotRunningModel("amr-1", "m", "5.0.0", fleetv1.ModelStatusActive),
 		robotRunningModel("amr-2", "m", "5.0.0", fleetv1.ModelStatusActive),
 	}
-	st := computeRolloutStatus("m", 2, nil, nil, nil, nil, newer, nil, false, nil, nil)
+	st := computeRolloutStatus("m", 2, nil, nil, nil, nil, nil, newer, nil, false, nil, nil)
 	if st.Phase == fleetv1.RolloutPhaseInProgress {
 		t.Fatalf("a rollout whose targets are all ahead must settle, got phase %s", st.Phase)
 	}

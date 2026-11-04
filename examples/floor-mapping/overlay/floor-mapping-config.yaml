@@ -1,0 +1,25 @@
+# The operator's input to the zone proposal: the floor's name, the room names in the
+# order the splitter numbers the rooms, and the keep-outs.
+#
+# Room names are typed by the operator: nothing in the map says what a room is.
+# Keep-outs are polygons in the map frame, in metres. Each becomes an exclusion
+# child zone with entry Denied, and its reason is quoted in the refusal of any goal
+# sent into it. A keep-out must lie inside one room; one that does not refuses the
+# whole proposal rather than being dropped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: floor-mapping
+  namespace: warehouse-a
+data:
+  floor-name: floor
+  room-names: room-a,room-b
+  keepouts.yaml: |
+    keepouts:
+      - name: keepout-1
+        reason: operator keep-out, fragile floor edge
+        polygon:
+          - {x: 1.2, y: 1.2}
+          - {x: 1.8, y: 1.2}
+          - {x: 1.8, y: 1.8}
+          - {x: 1.2, y: 1.8}

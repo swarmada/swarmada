@@ -19,6 +19,7 @@ package rbac
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -79,7 +80,7 @@ func grants(role rbacv1.ClusterRole, resource, verb string) bool {
 }
 
 // CARDINAL SAFETY INVARIANT: estop-clear is granted by admin and NO other builtin
-// role (§9.5.3.2 — the admin-only estop-clear constraint). A regression that
+// role (RFC-0001 #security-permission-matrix — the admin-only estop-clear constraint). A regression that
 // widened this would be a closed-open safety failure.
 func TestRBAC_EstopClearIsAdminOnly(t *testing.T) {
 	roles := allRoles(t)
@@ -104,12 +105,18 @@ func TestRBAC_EstopTriggerScope(t *testing.T) {
 	}
 }
 
-// The adapter role is tightly scoped: read robots + write robot status, but NO
-// mutation of robots, NO create, and NONE of the custom verbs.
+// The adapter role is tightly scoped: read robots, but NO robot status write (the adapter
+// reports over ControlStream and the control plane writes Robot.status), NO mutation of
+// robots, NO create, and NONE of the custom verbs.
 func TestRBAC_RobotRoleIsScoped(t *testing.T) {
 	robot := allRoles(t)["robot"]
-	if !grants(robot, "robots", "get") || !grants(robot, "robots/status", "patch") {
-		t.Error("robot role must read robots and write robot status")
+	if !grants(robot, "robots", "get") {
+		t.Error("robot role must read robots")
+	}
+	for _, verb := range []string{"update", "patch"} {
+		if grants(robot, "robots/status", verb) {
+			t.Errorf("robot role must NOT grant %q on robots/status: the adapter reports status over ControlStream", verb)
+		}
 	}
 	for _, verb := range []string{"create", "update", "patch", "delete", "estop-trigger", "estop-clear"} {
 		if grants(robot, "robots", verb) {
@@ -149,7 +156,7 @@ func TestRBAC_OperatorScope(t *testing.T) {
 	}
 }
 
-// audit-log export is admin-only; read/verify reach fleet-manager (§9.5.3.2).
+// audit-log export is admin-only; read/verify reach fleet-manager (RFC-0001 #security-permission-matrix).
 func TestRBAC_AuditLogScope(t *testing.T) {
 	roles := allRoles(t)
 	if grants(roles["fleet-manager"], "safetyauditlogs", "export") {
@@ -163,7 +170,7 @@ func TestRBAC_AuditLogScope(t *testing.T) {
 	}
 }
 
-// Rejecting a DiscoveredRobot is a mark, not a delete (§9.6.5.1). The SAR-gated `reject`
+// Rejecting a DiscoveredRobot is a mark, not a delete (RFC-0001 #safety-required-events). The SAR-gated `reject`
 // verb carries the decision, but the write it performs is a patch — so a role that holds
 // `reject` without `patch` passes the authorization check and then fails the write.
 func TestRBAC_RejectCanMarkButNotDelete(t *testing.T) {
@@ -201,6 +208,66 @@ func TestRBAC_AllRolesNamed(t *testing.T) {
 	for short, name := range want {
 		if roles[short].Name != name {
 			t.Errorf("role %s name = %q, want %q", short, roles[short].Name, name)
+		}
+	}
+}
+
+// grantsCore reports whether the role permits verb on resource in the core ("") group.
+func grantsCore(role rbacv1.ClusterRole, resource, verb string) bool {
+	for _, r := range role.Rules {
+		if !inList("", r.APIGroups) {
+			continue
+		}
+		if inList(resource, r.Resources) && inList(verb, r.Verbs) {
+			return true
+		}
+	}
+	return false
+}
+
+// The human roles read core Events: `swarmctl describe` lists an object's Events, and a
+// role that cannot list them sees "<unavailable: forbidden>" where a Warning would be.
+// Read only: no role writes, deletes or watches Events. The grant is to the human roles;
+// the machine roles (robot, edge) get none.
+func TestRBAC_EventsReadScope(t *testing.T) {
+	roles := allRoles(t)
+	roles["edge"] = loadRole(t, "swarmada_edge_role.yaml")
+	for short, role := range roles {
+		reads := short != "robot" && short != "edge"
+		for _, verb := range []string{"get", "list"} {
+			if got := grantsCore(role, "events", verb); got != reads {
+				t.Errorf("%s: %s events = %v, want %v", short, verb, got, reads)
+			}
+		}
+		for _, verb := range []string{"watch", "create", "update", "patch", "delete", "deletecollection"} {
+			if grantsCore(role, "events", verb) {
+				t.Errorf("%s grants %s on events; the grant is get/list only", short, verb)
+			}
+		}
+	}
+}
+
+// The edge node writes one thing to the API: status.edgeFeedUnavailable on the zones it
+// guards, as a merge patch (internal/edge FeedReporter; RFC-0001
+// #fleet-adapter-protocol-the-edge-stream). RBAC cannot narrow a grant to one field or
+// one zone, so the role holds only the verb that write needs: patch, and not update,
+// which replaces the whole status, nor get on the subresource, which the reporter never
+// reads (it reads the zone itself).
+func TestRBAC_EdgeWritesZoneStatusOnlyByPatch(t *testing.T) {
+	edge := loadRole(t, "swarmada_edge_role.yaml")
+	if !grants(edge, "fleetzones/status", "patch") {
+		t.Error("edge cannot patch fleetzones/status: edge feed loss would go unreported")
+	}
+	for _, verb := range []string{"get", "update", "create", "delete", "deletecollection", "list", "watch"} {
+		if grants(edge, "fleetzones/status", verb) {
+			t.Errorf("edge grants %s on fleetzones/status; the feed report needs patch only", verb)
+		}
+	}
+	for _, r := range edge.Rules {
+		for _, res := range r.Resources {
+			if strings.Contains(res, "/") && res != "fleetzones/status" {
+				t.Errorf("edge grants the subresource %s; its one write is fleetzones/status", res)
+			}
 		}
 	}
 }

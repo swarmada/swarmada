@@ -1,0 +1,23 @@
+# Plain-language limit 8: rationale moves to a non-normative note.
+# Flags rationale markers in normative text. "since" counts only where it is
+# causal in practice: at the start of a sentence or list item, or after a
+# comma (", since the robot ..."); temporal "elapsed since X" is not flagged.
+# "the reason" counts only as "the reason is/was/why/for/that", so a field
+# called "the reason recorded for it" is not flagged.
+# Write the reason in a blockquote note ("> ...") after the rule instead.
+# Scope: the same as PlainKeywordPerSentence (Vale 3.23).
+extends: existence
+message: "'%s' gives a reason inside normative text. Move the rationale to a non-normative note (a '> ' blockquote)."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+nonword: true
+ignorecase: true
+tokens:
+  - '\bbecause\b'
+  - '\bso that\b'
+  - '\bthe reason (?:is|was|why|for|that)\b'
+  - '\b(?:this|that) is why\b'
+  - '\bin order to\b'
+  - '\bfor this reason\b'
+  - '\bthe rationale\b'
+  - '(?:^|(?<=,\s))since\b'

@@ -41,7 +41,7 @@ import (
 // second on the same resource+path is not possible. RobotDefaulter.Default calls
 // stampEstopActor directly.
 
-// ── FleetZone: zone-scoped estop (§9.6.2.5) ──────────────────────────────────
+// ── FleetZone: zone-scoped estop (RFC-0001 #safety-estop-scopes) ──────────────────────────────────
 
 // +kubebuilder:webhook:path=/mutate-swarmada-io-v1-fleetzone,mutating=true,failurePolicy=ignore,sideEffects=None,groups=swarmada.io,resources=fleetzones,verbs=create;update,versions=v1,name=mfleetzone.swarmada.io,admissionReviewVersions=v1
 
@@ -67,7 +67,7 @@ func (d *FleetZoneEstopActorDefaulter) Default(ctx context.Context, obj runtime.
 	return nil
 }
 
-// ── SwarmadaConfig: namespace-scoped estop (§9.6.2.5) ────────────────────────
+// ── SwarmadaConfig: namespace-scoped estop (RFC-0001 #safety-estop-scopes) ────────────────────────
 
 // +kubebuilder:webhook:path=/mutate-swarmada-io-v1-swarmadaconfig,mutating=true,failurePolicy=ignore,sideEffects=None,groups=swarmada.io,resources=swarmadaconfigs,verbs=create;update,versions=v1,name=mswarmadaconfig.swarmada.io,admissionReviewVersions=v1
 

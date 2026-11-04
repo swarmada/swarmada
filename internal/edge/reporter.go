@@ -31,8 +31,8 @@ import (
 // FeedReporter periodically writes each edge-node FleetZone's
 // status.edgeFeedUnavailable from the Node's never-seen-beyond-grace detection, so
 // the control-plane Zone Controller can emit an EdgeFeedUnavailable Warning while an
-// adapter serving a zone's robots has no established EdgeStream (§9.2.10). It
-// requires RBAC to update fleetzones/status in its namespace. It is best-effort: a
+// adapter serving a zone's robots has no established EdgeStream (RFC-0001 #fleet-adapter-protocol-the-edge-stream). It
+// requires RBAC to patch fleetzones/status in its namespace. It is best-effort: a
 // write error is logged and retried on the next tick, and it never touches the
 // headless-estop safety path — a control-plane outage only stalls the report.
 type FeedReporter struct {

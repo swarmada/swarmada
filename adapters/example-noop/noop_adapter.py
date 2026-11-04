@@ -47,7 +47,67 @@ import grpc
 # reports nothing or reports out of range, so this is not optional -- telemetry, heartbeat and
 # emergency stop keep working either way. Bump it only when this adapter is re-qualified against a
 # new contract (`make conformance`), and update the adapters/REGISTRY.md row with it.
-CONTRACT_VERSION = "1.0.0"
+#
+# HELD DELIBERATELY AT N-1, NOT LEFT BEHIND. The control plane implements 1.4.0 and accepts
+# ">=1.3.0 <1.5.0" (N and N-1 minor, ADR-0032), a window that moves with a later minor
+# release. This adapter sits one minor back ON PURPOSE: it is what exercises the compatibility
+# skew end to end on every conformance run, rather than leaving the skew only asserted in a
+# unit test.
+#
+# It moved 1.0.0 -> 1.1.0 when the contract moved 1.1.0 -> 1.2.0, and that move was NOT
+# cosmetic. An N/N-1 window is two minors wide: at contract 1.2.0 a 1.0.0 adapter was out of
+# range, as a 1.2.0 adapter is at 1.4.0, and an adapter out of range is refused
+# RegisterRobot/DiscoverRobot with
+# REGISTRATION_REJECTION_VERSION_MISMATCH -- connected, streaming telemetry, still receiving
+# estop, and unable to bring a single robot under management. ADR-0032 Amendment 1 (A1.2)
+# records that the ADR's own "minor releases never break an adapter" is false as written, and
+# that this is the shape of the break.
+#
+# 1.3.0 is a TRUE claim, and this adapter stays at N-1 on purpose: it exercises the N-1 skew
+# on every conformance run (the simulation adapter is the in-tree adapter at N). Every change
+# since 1.0.0 was additive, so an adapter that ignores what it does not know speaks them by
+# construction. What 1.2.0 needs in code is the FA-R5/FA-R6 DECLINE below: it HONOURS no
+# operating subject and declares none (honoured_operating_constraints stays empty, which
+# FA-R1 says is not a breach), so every operating rule that reaches it is refused rather than
+# accepted and ignored. What 1.3.0 added is the zone_constraints push (FA-R7), an OPTIONAL
+# Command: this adapter declines it unsupported=true through the same branch it declines every
+# other optional command, which is conformant and the reason the arm is optional.
+#
+# It does NOT claim 1.4.0. 1.4.0 adds the Custom verb on the wire (SupportedAction,
+# AssignAction and ValidateAction custom_type) and CANCEL_DISPOSITION_STOP_UNCONFIRMED; this
+# adapter reads neither, and the control plane accepts N and N-1 (ADR-0032), so 1.3.0 is
+# inside the window an implementation at 1.4.0 advertises.
+CONTRACT_VERSION = "1.3.0"
+
+# The operating subjects this adapter can honour while a robot is in a zone that restricts
+# one (FA-R1). EMPTY, and that is a conformant answer, not a gap: FA-R1 states that an
+# adapter declaring none is not in breach -- its robots are simply withheld from zones
+# restricting a subject, by candidate filter 12. A vendor whose fleet API can actually turn a
+# camera or a water pump off for the duration of a task lists those subjects here, and is
+# then held to FA-R3 for them.
+_HONOURED_SUBJECTS: frozenset[str] = frozenset()
+
+# The action types this adapter serves: the catalog it declares on its CapabilitiesSnapshot
+# (supported_actions) and the ONE list an assignment is judged against. EMPTY, because the
+# no-op adapter drives nothing: it declares no action, and so it refuses every assignment
+# INVALID_ACTION rather than accepting work it cannot do (RFC-0001: an action type an adapter
+# does not recognise is rejected, never run as the nearest verb it has). A vendor lists each
+# FleetAction type its robots serve here, with the parameters the type requires.
+# TODO(vendor): (action_type, required_capabilities, [(param_name, unit, kind), ...required]).
+_SUPPORTED_ACTIONS: list[tuple[str, list[str], list[tuple[str, str, str]]]] = []
+
+
+def _unhonourable(constraints, honoured) -> list[str]:
+    """The subjects in `constraints` this adapter cannot honour (FA-R5 and FA-R6).
+
+    ONE PREDICATE COVERS BOTH OBLIGATIONS, and that is the point. A subject the adapter does
+    not RECOGNISE is not in `honoured` either, so it lands here exactly as a recognised
+    subject it cannot honour does. Writing the unknown case separately is how it comes to be
+    written as "ignore it": an unrecognised constraint is NOT an absent constraint, and
+    treating it as absent would make the namespaced extension form a universal bypass --
+    any vendor could route around every operating rule by inventing a subject.
+    """
+    return [c.subject for c in constraints if c.subject not in honoured]
 
 
 class NoopAdapter:
@@ -163,6 +223,31 @@ class NoopAdapter:
                         rejection=pb.ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN,
                     )
                 )
+            elif task.action_type not in {t for t, _caps, _params in _SUPPORTED_ACTIONS}:
+                # C19.1 — an action type this adapter does not declare is refused, never run
+                # as the nearest thing it can do. With the empty catalog above that is every
+                # assignment. Placed after the fencing branches for the reason given below.
+                result.assign_action.CopyFrom(
+                    pb.AssignActionResult(
+                        accepted=False,
+                        rejection=pb.ASSIGN_ACTION_REJECTION_INVALID_ACTION,
+                        message=f"action type {task.action_type!r} is not in this adapter's "
+                                f"catalog (it declares none)",
+                    )
+                )
+            elif _unhonourable(task.operating_constraints, _HONOURED_SUBJECTS):
+                # C17.1 / C17.2 (FA-R5, FA-R6) -- DECLINE, never accept-and-ignore. Placed
+                # AFTER the three fencing branches on purpose: staleness is about ordering,
+                # and a superseded command must be refused STALE so the control plane learns
+                # its assignment lost, not refused for a rule that was never the reason.
+                result.assign_action.CopyFrom(
+                    pb.AssignActionResult(
+                        accepted=False,
+                        rejection=pb.ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET,
+                        unhonourable_subjects=_unhonourable(
+                            task.operating_constraints, _HONOURED_SUBJECTS),
+                    )
+                )
             else:
                 self._fence[robot] = task.fencing_token  # C3.1 (persist for real)
                 self._assignment[robot] = task.assignment_id  # C3.4 identity
@@ -215,7 +300,24 @@ class NoopAdapter:
             # a withheld one — see ADR-0039 if a future revision needs to distinguish
             # "no hardware" from "not yet observed".
             result.scan.CopyFrom(pb.CapabilitiesSnapshot(
-                robot_id=robot, snapshot_ms=int(time.time() * 1000)))
+                robot_id=robot, snapshot_ms=int(time.time() * 1000),
+                supported_actions=[
+                    pb.SupportedAction(action_type=t, required_capabilities=list(caps), params=[
+                        pb.ActionParam(name=n, unit=u, kind=k, required=True)
+                        for n, u, k in params])
+                    for t, caps, params in _SUPPORTED_ACTIONS]))
+        elif which in ("pause", "resume"):
+            # C11.1 — REQUIRED (RFC-0001 Required-message table): pause and resume are
+            # answered, never declined with unsupported=true. This adapter manages no robot,
+            # so it has nothing to pause and says exactly that: paused=false is a true answer
+            # here, and a decline would not be. TODO(vendor): act on the named capabilities of
+            # the robot, and with require_stop_before_ack report paused=true only once the
+            # robot is CONFIRMED at rest.
+            note = "no robot is under management by this adapter; nothing was paused or resumed"
+            if which == "pause":
+                result.pause.CopyFrom(pb.PauseResult(paused=False, message=note))
+            else:
+                result.resume.CopyFrom(pb.ResumeResult(resumed=False, message=note))
         else:
             # C7.1: decline every optional command we do not implement.
             result.unsupported = True
@@ -224,7 +326,8 @@ class NoopAdapter:
 
     # ── Task status and the assignment lease (C16.1 / C4.2-C4.4) ─────────────
 
-    def _emit_action_status(self, robot: str, action_id: str, state: str) -> None:
+    def _emit_action_status(self, robot: str, action_id: str, state: str,
+                            end_cause: str = "") -> None:
         """Report a task phase transition. REQUIRED at every transition, terminal ones
         included: silence is indistinguishable from a robot that stopped reporting."""
         if not action_id:
@@ -234,6 +337,8 @@ class NoopAdapter:
             action_id=action_id,
             state=getattr(pb.ActionState, f"ACTION_STATE_{state}"),
             fencing_token=self._fence.get(robot, 0),
+            end_cause=(getattr(pb.ActionEndCause, f"ACTION_END_CAUSE_{end_cause}")
+                       if end_cause else 0),
         )))
 
     def _arm_lease(self, robot: str, action_id: str, generation: int, duration_ms: int) -> None:
@@ -269,13 +374,18 @@ class NoopAdapter:
     def _lease_expired(self, robot: str, action_id: str, epoch: int) -> None:
         """The lease lapsed without renewal. TODO(vendor): bring the robot to a safe
         stop here. The control plane may now reassign this task, so continuing to
-        execute it would put two robots on the same work."""
+        execute it would put two robots on the same work.
+
+        STOPPED says the stop was commanded and is not terminal. TODO(vendor): send the
+        terminal report only once the robot is observed at rest, or once rest cannot be
+        confirmed within your stopping budget. A no-op robot is never moving."""
         if self._lease_epoch.get(robot) != epoch:
             return  # a renewal superseded this timer before it fired
         if self._action.get(robot) != action_id:
             return  # superseded; the timer is stale
         self._action[robot] = ""
         self._emit_action_status(robot, action_id, "STOPPED")
+        self._emit_action_status(robot, action_id, "FAILED", end_cause="LEASE_EXPIRED")
 
     # ── SafetyStream ─────────────────────────────────────────────────────────
 

@@ -161,7 +161,7 @@ func TestEnterOnActionRowOpensActionDetail(t *testing.T) {
 	if !strings.Contains(out, "receiving-round-001-approach-dock") {
 		t.Fatalf("action detail is not for the member action:\n%s", out)
 	}
-	// Spec §3a: every action detail states its owning task.
+	// Every action detail states its owning task.
 	if !strings.Contains(out, "Task") || !strings.Contains(out, "member: approach-dock") {
 		t.Fatalf("action detail missing the Task line:\n%s", out)
 	}

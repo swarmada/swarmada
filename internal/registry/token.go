@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/swarmada/swarmada/internal/artifact"
 )
 
 // Registry bearer-token caching and OAuth2 refresh (Docker Registry v2 token auth).
@@ -112,6 +114,17 @@ func credentialIdentity(cred *Credential) string {
 // long-running poller against a registry issuing short-lived tokens does not fall back to sending
 // its basic credentials on every expiry.
 func (c *Client) token(ctx context.Context, ch bearerChallenge, cred *Credential) (string, error) {
+	realm, err := url.Parse(ch.realm)
+	if err != nil {
+		return "", fmt.Errorf("parsing token realm %q: %w", ch.realm, err)
+	}
+	// The realm comes from the registry's challenge. Credentials and refresh tokens travel to
+	// it only over https (the loopback development registry excepted), and the credentials
+	// only to a host they list: a realm elsewhere gets an anonymous exchange.
+	if !artifact.CredentialTransport(realm.Scheme, realm.Hostname()) {
+		return "", fmt.Errorf("refusing token realm %q: a token server must use https", ch.realm)
+	}
+	cred = cred.For(realm.Host)
 	key := cacheKey(ch, cred)
 	now := c.now()
 

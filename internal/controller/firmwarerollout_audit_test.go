@@ -65,7 +65,7 @@ func entriesOfType(rec *captureRecorder, eventType string) []audit.Entry {
 	return out
 }
 
-// ── §9.6.5.1 firmware producers ────────────────────────────────────────────────────────
+// ── RFC-0001 #safety-required-events firmware producers ────────────────────────────────────────────────────────
 //
 // Signature outcomes are the most safety-relevant records this specification defines: they
 // are the evidence that unverified code was never dispatched. Until now the failure case

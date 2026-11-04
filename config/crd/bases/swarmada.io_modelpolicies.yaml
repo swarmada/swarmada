@@ -20,6 +20,9 @@ spec:
     - jsonPath: .spec.modelName
       name: Model
       type: string
+    - jsonPath: .spec.targetKind
+      name: Target
+      type: string
     - jsonPath: .spec.trigger.type
       name: Trigger
       type: string
@@ -54,6 +57,29 @@ spec:
           The quality gate is the critical safety mechanism: a model that achieved 87%
           pick success rate in simulation will be blocked from reaching the fleet by
           the policy, regardless of how recently it was trained.
+
+          GATING IS TARGET-KIND-INDEPENDENT (normative). A ModelPolicy whose quality gate
+          rejects a candidate version of spec.modelName blocks the auto-deployment of that
+          version to EVERY target kind, robots and EdgeNodes alike; a policy that would
+          block a robot rollout blocks an edge rollout of the same artifact, and a policy
+          that would block an edge rollout blocks the robot rollout. The gate is evaluated
+          against the artifact's reported metrics, which say whether the model is fit to
+          run at all — nothing in minPickSuccessRate, maxFailureRate, minEvalEpisodes or
+          maxSimToRealGap becomes more permissive because the inference moved off the robot
+          and onto the box beside it. spec.targetKind chooses WHERE a passing model is
+          deployed; it never changes WHETHER it passes.
+
+          Two consequences worth stating, because both are the kind of thing a reader
+          otherwise assumes the other way:
+
+            - The suspension in §9.1.10.4 is likewise kind-independent. Once
+              consecutiveRejections reaches consecutiveRejectionLimit the policy stops
+              evaluating, and no target kind is exempt from the halt.
+            - Two policies over the same modelName with different targetKinds are two
+              independent gates, not one gate with two outputs. A version that one admits
+              and the other rejects deploys only where it was admitted — which is a real
+              configuration (an edge box may be held to a stricter latency bar than a
+              robot), and is legible only because each policy reports its own decision.
         properties:
           apiVersion:
             description: |-
@@ -73,7 +99,19 @@ spec:
           metadata:
             type: object
           spec:
-            description: ModelPolicySpec defines the desired state of a ModelPolicy.
+            description: |-
+              ModelPolicySpec defines the desired state of a ModelPolicy.
+
+              The quality gate is a judgement about the ARTIFACT, not about where it lands, so
+              targeting is expressed with a discriminator and one selector per kind rather than
+              with a second policy type. See the normative statement on the ModelPolicy root
+              type: a gate that blocks a robot rollout blocks an edge rollout of the same
+              artifact, and the reverse.
+
+              Which selector is required follows targetKind. targetRobotSelector could not be
+              reused for edge targets — its name says robots — so the edge case gets its own
+              field, and neither is schema-required on its own; the pairing is enforced here,
+              the way ComputeEndpointSpec enforces its binding/contract pairing.
             properties:
               autoDeployOn:
                 default: QualityGatePass
@@ -88,8 +126,9 @@ spec:
                 description: |-
                   ConsecutiveRejectionLimit is the number of consecutive quality-gate
                   rejections after which the controller sets a FailedRepeatedly condition and
-                  SUSPENDS evaluation — further triggers are silently dropped until an operator
-                  resets the policy (swarmctl reset policy). 0 disables suspension (unlimited
+                  SUSPENDS evaluation. Until an operator resets the policy (swarmctl modelpolicy
+                  reset), each further trigger is dropped with a TriggerDroppedWhileSuspended
+                  Warning Event on the policy; none is queued. 0 disables suspension (unlimited
                   retries). §9.1.10.4.
                 format: int32
                 minimum: 0
@@ -97,9 +136,12 @@ spec:
               maxConcurrentRollouts:
                 default: 1
                 description: |-
-                  MaxConcurrentRollouts prevents multiple auto-triggered rollouts from
-                  running simultaneously. Default 1 (queue new deployments until current
-                  completes).
+                  MaxConcurrentRollouts is specified to bound how many auto-triggered rollouts
+                  run simultaneously. Specified, not implemented at v0.4: no controller reads it,
+                  and every value behaves as 1. The controller admits one active rollout per
+                  policy. While it runs, one further trigger waits; a trigger written while
+                  another is waiting replaces it, and the replaced trigger is never evaluated,
+                  recorded or reported by an Event.
                 format: int32
                 minimum: 1
                 type: integer
@@ -112,7 +154,8 @@ spec:
               qualityGate:
                 description: |-
                   QualityGate defines the metrics thresholds a model must satisfy.
-                  If empty, any model version triggers deployment (use with caution).
+                  If empty, any model version with a well-formed modelChecksum triggers
+                  deployment (use with caution).
                 properties:
                   customMetrics:
                     description: |-
@@ -217,8 +260,9 @@ spec:
                         type: integer
                       requireIdleState:
                         default: true
-                        description: 'RequireIdleState: only update robots in Idle
-                          phase.'
+                        description: |-
+                          RequireIdleState: only update robots in Idle phase. Set false to allow updating a
+                          robot that is executing an action; unset means true.
                         type: boolean
                     type: object
                   strategy:
@@ -244,7 +288,7 @@ spec:
                               enters the batch while a failure stands, though in-flight updaters continue.
 
                               The operator resumes with `swarmctl rollout resume`, which is gated on the
-                              rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                              rollout-resume custom verb (RFC-0001 #security-permission-matrix) and writes the swarmada.io/rollout-resume
                               annotation the controller consumes. Resume EXCLUDES the robots that failed from
                               further attempts by this rollout rather than retrying them (ADR-0041); a fixed
                               artifact needs a fresh rollout. Excluded robots are named in
@@ -264,9 +308,25 @@ spec:
                         type: string
                     type: object
                 type: object
-              targetRobotSelector:
-                description: TargetRobotSelector selects which robots will receive
-                  auto-deployments.
+              targetKind:
+                default: Robot
+                description: |-
+                  TargetKind selects the kind of object this policy auto-deploys to. Defaults
+                  to Robot, so a policy authored before this field existed is unchanged.
+                  EdgeNode is specified but not implemented at this version: the policy creates a
+                  ModelRollout with targetKind EdgeNode, which the ModelRollout controller refuses,
+                  so no node is updated.
+                enum:
+                - Robot
+                - EdgeNode
+                type: string
+              targetNodeSelector:
+                description: |-
+                  TargetNodeSelector selects which EdgeNodes are specified to receive
+                  auto-deployments. REQUIRED when TargetKind is EdgeNode, and rejected otherwise.
+                  EdgeNode targeting is not implemented at this version (see TargetKind), so no
+                  node receives one. An empty selector ({}) is refused: it matches every EdgeNode
+                  in the namespace.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -309,6 +369,68 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: targetNodeSelector is empty, and an empty selector matches
+                    every EdgeNode in the namespace; select nodes with matchLabels
+                    or matchExpressions
+                  rule: (has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions)
+                    && size(self.matchExpressions) > 0)
+              targetRobotSelector:
+                description: |-
+                  TargetRobotSelector selects which robots will receive auto-deployments.
+                  REQUIRED when TargetKind is Robot (the default), which is every policy that
+                  predates TargetKind; the marker moved to a CEL rule on the type so an
+                  EdgeNode policy is not forced to carry a robot selector it never reads.
+                  Relaxing a required field is additive — no stored object becomes invalid.
+                  An empty selector ({}) is refused: it matches every Robot in the namespace.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: targetRobotSelector is empty, and an empty selector matches
+                    every Robot in the namespace; select robots with matchLabels or
+                    matchExpressions
+                  rule: (has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions)
+                    && size(self.matchExpressions) > 0)
               trigger:
                 description: Trigger configures how training completion events reach
                   this policy.
@@ -321,7 +443,8 @@ spec:
                         default: swarmada.metrics
                         description: |-
                           MetricsLabel is the OCI image label name containing quality metrics as JSON.
-                          Example: LABEL swarmada.metrics='{"pickSuccessRate":0.94,"failureRate":0.018}'
+                          Keys are the quality-gate metric names (snake_case), values numbers.
+                          Example: LABEL swarmada.metrics='{"pick_success_rate":0.94,"failure_rate":0.018}'
                         type: string
                       pollIntervalSeconds:
                         default: 60
@@ -376,8 +499,15 @@ spec:
                 type: object
             required:
             - modelName
-            - targetRobotSelector
             type: object
+            x-kubernetes-validations:
+            - message: targetRobotSelector is required when targetKind is Robot
+              rule: '!has(self.targetKind) || self.targetKind != ''Robot'' || has(self.targetRobotSelector)'
+            - message: targetNodeSelector is required when targetKind is EdgeNode
+              rule: '!has(self.targetKind) || self.targetKind != ''EdgeNode'' || has(self.targetNodeSelector)'
+            - message: 'targetNodeSelector applies only to targetKind: EdgeNode'
+              rule: '!has(self.targetNodeSelector) || (has(self.targetKind) && self.targetKind
+                == ''EdgeNode'')'
           status:
             description: ModelPolicyStatus defines the observed state of a ModelPolicy.
             properties:
@@ -529,8 +659,10 @@ spec:
                 type: integer
               webhookEndpoint:
                 description: |-
-                  WebhookEndpoint is the auto-generated endpoint URL when Trigger.Type=Webhook.
-                  Training systems POST to this URL when training completes.
+                  WebhookEndpoint is specified to hold the endpoint URL when Trigger.Type=Webhook.
+                  Written by no controller at v0.4: it stays empty, and the URL is
+                  /webhooks/v1/model-policy/{namespace}/{name} on the manager's ModelPolicy
+                  webhook listener.
                 type: string
             type: object
         type: object

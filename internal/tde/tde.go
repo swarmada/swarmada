@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package tde implements the Traffic Deconfliction Engine (RFC-0001 §9.4; the
+// Package tde implements the Traffic Deconfliction Engine (RFC-0001 #tde; the
 // commit-site reservation gate, ADR-0009): the
 // synchronous blocking gate the Scheduler must pass before committing a action
 // assignment (zone-capacity enforcement), and the reservation manager for shared
@@ -25,7 +25,7 @@ limitations under the License.
 // authoritatively in-process under per-zone locks — which is what makes
 // check-and-grant atomic and free of double-grants under concurrent requests —
 // and mirrored to FleetZone.status (durable, operator-visible, TDE-6), from which
-// it is rebuilt on restart (§9.4.7).
+// it is rebuilt on restart (RFC-0001 #tde-restart-recovery).
 package tde
 
 import (
@@ -38,7 +38,7 @@ import (
 // ReservationStatus is the outcome of a RequestReservation call.
 type ReservationStatus string
 
-// ReservationStatus values (§9.4.3).
+// ReservationStatus values (RFC-0001 #tde-go-interface-illustrative).
 const (
 	// Granted: capacity/resources available; a Reserved entry was created.
 	Granted ReservationStatus = "Granted"
@@ -56,7 +56,7 @@ const (
 )
 
 // ReservationRequest is a Scheduler (zone-capacity) or adapter (shared-resource)
-// reservation request (§9.4.3).
+// reservation request (RFC-0001 #tde-go-interface-illustrative).
 type ReservationRequest struct {
 	ActionID   string
 	RobotID    string
@@ -64,9 +64,15 @@ type ReservationRequest struct {
 	TargetZone string // leaf zone for capacity; empty skips the zone-capacity gate
 	Priority   fleetv1.ActionPriority
 	Resources  []ResourceRequest
+	// MayEvict, when set, is the caller's condition on a preemption victim, by its action ID: the
+	// engine evicts only a reservation it admits, on top of the band rule. The FleetAction
+	// controller admits only row A11's victims (RFC-0001 #safety-action-table): an Assigned or
+	// InProgress action whose robot is under no stop, never a Paused, operator-gated one. It is
+	// called with the zone's lock held. Nil admits every Normal or Low reservation.
+	MayEvict func(actionID string) bool
 }
 
-// ResourceRequest names a shared resource to reserve (§9.4.3).
+// ResourceRequest names a shared resource to reserve (RFC-0001 #tde-go-interface-illustrative).
 type ResourceRequest struct {
 	ResourceName string
 	ZoneName     string
@@ -75,7 +81,7 @@ type ResourceRequest struct {
 	EstimatedDurationSeconds *int32
 }
 
-// ReservationResult is returned synchronously to the caller (§9.4.3).
+// ReservationResult is returned synchronously to the caller (RFC-0001 #tde-go-interface-illustrative).
 type ReservationResult struct {
 	Status             ReservationStatus
 	ExpiresAt          time.Time
@@ -92,7 +98,7 @@ type ZoneReservationStatus struct {
 }
 
 // TrafficDeconflictionEngine is the synchronous blocking gate between the
-// Scheduler and action commitment (§9.4.3). A third-party scheduler MUST NOT bypass
+// Scheduler and action commitment (RFC-0001 #tde-go-interface-illustrative). A third-party scheduler MUST NOT bypass
 // it by writing FleetAction.status.assignedRobot directly (TDE-1).
 type TrafficDeconflictionEngine interface {
 	// RequestReservation checks zone capacity and shared-resource availability and
@@ -112,7 +118,7 @@ type TrafficDeconflictionEngine interface {
 }
 
 // Config carries the TDE tunables (SwarmadaConfig.spec.trafficDeconfliction,
-// §9.1.11.10). The zero value is unusable; use [DefaultConfig].
+// RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration). The zero value is unusable; use [DefaultConfig].
 type Config struct {
 	ReservationTTL             time.Duration
 	DisconnectedReservationTTL time.Duration
@@ -130,7 +136,7 @@ func DefaultConfig() Config {
 }
 
 // ConfigFromTDE maps SwarmadaConfig.spec.trafficDeconfliction TTLs onto a TDE
-// [Config] (§9.1.11.10). A zero (absent) field falls back to the DefaultConfig
+// [Config] (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration). A zero (absent) field falls back to the DefaultConfig
 // value per-field, so an unreadable tunable never zeroes a TTL; ClockSkew has no
 // CRD surface and keeps its default. It is the single translation from the CRD
 // surface to the engine's tunables.
@@ -147,7 +153,7 @@ func ConfigFromTDE(reservationTTLSeconds, disconnectedReservationTTLSeconds int3
 
 // isPreemptibleBand reports whether a reservation's band may be displaced by a
 // PREEMPTOR-band action (Critical or High — see ActionPriority.CanPreempt, used by
-// Engine.reserve). It matches the §C controller preemption rule: the VICTIM set is
+// Engine.reserve). It matches the FleetAction controller's preemption rule: the VICTIM set is
 // Normal/Low only, so a preemptor never evicts another Critical/High.
 func isPreemptibleBand(p fleetv1.ActionPriority) bool {
 	return p == fleetv1.ActionPriorityNormal || p == fleetv1.ActionPriorityLow

@@ -129,3 +129,65 @@ func TestBootstrap_IsolatesNamespaces(t *testing.T) {
 		t.Fatal("config created in a namespace with no reconciled FleetZone")
 	}
 }
+
+// ADR-0053: the trigger is FleetAdapter as well as FleetZone.
+//
+// A FleetAdapter has no zone reference, no admission webhook and no CEL rule tying it to
+// one, and FleetAdapterReconciler never reads a FleetZone — so a namespace can hold
+// adapters and never receive a config from the zone trigger alone. That namespace is
+// exactly where the signing policy used to be read from a gap. RFC-0001 #swarmadaconfig-auto-creation-on-namespace-initialization names
+// the zone as the trigger and, in the same paragraph, claims the guarantee this widening
+// is what actually delivers: "every operational namespace always has a SwarmadaConfig".
+func TestBootstrap_CreatesConfigForAnAdapterOnlyNamespace(t *testing.T) {
+	adapter := &fleetv1.FleetAdapter{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme", Namespace: "adapters-only"},
+	}
+	r, c := newBootstrapReconciler(t, adapter)
+
+	var zones fleetv1.FleetZoneList
+	if err := c.List(context.Background(), &zones, client.InNamespace("adapters-only")); err != nil {
+		t.Fatalf("listing zones: %v", err)
+	}
+	if len(zones.Items) != 0 {
+		t.Fatalf("precondition: the namespace must hold no FleetZone, found %d", len(zones.Items))
+	}
+	if _, ok := getConfig(t, c, "adapters-only"); ok {
+		t.Fatal("precondition: config should not exist yet")
+	}
+
+	// What the FleetAdapter watch enqueues.
+	for _, req := range bootstrapNamespaceRequest(context.Background(), adapter) {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+
+	if _, ok := getConfig(t, c, "adapters-only"); !ok {
+		t.Fatal("swarmada-config was not auto-created in a namespace that has adapters but no FleetZone")
+	}
+}
+
+// Every adapter in a namespace must collapse onto ONE queue key, so a namespace with many
+// adapters does not queue one bootstrap reconcile per adapter.
+func TestBootstrap_AdapterRequestsCollapseOntoOneKey(t *testing.T) {
+	ctx := context.Background()
+	a := &fleetv1.FleetAdapter{ObjectMeta: metav1.ObjectMeta{Name: "acme", Namespace: "warehouse-a"}}
+	b := &fleetv1.FleetAdapter{ObjectMeta: metav1.ObjectMeta{Name: "beta", Namespace: "warehouse-a"}}
+
+	ra, rb := bootstrapNamespaceRequest(ctx, a), bootstrapNamespaceRequest(ctx, b)
+	if len(ra) != 1 || len(rb) != 1 {
+		t.Fatalf("want one request each, got %d and %d", len(ra), len(rb))
+	}
+	if ra[0] != rb[0] {
+		t.Errorf("two adapters in one namespace produced different queue keys %v and %v", ra[0], rb[0])
+	}
+	if ra[0].Name != SwarmadaConfigName || ra[0].Namespace != "warehouse-a" {
+		t.Errorf("request = %v, want %s/%s", ra[0], "warehouse-a", SwarmadaConfigName)
+	}
+
+	// A cluster-scoped object has no namespace to bootstrap; it must enqueue nothing.
+	cluster := &fleetv1.FleetAdapter{ObjectMeta: metav1.ObjectMeta{Name: "nowhere"}}
+	if got := bootstrapNamespaceRequest(ctx, cluster); len(got) != 0 {
+		t.Errorf("a namespace-less object enqueued %v, want nothing", got)
+	}
+}

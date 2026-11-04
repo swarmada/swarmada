@@ -19,6 +19,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -91,12 +92,52 @@ audit apply.`,
 		newRolloutCommand(o),
 		newEstopClearCommand(o),
 		newRobotClassCommand(o),
+		newSignCommand(o),
 		newVerifyCommand(o),
 		newExportCommand(o),
 		newVersionCommand(o),
 	)
+	refuseUnknownSubcommands(root)
 
 	return root, o
+}
+
+// refuseUnknownSubcommands makes every command that has subcommands fail on a
+// positional argument that names none of them. Cobra resolves `swarmctl estop
+// trigge zone-a` to the `estop` group with args [trigge zone-a]; a group with no
+// RunE is not runnable, so cobra prints its help and returns nil, and the process
+// exits 0 without sending the estop. A script, or an operator reading the exit
+// code, would take a mistyped safety command for a delivered one. Each group
+// therefore gets an Args check, and, where it has none, a RunE that prints help:
+// cobra consults Args only on a runnable command. A bare group still prints its
+// help and exits 0.
+func refuseUnknownSubcommands(c *cobra.Command) {
+	if c.HasSubCommands() {
+		if c.Args == nil {
+			c.Args = unknownSubcommand
+		}
+		if !c.Runnable() {
+			c.RunE = func(cmd *cobra.Command, _ []string) error {
+				return cmd.Help()
+			}
+		}
+	}
+	for _, sub := range c.Commands() {
+		refuseUnknownSubcommands(sub)
+	}
+}
+
+// unknownSubcommand is the Args check refuseUnknownSubcommands installs. The
+// wording matches cobra's own refusal at the root.
+func unknownSubcommand(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return fmt.Errorf("%s\nRun '%s --help' for usage", msg, cmd.CommandPath())
 }
 
 // complete validates the persistent flags and builds the client factory. It runs

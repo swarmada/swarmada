@@ -35,9 +35,9 @@ import (
 	"github.com/swarmada/swarmada/internal/safety"
 )
 
-// §9.6.5.1 estop detail fields.
+// RFC-0001 #safety-required-events estop detail fields.
 //
-// The <500 ms SLA in §9.6.2.2 is measured on the estop round trip, and §9.5.4 offers the
+// The <500 ms SLA in RFC-0001 #safety-timing-requirements is measured on the estop round trip, and RFC-0001 #safety-standards-disclaimer offers the
 // audit chain as safety-case evidence. That only holds if the timings are actually in the
 // entry. The existing fakeEstopper returns a zero Result, so nothing in the suite reached
 // the timing path until these tests; a field whose presence is assumed rather than checked
@@ -55,7 +55,7 @@ type timedEstopper struct {
 }
 
 func (f *timedEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
-	scope metrics.EstopScope) (safety.Result, error) {
+	scope metrics.EstopScope, carrier safety.Carrier) (safety.Result, error) {
 	f.mu.Lock()
 	f.scopes = append(f.scopes, scope)
 	f.robots = append(f.robots, robotID)
@@ -69,7 +69,7 @@ func (f *timedEstopper) TriggerEstop(_ context.Context, _, robotID, _, _ string,
 	}, nil
 }
 
-func (f *timedEstopper) ClearEstop(_ context.Context, _, _, _ string) (fleetv1.RobotEstopState, error) {
+func (f *timedEstopper) ClearEstop(_ context.Context, _, _, _ string, _ safety.Ends) (fleetv1.RobotEstopState, error) {
 	return fleetv1.RobotEstopNormal, nil
 }
 
@@ -81,7 +81,7 @@ func TestEstopAudit_RobotScopeRecordsTimings(t *testing.T) {
 
 	for _, k := range []string{"rpc_sent_at", "delivered", "ack_received_at", "ack_latency_ms", "latency_violation"} {
 		if _, ok := d[k]; !ok {
-			t.Errorf("detail is missing %q; §9.6.2.2's SLA evidence is incomplete", k)
+			t.Errorf("detail is missing %q; RFC-0001 #safety-timing-requirements's SLA evidence is incomplete", k)
 		}
 	}
 	if d["ack_latency_ms"] != "265" {
@@ -121,7 +121,7 @@ func TestEstopAudit_UndeliveredOmitsAckFields(t *testing.T) {
 }
 
 // Every value is a string: audit.Entry.Detail is map[string]string and the chain hashes
-// the serialised entry, so a number must not leak in unquoted (§9.6.5.2).
+// the serialised entry, so a number must not leak in unquoted (RFC-0001 #safety-log-entry-format).
 func TestEstopAudit_AllValuesAreStrings(t *testing.T) {
 	d := estopTimingDetail(map[string]string{}, time.Now(),
 		safety.Result{Delivered: true, Latency: 1500 * time.Millisecond, LatencyViolation: true})

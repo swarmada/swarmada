@@ -24,7 +24,7 @@ import (
 	"github.com/swarmada/swarmada/internal/registry"
 )
 
-// Cosign support (§9.1.7.3). The layout half is easy; the half that matters is BINDING — proving
+// Cosign support (RFC-0001 #firmwarerollout). The layout half is easy; the half that matters is BINDING — proving
 // the signed payload describes the artifact actually being dispatched.
 //
 // A cosign signature that verifies proves someone signed *a* payload. Nothing about that says the

@@ -21,9 +21,10 @@
 #
 # Without them the control plane runs with NO admission control and NO defaulting: the
 # leaf-zone check, robot-id uniqueness, charging.dockName resolution and the FleetAdapter
-# admission gate (§6.6) are all absent, and — the failure that actually shows up first —
-# Robot.metadata.annotations["swarmada.io/robot-id"] is never defaulted, so telemetry cannot
-# be resolved to a Robot (ADR-0028) and is silently dropped.
+# admission gate (RFC-0001 #fleetadapter-admission-gating) are all absent, and — the
+# failure that actually shows up first — Robot.metadata.annotations["swarmada.io/robot-id"]
+# is never defaulted, so telemetry cannot be resolved to a Robot (ADR-0028) and is
+# silently dropped.
 
 apiVersion: v1
 kind: Service
@@ -38,8 +39,8 @@ spec:
   ports:
     - name: webhook
       port: 443
-      # controller-runtime's webhook server listens on 9443 by default. ControlStream was
-      # moved off that port (manager-mtls-patch.yaml) so the two can coexist in one pod.
+      # controller-runtime's webhook server listens on 9443 by default. ControlStream is on
+      # 9445 (manager-mtls-patch.yaml) so the two can coexist in one pod.
       targetPort: 9443
       protocol: TCP
 ---

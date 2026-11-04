@@ -182,21 +182,24 @@ func TestRolloutDelete_FailsClosedOnWrongType(t *testing.T) {
 	}
 }
 
-// Create/update stay unconstrained on both rollout kinds — the delete guard is the whole point.
-// ModelRollout create/update remain unconstrained — the CRD schema governs them and no signing gate
-// applies to model artifacts at admission.
+// Neither rollout kind's create/update is unconstrained any more: both carry the signing gate
+// (firmware_signing_test.go, model_signing_test.go). The phase-driven part of the old assertion
+// still holds and is what this test now isolates — a rollout's PHASE never constrains create or
+// update on either kind; only the delete guard and the namespace signing policy do.
 //
-// FirmwareRollout create/update are NO LONGER unconstrained: they carry the signing gate
-// (firmware_signing_test.go). The phase-driven part of the old assertion still holds and is kept
-// here — a rollout's PHASE never constrains create/update on either kind; only the delete guard and
-// the firmware signing policy do.
+// Both halves therefore run with signing NOT enforced, which proves the denials those gates
+// produce come from the policy and not from the phase.
 func TestRolloutCreateUpdate_PhaseNeverConstrains(t *testing.T) {
-	mr := &ModelRolloutValidator{}
-	if _, err := mr.ValidateCreate(context.Background(), mrPhase(fleetv1.RolloutPhaseInProgress)); err != nil {
-		t.Errorf("ModelRollout create should be unconstrained: %v", err)
+	mr := mrValidator(t, signingConfig(fwNS, false))
+	mrInFlight := mrPhase(fleetv1.RolloutPhaseInProgress)
+	mrInFlight.Namespace = fwNS
+	if _, err := mr.ValidateCreate(context.Background(), mrInFlight); err != nil {
+		t.Errorf("ModelRollout create must not be constrained by phase: %v", err)
 	}
-	if _, err := mr.ValidateUpdate(context.Background(), mrPhase(""), mrPhase(fleetv1.RolloutPhasePaused)); err != nil {
-		t.Errorf("ModelRollout update should be unconstrained: %v", err)
+	mrPaused := mrPhase(fleetv1.RolloutPhasePaused)
+	mrPaused.Namespace = fwNS
+	if _, err := mr.ValidateUpdate(context.Background(), mrPhase(""), mrPaused); err != nil {
+		t.Errorf("ModelRollout update must not be constrained by phase: %v", err)
 	}
 
 	// FirmwareRollout: an InProgress phase is not itself a reason to refuse. With signing NOT

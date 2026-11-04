@@ -116,6 +116,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-swarmada-io-v1-computeworkloadtemplate
+  failurePolicy: Fail
+  name: vcomputeworkloadtemplate.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - computeworkloadtemplates
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-swarmada-io-v1-firmwarerollout
   failurePolicy: Fail
   name: vfirmwarerollout.swarmada.io
@@ -148,6 +168,25 @@ webhooks:
     operations:
     - CREATE
     - UPDATE
+    resources:
+    - fleetactions
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-fleetaction-delete
+  failurePolicy: Ignore
+  name: vfleetactiondelete.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - DELETE
     resources:
     - fleetactions
   sideEffects: None
@@ -208,6 +247,8 @@ webhooks:
     apiVersions:
     - v1
     operations:
+    - CREATE
+    - UPDATE
     - DELETE
     resources:
     - modelrollouts
@@ -238,6 +279,44 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-swarmada-io-v1-robot-delete
+  failurePolicy: Ignore
+  name: vrobotdelete.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - DELETE
+    resources:
+    - robots
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-robot-status
+  failurePolicy: Fail
+  name: vrobotstatus.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - UPDATE
+    resources:
+    - robots/status
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-swarmada-io-v1-swarmadaconfig
   failurePolicy: Fail
   name: vswarmadaconfig.swarmada.io
@@ -249,6 +328,25 @@ webhooks:
     operations:
     - CREATE
     - UPDATE
+    resources:
+    - swarmadaconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-swarmada-io-v1-swarmadaconfig-delete
+  failurePolicy: Ignore
+  name: vswarmadaconfigdelete.swarmada.io
+  rules:
+  - apiGroups:
+    - swarmada.io
+    apiVersions:
+    - v1
+    operations:
+    - DELETE
     resources:
     - swarmadaconfigs
   sideEffects: None

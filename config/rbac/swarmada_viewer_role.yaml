@@ -1,4 +1,4 @@
-# swarmada:viewer — read-only access to all Swarmada resources (RFC-0001 §9.5.3.1).
+# swarmada:viewer — read-only access to all Swarmada resources (RFC-0001 #security-role-definitions).
 # Suitable for dashboards, monitoring, and read-only tooling. No write, no custom
 # verbs, no audit access.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -25,3 +25,8 @@ rules:
       - swarmadaconfigs
       - fleetadapters
     verbs: ["get", "list", "watch"]
+  # Core Events, read only: `swarmctl describe` and `kubectl describe` list an object's Events,
+  # and without this they show "<unavailable: forbidden>" where a Warning would be.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]

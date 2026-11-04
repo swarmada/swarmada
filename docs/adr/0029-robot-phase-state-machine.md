@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** Control Plane / CRD-controller capability
-- **Related:** RFC-0001 §5.2.3 (RobotPhase wire enum), ADR-0026 (per-robot liveness projection), ADR-0011 (connectivity-critical escalation); `fleet_adapter.v1 RobotPhase` proto enum
+- **Related:** RFC-0001 "Phase Transition Table", ADR-0026 (per-robot liveness projection), ADR-0011 (connectivity-critical escalation); `fleet_adapter.v1 RobotPhase` proto enum
 
 ## Context
 
@@ -100,7 +100,8 @@ or awaiting first heartbeat). Admitted-and-live robots read `Idle`/`InProgress`.
 - **Derive phase entirely from conditions on every reconcile (single writer).**
   Cleaner in theory, but it would fight the scheduler's authoritative
   `Idle↔InProgress` writes and risk racing the single-executor action binding
-  (§9.6.3.5). Scoping the Robot controller to only the liveness-owned phases keeps
+  (RFC-0001, "Assignment Lease and the Single-Executor Guarantee"). Scoping the Robot
+   controller to only the liveness-owned phases keeps
   a single owner per transition.
 - **Project phase from telemetry frames.** Rejected outright: that is a per-tick
   status write and violates RA-1.

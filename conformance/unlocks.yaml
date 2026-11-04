@@ -1,0 +1,163 @@
+# Copyright 2026 The Swarmada Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# What would make each unmeasured row measurable (ADR-0070, conformance/PROFILES.md,
+# "The capability sheet").
+#
+# Every row graded not-supported-by-platform, not-testable-here or not-tested-suite-gap
+# carries an `unlock`: the concrete thing -- a declaration, a sensor, a harness change,
+# a witness outside the suite -- that would let a run measure it. The report builder
+# resolves it here and REFUSES to write a report with a row it cannot resolve
+# (MissingUnlock), for the reason an unenumerated skip cause is refused: a report that
+# says what it could not establish, and not what would establish it, leaves the reader
+# with nothing to act on.
+#
+# Resolution order: byCheck (exact id, then the longest `PREFIX*` match), then byCause.
+#
+# byCause holds a default ONLY for a cause whose unlock is the same whichever check
+# records it. A cause whose unlock depends on the check -- not-observable-on-wire,
+# legal-alternative-path, deployment-property, needs-extended-run,
+# surface-not-implemented -- has no default on purpose: a generic sentence there would
+# satisfy the builder and tell the reader nothing.
+#
+# An unlock states what would make a row TESTABLE. It never promises the row would
+# pass, and for a not-supported-by-platform row it is not a recommendation to add the
+# feature.
+
+byCause:
+  optional-declined: >-
+    the implementation implements the optional operation this row grades instead of
+    declining it; the decline itself is recorded in the row's evidence
+  optional-not-exhibited: >-
+    the implementation exhibits the optional behaviour this row grades; the run reached the
+    state the behaviour applies to, and the row's evidence records that it was not exhibited
+  binding-not-declared: >-
+    a target that declares the binding this row belongs to
+  contract-not-declared: >-
+    a target that declares the contract this row belongs to
+  needs-resident-target: >-
+    a resident (contract: Service) fixture in the suite, or --target naming a resident
+    endpoint
+  needs-live-cluster: >-
+    a live-cluster mode in the ControlPlane driver that applies objects to a running API
+    server and reads back what the controller created and admitted; the driver today
+    reads shipped artefacts only
+  target-did-not-reach-state: >-
+    a run in which the target reaches the state this row needs; the row's evidence
+    names the state that was not reached
+  needs-target-restart: >-
+    a harness hook that terminates the target process mid-run, respawns it from the same
+    command, and re-queries the state the row needs
+  no-telemetry-in-run: >-
+    a run in which the target streams TelemetryPayload (for the simulation adapter,
+    --scenario healthy-fleet)
+  requires-successful-reregistration: >-
+    a harness reconnect in which registration succeeds; the suite's only reconnect
+    refuses registration by design, on the contract-version path
+  all-core-subjects-honoured: >-
+    an operating subject the adapter does not declare honoured; with all seven core
+    subjects declared none is left to send, so only a witness of each rule being
+    enforced on the robot establishes this row
+  adapter-declares-no-operating-subject: >-
+    the adapter declares at least one honoured operating subject in its
+    CapabilitiesSnapshot
+  adapter-declares-no-sensor-stream: >-
+    the adapter declares at least one sensor stream in its CapabilitiesSnapshot
+  adapter-declares-no-action: >-
+    the adapter declares at least one SupportedAction in its CapabilitiesSnapshot, with the
+    parameters each type requires, and serves it
+  adapter-declares-no-required-param: >-
+    the adapter declares the parameters its actions require (ActionParam.required) and
+    refuses an assignment missing one
+  adapter-declares-no-enum-param: >-
+    the adapter declares an enum parameter with its allowed values (ActionParam kind enum,
+    allowed) and refuses an assignment carrying a value outside them
+  adapter-declares-no-custom-verb: >-
+    the adapter declares a Custom verb (SupportedAction custom_type, or an operation enum on a
+    Custom entry) and accepts a Custom action that names it only in the payload
+  contract-predates-obligation: >-
+    the adapter reports the contract version that made the row an obligation (C5.8: 1.4.0,
+    which carries the stop latch) and meets the row there
+  no-motion-witness: >-
+    an external motion witness on a hardware run, timestamped on a clock aligned with the
+    harness; in a simulated run, the simulator's plant model passed as the witness
+    (--witness-file)
+  no-independent-motion-channel: >-
+    a motion channel independent of the command path that can confirm rest -- wheel or motor
+    encoders read from the drivetrain, a safety-rated scanner's motion output, or an external
+    motion witness -- recorded in the plant declaration's motion_channel
+
+byCheck:
+  FleetAdapter:
+    C5.3: >-
+      a motion channel independent of the command path that can confirm rest -- wheel or
+      motor encoders read from the drivetrain, a safety-rated scanner's motion output, or an
+      external motion witness -- recorded in the plant declaration's motion_channel
+    C1.3: >-
+      a harness mode that serves ControlStream and SafetyStream over TLS from a test CA,
+      requires a client certificate, and checks that the adapter sets no robot_id
+      outside the set that identity is authorised for; the harness serves plaintext
+    C1.4: >-
+      a health or readiness signal the adapter exposes, polled by the harness while it
+      refuses SafetyStream; the protocol carries no health state, so the witness has
+      to be the adapter's own signal
+    C1.5: >-
+      a harness mode that drops the stream several times and records the reconnect
+      intervals, so the curve can be graded as bounded exponential backoff
+    C3.7: >-
+      a harness restart hook: after the adapter accepts a fencing token, terminate the
+      adapter process, respawn it from --adapter-cmd, and offer a token below the one
+      accepted
+    C5.6: >-
+      an adapter that acknowledges an estop with STOPPING before its terminal ack; an
+      adapter that acks terminal directly has satisfied the requirement by the other
+      permitted shape, and this row is not an obligation of it
+    C6.3: >-
+      a running control plane observed for Robot status writes across telemetry ticks --
+      the ControlPlane surface's CP8.1, where this obligation is graded; an adapter-side
+      run cannot see the plane's write path
+    C10.1: >-
+      a harness probe artifact carrying a firmware_checksum the adapter can verify, so
+      push_firmware is accepted and the progress path becomes reachable; the suite's
+      probe artifact is unverifiable by design and a conformant adapter refuses it
+    # The reactive rows the adapter surface records when no grammar version is declared.
+    RB*: >-
+      an adapter that declares reactive_grammar_version, profiled with
+      --reactive-grammar-version
+  ComputeEndpoint:
+    CE1.3: >-
+      an observable that distinguishes a replayed reply from re-done work -- a side-effect
+      counter the endpoint exposes, or a fixture that records its own executions
+    CE1.4: >-
+      a driver for this binding that can inject slow work, so the deadline path is
+      exercised rather than only the ordinary path's latency
+    CE7.3: >-
+      a resident fixture with more than one replica, so a pinned run can be handed to
+      another replica and the serving address observed
+    CE7.4: >-
+      a harness step that removes the serving endpoint mid-run, forcing a re-placement
+    CE7.6: >-
+      a harness mode that cuts the fixture's frame source mid-run; the fixture generates
+      its own frames
+    CE8.1: >-
+      the endpoint reports the identity of the bytes serving the run (an image digest or
+      build identity) on its reply, or the deployment records it where the suite can
+      read it
+    CE8.3: >-
+      a reported identity (CE8.1), observed across runs against the same bytes and
+      against changed bytes
+  ControlPlane:
+    CP8.1: >-
+      a live-cluster mode in the ControlPlane driver that feeds a running controller
+      telemetry for a robot in a steady state and counts Robot status writes; any write
+      without a state transition fails the row
+    CP2*: >-
+      a controller that dispatches actions to a ComputeEndpoint, so the dispatch path
+      can be driven
+    CP3.2: >-
+      a `select` node in the shipped FleetTask schema
+    CP3.3: >-
+      TaskTrigger in the shipped CRD set, with a requireApproval default the profiler
+      can read
+    CP4.1: >-
+      a status field on the run that records the resolved executor digest

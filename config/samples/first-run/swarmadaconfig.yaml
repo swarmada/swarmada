@@ -1,0 +1,27 @@
+# The namespace's SwarmadaConfig. Created before any FleetZone or FleetAdapter (the
+# kustomization's sortOptions sets that order), so the bootstrap controller finds it
+# and does not create an empty one. With webhooks on,
+# vswarmadaconfig.swarmada.io refuses an empty one, because it would require
+# signature verification with no trust root.
+#
+# SIGNING: OFF, deliberately. The FleetAdapter's conformance report is still
+# digest-verified: the controller hashes the ConfigMap and compares it with the digest
+# the FleetAdapter pins, so the report cannot be altered after it is pinned. What is off
+# is the check that the report was signed by a key this cluster trusts. A signature
+# needs a signing key, and a sample cannot ship one. To turn it on, sign the report
+# with the adapter author's key (swarmctl sign conformance-report --report ... --key
+# ...), put the output in the ConfigMap's "signature" key, list the public key under
+# spec.signing.trustRoots, and set requireSignatureVerification: true.
+apiVersion: swarmada.io/v1
+kind: SwarmadaConfig
+metadata:
+  name: swarmada-config
+  namespace: warehouse-a
+spec:
+  signing:
+    requireSignatureVerification: false
+  telemetry:
+    sink:
+      # No metrics store in this sample, so high-cadence telemetry is dropped on
+      # purpose. Robot status projection is a separate path and is unaffected.
+      type: Drop

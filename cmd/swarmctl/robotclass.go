@@ -43,9 +43,9 @@ func newRobotClassRolloutCommand(o *options) *cobra.Command {
 		Use:   "rollout <class>",
 		Short: "Re-admit every Robot of a RobotClass to pick up a class change",
 		Long: `Rollout re-admits every Robot referencing a RobotClass, one at a time, so a
-class change reaches the whole fleet. This is the interim, scripted-loop path
-RFC-0001 §9.1.1 prescribes until the RobotClassRollout resource (a future RFC)
-provides batched, drain-aware rollouts; it does NOT itself drain in-progress
+class change reaches the whole fleet. This is the scripted-loop path
+RFC-0001 §9.1.1 prescribes; no Swarmada resource provides batched,
+drain-aware rollouts, and this command does NOT itself drain in-progress
 actions or honor maintenance windows, so sequence it during a quiet window.`,
 		Example: `  swarmctl robotclass rollout acme-picker-v2 --yes
   swarmctl robotclass rollout acme-picker-v2 --zone zone-aisle-b3`,

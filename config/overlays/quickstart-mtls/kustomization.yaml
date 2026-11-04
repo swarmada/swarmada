@@ -28,15 +28,21 @@ kind: Kustomization
 # plaintext sibling overlay (quickstart-dev) cannot drive an assignment for that
 # reason.
 #
+# Per-robot authorization is ON: each robot-scoped message is checked against the
+# adapter's certificate identity, its binding, and the adapter's
+# spec.servesRobotClasses. This overlay differs from quickstart-dev in transport AND
+# in authorization.
+#
 # Sibling overlays:
 #   quickstart-projected — no adapter at all; ControlStream off entirely.
-#   quickstart-dev       — plaintext + insecure-authz; telemetry only.
+#   quickstart-dev       — plaintext + insecure-authz; telemetry only. The only
+#                          overlay that sets --fleet-adapter-insecure-authz.
 
 # server-certificates.yaml and controlstream-service.yaml are local copies of the
 # equivalents under config/controlstream-tls/ and config/overlays/quickstart-dev/.
 # Kustomize refuses to load a bare file from outside the kustomization directory,
 # and referencing those directories instead would drag in their whole overlay
-# (webhook certs, the 9445 port move). Keep the copies in step if the originals
+# (webhook certs, the webhooks). Keep the copies in step if the originals
 # change.
 resources:
   - ../../default

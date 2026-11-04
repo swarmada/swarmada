@@ -1,0 +1,28 @@
+# The class of a ROS 2 / Nav2 robot the ROS 2 adapter drives (swarmctl admit --class
+# ros2-nav2-v1). The capabilities are the ones the adapter's declared actions require:
+# navigation.2d for Navigate and explore-floor; Charge requires none.
+apiVersion: swarmada.io/v1
+kind: RobotClass
+metadata:
+  name: ros2-nav2-v1
+  namespace: warehouse-a
+spec:
+  manufacturer: ROS 2
+  model: Nav2
+  baseAdapter:
+    name: fleet-adapter-ros2
+    version: "0.1.0"
+  hardware:
+    - name: lidar
+      type: Lidar
+      model: planar-lidar
+    - name: imu
+      type: Custom
+      customType: imu
+      model: imu
+  baseCapabilities:
+    - name: navigation.2d
+      type: hardware-native
+      pauseable: true
+  defaultTelemetry:
+    telemetryIntervalSeconds: 5

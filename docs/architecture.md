@@ -105,7 +105,7 @@ calling other components directly.
 - **Robot reconciler** — drives the robot lifecycle: capability derivation, the
   aggregate `status.health` summary, heartbeat-timeout offline detection and the
   prolonged-offline escalation. Together with the Probe Controller, the FleetAdapter
-  controller and the telemetry pipeline it realises what RFC-0001 §9.3.3 groups as
+  controller and the telemetry pipeline it realises what RFC-0001 #control-plane-robot-health-and-connectivity groups as
   robot health and connectivity; there is no single "Health Monitor" component.
 - **Zone Controller** — reconciles `FleetZone` resources and enforces zone-level
   capacity and access policy.
@@ -146,10 +146,13 @@ largest operational advantage of the model for physical fleets.
 - **controller-runtime reconciliation** — all internal state transitions are
   driven by watch events, never by direct calls between control-plane components.
 
-## The API surface: thirteen CRDs
+## The API surface: 21 CRDs
 
-Swarmada defines thirteen namespace-scoped custom resource definitions, grouped by
-lifecycle.
+Swarmada installs 21 namespace-scoped custom resource definitions
+(`config/crd/bases`, and the same set in the Helm chart), grouped by lifecycle. Eighteen
+of them are the kinds RFC-0001 specifies; the three under **Events and
+triggers** below are served by the same API group but not specified by RFC-0001
+(RFC-0001 #resource-model).
 
 **Discovery and admission**
 - `DiscoveredRobot` — created automatically when a Fleet Adapter reports a robot
@@ -196,18 +199,50 @@ lifecycle.
 - `ZoneMaintenance` — a planned, reversible pause of a zone or namespace,
   semantically distinct from emergency stop.
 
+**Edge and off-robot compute**
+- `EdgeNode` — a facility-local node that runs the Zone Controller and can hold
+  models close to the robots it serves. No controller reconciles one; the type and
+  its schema are complete and nothing writes its status.
+- `ComputeEndpoint` — an off-robot executor a `FleetAction` can name instead of a
+  robot. Admission resolves and validates the reference; nothing dials it.
+- `ComputeWorkloadTemplate` — a pod template a `ComputeEndpoint` can provision
+  itself from. The builder exists and no shipped binary calls it.
+- `ResultSink` — a declared destination for executor output, with a column schema
+  admission checks results against. There is no egress path and no grant is issued.
+- `ArtifactStore` — a declared location for bytes an action produces, referenced by
+  `store`/`path`/`digest` rather than by raw path. Nothing reads one at runtime.
+
+**Events and triggers**
+- `SemanticEventSource` — declares a non-adapter source of semantic events and the
+  closed set of event types it may raise. Read by the `TaskTriggerReconciler`, which
+  also writes its status: `acceptedCount` and `rejectedCount`, recounted from its events.
+- `SemanticEvent` — one event raised by a source. The `TaskTriggerReconciler`
+  reconciles it: an event whose type the source does not declare is rejected, and an
+  accepted one drafts a `FleetTask` from each matching `TaskTrigger`.
+- `TaskTrigger` — a rule that drafts a `FleetTask` when a matching event arrives. It
+  never dispatches. No controller watches it; the `TaskTriggerReconciler` lists it
+  while reconciling an event and records each firing on its status.
+
 ## The Fleet Adapter protocol
 
 The Fleet Adapter protocol is the boundary between the neutral core and
 vendor-specific hardware. It is a gRPC service (`fleet_adapter.v1`) covering the
 full robot lifecycle: discovery, registration, telemetry streaming, task
 assignment and status, emergency stop, capability scanning, and active hardware
-verification. All connections use mutual TLS and short-lived bearer tokens.
+verification.
 
-The control plane connects to each adapter; the adapter translates the
-standardized calls into the manufacturer's native interface. Because every vendor
-integration reduces to implementing this one contract, adding a robot family is an
-additive, community-maintainable act rather than a change to the core. A
+The adapter is the gRPC client: it dials the control plane and opens a `ControlStream`
+and a `SafetyStream`; the control plane never dials an adapter. The control plane
+authenticates an adapter by its mutual-TLS client certificate, taking the
+`FleetAdapter` name from the certificate's SAN, and authorizes each `robot_id` against
+that identity (`streamauth.Authorizer`). There are no bearer tokens. The manager serves
+the `ControlStream` only when the three `--fleet-adapter-tls-*` flags are set, or when
+`--fleet-adapter-insecure-authz` is set for a dev/demo cluster (plaintext, with per-robot
+authorization off; the manager refuses the flag together with the TLS flags); with
+neither it logs and serves nothing. The adapter translates the standardized calls into the manufacturer's native
+interface. Because every vendor integration reduces to implementing this one contract,
+adding a robot family is an additive, community-maintainable act rather than a change
+to the core. A
 conformance suite gates whether an adapter may drive robots, so an unverified
 adapter cannot silently control physical hardware.
 
@@ -245,6 +280,13 @@ non-negotiable rules the control plane is built around:
   adapter confirms, or the assignment lease is provably dead. Freeing a robot on
   unreachability alone risks two executors for one physical task — the
   dual-execution hazard this invariant exists to exclude.
+- **RA-3b — explicit presence on safety scalars.** A safety-relevant numeric that
+  was never reported is not the same fact as one reported as zero. Every such
+  scalar on the wire carries proto3 explicit presence, and every hop preserves the
+  distinction: an absent battery percentage must never reach a scheduling decision
+  as 0%, and a position with `x` present and `y` absent must not be completed into
+  a phantom origin. The discipline is asserted end to end — the field annotations in
+  `fleet_adapter.proto`, the translator in `internal/controlstream`, and its tests.
 - **RA-6 — dedicated safety channel.** Emergency-stop is never multiplexed behind
   bulk telemetry on a shared stream, where estop latency would couple to telemetry
   congestion. Safety-critical signals travel on their own channel (the SafetyStream
@@ -272,30 +314,41 @@ the robot platform.
 - **Single-site production** — the control plane on an on-premise cluster, one
   Zone Controller edge node per physical zone, and Fleet Adapters on edge compute
   co-located with the robots.
-- **Multi-site** — each site is a dedicated namespace with its own control-plane
-  deployment and zone set. Cross-site task routing and federation are out of scope
-  for the current specification and deferred to a future RFC.
+- **Multi-site** — each site is a dedicated namespace with its own zone set, and
+  one control-plane deployment serves every namespace in the cluster. Swarmada does
+  not run a control plane per site. Cross-site task routing and federation are out of scope
+  for this specification.
 
 ## Implementation status
 
 Swarmada is pre-release and evolving. Public claims track the code:
 
-- **CRDs:** all thirteen are defined and generate under `swarmada.io/v1`.
-- **Controllers:** every CRD has a reconciler registered with the manager
-  (`cmd/manager/main.go`), each covered by `envtest` suites in
-  `internal/controller/`. `Robot` and `FleetTask` are the most exercised paths
-  (assignment, leasing, preemption, traffic-deconfliction gating, estop); the
+- **CRDs:** all 21 are defined and generate under `swarmada.io/v1`.
+- **Controllers:** fourteen kinds have a reconciler registered with the manager
+  (`cmd/manager/main.go`), with `envtest` suites in `internal/controller/`. Seven have
+  none: `EdgeNode`, `ComputeEndpoint`, `ComputeWorkloadTemplate`, `ResultSink`,
+  `ArtifactStore`, `SemanticEventSource` and `TaskTrigger`. The last two are read by
+  the `TaskTriggerReconciler`, which reconciles `SemanticEvent`. `Robot` and
+  `FleetTask` are the most exercised paths (assignment, leasing, preemption,
+  traffic-deconfliction gating, estop); the
   robot-class, discovery, adapter, probe, zone, zone-estop, maintenance,
   model-policy, model-rollout, firmware-rollout, and config controllers are
   implemented and under active hardening.
 - **Adapters:** three reference adapters — ROS 2/Nav2, VDA5050, and MAVLink/PX4 —
   plus the in-tree simulation adapter run against the executable conformance
   harness (`adapters/conformance/`, run via `make conformance`). The harness
-  covers checks C0–C16. The reference adapters are exercised against it through
+  covers checks C0–C19. The reference adapters are exercised against it through
   simulated bindings only; none has been run against a live runtime, and
   `adapters/REGISTRY.md` — the authoritative per-adapter record — grades all
-  three `partial` as of this revision. Only a `passing` grade maps to
-  `FleetAdapter.status.conformance: Passed`, which robot admission requires. The lease self-stop (C4.2) and the
+  three `partial` as of this revision. No controller reads that grade.
+  `FleetAdapter.status.conformance` is `Passed` when the adapter's referenced
+  conformance report verifies and records `conformant: true` (no MUST or MUST
+  NOT check failed among the checks that ran). Robot admission also requires
+  that result to have been earned against a contract version inside the
+  supported range; each reference adapter records contract `1.0.0`, outside the
+  `>=1.3.0 <1.5.0` range, which is what keeps their robots out at v0.4. That range
+  is not widened: each adapter moves to a version inside it in its own
+  repository. The lease self-stop (C4.2) and the
   telemetry-path checks (C6.x) are asserted in the suite itself, not separately:
   an adapter reports the stop it performs, which is what makes the primary
   dual-execution safeguard observable rather than assumed. Bindings
@@ -313,3 +366,4 @@ is the authoritative statement of what runs.
 - [RFC-0001 — Core Specification](../rfcs/dist/RFC-0001-core-spec.md) (normative)
 - [Fleet Adapter protocol](../proto/fleet_adapter/v1/fleet_adapter.proto) — the vendor-neutral gRPC contract
 - [API design principles](api-principles.md) — CRD and API design conventions
+

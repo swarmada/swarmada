@@ -1,0 +1,10 @@
+# Plain-language limit 5: at most one {{ref:...}} cross-reference per sentence.
+# Flags every reference after the first in the same sentence.
+# Same sentence-end definition and scope as PlainKeywordPerSentence.
+extends: existence
+message: "'%s' is a second cross-reference in this sentence. Limit: one {{ref:...}} per sentence."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+nonword: true
+tokens:
+  - '(?<=\{\{ref:[^}\s]*\}\}(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[\s\S])*?)\{\{ref:[^}\s]*\}\}'

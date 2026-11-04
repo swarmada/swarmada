@@ -1,0 +1,1763 @@
+# Copyright 2026 The Swarmada Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# The machine-readable conformance profile registry.
+#
+# This file is the SPINE of the conformance program: it names every surface,
+# every profile, every check, and every check's support level, and the harness
+# reads it rather than hard-coding a partition. Two self-checks keep it honest
+# and both run on every report:
+#
+#   *0.5  every check id here is defined in its catalog document, and every
+#         check defined in a catalog document appears here. A registry that
+#         drifts from the prose is the failure mode this program exists to
+#         prevent, so drift is a FAILED check and not a review comment.
+#   *0.3  no profile, check, fixture or target in this suite names a
+#         specification the suite cannot read.
+#
+# Normative sources, per surface:
+#   FleetAdapter     adapters/CONFORMANCE.md  +  RFC-0001 "Conformance Profiles
+#                    and Support Levels" (rfcs/rfc-0001-core-spec/conformance-profiles.md)
+#   ComputeEndpoint  conformance/COMPUTE-ENDPOINT.md
+#   ReactiveBlock    conformance/REACTIVE-BLOCK.md   (a profile OF the FleetAdapter surface)
+#   ControlPlane     conformance/CONTROL-PLANE.md
+#
+# A specification outside the published contract (a draft for review) may reserve check identifiers of its own. It does
+# so in a registry OVERLAY kept beside its sources (rfcs/*/conformance-registry.yaml),
+# which registry.py merges when the file is present: a checkout that holds the
+# specification grades against it, and one that does not names nothing it cannot read
+# (*0.3). An overlay adds catalogs, profiles and exclusions; it never changes an entry
+# declared here.
+#
+# Where this registry and a catalog document disagree, the CATALOG governs, and
+# where a catalog and the specification disagree, the SPECIFICATION governs
+# (RFC-0001 conformance-profiles, "Precedence: the specification overrules the
+# tests"). This file is a test artefact. It can be wrong.
+
+apiVersion: conformance.swarmada.io/v1alpha1
+kind: ProfileRegistry
+# SUITE REVISIONS AND THEIR CLASS. Every revision is declared in `revisions:` below with one
+# of two classes, and the class -- not the fact of a bump -- decides whether a result earned
+# before it still stands:
+#
+#   harness        What an implementation must do to pass changed: a check's logic, the set of
+#                  checks the harness runs, a check's level, or the rule that turns rows into a
+#                  verdict. A result earned before it must be re-earned.
+#   profile-layer  Only the grouping, naming or reporting of results changed; every row's
+#                  outcome and the verdict rule are unchanged. A result earned before it carries
+#                  forward.
+#
+# A registry row (adapters/REGISTRY.md) names the revision its result was earned at. It is
+# STALE when a `harness` revision later than that one is at or below the current revision,
+# and CURRENT otherwise. tests/python/test_registry_suite_revision.py enforces the rule on
+# every row. A suite revision is provenance recorded beside a result, never a component of
+# the contract version an adapter negotiates (ADR-0032, Decision bullet 1).
+#
+# 2026.10.22.2 -- harness. An assignment for a Custom entry keyed by custom_type carries that
+#   custom_type, as a control plane sets it from FleetAction.spec.customType (contract 1.4.0): the
+#   served-action assignment, and every C19 probe and control that names a declared entry. C19.1's
+#   and C19.3's probes name none and carry none, and C19.5's names its verb only in the payload, on
+#   purpose. Without it an adapter that keys its Custom verbs refused every one of them as naming
+#   no verb, so C4.2, C3.9 and C16.1 skipped and C3.4, C3.5, C5.8, C17.1, C17.2 and C19.1-C19.3
+#   failed on the refusal and not on what they grade. C2.2 grades the terminal report for the
+#   action the RegisterAck declares CANCELLED, any state RFC-0001 calls terminal, as C4.2 does: it
+#   passed an adapter that sent only ACTION_STATE_STOPPED and failed one that ended the action
+#   FAILED or SUCCEEDED. The check set and the levels did not change; what it takes to pass C2.2
+#   moved, and an adapter that keys its Custom verbs is graded on rows it could not reach, so a
+#   result earned before it is re-earned. The contract version did not move. The reports pending
+#   re-recording at 2026.10.22 stay pending at this revision (`pendingReRecording:` below).
+#
+# 2026.10.22 -- harness. No row reads ACTION_STATE_STOPPED as an end, and C3.6 accepts every
+#   disposition the contract defines. STOPPED is the commanded stop and is not terminal (RFC-0001,
+#   safety chapter, *terminal*; the proto's ACTION_STATE_STOPPED comment). C4.2 grades the lapsed
+#   lease's terminal report, any state RFC-0001 calls terminal (SUCCEEDED, FAILED, CANCELLED,
+#   UNKNOWN), and no longer passes an adapter that sends only STOPPED (adapters/CONFORMANCE.md
+#   C4.2). C16.1's terminal half and C3.9's wait for the preemptor's end skip a STOPPED and read
+#   the report after it. C3.6 accepts CANCEL_DISPOSITION_STOP_UNCONFIRMED (contract 1.4.0), which
+#   it failed. The check set and the levels did not change; what it takes to pass C4.2, C16.1,
+#   C3.9 and C3.6 moved, so a result earned before it is re-earned. The contract version did not
+#   move. The in-tree simulation, template and example-noop adapters now follow the STOPPED of a
+#   lease self-stop with a terminal FAILED (end cause ACTION_END_CAUSE_LEASE_EXPIRED). The
+#   reports this repository pins, and the profiled reports, are pending re-recording at this
+#   revision (`pendingReRecording:` below).
+#
+# 2026.10.17 -- harness. The harness negotiates the contract version per connection, as a control
+#   plane does (RFC-0001, fleet adapter protocol, Package and versioning): 1.4.0 with an adapter
+#   that reports a 1.4 version, and the reported 1.3.x otherwise. A connection held to 1.3.x is
+#   sent every stop and no AssignAction, so each row that needs an assignment records
+#   `contract-predates-obligation` there (C2.2, C3.1-C3.6, C3.8, C3.9, C4.1-C4.4, C6.4, C16.1,
+#   C17.1, C17.2, C17.4, C19.1-C19.5, and C5.8 as before), and the cadence drive of C2.3 sends
+#   none. The rules that bind every adapter are still graded there: a 1.3.x adapter that does not
+#   answer a stop fails. Before it, every compatible adapter was told 1.4.0, so no row ran on a
+#   1.3.x connection. The check set and the levels did not change, and a 1.4.0 run
+#   grades as before. The contract version did not move. The three simulation-adapter reports
+#   this repository pins are re-recorded at this revision from `make conformance-sim` (--latch,
+#   1.4.0), and the profiled reports by `make conformance-profiles`. The ROS 2 adapter's report
+#   stays pending re-recording.
+#
+# 2026.10.15 -- harness. Three changes, landed together so the pass bar moves once:
+#   1. New C5.8 (MUST, `safety` Core): a stop holds the robot's work until its EstopClear lifts
+#      it (RFC-0001, fleet adapter protocol, The Stop Latch, While latched and The clear). It
+#      binds a connection at contract 1.4.0; a 1.3.x adapter records
+#      `contract-predates-obligation`, never an obligation. Before it, an adapter that reported
+#      1.4.0 and kept no latch passed. The simulation adapter keeps the latch with --latch and
+#      reports 1.3.0 without it; `make conformance-sim` runs it with --latch. The template keeps
+#      it.
+#   2. The harness meets the stop latch. It sets the leader term on every Command. On a 1.4.0
+#      connection it sends each stop's fence with the stop and clears every stop it issues
+#      (EstopClear at leader term 1, then the EstopClearAck) before the next check gives the
+#      robot work. It reads each stop's answer by its arm and stop ID (C5, C5.4, C8.3, C14.1),
+#      runs C8.3 last, and runs C3.1 and C13.2 before C14.1's stop on the refused session,
+#      where no clear may be sent. C5.4 fails a fence answered on ControlStream with no
+#      EstopAck on SafetyStream, and no longer fails the CommandResult.estop receipt RFC-0001
+#      permits. Before, an adapter that keeps the latch failed C5.2, C5.4, C17.1, C17.2, C3.8,
+#      C3.1 and C14.1, and C3.9 was skipped.
+#   3. New C19.5 (MUST, `dispatch` Core): a Custom action with no custom_type, whose payload's
+#      `operation` names a declared verb, is accepted. C19 takes token 9; the fencing checks'
+#      first fresh token moves from 9 to 10. An adapter that declares no Custom verb records
+#      `adapter-declares-no-custom-verb`, never an obligation.
+#   The contract version did not move. The three simulation-adapter reports this repository
+#   pins (the first-run sample, the demo-webhooks overlay and the recorded report they copy)
+#   are re-recorded at this revision from `make conformance-sim`, which runs the adapter with
+#   --latch at contract 1.4.0. The deployments run it without --latch, at 1.3.0; a run in that
+#   mode is conformant too, with C5.8 recorded as `contract-predates-obligation`. The
+#   profiled reports in conformance-reports/ are re-recorded at this revision by
+#   `make conformance-profiles`. The ROS 2 adapter's report stays pending re-recording.
+#
+# 2026.10.13 -- harness. CE6.1-CE6.5 leave the ComputeEndpoint `events` profile and
+# CP2.3-CP2.5 leave the ControlPlane `endpoint-dispatch` profile; each set is listed under its
+# surface's `excluded:`. Their catalog rows state rules RFC-0001's `ComputeEndpoint` chapter
+# does not state (it calls `spec.emitsEvents` declarative only), and under RFC-0001's
+# precedence rule (conformance profiles, *Precedence*) such a row grades no RFC-0001
+# obligation. Graded Core, they let an endpoint or a deployment fail a required profile on an
+# obligation the specification does not make, against their own catalog rows, which said
+# they grade no RFC-0001 obligation until the chapter states them. `events` keeps CE6.6 as Extended and so has no Core level; `endpoint-dispatch`
+# keeps CP2.1 and CP2.2 as Core. The rows are still recorded and still carry a grade on the
+# capability sheet; no profile and no verdict counts them until the chapter states the
+# rules, and then they return to their profiles under a new revision. What it takes to pass
+# moved on two surfaces, so a result earned before it is re-earned. The FleetAdapter
+# harness's check set and levels are unchanged (the pinned set below is the 2026.09.29 set),
+# and the contract version did not move. The conformance reports this repository pins were
+# recorded at 2026.09.29 and are pending re-recording at this revision; the entry below
+# names them (`pendingReRecording:`), and the test that compares a pinned report's revision
+# with the harness's reads the list from there.
+#
+# 2026.09.29 -- harness. New C3.9 (MUST, `dispatch` Core): a cancel naming a preempted action
+# leaves the preemptor running to completion. The harness preempts in place (an assignment of
+# the same type at a strictly higher token, RFC-0001
+# #fleet-adapter-protocol-directive-supersession-on-the-wire), then cancels the preempted action
+# by name at its own token and at the mark, and requires the preemptor still running and then
+# SUCCEEDED. No row sent a cancel naming anything but the running action, so an adapter that
+# stops whatever is running on any cancel passed every row and aborted every in-place
+# preemptor. To make room below the C3.8 adoption probe, C17's probes move from tokens 15-17 to
+# 17-19 and the C3.8 fixture from 18/20 to 20/22; neither row's logic changed. The check set
+# changed, so a result earned before it is re-earned. No level moved and the contract version
+# did not move.
+#
+# 2026.09.28 -- harness. C8.3 grades the TERMINAL EstopAck on the EdgeStream: a STOPPING
+# receipt is skipped and the terminal ack awaited on C5.6's budget, as the SafetyStream checks
+# and the edge node itself do. Before, the first ack was graded, so the two-phase answer C5.2
+# requires (STOPPING, then STOPPED) failed a Core row on the EdgeStream alone. The pass bar
+# moved, so a result earned before it is re-earned. No check id, no level and not the verdict
+# rule changed, and the contract version did not move. The raw harness report now names this
+# revision (`suite_revision`).
+#
+# 2026.09.25 -- profile-layer. Rows a run could not reach are recorded with the adapter as
+# the cause rather than left out: C8.2/C8.3 when no EdgeStream was advertised, C3.8/C2.3 when
+# the accepting reconnect never completed, C3.1/C3.7 when the refused-session reconnect never
+# happened. An absent Core row was graded not-tested-suite-gap, which blamed the suite for an
+# adapter behaviour; it is now not-testable-here, which still prevents a pass. C0.1's PASS
+# line reports how many recorded causes it can contradict. Every row's outcome, the check set,
+# the levels and the verdict rule are unchanged, so a result earned before it carries forward.
+#
+# 2026.09.24 -- harness. C10.1 (MAY) grades an accepted install that emits no advisory
+# progress by what it is. It recorded `optional-declined`, a cause that means the adapter
+# declined the command, and C0.1 (MUST) rightly contradicted a decline the run never saw.
+# So an adapter doing exactly what CONFORMANCE.md C10.1 permits ("emitting none is
+# conformant") was graded NON-CONFORMANT. The row now records `optional-not-exhibited`
+# (graded not-supported-by-platform, like a decline, and kept out of the never-an-obligation
+# set, like a decline), and C0.1 contradicts that cause only when the arm WAS declined. It is
+# still a skip, not a pass: a C10.1 pass reports `provisioning.update-progress` supported.
+# A result earned before this revision could be NON-CONFORMANT for that reason alone, so
+# it does not carry forward. The check set and levels are unchanged. The harness also binds
+# its port exclusively and serves one adapter per run (a second live ControlStream or
+# SafetyStream is refused); that changes no row of an isolated run.
+#
+# 2026.09.22 -- harness. The platform precondition reaches the rows it implies, and every
+# report states one limitation of its fixture:
+#   1. ADR-0071's precondition already re-graded C5.3 from a plant declaration whose odometry
+#      is all `command-derived`. It now re-grades C5.2, C8.3, C14.1 and C3.6 the same way --
+#      `not-supported-by-platform`, cause `no-independent-motion-channel`, a cause outside the
+#      never-an-obligation set, so the verdict still cannot reach `pass` on such a platform.
+#      Left as they were, an adapter giving ADR-0071's honest terminal answer on a robot with
+#      no encoder read as four failed Core rows attributed to the adapter. C16.1 is NOT in the
+#      set: an unacknowledged cancel that emits no terminal ActionStatusUpdate is an adapter
+#      gap whatever the drivetrain can witness, and stays graded from the wire.
+#   2. C3.6 joins that set for this revision because `CancelDisposition` has no value meaning
+#      "stop commanded, rest unwitnessable"; the enum value is queued as a contract change and
+#      this grading is what holds until it lands.
+#   3. Every report -- human and JSON -- carries the suite's one stated limitation: goals
+#      needing a reversal longer than the fixture's dwell are pre-empted before the reversal
+#      completes, so motion rows attest one-directional travel only. Nothing about the
+#      fixture changed; the limitation stopped being silent. The next revision sizes the
+#      dwell from the plant's declared turn time.
+# The harness check set is UNCHANGED (the change is entirely in the profile layer), and the
+# class is `harness` all the same: the rule that turns rows into a verdict moved, which is
+# what the class names.
+#
+# 2026.09.19.4 -- harness. Three changes, landed together so the pass bar moves once:
+#   1. New C19.3 (an assignment that states no action type is declined INVALID_ACTION) and
+#      C19.4 (a declared enum parameter carrying a value outside its `allowed` set is declined
+#      INVALID_ACTION), each paired with an acceptance control, in `dispatch` Core. C19.4 is
+#      not applicable to an adapter that declares no enum parameter
+#      (`adapter-declares-no-enum-param`, never an obligation).
+#   2. C5.7 compares an early STOPPED with the larger of the witness's declared resolution
+#      and the gap between the last sample showing motion and the first showing rest, so a
+#      sparse witness no longer fails a timely STOPPED.
+#   3. C19's probes take tokens 1-8; the fencing checks' first fresh token moves from 5 to 9.
+#
+# 2026.09.19.3 -- harness. Landed together so the pass bar moves once:
+#   1. Every assignment probe carries an action type the adapter DECLARED on its scan reply,
+#      with the parameters that type declares required; an adapter declaring no action has
+#      the rows that need an accepted assignment skipped `adapter-declares-no-action`.
+#      C13.2's and C17.4's probes are otherwise acceptable, so their verdicts depend only on
+#      the property each names.
+#   2. New C19.1 (an undeclared action type is declined INVALID_ACTION) and C19.2 (an
+#      assignment missing a declared required parameter is declined INVALID_ACTION), each
+#      paired with an acceptance control, in `dispatch` Core; new C12.2 (the snapshot pushed
+#      at registration carries the scan reply's catalog) in `discovery` Core.
+#   3. New C5.7 (an early STOPPED fails against a motion witness) in `safety` Core, graded
+#      not-testable-here without a witness; C5.3 graded not-supported-by-platform from a
+#      plant declaration with no independent motion channel (ADR-0071).
+#
+# 2026.09.19.2 -- harness. Four changes, landed together so the pass bar moves once:
+#   1. C11.1 is graded at its catalog level: a declined or unanswered pause/resume is a
+#      failed MUST (pause/resume are in RFC-0001's Required-message table), where it was an
+#      `optional-declined` skip at MAY. Level labels brought to the catalog on C9.1 (SHOULD),
+#      C5.6's skip arm (MUST), and C5.3, C6.3, C18.2 (MUST NOT).
+#   2. C6.3 leaves every FleetAdapter profile: RA-1 is the control plane's write policy, so
+#      it is graded on the ControlPlane surface as CP8.1 (new `status-discipline` profile).
+#   3. The harness's check ids and levels are pinned on this entry (`harnessChecks:`), and
+#      tests/python/test_harness_check_set_pinned.py fails when they drift without a new
+#      revision.
+#   4. A report stored in conformance-reports/ must name its adapter; the Makefile targets
+#      pass the real name.
+#
+# 2026.09.19 -- harness. The report grades every row and states a verdict (ADR-0070): a Core
+# row of a required profile that was not measured now prevents `pass`, where before it only
+# held its level at `notVerified`. The same run can read `conformant: true` at 2026.09.15 and
+# `false` here, so the pass bar moved and every result is re-earned.
+#
+# 2026.09.15 -- harness. The bump itself added the `sensor-streams` profile to the
+# FleetAdapter surface (C18.1-C18.5), closing a registry/catalog drift *0.5 was already
+# reporting. That part is profile-layer. It is classified `harness` because the harness it is
+# the first revision of is not the harness 2026.09.13 ran: C18.1-C18.5 were added to the
+# harness between the two, without a revision of their own, and a harness run went from 57
+# recorded checks (48 passed, 1 advisory, 8 skipped, on the simulation adapter) to 62 (53
+# passed). Five MUSTs a 2026.09.13 result never faced now count toward the harness's
+# `conformant`, so a 2026.09.13 result does not carry forward. The evidence is the record of
+# those runs and the registry cells at 2026.09.13, which name a C0-C17 harness; no copy of
+# the 2026.09.13 harness survives to diff against.
+#
+# 2026.09.13 -- harness. Adds the `zone-restrictions` profile to the FleetAdapter surface and
+# its checks C17.1-C17.4 (ADR-0058's decline obligation, the declaration behind it, and
+# C17.4's requirement that a refusal follow from the subjects that arrived). New checks an
+# adapter must pass, so a 2026.09.03 result is re-earned. The contract version did not move.
+#
+# 2026.09.03 -- harness. Adds C2.4 (the redial re-registers) and moves the pass bar on C2.1,
+# C7.2/C7.3, C10.2 and C16.1, so a result earned against 2026.09.02 does not carry forward.
+revision: "2026.10.22.2"
+revisions:
+  - revision: "2026.09.03"
+    class: harness
+    reason: "adds C2.4; moves the pass bar on C2.1, C7.2/C7.3, C10.2 and C16.1"
+  - revision: "2026.09.13"
+    class: harness
+    reason: "adds the zone-restrictions checks C17.1-C17.4"
+  - revision: "2026.09.15"
+    class: harness
+    reason: "the harness gained C18.1-C18.5 after 2026.09.13 (57 to 62 recorded checks); the bump itself only assigned them to a profile"
+  - revision: "2026.09.19"
+    class: harness
+    reason: "an unmeasured required Core row now prevents a pass verdict (ADR-0070)"
+  - revision: "2026.09.19.2"
+    class: harness
+    reason: >-
+      C11.1 graded at its catalog level (a declined pause/resume is a failed MUST), with the
+      C9.1, C5.6, C5.3, C6.3 and C18.2 levels brought to the catalog; C6.3 moved to the
+      ControlPlane surface as CP8.1; the harness check set pinned below; stored reports
+      name their adapter
+    # Every check id the harness records and the level it records it at. Pinned so a
+    # change to either cannot land without a new revision entry
+    # (tests/python/test_harness_check_set_pinned.py).
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+  - revision: "2026.09.19.3"
+    class: harness
+    reason: >-
+      every assignment probe carries a declared action type and its required parameters;
+      new C19.1/C19.2 (undeclared type and missing required parameter declined
+      INVALID_ACTION, each with an acceptance control), C12.2 (registration snapshot carries
+      the scan reply's catalog) and C5.7 (early STOPPED fails against a motion witness);
+      C5.3 graded against the platform precondition from plant.yaml
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+  - revision: "2026.09.19.4"
+    class: harness
+    reason: >-
+      new C19.3 (an assignment stating no action type declined INVALID_ACTION) and C19.4 (a
+      declared enum parameter's value outside its allowed set declined INVALID_ACTION), each
+      with an acceptance control, in dispatch Core; C5.7 tolerates the witness's sample gap
+      at the rest where it is wider than the declared resolution; C19 probes on tokens 1-8,
+      the fencing checks from token 9
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.09.22"
+    class: harness
+    reason: >-
+      the ADR-0071 platform precondition re-grades C5.2, C8.3, C14.1 and C3.6 as well as C5.3
+      to not-supported-by-platform on a plant whose odometry is all command-derived (C16.1
+      stays graded from the wire); every report states the fixture's one-directional-travel
+      limitation. The harness check set is unchanged; the rule that turns rows into a verdict
+      is not
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.09.24"
+    class: harness
+    reason: >-
+      C10.1 no longer records an accepted install that emits no advisory progress as
+      optional-declined; it records the new cause optional-not-exhibited, which C0.1 does
+      not contradict. An adapter doing what the MAY permits was graded NON-CONFORMANT by
+      C0.1 and now is not. The check set and levels are unchanged; the harness also
+      stopped sharing its port and its streams with a second adapter, which changes no
+      row of an isolated run
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.09.25"
+    class: profile-layer
+    reason: >-
+      Reporting only. A check that returns early because the adapter never reached the state
+      it needs (no redial, no registered robot, no EdgeStream) now records every row that
+      branch owns, with adapter-did-not-reach-state, instead of leaving some out; the profile
+      layer graded an absent Core row not-tested-suite-gap and so blamed the suite for the
+      adapter. C0.1's PASS line counts only the recorded causes it can contradict. No row's
+      outcome, no check, no level and not the verdict rule changed
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.09.28"
+    class: harness
+    reason: >-
+      C8.3 grades the terminal EstopAck on the EdgeStream: a STOPPING receipt is skipped and
+      the terminal ack awaited on C5.6's budget, exactly as on the SafetyStream. Before, the
+      first ack was graded, so the two-phase answer C5.2 requires failed C8.3. The pass bar
+      moved; no check id, no level and not the verdict rule changed
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.09.29"
+    class: harness
+    reason: >-
+      adds C3.9 (MUST, dispatch Core): a cancel_action naming a preempted action, at its own
+      token and at the mark, must leave the in-place preemptor running to completion. C17's
+      probe tokens and the C3.8 fixture move up to make room; their logic is unchanged
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.10.13"
+    class: harness
+    reason: >-
+      CE6.1-CE6.5 leave the ComputeEndpoint events profile and CP2.3-CP2.5 leave the
+      ControlPlane endpoint-dispatch profile, each listed under its surface's excluded: they
+      state rules RFC-0001's ComputeEndpoint chapter does not, so they grade no RFC-0001
+      obligation until it does. A required Core level no longer holds those rows, so the pass
+      bar moved on both surfaces; the FleetAdapter harness's check set and levels are unchanged
+    # The conformance reports this repository pins, recorded at the previous revision and not
+    # yet re-recorded at this one. Machine-readable so the check that compares a pinned
+    # report's revision with the harness's
+    # (tests/python/test_pinned_reports_are_on_the_current_suite.py) marks exactly these as
+    # expected failures, strictly: each must be removed from this list when it is re-recorded.
+    # Re-record with hack/sim-conformance-report.sh and make conformance-profiles, and the
+    # ROS 2 adapter's report with a run of that adapter.
+    pendingReRecording:
+      recordedAt: "2026.09.29"
+      reason: >-
+        recorded at suite 2026.09.29; pending re-recording at 2026.10.13,
+        where CE6.1-CE6.5 and CP2.3-CP2.5 left the graded profiles
+      reports:
+        - config/samples/first-run/conformance-report.json
+        - config/overlays/demo-webhooks/sim-adapter/conformance-report.json
+        - test/samples/testdata/recorded-sim-adapter-report.json
+        - examples/floor-mapping/robot/conformance-report.json
+        # The profiled reports `make conformance-profiles` writes into conformance-reports/,
+        # recorded at 2026.09.29 and outdated at 2026.10.13 for the same reason. That directory
+        # is generated locally and not published: a clone without it has none of these seven files.
+        - conformance-reports/_adapter.json
+        - conformance-reports/compute-endpoint-plate-reader-grpc.yaml
+        - conformance-reports/compute-endpoint-plate-reader-http.yaml
+        - conformance-reports/compute-endpoint-plate-reader-mcp.yaml
+        - conformance-reports/compute-endpoint-plate-watcher-grpc.yaml
+        - conformance-reports/control-plane.yaml
+        - conformance-reports/fleet-adapter.yaml
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+  - revision: "2026.10.15"
+    class: harness
+    reason: >-
+      new C5.8 (MUST, safety Core, binding at contract 1.4.0): a stop holds the robot's work
+      until its EstopClear lifts it; the harness meets the stop latch (on a 1.4.0 connection
+      it fences and clears every stop it issues and waits for the EstopClearAck, reads each
+      stop's answer by stop ID, runs C8.3 last and C14.1 after C3.1 and C13.2, and C5.4 no
+      longer fails the fence receipt RFC-0001 permits); new C19.5 (MUST, dispatch Core): a
+      Custom action with no custom_type is accepted when its payload names a declared verb
+    pendingReRecording:
+      recordedAt: "2026.09.29"
+      reason: >-
+        recorded at suite 2026.09.29; pending re-recording at 2026.10.15,
+        where the harness grades the stop latch (C5.8) and adds C19.5
+      reports:
+        - examples/floor-mapping/robot/conformance-report.json
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C5.8": "MUST"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+      "C19.5": "MUST"
+  - revision: "2026.10.17"
+    class: harness
+    reason: >-
+      the harness negotiates the contract version per connection, as a control plane does: a
+      1.3.x adapter's connection negotiates 1.3.x and is sent every stop and no AssignAction, so
+      each row that needs an assignment records contract-predates-obligation there, and the
+      rules that bind every adapter are still graded; before it every compatible adapter was
+      told 1.4.0 and no row ran on a 1.3.x connection
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C5.8": "MUST"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+      "C19.5": "MUST"
+  - revision: "2026.10.22"
+    class: harness
+    reason: >-
+      no row reads ACTION_STATE_STOPPED, the commanded stop, as an end: C4.2 grades the lapsed
+      lease's terminal report (any state RFC-0001 calls terminal) and fails an adapter that sends
+      only STOPPED, and C16.1's terminal half and C3.9's wait for the preemptor's end read the
+      report after a STOPPED; C3.6 accepts CANCEL_DISPOSITION_STOP_UNCONFIRMED
+    pendingReRecording:
+      recordedAt: "2026.10.17"
+      reason: >-
+        recorded at suite 2026.10.17; pending re-recording at 2026.10.22, where C4.2 no longer
+        counts ACTION_STATE_STOPPED as the lapsed lease's terminal report
+      reports:
+        - config/samples/first-run/conformance-report.json
+        - config/overlays/demo-webhooks/sim-adapter/conformance-report.json
+        - test/samples/testdata/recorded-sim-adapter-report.json
+        - examples/floor-mapping/robot/conformance-report.json
+        # The profiled reports `make conformance-profiles` writes into conformance-reports/,
+        # recorded at 2026.10.17 and outdated at 2026.10.22 for the same reason. That directory
+        # is generated locally and not published: a clone without it has none of these seven files.
+        - conformance-reports/_adapter.json
+        - conformance-reports/compute-endpoint-plate-reader-grpc.yaml
+        - conformance-reports/compute-endpoint-plate-reader-http.yaml
+        - conformance-reports/compute-endpoint-plate-reader-mcp.yaml
+        - conformance-reports/compute-endpoint-plate-watcher-grpc.yaml
+        - conformance-reports/control-plane.yaml
+        - conformance-reports/fleet-adapter.yaml
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C5.8": "MUST"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+      "C19.5": "MUST"
+  - revision: "2026.10.22.2"
+    class: harness
+    reason: >-
+      an assignment for a Custom entry keyed by custom_type carries that custom_type, so an
+      adapter that keys its Custom verbs is graded on what each row probes and is not refused for
+      a verb left unnamed; C2.2 grades the terminal report for the action the RegisterAck declares
+      CANCELLED (any state RFC-0001 calls terminal) and never counts ACTION_STATE_STOPPED
+    pendingReRecording:
+      recordedAt: "2026.10.17"
+      reason: >-
+        recorded at suite 2026.10.17; pending re-recording at 2026.10.22.2, where C4.2 and C2.2
+        no longer count ACTION_STATE_STOPPED as a terminal report
+      reports:
+        - examples/floor-mapping/robot/conformance-report.json
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C5.8": "MUST"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+      "C19.5": "MUST"
+
+# The capability tiers, adopted as vocabulary from Open-RMF's fleet-adapter
+# integration levels. The tier axis is defined on the FleetAdapter surface and
+# selects which profiles that surface is OBLIGED to satisfy. The other two
+# surfaces carry a fixed value, stated rather than omitted:
+#
+#   ComputeEndpoint  ReadOnly, always. An endpoint holds no authority over the
+#                    fleet by construction -- its result is data and is never a
+#                    command. A ComputeEndpoint
+#                    report declaring any other tier is MALFORMED.
+#   ControlPlane     NotApplicable. The tier states how much authority an
+#                    adapter offers over a fleet; the control plane is the party
+#                    holding the authority, not offering it.
+tiers:
+  - name: ReadOnly
+    authority: "Observation without command."
+  - name: TrafficLight
+    authority: "Observation, plus pause and resume of named capabilities."
+  - name: FullControl
+    authority: "Observation, pause/resume, plus task assignment and execution under lease."
+  - name: NotApplicable
+    authority: "The surface offers no fleet authority to grade."
+
+surfaces:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: FleetAdapter
+    protocolVersion: fleet_adapter.v1
+    catalogs:
+      - path: adapters/CONFORMANCE.md
+        prefixes: [C]
+      - path: conformance/REACTIVE-BLOCK.md
+        prefixes: [RB]
+    tierAxis: true
+    tierRequires:
+      ReadOnly:     [attestation, handshake, lifecycle, telemetry, safety]
+      TrafficLight: [attestation, handshake, lifecycle, telemetry, safety, discovery, traffic]
+      FullControl:  [attestation, handshake, lifecycle, telemetry, safety, discovery, traffic, dispatch, lease]
+    profiles:
+      # Partition of C0-C16, as fixed by the RFC-0001 chapter. Restated here in
+      # machine-readable form; that chapter is normative.
+      - name: attestation
+        core:     [C0.1, C15.1, C15.2, RB0.2, RB0.3, RB0.5]
+      - name: handshake
+        core:     [C1.1, C1.2, C1.3, C1.4, C13.1]
+        extended: [C1.5, C13.2]
+        features:
+          handshake.reconnect-backoff:  [C1.5]
+          handshake.mismatch-refusal:   [C13.2]
+      - name: lifecycle
+        core:     [C2.1, C2.2, C2.3, C2.4]
+      # C6.3 is not here: it grades the control plane's write policy (RA-1) and is graded
+      # on the ControlPlane surface as CP8.1. It is listed under `excluded` below.
+      # C6.4 (echo the assigned fencing token on ActionStatusUpdate) is graded in `dispatch`:
+      # it needs an accepted assignment, which a Read Only or Traffic Light adapter never
+      # takes, so in `telemetry` it held those tiers short of a profile they require.
+      - name: telemetry
+        core:     [C6.1, C6.2]
+      # PRECONDITION (ADR-0071): the safety profile is claimable only on a platform with at
+      # least one motion channel independent of the command path that can confirm rest. A
+      # plant declaration whose odometry is all command-derived grades C5.2, C5.3, C14.1
+      # (and, on the `dispatch` and `edge` profiles, C3.6 and C8.3)
+      # `not-supported-by-platform` with `no-independent-motion-channel`, a cause kept out
+      # of the never-an-obligation set, so the verdict cannot reach `pass` on such a
+      # platform. The set is named once, in `conformance/adapter.py`
+      # (`PLATFORM_PRECONDITION_CHECKS`), so it cannot be widened in one place and not the
+      # other. Any channel that shows motion forbids STOPPED (refute wins). C5.7 grades an
+      # early STOPPED against a motion witness, and is not-testable-here without one.
+      - name: safety
+        precondition: >-
+          at least one motion channel independent of the command path that can confirm rest
+        core:     [C5.1, C5.2, C5.3, C5.4, C5.5, C5.6, C5.7, C5.8, C14.1, C14.2]
+      - name: discovery
+        core:     [C12.1, C12.2]
+      - name: traffic
+        core:     [C11.1]
+      - name: dispatch
+        # C3.9 is Core: it grades a MUST at every contract version, like C3.1-C3.7. RFC-0001's
+        # profile table still lists C3.1-C3.7 as the Core fencing rows, and is owed the same
+        # addition.
+        core:     [C3.1, C3.2, C3.3, C3.4, C3.5, C3.6, C3.7, C3.9, C6.4, C16.1, C19.1, C19.2, C19.3,
+                   C19.4, C19.5]
+        # C3.8 is EXTENDED, not core, and for the same reason C13.2 is: it grades MUST only
+        # at the contract version this suite attests, and advisory at N-1 (ADR-0032 sets the
+        # supported range at N and N-1 minor and states a minor release never invalidates an
+        # adapter's qualification). An adapter at N-1 is inside that range (adapters/example-noop
+        # declares 1.3.0 against contract 1.4.0), so listing it core would fail the dispatch
+        # level of an adapter the control plane admits. As an extended feature a
+        # failure marks the FEATURE unsupported and is still counted and disclosed.
+        extended: [C3.8]
+        features:
+          dispatch.fencing-token-adoption: [C3.8]
+      - name: lease
+        core:     [C4.1, C4.2, C4.3, C4.4]
+      - name: edge
+        conditional: "RegisterAck.edge_endpoints is non-empty for at least one managed robot"
+        core:     [C8.1, C8.2, C8.3]
+      - name: provisioning
+        extended: [C7.1, C7.2, C7.3, C9.1, C10.1, C10.2]
+        features:
+          # C10.2 belongs to BOTH install features: it asserts a terminal outcome for
+          # every install the adapter ANSWERS, firmware and model alike. Mapping it to
+          # push-firmware alone would report a model-install shortfall against the
+          # firmware feature and leave model-update reading as supported. A shared pass
+          # does not carry a declined command: a feature with an `optional-declined` row
+          # (C7.2 for model_update, C7.3 for push_firmware) is unsupported
+          # (conformance/registry.py).
+          provisioning.push-firmware:   [C7.3, C10.2]
+          provisioning.model-update:    [C7.2, C10.2]
+          provisioning.verify:          [C9.1]
+          provisioning.update-progress: [C10.1]
+      # New in Draft 4, and SPLIT IN TWO on purpose.
+      #
+      # `reactive-grammar` is Core within its own catalog and always applicable, but it
+      # gates NO capability tier: RFC-0001 #conformance-profiles-adapter-capability-tiers
+      # is the complete statement of what a tier requires and does not name it, and
+      # RFC-0001 #conformance-profiles-surfaces-beyond-the-fleet-adapter forbids a report
+      # presenting a profile this chapter does not define as bearing on the tier. The
+      # profile still runs and is still reported; a failure marks it unheld and leaves the
+      # adapter's declared tier unchanged. Its checks
+      # are properties of the GRAMMAR as specified and of this suite's coverage
+      # of it -- RB0.1 (every construct is covered) and the four MUST NOTs that
+      # ask what the grammar OFFERS. They hold identically for every adapter,
+      # including one that declines the reactive tier entirely, because an
+      # adapter that declines it still ships into a fleet where the grammar is
+      # what it is. Folding them into the conditional profile below would make
+      # them disappear for exactly the adapters that never implement the tier --
+      # which is most of them, and which would leave the guarantee unasserted in
+      # nearly every report that exists.
+      - name: reactive-grammar
+        core:     [RB0.1, RB2.7, RB3.5, RB3.6, RB3.7]
+      # `reactive` is what the ADAPTER is held to. Extended at every tier, and
+      # holding it never raises the tier: none of the four effects commands
+      # motion, so a Read Only adapter may host reactive blocks and stay Read
+      # Only.
+      - name: reactive
+        conditional: "the adapter declares reactive_grammar_version on AdapterHello"
+        extended:
+          [RB1.1, RB1.2, RB1.3, RB1.4, RB1.5,
+           RB2.1, RB2.2, RB2.3, RB2.4, RB2.5, RB2.6,
+           RB3.1, RB3.2, RB3.3, RB3.4,
+           RB4.1, RB4.2, RB4.3,
+           RB5.1, RB5.2, RB5.3,
+           RB6.1, RB6.2]
+        features:
+          reactive.grammar-v1:   [RB1.1, RB1.2, RB1.3, RB1.4, RB1.5,
+                                  RB2.1, RB2.2, RB2.3, RB2.4, RB2.5, RB2.6,
+                                  RB3.1, RB3.2, RB3.3, RB3.4]
+          reactive.execution:    [RB4.1, RB4.2, RB4.3, RB5.1, RB5.2, RB5.3]
+          reactive.local-cues:   [RB6.1, RB6.2]
+      # ADR-0058, the FleetAdapter half. EXTENDED and conditional, exactly as the
+      # specification's conformance-profiles chapter states it: the profile grades an
+      # adapter that has taken on the declare/honour/attest obligations, and an adapter
+      # that declares no subject has taken on none of them.
+      #
+      # ALWAYS APPLICABLE, corrected 2026-09-14. It was `conditional: CapabilitiesSnapshot.
+      # honoured_operating_constraints is non-empty`, which could not be satisfied alongside
+      # the specification's own statement that the load-bearing case is a run going RED
+      # against an adapter that ACCEPTS AND IGNORES a rule -- which is an adapter declaring
+      # NOTHING. The profile was reported notApplicable for exactly the adapters whose red
+      # run it demanded, so a reader saw notApplicable beside a failing MUST from the same
+      # profile and had to be told, in two catalogs, that the two were separable.
+      #
+      # FA-R5's antecedent has no declaring clause: "an adapter that CANNOT honour a rule
+      # MUST decline". An adapter that honours nothing cannot honour anything it is sent, so
+      # every operating rule that reaches it is one it must decline.
+      #
+      # NO ROW HERE NEEDED THE CONDITIONAL. C17.1 and C17.2 have no declaring antecedent;
+      # C17.3 grades the SHAPE of whatever was declared and declaring none PASSES; C17.4 does
+      # need a declaration to exist and carries its own enumerated skip cause for the absence
+      # (adapter-declares-no-operating-subject) rather than leaning on the profile. The
+      # conditional was buying nothing and costing the contradiction.
+      #
+      # LIVE, NOT STATIC, and the opposite of the ControlPlane profile of the same name:
+      # these rows are graded on messages a running adapter actually sent, where CP7.1 and
+      # CP7.2 are read off shipped schemas and establish only that the surface exists.
+      - name: zone-restrictions
+        extended: [C17.1, C17.2, C17.3, C17.4]
+        features:
+          # The two decline rows are ONE feature. They are the same obligation with the
+          # same observable -- a refusal naming the subject -- separated only by whether
+          # the subject is a core one or an unrecognised extension, and an adapter that
+          # implements one and not the other has not implemented the obligation.
+          zone-restrictions.decline:     [C17.1, C17.2]
+          zone-restrictions.declaration: [C17.3]
+          # C17.4 is a SEPARATE feature because it grades a different property: that the
+          # refusals above are a FUNCTION OF WHAT ARRIVED. An adapter that declines every
+          # assignment carrying any operating rule passes both decline rows without ever
+          # reading the message, and its green lines would then mean "this adapter
+          # declines" rather than "this adapter was told". Requiring an ACCEPTANCE for a
+          # set it declared is what separates the behaviour from the reflex, and it is the
+          # only row in this family that can establish FA-R2's carry ARRIVED.
+          zone-restrictions.arrival:     [C17.4]
+      # C18 -- the sensor-stream duty cycle. EXTENDED, because the catalog says the whole
+      # family is optional in as many words: an adapter declining `activate_stream`
+      # declines the duty cycle for its robots, which is conformant under C7.1 and means
+      # nothing activates, so nothing can be left on.
+      #
+      # ALWAYS APPLICABLE, and NOT conditional on the adapter declaring a stream. C18.1
+      # grades the SHAPE of whatever was declared and declaring nothing PASSES -- the
+      # catalog states that outright ("Declaring no stream passes") and the harness agrees
+      # structurally: `_DECLINE_ARMS` arms C18.2-C18.5 behind `activate_stream` and
+      # deliberately leaves C18.1 unarmed. A conditional here would buy nothing and cost
+      # the same contradiction zone-restrictions was corrected for on 2026-09-14: the
+      # profile would read notApplicable while carrying a row that had actually run.
+      #
+      # IT GATES NO CAPABILITY TIER, and it is absent from tierRequires on purpose.
+      # RFC-0001's tier chapter is the complete statement of what a tier requires and does
+      # not name it. The substantive reason is the `reactive` one: switching a sensor on
+      # commands no MOTION, so a Read Only adapter may serve sensor streams and stay Read
+      # Only. Observation is what a Read Only adapter is FOR.
+      - name: sensor-streams
+        extended: [C18.1, C18.2, C18.3, C18.4, C18.5]
+        features:
+          sensor-streams.declaration:         [C18.1]
+          # Kept apart from the transport rows because it is the one property that is not
+          # about this adapter's own behaviour under command: it is where the BYTES go.
+          sensor-streams.off-plane-transport: [C18.2]
+          # THE ORDINARY PATH and THE FAIL-SAFE ARE SEPARATE FEATURES, because the catalog
+          # says they are different things -- "the lease is the FAIL-SAFE, not the ordinary
+          # path" -- and because an adapter can stop cleanly on DeactivateStream and still
+          # never stop when abandoned. That second adapter leaves a camera running for a
+          # whole lease every time the control plane goes quiet, and the hazard the family
+          # exists for is precisely an unattended, still-powered sensor. Folding the two
+          # into one feature would let a passing DeactivateStream row report the fail-safe
+          # as held.
+          sensor-streams.duty-cycle:          [C18.5]
+          sensor-streams.lease-failsafe:      [C18.3]
+          sensor-streams.clip-windows:        [C18.4]
+    excluded:
+      - checks: [C6.3]
+        reason: >-
+          graded on the ControlPlane surface as CP8.1. RA-1 is the control plane's
+          status-write policy; nothing an adapter puts on the wire can show it, so the row
+          could only ever be unmeasured here and held every adapter's verdict for a
+          property of the plane. The harness still records the row, because the catalog
+          still lists it on this surface
+      - checks: [C0.2, C0.3, C0.4]
+        reason: "harness context, not adapter behaviour; does not count toward conformance"
+      - checks: [C8.4]
+        reason: "an obligation on the Zone Controller edge node, not on an adapter"
+      - checks: [C3.10, C3.11]
+        reason: >-
+          defined in the catalog for draft 4 (the leader term, RFC-0001 fleet adapter
+          protocol, The Stop Latch) and not yet run: the harness has no probe for them, so a
+          Core or Extended level would leave an unmeasured row on every adapter. They return to
+          `dispatch` as an Extended feature under the suite revision that adds their probes
+      - checks: [C16.2]
+        reason: >-
+          defined in the catalog for draft 4 (the retained outcome, RFC-0001 fleet adapter
+          protocol, Reconnect Action State Reconciliation) and not yet run: the harness has no
+          probe for it, so a Core or Extended level would leave an unmeasured row on every
+          adapter. It joins `dispatch` under the suite revision that adds its probe
+      - checks: [RB0.4]
+        reason: "a registry self-check reported once, on the surface that carries the registry"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: ComputeEndpoint
+    protocolVersion: compute.v1
+    catalogs:
+      - path: conformance/COMPUTE-ENDPOINT.md
+        prefixes: [CE]
+    tierAxis: false
+    fixedTier: ReadOnly
+    profiles:
+      - name: attestation
+        core:     [CE0.1, CE0.2, CE0.3, CE0.5]
+      - name: invocation
+        core:     [CE1.1, CE1.2, CE1.3, CE1.4, CE1.5, CE1.6]
+        extended: [CE1.7]
+        features:
+          invocation.replay-marker: [CE1.7]
+      - name: envelope
+        core:     [CE2.1, CE2.2, CE2.3, CE2.4, CE2.5, CE2.6, CE2.7, CE2.9]
+        extended: [CE2.8]
+        features:
+          envelope.model-provenance: [CE2.8]
+      - name: binding-http
+        conditional: "spec.binding is Http"
+        core:     [CE3.1, CE3.2, CE3.3, CE3.4, CE3.5, CE3.6]
+      - name: binding-grpc
+        conditional: "spec.binding is Grpc"
+        core:     [CE4.1, CE4.2, CE4.3, CE4.4, CE4.5, CE4.7]
+        extended: [CE4.6]
+        features:
+          binding-grpc.lease-renewal: [CE4.6]
+      - name: binding-mcp
+        conditional: "spec.binding is Mcp"
+        core:     [CE5.1, CE5.2, CE5.3, CE5.4, CE5.5]
+        extended: [CE5.6]
+        features:
+          binding-mcp.schema-drift: [CE5.6]
+      # No Core level since 2026.10.13. CE6.1-CE6.5 state rules RFC-0001's ComputeEndpoint
+      # chapter does not (it calls `spec.emitsEvents` declarative only), so they are listed
+      # under `excluded` below and graded nowhere until the chapter states them. An
+      # Extended-only profile is never required (conformance/registry.py), so `events` can
+      # no longer hold an endpoint's verdict; CE6.6 is still graded as a feature.
+      - name: events
+        conditional: "spec.emitsEvents is non-empty"
+        extended: [CE6.6]
+        features:
+          events.delivery-timing-documented: [CE6.6]
+      - name: service-contract
+        conditional: "spec.contract is Service"
+        core:     [CE7.1, CE7.2, CE7.3, CE7.4, CE7.5, CE7.6]
+      - name: provenance
+        core:     [CE8.1, CE8.3]
+        extended: [CE8.2]
+        features:
+          provenance.model-identity: [CE8.2]
+    excluded:
+      - checks: [CE0.4]
+        reason: "harness context, not endpoint behaviour; does not count toward conformance"
+      - checks: [CE6.1, CE6.2, CE6.3, CE6.4, CE6.5]
+        reason: >-
+          not an RFC-0001 obligation yet. RFC-0001's ComputeEndpoint chapter calls
+          spec.emitsEvents declarative only and states none of these rules, and under its
+          precedence rule a catalog row grades no obligation the chapter does not state. The
+          suite still records the rows; no profile and no verdict counts them until the
+          chapter states the rules (suite revision 2026.10.13)
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: ControlPlane
+    protocolVersion: swarmada.io/v1
+    catalogs:
+      - path: conformance/CONTROL-PLANE.md
+        prefixes: [CP]
+    tierAxis: false
+    fixedTier: NotApplicable
+    profiles:
+      - name: attestation
+        core:     [CP0.1, CP0.2, CP0.3, CP0.5]
+      # CP5.5 lives HERE, not in cluster-compute, and the placement is
+      # deliberate: a check verifying that a profile was legitimately DECLINED
+      # cannot sit inside the profile it declines, or it disappears with it. The
+      # decline must be established by a check that always runs, and "the
+      # manager holds no pod-create authority" is a containment property in any
+      # case: the risk it bounds is privilege escalation.
+      - name: containment
+        core:     [CP1.1, CP1.2, CP1.3, CP1.4, CP5.5]
+      # CP2.3-CP2.5 are not here since 2026.10.13: they are the control plane's half of
+      # CE6.3, CE6.4 and CE6.1, rules RFC-0001's ComputeEndpoint chapter does not state, and
+      # are listed under `excluded` below with them.
+      - name: endpoint-dispatch
+        core:     [CP2.1, CP2.2]
+      - name: result-is-data
+        core:     [CP3.1, CP3.2]
+        extended: [CP3.3]
+        features:
+          result-is-data.approval-default: [CP3.3]
+      - name: image-provenance
+        core:     [CP4.1, CP4.2]
+      # ADR-0058. Core because a deployment that cannot carry the resolved projection
+      # cannot have a conforming filter 11 at all -- there is nowhere for the answer to
+      # live, so the filter must either re-resolve the tree (FZ-R4 forbids it) or fail
+      # open. CP7.1 and CP7.2 are STATIC: they establish the surface, never the behaviour.
+      #
+      # CP7.3 IS CORE AND IS RECORDED AS UNEXERCISED IN EVERY RUN, deliberately. FA-R2's
+      # carry -- the plane FILLING AssignAction.operating_constraints from the resolved
+      # projection at the robot's leaf -- is a property of a live dispatch, and no pairing
+      # of a running control plane with a running adapter exists in any harness here. The
+      # check this profiler COULD run is the one that must not be green: reading the proto
+      # descriptor would establish that the schema has a slot, which is exactly what a
+      # reader would mistake for "the adapter was told". Listing it Core and skipping it
+      # keeps the obligation visible as an obligation rather than deleting it from the
+      # registry because it is inconvenient to grade.
+      - name: zone-restrictions
+        core:     [CP7.1, CP7.2, CP7.3]
+      # RA-1, moved from the FleetAdapter surface's C6.3: the obligation is on the party
+      # that writes Robot status. Core, and recorded as not exercised in every static run,
+      # for the reason CP7.3 is.
+      - name: status-discipline
+        core:     [CP8.1]
+      # EXTENDED, NEVER CORE. A deployment that declines
+      # workload-create RBAC must pass Core IN FULL. CP5.5 is the check that
+      # asserts the decline is a legitimate outcome rather than a gap.
+      - name: cluster-compute
+        conditional: "the deployment grants the manager create authority on workload kinds"
+        neverCore: true
+        extended: [CP5.1, CP5.2, CP5.3, CP5.4]
+        features:
+          cluster-compute.workload-provisioning: [CP5.1, CP5.2, CP5.3, CP5.4]
+      - name: reactive-dispatch
+        conditional: "the deployment dispatches ReactiveBlocks"
+        extended: [CP6.1, CP6.2, CP6.3, CP6.4]
+        features:
+          reactive-dispatch.grammar-gate: [CP6.1, CP6.2, CP6.3, CP6.4]
+    excluded:
+      - checks: [CP0.4]
+        reason: "harness context, not control-plane behaviour; does not count toward conformance"
+      - checks: [CP2.3, CP2.4, CP2.5]
+        reason: >-
+          not an RFC-0001 obligation yet. They are the control plane's half of CE6.3, CE6.4
+          and CE6.1, and RFC-0001's ComputeEndpoint chapter states none of them (it calls
+          spec.emitsEvents declarative only, with nothing validating a raised event against
+          it). Under its precedence rule a catalog row grades no obligation the chapter does
+          not state. The suite still records the rows; no profile and no verdict counts them
+          until the chapter states the rules (suite revision 2026.10.13)
+
+# Specifications this program deliberately asserts NOTHING about. A profile that
+# claims support for a specification a stranger cannot read is untestable by a
+# stranger, which fails the standing rule that a public test must stand alone.
+# Enforced, not merely stated: the *0.3 self-check fails the run if any of these
+# names appears in a profile, a check id, a check title, or a fixture path.
+excludedSpecifications:
+  - name: MHS
+    aliases: ["mhs", "machine health services", "machine-health-services"]
+    reason: >-
+      No public specification, no repository, no license, one vendor in control
+      as of 2026-09-01. It stays reachable over the Mcp binding as
+      deployment configuration, which commits nothing and is asserted nowhere.
+      Re-assess when it publishes under a neutral foundation with a readable
+      specification.

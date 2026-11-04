@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package probe runs active RobotProbe health checks (RFC-0001 §9.1.6): it pushes
+// Package probe runs active RobotProbe health checks (RFC-0001 #robotprobe): it pushes
 // the verify_hardware / verify_capability / verify_model Commands to a robot's
 // Fleet Adapter and binds the returned proto ProbeStatus into a control-plane
 // status. Binding is fail-safe: a probe that cannot confirm health is never
@@ -32,7 +32,7 @@ import (
 type Status string
 
 // Status values. Unknown is distinct from Failed: Unknown means the adapter
-// does not implement probes (§9.1.6.3), Failed means the check ran and the
+// does not implement probes (RFC-0001 #robotprobe-the-verify-probe-commands), Failed means the check ran and the
 // component is unreachable or out of spec.
 const (
 	StatusHealthy  Status = "Healthy"
@@ -68,7 +68,7 @@ type VerifyRequest struct {
 
 // Prober invokes a verify_* Command on a robot's Fleet Adapter and returns the
 // result. The production implementation pushes the Command over the ControlStream
-// command-push path (§9.2, backlog §E-2) and binds the CommandResult.VerifyResult;
+// command-push path (RFC-0001 §9.2) and binds the CommandResult.VerifyResult;
 // it MUST be safe for concurrent use. A non-nil error means the probe could not be
 // completed (unreachable/timeout) — the caller treats that as Failed, never
 // Healthy.
@@ -77,7 +77,7 @@ type Prober interface {
 }
 
 // BindProbeStatus maps the proto ProbeStatus enum to the control-plane status
-// (§9.1.6.3). UNSPECIFIED — a status the adapter never legitimately reports — binds
+// (RFC-0001 #robotprobe-the-verify-probe-commands). UNSPECIFIED — a status the adapter never legitimately reports — binds
 // to Unknown, never to a healthy state.
 func BindProbeStatus(s fav1.ProbeStatus) Status {
 	switch s {
@@ -94,7 +94,7 @@ func BindProbeStatus(s fav1.ProbeStatus) Status {
 
 // MetricsMet reports whether every expected threshold is satisfied by the actual
 // metrics. A missing actual metric fails the check (never assumed met). Thresholds
-// are minimums (the §9.1.6.3 metrics are "minimum acceptable value").
+// are minimums (the RFC-0001 #robotprobe-the-verify-probe-commands metrics are "minimum acceptable value").
 func MetricsMet(expected, actual map[string]float64) bool {
 	for name, threshold := range expected {
 		got, ok := actual[name]

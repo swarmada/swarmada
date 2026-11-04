@@ -1,0 +1,12 @@
+# Build context for Dockerfile.sim-adapter (BuildKit reads <Dockerfile>.dockerignore
+# in place of the root .dockerignore). Everything is excluded, then only what the
+# adapter imports is let back in, so the context is kilobytes rather than the tree.
+*
+!adapters/__init__.py
+!adapters/simulation/
+!adapters/scenarios/
+!proto/fleet_adapter/v1/fleet_adapter_pb2.py
+!proto/fleet_adapter/v1/fleet_adapter_pb2_grpc.py
+!sdk/python/src/swarmada_sdk/
+**/__pycache__
+**/*.md

@@ -1,0 +1,78 @@
+# The floor-mapping demo's cluster side for a robot run: the same worker and operator
+# ConfigMap as ../overlay, with the maps in an object store instead of a node directory.
+#
+# A robot's adapter shares no directory with the cluster, so ArtifactStore floor-maps is of
+# kind ObjectStore: the MinIO server in minio.yaml, bucket floor-maps. The adapter uploads
+# each saved segment to floor-maps/<namespace>/<action-name>/ and reports the reference and
+# its sha256; the worker reads it from the store, verifies it, and saves the keep-out set it
+# renders from the applied zones at floor-maps/<namespace>/keepouts-<digest>/, where the
+# adapter fetches it by reference.
+#
+# Apply with setup.sh, which also makes the bucket, the two scoped users and the worker's
+# Secret, and loads the MinIO image. The VolumeClaim store of ../overlay is removed here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../overlay
+
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: swarmada-floor-maps
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: floor-maps
+        namespace: warehouse-a
+  - target:
+      group: swarmada.io
+      kind: ArtifactStore
+      name: floor-maps
+    patch: |-
+      - op: replace
+        path: /spec
+        value:
+          kind: ObjectStore
+          objectStore:
+            endpoint: http://minio.swarmada-store.svc.cluster.local:9000/floor-maps
+            credentialRef:
+              name: floor-maps-worker
+              key: secret-key
+  - target:
+      group: apps
+      kind: Deployment
+      name: zone-proposal-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - --namespace=warehouse-a
+          - --store-endpoint=http://minio.swarmada-store.svc.cluster.local:9000
+          - --bucket=floor-maps
+          - --store=floor-maps
+          - --tool-dir=/app/tools/map-to-fleetzone
+          - --config=floor-mapping
+          - --work=/work
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: SWARMADA_STORE_ACCESS_KEY
+            valueFrom: {secretKeyRef: {name: floor-maps-worker, key: access-key}}
+          - name: SWARMADA_STORE_SECRET_KEY
+            valueFrom: {secretKeyRef: {name: floor-maps-worker, key: secret-key}}
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: work
+            mountPath: /work
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: work
+            emptyDir: {}

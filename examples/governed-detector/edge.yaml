@@ -1,0 +1,92 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The floor-hazard classifier aimed at an edge node instead of robots. The quality gate is the
+# robot policy's gate, unchanged (modelpolicy.yaml): a ModelPolicy's verdict is about the
+# artifact, not about where it lands, so the same numbers get the same verdict whatever the
+# target kind. Where a passing model lands is a separate question, and for targetKind EdgeNode
+# the ModelRollout controller refuses it: edge targeting is specified and not implemented.
+#
+# The rollouts are not in this file. Their modelUri, modelChecksum and modelSignatureRef come
+# from publish.sh, so they are written from its output at run time.
+#
+# Apply one stage at a time:
+#     kubectl apply -f examples/governed-detector/edge.yaml -l swarmada.io/demo-step=<node|policy>
+#
+# NO STATUS IS DECLARED IN THIS FILE.
+---
+apiVersion: swarmada.io/v1
+kind: FleetZone
+metadata:
+  name: warehouse-a
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: node
+spec:
+  displayName: "Receiving and staging area"
+---
+apiVersion: swarmada.io/v1
+kind: EdgeNode
+metadata:
+  name: zc-warehouse-a
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: node
+    zone: warehouse-a
+    swarmada.io/edge-role: zone-controller
+spec:
+  nodeClass: ZoneController
+  identity:
+    commonName: edge-zc-warehouse-a
+  zones:
+    - warehouse-a
+  installedModels:
+    - name: floor-hazard
+      version: "1.0.0"
+      modelUri: "oci://localhost:5051/swarmada/floor-hazard:1.0.0"
+      grantsCapabilities:
+        - zone_hazard_detection
+---
+apiVersion: swarmada.io/v1
+kind: ModelPolicy
+metadata:
+  name: floor-hazard-edge-gate
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: policy
+spec:
+  modelName: floor-hazard
+  targetKind: EdgeNode
+  targetNodeSelector:
+    matchLabels:
+      swarmada.io/edge-role: zone-controller
+  trigger:
+    type: Webhook
+    webhook:
+      enabled: true
+      authSecretRef: modelpolicy-hmac
+  qualityGate:
+    minEvalEpisodes: 500
+    customMetrics:
+      - {name: accuracy, operator: GreaterThanOrEqual, threshold: 0.80}
+      - {name: min_class_recall, operator: GreaterThanOrEqual, threshold: 0.60}
+      - {name: recall_cable, operator: GreaterThanOrEqual, threshold: 0.70}
+  autoDeployOn: QualityGatePass
+  rolloutTemplate:
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: "1"
+        pauseOnError: true
+    rollbackPolicy: Manual

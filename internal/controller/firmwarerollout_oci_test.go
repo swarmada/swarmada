@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,11 +30,16 @@ import (
 	"github.com/swarmada/swarmada/internal/registry"
 )
 
-// registryCredsSecret builds the conventional per-namespace credentials Secret.
-func registryCredsSecret(token string) *corev1.Secret {
+// registryCredsSecret builds the conventional per-namespace credentials Secret, bound
+// to the given hosts (none: the key is left out).
+func registryCredsSecret(token string, registries ...string) *corev1.Secret {
+	data := map[string][]byte{"token": []byte(token)}
+	if len(registries) > 0 {
+		data["registries"] = []byte(strings.Join(registries, ","))
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: registryCredentialsSecret, Namespace: rolloutNS},
-		Data:       map[string][]byte{"token": []byte(token)},
+		Data:       data,
 	}
 }
 
@@ -88,7 +94,7 @@ func TestFirmwareRollout_OCIFetchVerifiesAndDispatches(t *testing.T) {
 // The conventional registry credential is passed through to the OCI fetch.
 func TestFirmwareRollout_OCIFetchUsesCredentials(t *testing.T) {
 	secret, rawSig := rawSigningFixture(t, fwChecksum)
-	creds := registryCredsSecret("registry-tok")
+	creds := registryCredsSecret("registry-tok", "reg.example:5000")
 	r, _ := newFirmwareReconciler(t, fwRollout(ociRef(rawSig)),
 		signingConfig(true), secret, creds, targetRobot("r1", fleetv1.RobotPhaseIdle, 90))
 	oci := &fakeOCIFetcher{blob: rawSig}

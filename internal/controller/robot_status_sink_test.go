@@ -70,7 +70,7 @@ func TestApplyMaterialUpdate_ProjectsBattery(t *testing.T) {
 	sink, c := newSink(t, robotWithID("sim-robot-001", "warehouse-a", "rid-1"))
 
 	// 0% is a valid critical reading; it must persist as *0.
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
 		RobotID: "rid-1", BatteryPct: i32(0),
 	}); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -89,7 +89,7 @@ func TestApplyMaterialUpdate_ProjectsHardwarePreservingOtherFields(t *testing.T)
 	}
 	sink, c := newSink(t, robot)
 
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
 		RobotID:  "rid-1",
 		Hardware: map[string]fleetv1.HardwareStatus{"lidar": fleetv1.HardwareDegraded, "camera": fleetv1.HardwareFailed},
 	}); err != nil {
@@ -120,7 +120,7 @@ func TestApplyMaterialUpdate_DoesNotWritePhaseOrAction(t *testing.T) {
 	// A phase-only material transition (no battery / hardware) must not write.
 	offline := fleetv1.RobotPhaseOffline
 	action := ""
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
 		RobotID: "rid-1", Phase: &offline, AssignedAction: &action,
 	}); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -136,7 +136,7 @@ func TestApplyMaterialUpdate_DoesNotWritePhaseOrAction(t *testing.T) {
 
 func TestApplyMaterialUpdate_UnresolvedRobotIsDroppedNotErrored(t *testing.T) {
 	sink, _ := newSink(t, robotWithID("sim-robot-001", "warehouse-a", "rid-1"))
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
 		RobotID: "ghost", BatteryPct: i32(55),
 	}); err != nil {
 		t.Fatalf("unresolved robot_id must be dropped, not errored; got %v", err)
@@ -150,7 +150,7 @@ func TestApplyMaterialUpdate_DuplicateRobotIDErrors(t *testing.T) {
 		robotWithID("robot-a", "warehouse-a", "dup"),
 		robotWithID("robot-b", "warehouse-b", "dup"),
 	)
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{
 		RobotID: "dup", BatteryPct: i32(10),
 	}); err == nil {
 		t.Fatal("expected an error for a non-unique robot_id")
@@ -182,7 +182,7 @@ func TestLiveFeed_RA1_NoWritePerTick(t *testing.T) {
 
 type countingSink struct{ n int }
 
-func (c *countingSink) ApplyMaterialUpdate(_ context.Context, _ telemetry.MaterialUpdate) error {
+func (c *countingSink) ApplyMaterialUpdate(_ context.Context, _ telemetry.MaterialUpdate) (bool, error) {
 	c.n++
-	return nil
+	return true, nil
 }

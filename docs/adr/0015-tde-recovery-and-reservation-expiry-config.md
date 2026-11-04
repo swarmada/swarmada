@@ -3,8 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** Distributed Systems Reviewer, API Designer, Kubernetes Expert
-- **Related:** RFC-0001 §9.4 (traffic deconfliction), §9.4.7 (startup recovery),
-  §9.1.11.10 (TDE tunables), ADR-0009 (deconfliction gate at commit site)
+- **Related:** RFC-0001 "Traffic Deconfliction Engine", its "Restart Recovery" section,
+  and "Traffic Deconfliction Engine Configuration" (the SwarmadaConfig tunables), ADR-0009 (deconfliction gate at commit site)
 
 ## Context
 

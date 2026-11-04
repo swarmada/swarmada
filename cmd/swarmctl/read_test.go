@@ -172,7 +172,7 @@ func TestDescribeRobot(t *testing.T) {
 	}
 	var out bytes.Buffer
 	o := newTestOptions(&out, cli.OutputTable)
-	o.describeRobot(r)
+	o.describeRobot(context.Background(), eventClient(t, nil), r)
 	got := out.String()
 
 	for _, want := range []string{
@@ -207,7 +207,7 @@ func TestDescribeGenericFleetAction(t *testing.T) {
 	def, _ := resolveResource("fact")
 	var out bytes.Buffer
 	o := newTestOptions(&out, cli.OutputTable)
-	o.describeGeneric(def, action)
+	o.describeGeneric(context.Background(), eventClient(t, nil), def, action)
 	got := out.String()
 	for _, want := range []string{"Name:         pick-run-4471", "Kind:         FleetAction", "Assigned Robot", "sim-robot-002", "Events:  <none>"} {
 		if !strings.Contains(got, want) {
@@ -216,51 +216,20 @@ func TestDescribeGenericFleetAction(t *testing.T) {
 	}
 }
 
-// The registry must cover every CRD, and every short name must be the one the
-// type itself declares. The previous version of this test asserted 12 resources
-// and "ft" => FleetAction, which pinned the FleetTask omission and the alias
-// collision as intended behaviour: the bug could not be fixed without the test
-// failing, so the test was evidence for the bug rather than against it.
+// The registry's coverage, short names and spellings are asserted in
+// registry_derivation_test.go, derived from api/v1's +kubebuilder:resource
+// markers and the generated CRDs in config/crd/bases.
 //
-// The short names below are transcribed from the +kubebuilder:resource markers
-// in api/v1. Anything else means `kubectl get <short>` and `swarmctl get <short>`
-// resolve to different kinds.
-func TestRegistryCoversEveryCRD(t *testing.T) {
-	const wantResources = 13
-	if len(resourceOrder) != wantResources {
-		t.Fatalf("expected %d registered resources, got %d", wantResources, len(resourceOrder))
-	}
-	// Every short name resolves back to its kind.
-	shorts := map[string]string{
-		"rob": "Robot", "fact": "FleetAction", "ft": "FleetTask", "fz": "FleetZone",
-		"rc": "RobotClass", "dr": "DiscoveredRobot", "fa": "FleetAdapter", "rp": "RobotProbe",
-		"fwr": "FirmwareRollout", "mr": "ModelRollout", "mp": "ModelPolicy",
-		"sc": "SwarmadaConfig", "zm": "ZoneMaintenance",
-	}
-	if len(shorts) != wantResources {
-		t.Fatalf("short-name table lists %d entries, want %d — add the new CRD here too", len(shorts), wantResources)
-	}
-	for short, kind := range shorts {
-		def, err := resolveResource(short)
-		if err != nil || def.kind != kind {
-			t.Errorf("short %q => %v (err %v), want kind %s", short, def, err, kind)
-		}
-	}
-	// Every registered resource is addressable by all four of its spellings, so a
-	// kind cannot be half-registered the way FleetTask was.
-	for _, r := range resourceOrder {
-		for _, spelling := range append([]string{r.plural, r.singular, strings.ToLower(r.kind)}, r.aliases...) {
-			def, err := resolveResource(spelling)
-			if err != nil {
-				t.Errorf("%s: spelling %q does not resolve: %v", r.kind, spelling, err)
-				continue
-			}
-			if def.kind != r.kind {
-				t.Errorf("%s: spelling %q resolves to %s", r.kind, spelling, def.kind)
-			}
-		}
-	}
-}
+// What used to be here asserted a literal resource count plus a hand-transcribed
+// short-name table. That was itself the fix for a worse version — one lower, with
+// "ft" bound to FleetAction — which pinned the FleetTask omission and the alias
+// collision as intended behaviour: the bug could not be fixed without the test
+// failing, so the test was evidence for the bug rather than against it. Raising
+// the number fixed that instance and kept the mechanism. A count agrees with the
+// registry because someone updated both, and cannot distinguish "this is the right
+// number" from "this is how many there happen to be" — api/v1 declares more CRDs
+// than the registry offers, and the deferral is recorded in that file's
+// pendingRegistration rather than folded into an integer here.
 
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {

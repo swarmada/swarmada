@@ -204,7 +204,7 @@ func TestRobotProbe_PassiveTelemetryFlowsWhileProbesDisabled(t *testing.T) {
 
 	// Passive telemetry (battery projection) via the real status sink still writes.
 	sink := &RobotStatusSink{Client: c}
-	if err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{RobotID: "rid-1", BatteryPct: i32(42)}); err != nil {
+	if _, err := sink.ApplyMaterialUpdate(context.Background(), telemetry.MaterialUpdate{RobotID: "rid-1", BatteryPct: i32(42)}); err != nil {
 		t.Fatalf("apply telemetry: %v", err)
 	}
 	if got := getRobot(t, c, "amr-1", rolloutNS); got.Status.BatteryPercent == nil || *got.Status.BatteryPercent != 42 {

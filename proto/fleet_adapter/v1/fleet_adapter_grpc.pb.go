@@ -17,7 +17,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v7.35.1
-// source: proto/fleet_adapter/v1/fleet_adapter.proto
+// source: fleet_adapter/v1/fleet_adapter.proto
 
 package fleetadapterv1
 
@@ -45,15 +45,13 @@ type FleetAdapterServiceClient interface {
 	// ControlStream is the primary persistent connection. The adapter opens it
 	// and sends AdapterHello first; the control plane replies with HelloAck.
 	// Thereafter both sides multiplex:
-	//
-	//	adapter → control plane : AdapterMessage  (register/discover, telemetry,
-	//	                          action status, command results, heartbeat replies)
-	//	control plane → adapter : ControlPlaneMessage (acks, pushed Commands,
-	//	                          heartbeat requests)
-	//
-	// NOTE: Estop/EstopAck travel on SafetyStream, NOT on ControlStream.
-	// Command.estop (field 5) and CommandResult.estop (field 6) are retained for
-	// wire-format compatibility but are DEPRECATED — see annotations below.
+	// adapter → control plane: AdapterMessage (register/discover, telemetry,
+	// action status, command results, heartbeat replies)
+	// control plane → adapter: ControlPlaneMessage (acks, pushed Commands,
+	// heartbeat requests)
+	// NOTE: the stop travels on SafetyStream. Command.estop (field 5) is the stop's
+	// fence on ControlStream, in order with AssignActions (contract 1.4.0); its
+	// CommandResult.estop (field 6) answer is a receipt that no stop row reads.
 	ControlStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AdapterMessage, ControlPlaneMessage], error)
 	// SafetyStream is the ONLY additional RPC in this service. It exists because
 	// ControlStream multiplexes bulk telemetry, large CapabilitiesSnapshots, and
@@ -69,16 +67,17 @@ type FleetAdapterServiceClient interface {
 	// that guarantees estop is never queued behind bulk data.
 	//
 	// Invariants:
-	//   - Same mTLS identity and per-robot authorization as ControlStream.
-	//   - Carries ONLY Estop Commands and EstopAck results (plus optional
-	//     safety-critical PauseCapabilities / PauseResult).
-	//   - Permanently empty in steady state — no telemetry, no action commands.
-	//   - EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
-	//   - Adapter MUST open SafetyStream in the same dial step as ControlStream.
-	//     If SafetyStream cannot be established the adapter MUST NOT declare
-	//     itself healthy and MUST retry.
-	//   - Estop and EstopAck messages are REUSED — not duplicated — via the
-	//     AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
+	// * Same mTLS identity and per-robot authorization as ControlStream.
+	// * Carries ONLY the stop latch's messages: Estop and EstopClear down; EstopAck,
+	// EstopClearAck, LocalStopReport up (plus optional PauseCapabilities / PauseResult).
+	// * Permanently empty in steady state — no telemetry, no action commands.
+	// * EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
+	// * Adapter MUST open SafetyStream in the same dial step as ControlStream.
+	// Both streams MUST be established before the adapter sends AdapterHello;
+	// if SafetyStream cannot be established the adapter sends no AdapterHello
+	// and MUST retry (RFC-0001 #fleet-adapter-protocol-connection-lifecycle).
+	// * Estop and EstopAck messages are REUSED — not duplicated — via the
+	// AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
 	SafetyStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AdapterSafetyMessage, ControlPlaneSafetyMessage], error)
 }
 
@@ -123,15 +122,13 @@ type FleetAdapterServiceServer interface {
 	// ControlStream is the primary persistent connection. The adapter opens it
 	// and sends AdapterHello first; the control plane replies with HelloAck.
 	// Thereafter both sides multiplex:
-	//
-	//	adapter → control plane : AdapterMessage  (register/discover, telemetry,
-	//	                          action status, command results, heartbeat replies)
-	//	control plane → adapter : ControlPlaneMessage (acks, pushed Commands,
-	//	                          heartbeat requests)
-	//
-	// NOTE: Estop/EstopAck travel on SafetyStream, NOT on ControlStream.
-	// Command.estop (field 5) and CommandResult.estop (field 6) are retained for
-	// wire-format compatibility but are DEPRECATED — see annotations below.
+	// adapter → control plane: AdapterMessage (register/discover, telemetry,
+	// action status, command results, heartbeat replies)
+	// control plane → adapter: ControlPlaneMessage (acks, pushed Commands,
+	// heartbeat requests)
+	// NOTE: the stop travels on SafetyStream. Command.estop (field 5) is the stop's
+	// fence on ControlStream, in order with AssignActions (contract 1.4.0); its
+	// CommandResult.estop (field 6) answer is a receipt that no stop row reads.
 	ControlStream(grpc.BidiStreamingServer[AdapterMessage, ControlPlaneMessage]) error
 	// SafetyStream is the ONLY additional RPC in this service. It exists because
 	// ControlStream multiplexes bulk telemetry, large CapabilitiesSnapshots, and
@@ -147,16 +144,17 @@ type FleetAdapterServiceServer interface {
 	// that guarantees estop is never queued behind bulk data.
 	//
 	// Invariants:
-	//   - Same mTLS identity and per-robot authorization as ControlStream.
-	//   - Carries ONLY Estop Commands and EstopAck results (plus optional
-	//     safety-critical PauseCapabilities / PauseResult).
-	//   - Permanently empty in steady state — no telemetry, no action commands.
-	//   - EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
-	//   - Adapter MUST open SafetyStream in the same dial step as ControlStream.
-	//     If SafetyStream cannot be established the adapter MUST NOT declare
-	//     itself healthy and MUST retry.
-	//   - Estop and EstopAck messages are REUSED — not duplicated — via the
-	//     AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
+	// * Same mTLS identity and per-robot authorization as ControlStream.
+	// * Carries ONLY the stop latch's messages: Estop and EstopClear down; EstopAck,
+	// EstopClearAck, LocalStopReport up (plus optional PauseCapabilities / PauseResult).
+	// * Permanently empty in steady state — no telemetry, no action commands.
+	// * EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
+	// * Adapter MUST open SafetyStream in the same dial step as ControlStream.
+	// Both streams MUST be established before the adapter sends AdapterHello;
+	// if SafetyStream cannot be established the adapter sends no AdapterHello
+	// and MUST retry (RFC-0001 #fleet-adapter-protocol-connection-lifecycle).
+	// * Estop and EstopAck messages are REUSED — not duplicated — via the
+	// AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
 	SafetyStream(grpc.BidiStreamingServer[AdapterSafetyMessage, ControlPlaneSafetyMessage]) error
 	mustEmbedUnimplementedFleetAdapterServiceServer()
 }
@@ -230,7 +228,7 @@ var FleetAdapterService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "proto/fleet_adapter/v1/fleet_adapter.proto",
+	Metadata: "fleet_adapter/v1/fleet_adapter.proto",
 }
 
 const (
@@ -243,7 +241,7 @@ const (
 //
 // ---------------------------------------------------------------------------
 // EdgeService — served by the Zone Controller EDGE NODE on the facility LAN,
-// not by the control plane (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
+// not by the control plane (RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
 // every endpoint listed in RegisterAck.edge_endpoints and holds one EdgeStream
 // per edge node, with the same dial-out, mTLS, and reconnect-backoff
 // discipline as the ControlStream. The stream survives control-plane
@@ -280,7 +278,7 @@ type EdgeService_EdgeStreamClient = grpc.BidiStreamingClient[AdapterEdgeMessage,
 //
 // ---------------------------------------------------------------------------
 // EdgeService — served by the Zone Controller EDGE NODE on the facility LAN,
-// not by the control plane (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
+// not by the control plane (RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
 // every endpoint listed in RegisterAck.edge_endpoints and holds one EdgeStream
 // per edge node, with the same dial-out, mTLS, and reconnect-backoff
 // discipline as the ControlStream. The stream survives control-plane
@@ -344,5 +342,5 @@ var EdgeService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "proto/fleet_adapter/v1/fleet_adapter.proto",
+	Metadata: "fleet_adapter/v1/fleet_adapter.proto",
 }

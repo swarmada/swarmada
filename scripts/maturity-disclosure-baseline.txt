@@ -1,0 +1,33 @@
+# maturity-disclosure-baseline.txt — the five "no reader" claims standing when
+# scripts/check-maturity-disclosures.py was written (2026-09-08), each with the reading it
+# was given. Same ratchet as the specification's citation baseline: the gate fails on anything
+# NOT listed, so this file is a debt register, not an amnesty.
+#
+# THE PRECISION LIMIT, STATED RATHER THAN HIDDEN. This gate pairs a "no reader" phrase with
+# the CRD fields backticked near it. RFC-0001's override map wrote rows of the shape
+#
+#     | `scheduling.actionRequeueBackoffSeconds` | `FleetAction` | `spec.retryPolicy.backoffSeconds`
+#       — the SwarmadaConfig side is schema-only at v0.4; the per-action retryPolicy is read |
+#
+# where the claim is about the FIRST field and the second is named only to say it IS read.
+# Both sit in one table cell, so no amount of clause splitting separates them. One of the
+# three below is that shape; the actionRequeueBackoffSeconds row quoted above was a second,
+# until its claim was corrected (the namespace value is read). It is recorded as a false
+# positive rather than suppressed by a rule, because a rule tuned to make it disappear
+# would also hide the true ones.
+#
+# One line per field path, `#` comments allowed. Remove a line when the disclosure is fixed.
+
+# FALSE POSITIVE — same shape. The claim is about maintenance.defaultAutoResumeMinutes; the
+# per-window spec.autoResumeAfterMinutes named beside it is correctly described as applying.
+spec.autoResumeAfterMinutes
+
+# NEEDS A HUMAN — `spec.executor.sinks` is read by the admission webhook
+# (internal/webhook/fleetaction_webhook.go) but by no controller. Whether "no reader" was
+# meant to exclude validation is a judgement the gate cannot make and should not guess.
+spec.executor.sinks
+
+# NEEDS A HUMAN — `spec.deliveryMechanism` resolved to the Go identifier `Delivery`, read at
+# internal/safety/dispatcher.go:157. The name resolution is loose enough here that the hit
+# may belong to a different field; verify before acting.
+spec.deliveryMechanism

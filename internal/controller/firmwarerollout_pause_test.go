@@ -28,7 +28,7 @@ import (
 	"github.com/swarmada/swarmada/internal/webhook"
 )
 
-// firmware pauseOnError (§9.1.8.5). The firmware controller had ZERO references to
+// firmware pauseOnError (RFC-0001 #firmwarerollout-rollback-policy). The firmware controller had ZERO references to
 // PauseOnError and computeFirmwareStatus could not return Paused at all, so a rollout with
 // the documented default kept dispatching after a robot failed — a bad image reached the
 // whole fleet one batch at a time. Firmware has no rollbackPolicy: Auto either, so this is
@@ -38,7 +38,7 @@ import (
 // a fake client applies no CRD defaulting, so the fixture states it.
 func pausingFwRollout(sigRef string) *fleetv1.FirmwareRollout {
 	ro := fwRollout(sigRef)
-	ro.Spec.Strategy.RollingUpdate.PauseOnError = true
+	ro.Spec.Strategy.RollingUpdate.PauseOnError = apiBool(true)
 	return ro
 }
 
@@ -80,7 +80,12 @@ func TestFirmwareRollout_PauseOnErrorHaltsDispatch(t *testing.T) {
 func TestFirmwareRollout_PauseOnErrorOffKeepsDispatching(t *testing.T) {
 	dispatched := time.Now().Add(-10 * time.Minute)
 	secret, sigRef := signingFixture(t, fwChecksum)
-	ro := fwRollout(sigRef) // PauseOnError defaults to the Go zero value: false
+	ro := fwRollout(sigRef)
+	// Set EXPLICITLY. This used to rely on PauseOnError's Go zero value being false, which
+	// only held under the fake client: on a real cluster the API server defaults the field
+	// to true, so the configuration this test covers was unreachable in production and the
+	// test passed against a state no operator could create (ADR-0052).
+	ro.Spec.Strategy.RollingUpdate.PauseOnError = apiBool(false)
 	ro.Spec.Strategy.RollingUpdate.MaxUnavailable = "2"
 	seedBatch(ro, "r1", dispatched)
 	r, c := newFirmwareReconciler(t, ro, signingConfig(true), secret,
@@ -97,7 +102,7 @@ func TestFirmwareRollout_PauseOnErrorOffKeepsDispatching(t *testing.T) {
 	}
 }
 
-// §9.5.4 requires FIRMWARE_ROLLOUT_PAUSED. Until pauseOnError existed the transition it keys on
+// RFC-0001 #security-audit-logging requires FIRMWARE_ROLLOUT_PAUSED. Until pauseOnError existed the transition it keys on
 // could not occur, so the required event had no reachable writer.
 func TestFirmwareRollout_PauseIsSealed(t *testing.T) {
 	_, _, rec := pausedFirmware(t)

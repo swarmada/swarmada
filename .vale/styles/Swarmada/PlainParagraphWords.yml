@@ -1,0 +1,11 @@
+# Plain-language limit 4b: a paragraph has at most 80 words.
+# Each list item is its own block and is held to the same limit.
+# A word is a whitespace-separated token holding a letter, a digit or masked
+# inline code (Vale masks `code` as asterisks), so `EstopAck` and
+# {{ref:...}} count as one word each and a lone dash counts as none.
+extends: occurrence
+message: "This paragraph or list item has more than 80 words. Limit: 80 words per paragraph."
+level: error
+scope: [paragraph, list]
+max: 80
+token: '(?=\S*[\p{L}\p{N}*])\S+'

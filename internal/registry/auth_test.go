@@ -74,11 +74,11 @@ func TestTokenAuth_BasicCredentialsForwardedToAuthServer(t *testing.T) {
 	defer ts.Close()
 	host, c := hostOf(ts)
 
-	if _, err := c.ListTags(context.Background(), host, "models/item", &Credential{Username: "u", Password: "p"}); err != nil {
+	if _, err := c.ListTags(context.Background(), host, "models/item", &Credential{Username: "u", Password: "p", Hosts: []string{host}}); err != nil {
 		t.Fatalf("token auth with basic creds: %v", err)
 	}
 	// Wrong creds → the auth server 401s → the whole request fails.
-	if _, err := c.ListTags(context.Background(), host, "models/item", &Credential{Username: "u", Password: "wrong"}); err == nil {
+	if _, err := c.ListTags(context.Background(), host, "models/item", &Credential{Username: "u", Password: "wrong", Hosts: []string{host}}); err == nil {
 		t.Fatal("expected failure when the auth server rejects the basic credentials")
 	}
 }
@@ -95,7 +95,7 @@ func TestTokenAuth_PreSuppliedBearerDoesNotLoop(t *testing.T) {
 	defer ts.Close()
 	host, c := hostOf(ts)
 
-	if _, err := c.ListTags(context.Background(), host, "r", &Credential{BearerToken: "stale"}); err == nil {
+	if _, err := c.ListTags(context.Background(), host, "r", &Credential{BearerToken: "stale", Hosts: []string{host}}); err == nil {
 		t.Fatal("expected an error for a stale pre-supplied bearer")
 	}
 	if calls != 1 {

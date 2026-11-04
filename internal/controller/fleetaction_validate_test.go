@@ -43,7 +43,7 @@ type stubValidator struct {
 	calls   []string
 }
 
-func (s *stubValidator) ValidateAction(_ context.Context, _, robotID, _ string, _ []byte) (command.ValidateOutcome, error) {
+func (s *stubValidator) ValidateAction(_ context.Context, _, robotID, _, _ string, _ []byte) (command.ValidateOutcome, error) {
 	s.calls = append(s.calls, robotID)
 	if err, ok := s.errFor[robotID]; ok {
 		return command.ValidateOutcome{}, err
@@ -80,7 +80,7 @@ func TestValidateAction_ServableRobotIsAccepted(t *testing.T) {
 }
 
 func TestValidateAction_UnsupportedDoesNotWithholdWork(t *testing.T) {
-	// THE TRAP. validate_action is OPTIONAL (§9.2.8). An adapter that has not implemented
+	// THE TRAP. validate_action is OPTIONAL (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist). An adapter that has not implemented
 	// it replies unsupported, and the control plane must dispatch on the catalog gate alone
 	// — exactly as it did before this check existed. Withholding here would make an optional
 	// command mandatory and quietly stop work on every adapter that declines it.
@@ -155,7 +155,7 @@ func TestValidateAction_NilPayloadIsNotADereference(t *testing.T) {
 
 type recordingValidator struct{ fn func(string, []byte) }
 
-func (v *recordingValidator) ValidateAction(_ context.Context, _, _, actionType string, payload []byte) (command.ValidateOutcome, error) {
+func (v *recordingValidator) ValidateAction(_ context.Context, _, _, actionType, _ string, payload []byte) (command.ValidateOutcome, error) {
 	v.fn(actionType, payload)
 	return command.ValidateOutcome{Servable: true}, nil
 }

@@ -23,21 +23,27 @@ image:
 imagePullSecrets: []
 
 # ── Controller-manager Deployment ─────────────────────────────────────────────
+# ONE replica while controlStream.enabled is true; the chart refuses more. Only the
+# leading replica accepts adapter streams (a replica that does not lead refuses them),
+# and it pushes commands only to the streams it holds in memory. Multi-replica command
+# delivery is not implemented. The Deployment is replaced with the Recreate strategy, so
+# an upgrade never runs a second manager beside the leader.
 replicaCount: 1
 
 manager:
-  # Leader election lets you run replicaCount > 1 with a single active reconciler.
-  # (--leader-elect / --leader-election-id, cmd/manager).
+  # Leader election keeps a single active reconciler (--leader-elect /
+  # --leader-election-id, cmd/manager). It does not make replicaCount > 1 safe with
+  # ControlStream enabled: see replicaCount above.
   leaderElect: true
   leaderElectionID: swarmada-leader
 
   # The manager serves /metrics here (--metrics-bind-address) and health probes
   # here (--health-probe-bind-address). Ports are referenced by the metrics
   # Service and the probes below; keep the host empty to bind all interfaces.
-  # 8080 matches the manager's own default (--metrics-bind-address, cmd/manager/main.go).
-  # RFC-0001 §9.3.8 defines the scrape surface and the metric names; it deliberately does
-  # NOT mandate a port, so this number tracks the binary, not the specification. The chart
-  # drives the flag explicitly so container port, Service and scrape annotation agree.
+  # 8080 is the default RFC-0001 #control-plane-observability-prometheus-metrics-contract
+  # specifies for the configurable /metrics port, and the manager's own default
+  # (--metrics-bind-address, cmd/manager/main.go). The chart drives the flag explicitly so
+  # container port, Service and scrape annotation agree.
   metricsPort: 8080
   healthPort: 8081
 
@@ -75,6 +81,7 @@ manager:
   affinity: {}
   # Extra args/env appended verbatim to the manager container (escape hatch).
   extraArgs: []
+  # POD_NAMESPACE is already set from the downward API; do not set it here.
   extraEnv: []
 
 serviceAccount:
@@ -85,20 +92,51 @@ serviceAccount:
   annotations: {}
 
 # ── ControlStream gRPC server (Fleet Adapter connections) ─────────────────────
-# --fleet-adapter-bind-address; empty disables it. NOTE: the controller-runtime
-# admission webhook server binds 9443 (its fixed default, not flag-configurable),
-# so ControlStream is placed on a DISTINCT port here to avoid a listener collision
-# when webhooks and ControlStream are both enabled. Adapters connect to this
-# Service (RFC-0001 §9.2 mandates mTLS in production — see docs).
+# --fleet-adapter-bind-address; empty disables it. 9445 is the ControlStream port
+# everywhere in this repository (the manager's own default, the kustomize overlays,
+# the Service and the simulation adapter's --endpoint). The controller-runtime
+# admission webhook server binds 9443 (its fixed default, not flag-configurable), so
+# ControlStream must not use 9443 when both are enabled. Adapters connect to the
+# Service <fullname>-controlstream.<namespace>.svc:9445.
 controlStream:
   enabled: true
-  port: 9440
+  port: 9445
   service:
     type: ClusterIP
     annotations: {}
+  # mTLS material (RFC-0001 #fleet-adapter-protocol-transport-security, ADR-0025). The
+  # manager serves ControlStream only when --fleet-adapter-tls-cert-file,
+  # --fleet-adapter-tls-key-file and --fleet-adapter-client-ca-file are all set;
+  # otherwise it logs "NOT serving ControlStream (fail closed)" and no adapter can
+  # connect. So with controlStream.enabled=true the chart requires one of the two
+  # sources below, and refuses to render without one.
+  tls:
+    # The Secret mounted into the manager. It must hold tls.crt and tls.key (the server
+    # keypair) and ca.crt (the CA that signs adapter CLIENT certificates). When set,
+    # the chart renders no ControlStream cert-manager resources and uses this Secret.
+    existingSecret: ""
+    certManager:
+      # Mirrors config/controlstream-tls: a self-signed root bootstraps a CA; the CA
+      # issues the server certificate for <fullname>-controlstream.<namespace>.svc
+      # (server auth only) and every adapter client certificate (client auth only).
+      enabled: true
+      # Duration/renewal for the server Certificate (cert-manager defaults if empty).
+      # The manager re-reads the keypair on each handshake, so renewal needs no restart.
+      duration: ""
+      renewBefore: ""
+      # One client Certificate per FleetAdapter, issued by the same CA. The SAN is
+      # <name>.<namespace>.svc.cluster.local, which is the adapter identity the
+      # ControlStream reads (internal/controlstream/identity.go); it must name the
+      # FleetAdapter object and its namespace. The Secret lands in the release
+      # namespace, so an adapter that mounts it runs there.
+      #   adapterClients:
+      #     - name: sim-fleet-adapter
+      #       namespace: warehouse-a
+      #       secretName: ""   # default: <name>-<namespace>-client-tls
+      adapterClients: []
 
 # ── ModelPolicy training-completion HMAC webhook ──────────────────────────────
-# --model-webhook-bind-address (§9.1.9.3); empty disables it. Plain HTTP endpoint
+# --model-webhook-bind-address (RFC-0001 #modelpolicy-training-pipeline-integration-webhook-payload); empty disables it. Plain HTTP endpoint
 # that verifies the HMAC signature; served on every replica.
 modelWebhook:
   enabled: true
@@ -107,6 +145,13 @@ modelWebhook:
 # ── Admission webhooks (mutating + validating) ────────────────────────────────
 # Governs ENABLE_WEBHOOKS and the MutatingWebhookConfiguration/
 # ValidatingWebhookConfiguration. The webhook server binds 9443 (fixed).
+# webhooks.enabled=false installs no admission webhook at all, like make deploy-minimal,
+# the quickstart overlays and make run. Nothing then checks the estop verbs on
+# the estop annotation, the cancel, append and activate verbs, or the robots/status guard
+# (anyone who can write robots/status can set a stopped robot Normal), and a
+# Robot that holds a stop can be deleted and created again Normal. Use it only
+# on a single-user development cluster (docs/known-limitations.md, "An install
+# without admission webhooks checks nothing at admission").
 webhooks:
   enabled: true
   port: 9443
@@ -124,8 +169,22 @@ webhooks:
   # (tls.crt/tls.key) yourself. Ignored when cert-manager is enabled (its
   # ca-injector fills caBundle via the inject-ca-from annotation).
   caBundle: ""
-  # failurePolicy for the webhook configurations (Fail = fail-closed admission).
+  # failurePolicy for every validating webhook but one and for the Robot mutating
+  # webhook (Fail = fail-closed admission; Ignore is a break-glass loosening). It does
+  # NOT govern the four estop-actor stampers (mfleetzone, mswarmadaconfig,
+  # mfirmwarerollout, mmodelrollout): those are Ignore by ADR-0046 so that
+  # attribution can never block a stop, and the chart renders that literally. Nor does
+  # it govern vrobotdelete, the Robot delete check, which is always Ignore: a manager
+  # outage never blocks deleting a Robot, and during one a Robot that holds a stop can
+  # be deleted. The FleetZone, FleetTask, FirmwareRollout and ModelRollout delete checks
+  # follow this value: with Fail, a namespace holding one of them stays Terminating
+  # at least until the manager serves again (docs/operations.md, section 4).
   failurePolicy: Fail
+  # failurePolicy: Ignore opens the estop, estop-marker, Robot admission, robots/status
+  # and zone-delete validators whenever the webhook server is unreachable. The chart
+  # refuses to render Ignore unless this is set to true, so the choice is deliberate and
+  # visible.
+  acknowledgeFailOpenSecurity: false
 
 # ── CRDs ──────────────────────────────────────────────────────────────────────
 # Install the api/v1 CustomResourceDefinitions with the chart. See step 3 for the
@@ -137,8 +196,8 @@ rbac:
   # The manager ClusterRole + binding (mirrors config/rbac/role.yaml and the
   # fleetaction supplemental role).
   create: true
-  # The five built-in operator/automation ClusterRoles from RFC-0001 §9.5.3
-  # (swarmada:admin / :operator / :fleet-manager / :viewer / :robot). These are
+  # The six built-in ClusterRoles from RFC-0001 #security-role-definitions
+  # (swarmada:viewer / :operator / :fleet-manager / :admin / :robot / :edge). These are
   # cluster-scoped grants for humans/automation; bind them yourself to subjects.
   clusterRoles: true
 
@@ -146,7 +205,7 @@ rbac:
 metrics:
   service:
     enabled: true
-    # Service port; targets the manager's metricsPort (/metrics), §9.3.8 default 8080.
+    # Service port; targets the manager's metricsPort (/metrics), RFC-0001 #control-plane-observability-prometheus-metrics-contract default 8080.
     port: 8080
     annotations: {}
   # OPTIONAL Prometheus-Operator ServiceMonitor pointing an EXISTING Prometheus at
@@ -161,7 +220,7 @@ metrics:
     labels: {}
     relabelings: []
     metricRelabelings: []
-  # OPTIONAL Prometheus-Operator PrometheusRule carrying the §9.3.8 alert rules.
+  # OPTIONAL Prometheus-Operator PrometheusRule carrying the RFC-0001 #control-plane-observability-prometheus-metrics-contract alert rules.
   # Renders ONLY when enabled. Default OFF.
   prometheusRule:
     enabled: false

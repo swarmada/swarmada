@@ -92,7 +92,8 @@ func TestFirmwareRollout_HTTPSFetchUsesRegistryCredentials(t *testing.T) {
 	secret, rawSig := rawSigningFixture(t, fwChecksum)
 	creds := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: registryCredentialsSecret, Namespace: rolloutNS},
-		Data:       map[string][]byte{"token": []byte("registry-tok")},
+		Data: map[string][]byte{"token": []byte("registry-tok"),
+			"registries": []byte("artifacts.example.com")},
 	}
 	r, _ := newFirmwareReconciler(t, fwRollout("https://artifacts.example.com/x.sig"),
 		signingConfig(true), secret, creds, targetRobot("r1", fleetv1.RobotPhaseIdle, 90))

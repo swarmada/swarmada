@@ -86,7 +86,7 @@ func TestVerify_ReorderDetected(t *testing.T) {
 	}
 }
 
-// A Denied action is recorded (never dropped, §9.5.4) and part of the chain.
+// A Denied action is recorded (never dropped, RFC-0001 #security-audit-logging) and part of the chain.
 func TestRecord_DeniedNeverDropped(t *testing.T) {
 	l := New(&MemorySink{}, "v0.1.0")
 	sealed, err := l.Record(Entry{

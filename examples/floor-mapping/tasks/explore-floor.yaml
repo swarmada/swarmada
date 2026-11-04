@@ -1,0 +1,74 @@
+# Explore a floor in segments, charging between them.
+#
+#   explore-first, then up to three times: [charge, explore-resume]
+#
+# The loop is bounded by a count, not by "no frontier left". A loop's `until` reads a
+# member's status.result.values or its status.events[], and an adapter's report reaches
+# neither: ActionStatusUpdate carries a message and a progress percentage only. So the
+# count is the bound, and a segment that finds no frontier left ends at once with
+# "frontier: none-left" in its message, which makes the remaining iterations a charge
+# check and an empty segment each.
+#
+# explore-first and explore-resume are two members rather than one, because the payload
+# is fixed per member and only the first segment starts a new map (resume: false).
+#
+# FleetAction.spec.customType names the verb on the operator's surface, and AssignAction
+# carries it to the adapter as custom_type (contract 1.4.0). The payload names the same verb
+# as `operation`, which an adapter below 1.4.0 reads; the simulation adapter reads custom_type
+# first and refuses a payload that contradicts it.
+#
+# EVERY PAYLOAD HERE IS WRITTEN AS `raw:` (base64 of the JSON), with the JSON in a
+# comment beside it. A payload written as plain keys reaches the adapter as the same
+# object too, and a member's payload reaches its child FleetAction intact; these samples
+# use the `raw` form, and tests/python/test_floor_mapping_samples.py keeps each comment
+# and its payload in step.
+#
+# EVERY ACTION HERE IS `onFailure: Alert`. The default, Requeue, dispatches a failed action
+# again 30 s later with no operator. A robot action that fails is one an operator should look
+# at before anything moves again: a segment the robot refused before motion ("...; no motion")
+# is typically the one the operator then charges, and a requeued segment would be dispatched
+# while the charging cable is in. Alert leaves the action Failed and raises an operator alert.
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: explore-floor
+  namespace: warehouse-a
+spec:
+  desiredState: Running
+  actions:
+    - name: explore-first
+      action:
+        type: Custom
+        customType: explore-floor
+        zone: warehouse-a
+        priority: Normal
+        onFailure: Alert
+        payload:
+          # {"operation":"explore-floor","bound_ref":"room-1","max_speed_mps":0.2,"resume":false}
+          raw: eyJvcGVyYXRpb24iOiJleHBsb3JlLWZsb29yIiwiYm91bmRfcmVmIjoicm9vbS0xIiwibWF4X3NwZWVkX21wcyI6MC4yLCJyZXN1bWUiOmZhbHNlfQ==
+    - name: charge
+      action:
+        type: Charge
+        zone: warehouse-a
+        priority: Normal
+        onFailure: Alert
+    - name: explore-resume
+      action:
+        type: Custom
+        customType: explore-floor
+        zone: warehouse-a
+        priority: Normal
+        onFailure: Alert
+        payload:
+          # {"operation":"explore-floor","bound_ref":"room-1","max_speed_mps":0.2,"resume":true}
+          raw: eyJvcGVyYXRpb24iOiJleHBsb3JlLWZsb29yIiwiYm91bmRfcmVmIjoicm9vbS0xIiwibWF4X3NwZWVkX21wcyI6MC4yLCJyZXN1bWUiOnRydWV9
+  flow:
+    sequence:
+      - run: explore-first
+      - loop:
+          mode: Times
+          times: 3
+          body:
+            sequence:
+              - run: charge
+              - run: explore-resume

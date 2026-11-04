@@ -1,0 +1,30 @@
+# The work. Apply it once a robot of class simbot-v1 has been admitted:
+#
+#   kubectl apply -f config/samples/first-run/fleettask.yaml
+#   kubectl get fleettask first-run -n warehouse-a -w
+#
+# Two members, in order, so the task shows a dependency as well as a result. Both are
+# Navigate, which the simulation adapter executes and reports to completion.
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: first-run
+  namespace: warehouse-a
+spec:
+  completionPolicy: All
+  failurePolicy: FailFast
+  desiredState: Running
+  actions:
+    - name: drive-out
+      action:
+        type: Navigate
+        zone: warehouse-a
+        priority: Normal
+        requiredCapabilities: [navigation.2d]
+    - name: drive-back
+      dependsOn: [drive-out]
+      action:
+        type: Navigate
+        zone: warehouse-a
+        priority: Normal
+        requiredCapabilities: [navigation.2d]

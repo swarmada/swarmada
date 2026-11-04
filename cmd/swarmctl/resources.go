@@ -146,6 +146,9 @@ func init() {
 	registerSwarmadaConfig()
 	registerZoneMaintenance()
 	registerFleetTask()
+	registerTaskTrigger()
+	registerSemanticEventSource()
+	registerSemanticEvent()
 }
 
 func registerRobot() {
@@ -198,7 +201,21 @@ func registerFleetAction() {
 		},
 		columns: []column{
 			{header: "TYPE", cell: func(o client.Object) cli.Cell { return text(string(o.(*fleetv1.FleetAction).Spec.Type)) }},
+			// VERB renders spec.customType. ActionType is a closed set of verbs meeting an
+			// open world, and Custom + customType is the extension point that keeps it closed
+			// (api/v1/fleetaction_types.go, the admission rule on ActionType). That answer is
+			// only as good as its operator surface: without this column every Custom action
+			// reads as the same opaque row, which is what made a Clean indistinguishable from
+			// any other Custom in the first place.
+			{header: "VERB", cell: func(o client.Object) cli.Cell { return text(o.(*fleetv1.FleetAction).Spec.CustomType) }},
 			{header: "PHASE", cell: func(o client.Object) cli.Cell { return text(string(o.(*fleetv1.FleetAction).Status.Phase)) }},
+			// OUTCOME renders status.outcomeCertainty. An Unestablished outcome is pinned by
+			// CEL to phase: Failed (RFC-0001 rule R4), so PHASE alone cannot tell an observed
+			// failure from one nobody could establish — this column is where that distinction
+			// reaches an operator.
+			{header: "OUTCOME", cell: func(o client.Object) cli.Cell {
+				return cli.OutcomeCertaintyCell(string(o.(*fleetv1.FleetAction).Status.OutcomeCertainty))
+			}},
 			{header: "PRIORITY", cell: func(o client.Object) cli.Cell { return text(string(o.(*fleetv1.FleetAction).Spec.Priority)) }},
 			{header: "ROBOT", cell: func(o client.Object) cli.Cell { return text(o.(*fleetv1.FleetAction).Status.AssignedRobot) }},
 			{header: "ZONE", cell: func(o client.Object) cli.Cell { return text(o.(*fleetv1.FleetAction).Spec.Zone) }},
@@ -210,9 +227,11 @@ func registerFleetAction() {
 			t := o.(*fleetv1.FleetAction)
 			return []cli.KV{
 				{Label: "Type", Value: string(t.Spec.Type)},
+				{Label: "Verb", Value: orNone(t.Spec.CustomType)},
 				{Label: "Priority", Value: orNone(string(t.Spec.Priority))},
 				{Label: "Zone", Value: orNone(t.Spec.Zone)},
 				{Label: "Phase", Value: orNone(string(t.Status.Phase))},
+				{Label: "Outcome", Value: orNone(string(t.Status.OutcomeCertainty))},
 				{Label: "Assigned Robot", Value: orNone(t.Status.AssignedRobot)},
 				{Label: "Message", Value: orNone(t.Status.Message)},
 			}
@@ -238,7 +257,6 @@ func registerFleetZone() {
 		columns: []column{
 			{header: "ROBOTS", cell: func(o client.Object) cli.Cell { return num(o.(*fleetv1.FleetZone).Status.RobotCount) }},
 			{header: "MAX", cell: func(o client.Object) cli.Cell { return num(o.(*fleetv1.FleetZone).Spec.MaxConcurrentRobots) }},
-			{header: "ACTIVETASKS", cell: func(o client.Object) cli.Cell { return num(o.(*fleetv1.FleetZone).Status.ActiveActions) }},
 			{header: "AGE", cell: func(o client.Object) cli.Cell { return cli.TextCell(cli.Age(o.(*fleetv1.FleetZone).CreationTimestamp)) }},
 		},
 		details: func(o client.Object) []cli.KV {
@@ -248,7 +266,6 @@ func registerFleetZone() {
 				{Label: "Parent Zone", Value: orNone(z.Spec.ParentZone)},
 				{Label: "Max Concurrent Robots", Value: fmt.Sprintf("%d", z.Spec.MaxConcurrentRobots)},
 				{Label: "Robot Count", Value: fmt.Sprintf("%d", z.Status.RobotCount)},
-				{Label: "Active Tasks", Value: fmt.Sprintf("%d", z.Status.ActiveActions)},
 				{Label: "Is Leaf", Value: fmt.Sprintf("%t", z.Status.IsLeaf)},
 			}
 		},
@@ -335,7 +352,7 @@ func registerDiscoveredRobot() {
 
 func registerFleetAdapter() {
 	registerResource(&resourceDef{
-		singular: "fleetadapter", plural: "fleetadapters", kind: "FleetAdapter", aliases: []string{"fa"},
+		singular: "fleetadapter", plural: "fleetadapters", kind: "FleetAdapter", aliases: []string{"fadapt"},
 		gvk:       gvkOf("FleetAdapter"),
 		newList:   func() client.ObjectList { return &fleetv1.FleetAdapterList{} },
 		newObject: func() client.Object { return &fleetv1.FleetAdapter{} },
@@ -585,5 +602,130 @@ func registerFleetTask() {
 			)
 		},
 		conditions: func(o client.Object) []metav1.Condition { return o.(*fleetv1.FleetTask).Status.Conditions },
+	})
+}
+
+func registerTaskTrigger() {
+	registerResource(&resourceDef{
+		singular: "tasktrigger", plural: "tasktriggers", kind: "TaskTrigger", aliases: []string{"tt"},
+		gvk:       gvkOf("TaskTrigger"),
+		newList:   func() client.ObjectList { return &fleetv1.TaskTriggerList{} },
+		newObject: func() client.Object { return &fleetv1.TaskTrigger{} },
+		items: func(l client.ObjectList) []client.Object {
+			tl := l.(*fleetv1.TaskTriggerList)
+			out := make([]client.Object, len(tl.Items))
+			for i := range tl.Items {
+				out[i] = &tl.Items[i]
+			}
+			return out
+		},
+		columns: []column{
+			{header: "SOURCE", cell: func(o client.Object) cli.Cell {
+				return text(o.(*fleetv1.TaskTrigger).Spec.Source.SemanticEventSource)
+			}},
+			{header: "EVENT", cell: func(o client.Object) cli.Cell {
+				return text(o.(*fleetv1.TaskTrigger).Spec.Source.EventType)
+			}},
+			{header: "SUSPENDED", cell: func(o client.Object) cli.Cell {
+				return cli.TextCell(fmt.Sprintf("%t", o.(*fleetv1.TaskTrigger).Spec.Suspend))
+			}},
+			{header: "DRAFTS", cell: func(o client.Object) cli.Cell {
+				return cli.TextCell(fmt.Sprintf("%d", o.(*fleetv1.TaskTrigger).Status.DraftCount))
+			}},
+		},
+		details: func(o client.Object) []cli.KV {
+			t := o.(*fleetv1.TaskTrigger)
+			return []cli.KV{
+				{Label: "Source", Value: orNone(t.Spec.Source.SemanticEventSource)},
+				{Label: "Event Type", Value: orNone(t.Spec.Source.EventType)},
+				{Label: "Suspended", Value: fmt.Sprintf("%t", t.Spec.Suspend)},
+				{Label: "Drafts Produced", Value: fmt.Sprintf("%d", t.Status.DraftCount)},
+				// The operator's queue: drafts composed and waiting for a human.
+				{Label: "Pending Drafts", Value: orNone(strings.Join(t.Status.PendingDrafts, ", "))},
+				{Label: "Last Event", Value: orNone(t.Status.LastEventName)},
+				{Label: "Last Fired", Value: cli.DateColumn(t.Status.LastFiredAt)},
+			}
+		},
+		conditions: func(o client.Object) []metav1.Condition { return o.(*fleetv1.TaskTrigger).Status.Conditions },
+	})
+}
+
+func registerSemanticEventSource() {
+	registerResource(&resourceDef{
+		singular: "semanticeventsource", plural: "semanticeventsources", kind: "SemanticEventSource",
+		aliases:   []string{"ses"},
+		gvk:       gvkOf("SemanticEventSource"),
+		newList:   func() client.ObjectList { return &fleetv1.SemanticEventSourceList{} },
+		newObject: func() client.Object { return &fleetv1.SemanticEventSource{} },
+		items: func(l client.ObjectList) []client.Object {
+			sl := l.(*fleetv1.SemanticEventSourceList)
+			out := make([]client.Object, len(sl.Items))
+			for i := range sl.Items {
+				out[i] = &sl.Items[i]
+			}
+			return out
+		},
+		columns: []column{
+			{header: "TYPES", cell: func(o client.Object) cli.Cell {
+				return text(strings.Join(o.(*fleetv1.SemanticEventSource).Spec.EventTypes, ","))
+			}},
+			{header: "ACCEPTED", cell: func(o client.Object) cli.Cell {
+				return cli.TextCell(fmt.Sprintf("%d", o.(*fleetv1.SemanticEventSource).Status.AcceptedCount))
+			}},
+			{header: "REJECTED", cell: func(o client.Object) cli.Cell {
+				return cli.TextCell(fmt.Sprintf("%d", o.(*fleetv1.SemanticEventSource).Status.RejectedCount))
+			}},
+		},
+		details: func(o client.Object) []cli.KV {
+			s := o.(*fleetv1.SemanticEventSource)
+			return []cli.KV{
+				{Label: "Display Name", Value: orNone(s.Spec.DisplayName)},
+				{Label: "Declared Event Types", Value: orNone(strings.Join(s.Spec.EventTypes, ", "))},
+				{Label: "Accepted", Value: fmt.Sprintf("%d", s.Status.AcceptedCount)},
+				{Label: "Rejected", Value: fmt.Sprintf("%d", s.Status.RejectedCount)},
+			}
+		},
+		conditions: func(o client.Object) []metav1.Condition {
+			return o.(*fleetv1.SemanticEventSource).Status.Conditions
+		},
+	})
+}
+
+func registerSemanticEvent() {
+	registerResource(&resourceDef{
+		singular: "semanticevent", plural: "semanticevents", kind: "SemanticEvent", aliases: []string{"sev"},
+		gvk:       gvkOf("SemanticEvent"),
+		newList:   func() client.ObjectList { return &fleetv1.SemanticEventList{} },
+		newObject: func() client.Object { return &fleetv1.SemanticEvent{} },
+		items: func(l client.ObjectList) []client.Object {
+			el := l.(*fleetv1.SemanticEventList)
+			out := make([]client.Object, len(el.Items))
+			for i := range el.Items {
+				out[i] = &el.Items[i]
+			}
+			return out
+		},
+		columns: []column{
+			{header: "SOURCE", cell: func(o client.Object) cli.Cell { return text(o.(*fleetv1.SemanticEvent).Spec.Source) }},
+			{header: "TYPE", cell: func(o client.Object) cli.Cell { return text(o.(*fleetv1.SemanticEvent).Spec.Type) }},
+			{header: "PHASE", cell: func(o client.Object) cli.Cell {
+				return text(string(o.(*fleetv1.SemanticEvent).Status.Phase))
+			}},
+			{header: "DRAFTED", cell: func(o client.Object) cli.Cell {
+				return text(strings.Join(o.(*fleetv1.SemanticEvent).Status.DraftedTasks, ","))
+			}},
+		},
+		details: func(o client.Object) []cli.KV {
+			e := o.(*fleetv1.SemanticEvent)
+			return []cli.KV{
+				{Label: "Source", Value: orNone(e.Spec.Source)},
+				{Label: "Type", Value: orNone(e.Spec.Type)},
+				{Label: "Occurred At", Value: cli.DateColumn(e.Spec.OccurredAt)},
+				{Label: "Phase", Value: orNone(string(e.Status.Phase))},
+				{Label: "Message", Value: orNone(e.Status.Message)},
+				// Drafted, never dispatched: these are waiting for a human.
+				{Label: "Drafted Tasks", Value: orNone(strings.Join(e.Status.DraftedTasks, ", "))},
+			}
+		},
 	})
 }

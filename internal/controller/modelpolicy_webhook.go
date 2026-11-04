@@ -39,7 +39,7 @@ import (
 
 const (
 	// hmacSecretKey is the Secret data key holding the shared HMAC secret
-	// (crds/modelpolicy.md §9.1.10.3).
+	// (RFC-0001 #security-webhook-hmac-secrets-modelpolicy).
 	hmacSecretKey = "hmac-secret"
 	// signatureHeader carries "sha256=<hex HMAC-SHA256 of the raw body>".
 	signatureHeader = "X-Swarmada-Signature-256"
@@ -49,10 +49,11 @@ const (
 	webhookPathPrefix = "/webhooks/v1/model-policy/"
 )
 
-// isaacWebhookPayload is the Isaac Lab training-completion POST body (§9.1.10.3),
-// snake_case per the published contract. It is translated into the internal
-// modelTriggerPayload the ModelPolicyReconciler consumes; extra fields
-// (model_signature_ref, training_metadata, …) are ignored here.
+// isaacWebhookPayload is the Isaac Lab training-completion POST body (RFC-0001 #modelpolicy-training-pipeline-integration-webhook-payload),
+// snake_case per the published contract. It is converted into the internal
+// modelTriggerPayload the ModelPolicyReconciler consumes; model_signature_ref is
+// carried through to the generated ModelRollout's spec.modelSignatureRef, and
+// fields this struct does not declare (training_metadata, …) are ignored.
 type isaacWebhookPayload struct {
 	ModelVersion      string             `json:"model_version"`
 	ModelURI          string             `json:"model_uri"`
@@ -61,7 +62,7 @@ type isaacWebhookPayload struct {
 	Metrics           map[string]float64 `json:"metrics"`
 }
 
-// ModelPolicyWebhook serves the training-completion webhook (§9.1.10.3) as a
+// ModelPolicyWebhook serves the training-completion webhook (RFC-0001 #modelpolicy-training-pipeline-integration-webhook-payload) as a
 // manager.Runnable. It verifies the HMAC signature and writes the model-trigger
 // annotation onto the ModelPolicy; the ModelPolicyReconciler is the SINGLE
 // evaluation path (this front-end never evaluates the quality gate itself).

@@ -28,11 +28,13 @@ const (
 	ModelPolicyTriggerWebhook ModelPolicyTriggerType = "Webhook"
 
 	// ModelPolicyTriggerRegistryWatch — the ModelPolicy controller polls an OCI registry for new
-	// image tags matching modelName. On new tag: pulls image labels for metrics.
+	// image tags matching modelName. On new tag: pulls image labels for metrics. It reads no
+	// signature label, so a RegistryWatch trigger never carries a modelSignatureRef.
 	ModelPolicyTriggerRegistryWatch ModelPolicyTriggerType = "RegistryWatch"
 
-	// ModelPolicyTriggerManual — no automatic trigger. Operator calls swarmctl evaluate policy <name>
-	// to manually submit metrics and trigger evaluation.
+	// ModelPolicyTriggerManual — no automatic trigger. The operator writes the
+	// swarmada.io/model-trigger annotation (a JSON payload with the metrics) to submit a
+	// candidate for evaluation; swarmctl has no command for this at v0.4.
 	ModelPolicyTriggerManual ModelPolicyTriggerType = "Manual"
 )
 
@@ -41,8 +43,9 @@ const (
 type ModelPolicyDecision string
 
 // ModelPolicyDecision values (§9.1.10): the quality gate's verdict on a candidate model. Deploy
-// auto-creates a ModelRollout; Reject counts toward the consecutive-rejection suspension; Pending
-// means the gate has not yet evaluated this trigger.
+// auto-creates a ModelRollout (unless autoDeployOn is Manual); Reject counts toward the
+// consecutive-rejection suspension; Pending is specified to mean the gate has not yet evaluated
+// this trigger, and is written by no controller at v0.4.
 const (
 	ModelPolicyDecisionDeploy  ModelPolicyDecision = "Deploy"
 	ModelPolicyDecisionReject  ModelPolicyDecision = "Reject"
@@ -59,8 +62,9 @@ const (
 	// AutoDeployNewVersion — deploy any new version that arrives (no quality gate enforcement).
 	// Use only for development/staging namespaces.
 	AutoDeployNewVersion AutoDeployCondition = "NewVersion"
-	// AutoDeployManual — quality gate is evaluated and logged but deployment requires
-	// an explicit swarmctl policy approve command even if gate passes.
+	// AutoDeployManual — quality gate is evaluated and recorded, and a pass emits a
+	// QualityGatePass Event, but no ModelRollout is created. No approval command exists
+	// at v0.4; deploying the version takes a hand-written ModelRollout.
 	AutoDeployManual AutoDeployCondition = "Manual"
 )
 
@@ -116,7 +120,8 @@ type RegistryWatchConfig struct {
 	PollIntervalSeconds int32 `json:"pollIntervalSeconds,omitempty"`
 
 	// MetricsLabel is the OCI image label name containing quality metrics as JSON.
-	// Example: LABEL swarmada.metrics='{"pickSuccessRate":0.94,"failureRate":0.018}'
+	// Keys are the quality-gate metric names (snake_case), values numbers.
+	// Example: LABEL swarmada.metrics='{"pick_success_rate":0.94,"failure_rate":0.018}'
 	// +kubebuilder:default="swarmada.metrics"
 	MetricsLabel string `json:"metricsLabel,omitempty"`
 }
@@ -218,6 +223,20 @@ type RolloutTemplateSpec struct {
 }
 
 // ModelPolicySpec defines the desired state of a ModelPolicy.
+//
+// The quality gate is a judgement about the ARTIFACT, not about where it lands, so
+// targeting is expressed with a discriminator and one selector per kind rather than
+// with a second policy type. See the normative statement on the ModelPolicy root
+// type: a gate that blocks a robot rollout blocks an edge rollout of the same
+// artifact, and the reverse.
+//
+// Which selector is required follows targetKind. targetRobotSelector could not be
+// reused for edge targets — its name says robots — so the edge case gets its own
+// field, and neither is schema-required on its own; the pairing is enforced here,
+// the way ComputeEndpointSpec enforces its binding/contract pairing.
+// +kubebuilder:validation:XValidation:rule="!has(self.targetKind) || self.targetKind != 'Robot' || has(self.targetRobotSelector)",message="targetRobotSelector is required when targetKind is Robot"
+// +kubebuilder:validation:XValidation:rule="!has(self.targetKind) || self.targetKind != 'EdgeNode' || has(self.targetNodeSelector)",message="targetNodeSelector is required when targetKind is EdgeNode"
+// +kubebuilder:validation:XValidation:rule="!has(self.targetNodeSelector) || (has(self.targetKind) && self.targetKind == 'EdgeNode')",message="targetNodeSelector applies only to targetKind: EdgeNode"
 type ModelPolicySpec struct {
 	// ModelName is the logical model name this policy governs.
 	// Must match InstalledModel.name on target robots.
@@ -225,16 +244,41 @@ type ModelPolicySpec struct {
 	// +kubebuilder:validation:MinLength=1
 	ModelName string `json:"modelName"`
 
+	// TargetKind selects the kind of object this policy auto-deploys to. Defaults
+	// to Robot, so a policy authored before this field existed is unchanged.
+	// EdgeNode is specified but not implemented at this version: the policy creates a
+	// ModelRollout with targetKind EdgeNode, which the ModelRollout controller refuses,
+	// so no node is updated.
+	// +optional
+	// +kubebuilder:default=Robot
+	TargetKind RolloutTargetKind `json:"targetKind,omitempty"`
+
 	// TargetRobotSelector selects which robots will receive auto-deployments.
-	// +kubebuilder:validation:Required
-	TargetRobotSelector metav1.LabelSelector `json:"targetRobotSelector"`
+	// REQUIRED when TargetKind is Robot (the default), which is every policy that
+	// predates TargetKind; the marker moved to a CEL rule on the type so an
+	// EdgeNode policy is not forced to carry a robot selector it never reads.
+	// Relaxing a required field is additive — no stored object becomes invalid.
+	// An empty selector ({}) is refused: it matches every Robot in the namespace.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="targetRobotSelector is empty, and an empty selector matches every Robot in the namespace; select robots with matchLabels or matchExpressions"
+	TargetRobotSelector *metav1.LabelSelector `json:"targetRobotSelector,omitempty"`
+
+	// TargetNodeSelector selects which EdgeNodes are specified to receive
+	// auto-deployments. REQUIRED when TargetKind is EdgeNode, and rejected otherwise.
+	// EdgeNode targeting is not implemented at this version (see TargetKind), so no
+	// node receives one. An empty selector ({}) is refused: it matches every EdgeNode
+	// in the namespace.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="targetNodeSelector is empty, and an empty selector matches every EdgeNode in the namespace; select nodes with matchLabels or matchExpressions"
+	TargetNodeSelector *metav1.LabelSelector `json:"targetNodeSelector,omitempty"`
 
 	// Trigger configures how training completion events reach this policy.
 	// +optional
 	Trigger ModelPolicyTrigger `json:"trigger,omitempty"`
 
 	// QualityGate defines the metrics thresholds a model must satisfy.
-	// If empty, any model version triggers deployment (use with caution).
+	// If empty, any model version with a well-formed modelChecksum triggers
+	// deployment (use with caution).
 	// +optional
 	QualityGate *QualityGate `json:"qualityGate,omitempty"`
 
@@ -246,17 +290,21 @@ type ModelPolicySpec struct {
 	// +optional
 	RolloutTemplate *RolloutTemplateSpec `json:"rolloutTemplate,omitempty"`
 
-	// MaxConcurrentRollouts prevents multiple auto-triggered rollouts from
-	// running simultaneously. Default 1 (queue new deployments until current
-	// completes).
+	// MaxConcurrentRollouts is specified to bound how many auto-triggered rollouts
+	// run simultaneously. Specified, not implemented at v0.4: no controller reads it,
+	// and every value behaves as 1. The controller admits one active rollout per
+	// policy. While it runs, one further trigger waits; a trigger written while
+	// another is waiting replaces it, and the replaced trigger is never evaluated,
+	// recorded or reported by an Event.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	MaxConcurrentRollouts int32 `json:"maxConcurrentRollouts,omitempty"`
 
 	// ConsecutiveRejectionLimit is the number of consecutive quality-gate
 	// rejections after which the controller sets a FailedRepeatedly condition and
-	// SUSPENDS evaluation — further triggers are silently dropped until an operator
-	// resets the policy (swarmctl reset policy). 0 disables suspension (unlimited
+	// SUSPENDS evaluation. Until an operator resets the policy (swarmctl modelpolicy
+	// reset), each further trigger is dropped with a TriggerDroppedWhileSuspended
+	// Warning Event on the policy; none is queued. 0 disables suspension (unlimited
 	// retries). §9.1.10.4.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=5
@@ -321,8 +369,10 @@ type ModelPolicyStatus struct {
 	// +optional
 	ConsecutiveRejections int32 `json:"consecutiveRejections,omitempty"`
 
-	// WebhookEndpoint is the auto-generated endpoint URL when Trigger.Type=Webhook.
-	// Training systems POST to this URL when training completes.
+	// WebhookEndpoint is specified to hold the endpoint URL when Trigger.Type=Webhook.
+	// Written by no controller at v0.4: it stays empty, and the URL is
+	// /webhooks/v1/model-policy/{namespace}/{name} on the manager's ModelPolicy
+	// webhook listener.
 	// +optional
 	WebhookEndpoint string `json:"webhookEndpoint,omitempty"`
 
@@ -356,10 +406,34 @@ type ModelPolicyStatus struct {
 // pick success rate in simulation will be blocked from reaching the fleet by
 // the policy, regardless of how recently it was trained.
 //
+// GATING IS TARGET-KIND-INDEPENDENT (normative). A ModelPolicy whose quality gate
+// rejects a candidate version of spec.modelName blocks the auto-deployment of that
+// version to EVERY target kind, robots and EdgeNodes alike; a policy that would
+// block a robot rollout blocks an edge rollout of the same artifact, and a policy
+// that would block an edge rollout blocks the robot rollout. The gate is evaluated
+// against the artifact's reported metrics, which say whether the model is fit to
+// run at all — nothing in minPickSuccessRate, maxFailureRate, minEvalEpisodes or
+// maxSimToRealGap becomes more permissive because the inference moved off the robot
+// and onto the box beside it. spec.targetKind chooses WHERE a passing model is
+// deployed; it never changes WHETHER it passes.
+//
+// Two consequences worth stating, because both are the kind of thing a reader
+// otherwise assumes the other way:
+//
+//   - The suspension in §9.1.10.4 is likewise kind-independent. Once
+//     consecutiveRejections reaches consecutiveRejectionLimit the policy stops
+//     evaluating, and no target kind is exempt from the halt.
+//   - Two policies over the same modelName with different targetKinds are two
+//     independent gates, not one gate with two outputs. A version that one admits
+//     and the other rejects deploys only where it was admitted — which is a real
+//     configuration (an edge box may be held to a stricter latency bar than a
+//     robot), and is legible only because each policy reports its own decision.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=mp
 // +kubebuilder:printcolumn:name="Model",type="string",JSONPath=".spec.modelName"
+// +kubebuilder:printcolumn:name="Target",type="string",JSONPath=".spec.targetKind"
 // +kubebuilder:printcolumn:name="Trigger",type="string",JSONPath=".spec.trigger.type"
 // +kubebuilder:printcolumn:name="AutoDeploy",type="string",JSONPath=".spec.autoDeployOn"
 // +kubebuilder:printcolumn:name="Deployed",type="integer",JSONPath=".status.deploymentCount"

@@ -3,8 +3,8 @@
 
 {{- if .Values.metrics.service.enabled -}}
 # ─────────────────────────────────────────────────────────────────────────────
-# Metrics Service — exposes the manager's /metrics endpoint (RFC-0001 §9.3.8; the port
-# is not specified there and defaults to 8080 from the manager's own flag) so a Prometheus
+# Metrics Service — exposes the manager's /metrics endpoint (RFC-0001 #control-plane-observability-prometheus-metrics-contract;
+# a configurable port, default 8080, which is also the manager's own flag default) so a Prometheus
 # can scrape it. Swarmada is only a scrape
 # TARGET; this chart never bundles Prometheus/Grafana/Alertmanager.
 #
@@ -18,7 +18,7 @@
 #        prometheus.io/path:   "/metrics"
 #      (Pod-role service discovery reads pod annotations, so this Service is not
 #      strictly required for that path — but it gives a stable DNS name.)
-# The endpoint is unauthenticated by default (§9.3.8); front it with a network
+# The endpoint is unauthenticated by default (RFC-0001 #control-plane-observability-prometheus-metrics-contract); front it with a network
 # policy or an authenticating proxy in production.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: v1

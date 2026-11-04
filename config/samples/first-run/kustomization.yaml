@@ -1,0 +1,80 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The first-run sample set, for a control plane with admission webhooks ON and
+# ControlStream authorization ON: the Helm chart's defaults, `make deploy`, or
+# `make first-run`, which applies this set and runs it end to end.
+#
+#   kubectl create namespace warehouse-a
+#   kubectl apply -k config/samples/first-run
+#
+# Like every sample, it declares only swarmada.io kinds (and generates one ConfigMap), so
+# the namespace is created first. The in-cluster simulation adapter's client certificate
+# names it: sim-fleet-adapter.warehouse-a.svc.cluster.local binds a connection to
+# FleetAdapter warehouse-a/sim-fleet-adapter.
+#
+# It declares no Robot. With webhooks on, a Robot is admitted only while its
+# FleetAdapter is Connected with conformance Passed, and an adapter is Connected
+# only while its process holds a verified ControlStream. So a robot arrives by
+# discovery: the adapter announces it, a DiscoveredRobot appears, and an operator
+# admits it with this set's class:
+#
+#   swarmctl admit robot sim-robot-001 -n warehouse-a --zone warehouse-a \
+#     --adapter sim-fleet-adapter --class simbot-v1 --yes
+#
+# Then apply the task, which is kept out of this kustomization so that it is
+# created when a robot can take it:
+#
+#   kubectl apply -f config/samples/first-run/fleettask.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Emit order. The default sort puts kinds it does not know in alphabetical order, so
+# the FleetAdapter and FleetZone would reach the API server before the SwarmadaConfig,
+# and the manager would create a default config (signature verification required, no
+# trust root) that this set then overwrites. This order puts the report ConfigMap
+# before the FleetAdapter that pins it, and the SwarmadaConfig before any FleetZone or
+# FleetAdapter. sortOptions needs the kustomize built into kubectl 1.27 or later; the
+# chart's Kubernetes 1.31 minimum already implies such a kubectl.
+sortOptions:
+  order: legacy
+  legacySortOptions:
+    orderFirst:
+      - ConfigMap
+      - SwarmadaConfig
+      - RobotClass
+      - FleetZone
+      - FleetAdapter
+    orderLast: []
+
+resources:
+  - swarmadaconfig.yaml
+  - fleetzone.yaml
+  - robotclass.yaml
+  - fleetadapter.yaml
+
+# The conformance report the FleetAdapter pins by digest. conformance-report.json is a
+# report the conformance harness wrote for the simulation adapter, the recorded one:
+#   SIM_CONFORMANCE_REPORT=recorded hack/sim-conformance-report.sh \
+#     config/samples/first-run/conformance-report.json
+# (a byte copy of test/samples/testdata/recorded-sim-adapter-report.json, the recorded
+# harness report the repository publishes). test/samples fails if the copy, the
+# pinned digest or the report's contract version stops agreeing with the control plane.
+configMapGenerator:
+  - name: sim-fleet-adapter-conformance
+    namespace: warehouse-a
+    files:
+      - report.json=conformance-report.json
+    options:
+      disableNameSuffixHash: true

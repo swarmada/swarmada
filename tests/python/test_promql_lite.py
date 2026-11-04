@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline unit tests for the §9.3.8 alert-expression evaluator (no cluster)."""
+"""Offline unit tests for the metrics-contract alert-expression evaluator (no cluster)."""
 
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "examples" / "full-surface-demo"))
+sys.path.insert(
+    0, str(pathlib.Path(__file__).resolve().parents[2] / "examples" / "full-surface-demo")
+)
 
 from promql_lite import (  # noqa: E402
     ALERTS,
@@ -29,8 +31,8 @@ from promql_lite import (  # noqa: E402
 
 def test_parse_labels_and_values():
     snap = Snapshot(
-        '# HELP x help\n'
-        '# TYPE x gauge\n'
+        "# HELP x help\n"
+        "# TYPE x gauge\n"
         'swarmada_fleetactions_by_phase{namespace="warehouse-a",phase="Revoking"} 1\n'
         'swarmada_fleetactions_by_phase{namespace="warehouse-a",phase="InProgress"} 2\n'
         'swarmada_fleet_adapter_connected{namespace="warehouse-a",adapter="sim"} 0\n'
@@ -41,11 +43,7 @@ def test_parse_labels_and_values():
 
 
 def test_parse_ignores_comments_and_inf():
-    samples = parse_metrics(
-        "# a comment\n"
-        'b_bucket{le="+Inf"} 5\n'
-        "plain_metric 7\n"
-    )
+    samples = parse_metrics("# a comment\n" 'b_bucket{le="+Inf"} 5\n' "plain_metric 7\n")
     names = {s.name for s in samples}
     assert "plain_metric" in names and "b_bucket" in names
 
@@ -62,7 +60,8 @@ def test_histogram_quantile_all_fast():
     assert histogram_quantile(0.99, buckets) <= 1.0
 
 
-# ── fire / clear per §9.3.8 alert ─────────────────────────────────────────────
+# ── fire / clear per metrics-contract alert ─────────────────────────────────────────────
+
 
 def _gauge(name, **labels):
     lbl = ",".join(f'{k}="{v}"' for k, v in labels.items())
@@ -72,17 +71,26 @@ def _gauge(name, **labels):
 def test_gauge_alerts_fire_and_clear():
     ns = {"namespace": "warehouse-a"}
     fire = Snapshot(
-        _gauge("swarmada_fleetactions_by_phase", phase="Revoking", **ns) + " 1\n"
-        + _gauge("swarmada_fleet_adapter_connected", adapter="sim", **ns) + " 0\n"
-        + _gauge("swarmada_robots_in_estop", estop_state="Stopped", **ns) + " 1\n"
+        _gauge("swarmada_fleetactions_by_phase", phase="Revoking", **ns)
+        + " 1\n"
+        + _gauge("swarmada_fleet_adapter_connected", adapter="sim", **ns)
+        + " 0\n"
+        + _gauge("swarmada_robots_in_estop", estop_state="Stopped", **ns)
+        + " 1\n"
     )
     clear = Snapshot(
-        _gauge("swarmada_fleetactions_by_phase", phase="Revoking", **ns) + " 0\n"
-        + _gauge("swarmada_fleet_adapter_connected", adapter="sim", **ns) + " 1\n"
-        + _gauge("swarmada_robots_in_estop", estop_state="Stopped", **ns) + " 0\n"
+        _gauge("swarmada_fleetactions_by_phase", phase="Revoking", **ns)
+        + " 0\n"
+        + _gauge("swarmada_fleet_adapter_connected", adapter="sim", **ns)
+        + " 1\n"
+        + _gauge("swarmada_robots_in_estop", estop_state="Stopped", **ns)
+        + " 0\n"
     )
-    for alert in ("SwarmadaFleetActionStuckRevoking", "SwarmadaFleetAdapterDisconnected",
-                  "SwarmadaRobotEstopUncleared"):
+    for alert in (
+        "SwarmadaFleetActionStuckRevoking",
+        "SwarmadaFleetAdapterDisconnected",
+        "SwarmadaRobotEstopUncleared",
+    ):
         fn, _ = ALERTS[alert]
         assert fn(fire)[0] is True, f"{alert} should fire"
         assert fn(clear)[0] is False, f"{alert} should clear"
@@ -99,8 +107,11 @@ def test_counter_increase_alerts_fire_on_delta():
         'swarmada_telemetry_dropped_frames_total{namespace="warehouse-a"} 3\n'
         'swarmada_telemetry_tsdb_write_errors_total{namespace="warehouse-a"} 2\n'
     )
-    for alert in ("SwarmadaEstopLatencySLOBreach", "SwarmadaTelemetryDroppedFrames",
-                  "SwarmadaTelemetryTSDBWriteErrors"):
+    for alert in (
+        "SwarmadaEstopLatencySLOBreach",
+        "SwarmadaTelemetryDroppedFrames",
+        "SwarmadaTelemetryTSDBWriteErrors",
+    ):
         fn, needs_base = ALERTS[alert]
         assert needs_base is True
         assert fn(fired, base)[0] is True, f"{alert} should fire on counter advance"

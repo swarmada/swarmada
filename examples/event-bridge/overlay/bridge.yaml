@@ -1,0 +1,198 @@
+# The event bridge: a Deployment the cluster starts, so nobody runs it by hand.
+#
+# Its Role is the whole of what it may do in the cluster: create SemanticEvents. It
+# cannot read them back, create sources or triggers, touch a FleetTask, or clear a
+# draft. RBAC cannot say which sources those events may name; bridge-policy.yaml does.
+#
+# Callers authenticate with HMAC-SHA256 over the key id, a timestamp and the body,
+# one key per caller, from Secret event-bridge-keys. That Secret is not in this
+# directory: run.sh generates the keys and creates it, and no key is written to a file.
+# The serving certificate is issued by cert-manager; callers verify the bridge with
+# the ca.crt in Secret event-bridge-tls.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: event-bridge
+  namespace: warehouse-a
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: event-bridge
+  namespace: warehouse-a
+rules:
+  - apiGroups: ["swarmada.io"]
+    resources: ["semanticevents"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: event-bridge
+  namespace: warehouse-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: event-bridge
+subjects:
+  - kind: ServiceAccount
+    name: event-bridge
+    namespace: warehouse-a
+---
+# The bridge's declared vocabulary. Each caller (a key id) is bound to one source and
+# the inbound types it may send; zones and schedules are the only values that may
+# become part of an event type. Anything else is refused with the reason.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: event-bridge-config
+  namespace: warehouse-a
+data:
+  config.json: |
+    {
+      "namespace": "warehouse-a",
+      "hours": {"timezone": "UTC", "opens": "07:00", "closes": "19:00"},
+      "callers": {
+        "door-controller": {"source": "building-doors", "types": ["door.opened"]},
+        "work-orders":     {"source": "work-orders",    "types": ["workorder.created"]},
+        "scheduler":       {"source": "schedules",      "types": ["schedule.started"]},
+        "camera-adapter":  {"source": "static-cameras", "types": ["camera.detection"]}
+      },
+      "zones": ["warehouse-a"],
+      "schedules": ["mapping-segment"],
+      "maxAge": "24h"
+    }
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: event-bridge-selfsigned
+  namespace: warehouse-a
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: event-bridge-tls
+  namespace: warehouse-a
+spec:
+  secretName: event-bridge-tls
+  # A subject as well as the SANs: some TLS clients refuse a certificate whose
+  # subject is empty.
+  commonName: event-bridge.warehouse-a.svc
+  duration: 2160h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - event-bridge
+    - event-bridge.warehouse-a.svc
+    - event-bridge.warehouse-a.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: event-bridge-selfsigned
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-bridge
+  namespace: warehouse-a
+  labels:
+    app.kubernetes.io/name: event-bridge
+spec:
+  selector:
+    app.kubernetes.io/name: event-bridge
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-bridge
+  namespace: warehouse-a
+  labels:
+    app.kubernetes.io/name: event-bridge
+spec:
+  # One replica: the replay cache is in memory. A second replica would accept a
+  # request the first had already seen (and the API server would then answer it as
+  # a duplicate, so no second draft; but the refusal would be lost).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: event-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: event-bridge
+    spec:
+      serviceAccountName: event-bridge
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Secret volumes are root-owned; fsGroup makes them readable by the bridge's
+        # group, and mode 0440 keeps them unreadable by anyone else.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bridge
+          image: swarmada-event-bridge:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - --config=/etc/event-bridge/config/config.json
+            - --keys-dir=/etc/event-bridge/keys
+            - --tls-cert=/etc/event-bridge/tls/tls.crt
+            - --tls-key=/etc/event-bridge/tls/tls.key
+            - --listen=:8443
+            - --window=5m
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/event-bridge/config
+              readOnly: true
+            - name: keys
+              mountPath: /etc/event-bridge/keys
+              readOnly: true
+            - name: tls
+              mountPath: /etc/event-bridge/tls
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: event-bridge-config
+        - name: keys
+          secret:
+            secretName: event-bridge-keys
+            defaultMode: 0440
+        - name: tls
+          secret:
+            secretName: event-bridge-tls
+            defaultMode: 0440

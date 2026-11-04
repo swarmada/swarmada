@@ -18,7 +18,7 @@ package webhook
 
 // The RobotDefaulter backfills swarmada.io/robot-id to metadata.name so
 // operator-created Robots resolve robot_id → Robot for telemetry status projection
-// (RFC-0001 §9.3.1); an already-set value is preserved.
+// (RFC-0001 #control-plane-swarmada-api-server); an already-set value is preserved.
 
 import (
 	"context"

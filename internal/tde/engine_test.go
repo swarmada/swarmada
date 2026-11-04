@@ -121,8 +121,8 @@ func TestRequestReservation_CriticalDoesNotPreemptCritical(t *testing.T) {
 	}
 }
 
-// Critical does NOT preempt a High reservation — same band rule as the §C
-// controller preemption (only Normal/Low), stricter than §9.4.6's "any non-Critical".
+// Critical does NOT preempt a High reservation — RFC-0001 #tde-preemption-algorithm's band
+// rule (only Normal/Low), the same as the FleetAction controller's preemption.
 func TestRequestReservation_DoesNotPreemptHigh(t *testing.T) {
 	e, _ := newEngine(t, fzone("z", 1))
 	ctx := context.Background()
@@ -135,7 +135,7 @@ func TestRequestReservation_DoesNotPreemptHigh(t *testing.T) {
 	}
 }
 
-// §9.4.6 High-band preemption: a High action preempts a Normal reservation in a full
+// RFC-0001 #tde-preemption-algorithm High-band preemption: a High action preempts a Normal reservation in a full
 // zone — same path as Critical (both are preemptor bands).
 func TestRequestReservation_HighPreemptsNormal(t *testing.T) {
 	e, _ := newEngine(t, fzone("z", 1))

@@ -76,11 +76,15 @@ func newProbeReconciler(t *testing.T, prober probe.Prober, objs ...client.Object
 	return &RobotProbeReconciler{Client: c, Scheme: scheme, Prober: prober}, c
 }
 
+// reconcileProbe runs ONE probe cycle. It clears the cycle-pacing anchor first, so each
+// call is the next cycle rather than a second reconcile inside the same interval — which
+// the controller would rate-limit (RFC-0001 §9.1.7; see cycleDue). Tests that assert the
+// pacing itself call Reconcile directly: TestRobotProbe_CycleRateIsIntervalSeconds.
 func reconcileProbe(t *testing.T, r *RobotProbeReconciler) {
 	t.Helper()
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "cam-probe", Namespace: rolloutNS},
-	}); err != nil {
+	key := types.NamespacedName{Name: "cam-probe", Namespace: rolloutNS}
+	r.forgetCycle(key)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 }

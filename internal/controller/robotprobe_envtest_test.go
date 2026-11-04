@@ -65,7 +65,10 @@ func TestEnvtest_DisableAllProbes(t *testing.T) {
 	if err := envK8s.Create(ctx, cfg); err != nil {
 		t.Fatalf("create config: %v", err)
 	}
-	if err := envK8s.Create(ctx, envtestProbeRobot(ns, "amr-1", "rid-1")); err != nil {
+	// The robot id is unique per namespace: telemetry resolves it across namespaces, and a
+	// second run in one process (-count=N) finds the first run's robot still there.
+	rid := "rid-" + ns
+	if err := envK8s.Create(ctx, envtestProbeRobot(ns, "amr-1", rid)); err != nil {
 		t.Fatalf("create robot: %v", err)
 	}
 	if err := envK8s.Create(ctx, envtestProbe(ns, fleetv1.ProbeTypeHardware)); err != nil {
@@ -91,7 +94,7 @@ func TestEnvtest_DisableAllProbes(t *testing.T) {
 
 	// Passive telemetry still flows to Robot.status while probes are disabled.
 	sink := &RobotStatusSink{Client: envK8s}
-	if err := sink.ApplyMaterialUpdate(ctx, telemetry.MaterialUpdate{RobotID: "rid-1", BatteryPct: i32(55)}); err != nil {
+	if _, err := sink.ApplyMaterialUpdate(ctx, telemetry.MaterialUpdate{RobotID: rid, BatteryPct: i32(55)}); err != nil {
 		t.Fatalf("apply telemetry: %v", err)
 	}
 	gotRobot := &fleetv1.Robot{}

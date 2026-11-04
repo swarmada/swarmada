@@ -14,6 +14,11 @@ metadata:
     {{- include "swarmada.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # Recreate, never a rolling update: the old manager stops before the new one starts, so an
+  # upgrade never runs a second manager process beside the leader. A single manager replica is
+  # the only supported safety configuration (RFC-0001 #safety-robot-stop-table).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "swarmada.selectorLabels" . | nindent 6 }}
@@ -48,6 +53,11 @@ spec:
             {{- end }}
             {{- if .Values.controlStream.enabled }}
             - --fleet-adapter-bind-address=:{{ .Values.controlStream.port }}
+            # mTLS (ADR-0025). Without all three the manager does not serve ControlStream
+            # (fail closed); templates/validate.yaml refuses to render without a source.
+            - --fleet-adapter-tls-cert-file=/etc/controlstream-tls/tls.crt
+            - --fleet-adapter-tls-key-file=/etc/controlstream-tls/tls.key
+            - --fleet-adapter-client-ca-file=/etc/controlstream-tls/ca.crt
             {{- else }}
             # Empty disables the ControlStream gRPC server (cmd/manager).
             - --fleet-adapter-bind-address=
@@ -64,6 +74,13 @@ spec:
             # ENABLE_WEBHOOKS=false disables the admission webhook server (cmd/manager).
             - name: ENABLE_WEBHOOKS
               value: {{ ternary "true" "false" .Values.webhooks.enabled | quote }}
+            # The manager reads its TDE recovery settings (spec.trafficDeconfliction.recovery.*)
+            # from the SwarmadaConfig in its own namespace (cmd/manager). Set here from the
+            # downward API, so manager.extraEnv need not set POD_NAMESPACE.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- with .Values.manager.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -105,18 +122,33 @@ spec:
             {{- toYaml .Values.manager.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.manager.securityContext | nindent 12 }}
-          {{- if .Values.webhooks.enabled }}
+          {{- if or .Values.webhooks.enabled .Values.controlStream.enabled }}
           volumeMounts:
+            {{- if .Values.webhooks.enabled }}
             - name: webhook-certs
               mountPath: /tmp/k8s-webhook-server/serving-certs
               readOnly: true
+            {{- end }}
+            {{- if .Values.controlStream.enabled }}
+            - name: controlstream-tls
+              mountPath: /etc/controlstream-tls
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if .Values.webhooks.enabled }}
+      {{- if or .Values.webhooks.enabled .Values.controlStream.enabled }}
       volumes:
+        {{- if .Values.webhooks.enabled }}
         - name: webhook-certs
           secret:
             secretName: {{ include "swarmada.webhookCertSecret" . }}
             defaultMode: 420
+        {{- end }}
+        {{- if .Values.controlStream.enabled }}
+        - name: controlstream-tls
+          secret:
+            secretName: {{ include "swarmada.controlStreamTLSSecret" . }}
+            defaultMode: 420
+        {{- end }}
       {{- end }}
       terminationGracePeriodSeconds: 10
       {{- with .Values.manager.nodeSelector }}

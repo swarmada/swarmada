@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 // Package audit is the tamper-evident, hash-chained safety audit log (RFC-0001
-// §9.5.4, §9.6.5). Entries form a per-namespace chain: each entry's chain_hash is
+// #security-audit-logging, RFC-0001 #safety-safety-audit-log). Entries form a per-namespace chain: each entry's chain_hash is
 // SHA-256(previous chain_hash ‖ this entry's content), so any modification,
 // deletion, reordering, or sequence gap is detectable by Verify. Denied actions
-// are recorded, never dropped (§9.5.4).
+// are recorded, never dropped (RFC-0001 #security-audit-logging).
 package audit
 
 import (
@@ -36,14 +36,14 @@ import (
 // read back, so the chain necessarily restarts at genesis on every process restart.
 var ErrSinkNotResumable = errors.New("audit sink cannot be resumed; the chain restarts at genesis on each restart")
 
-// genesisHash seeds each namespace's chain (§9.6.5.2 — genesis chain_hash is all
+// genesisHash seeds each namespace's chain (RFC-0001 #safety-log-entry-format — genesis chain_hash is all
 // zeros). It is the prev-hash for the first real entry.
 const genesisHash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 // logVersion is the audit schema version stamped on every entry.
 const logVersion = "1"
 
-// ActorType classifies the identity that caused an event (§9.5.4).
+// ActorType classifies the identity that caused an event (RFC-0001 #security-audit-logging).
 type ActorType string
 
 // ActorType values.
@@ -53,7 +53,7 @@ const (
 	ActorRobot          ActorType = "robot"
 )
 
-// Outcome is the result of an audited action (§9.5.4). Denied actions are always
+// Outcome is the result of an audited action (RFC-0001 #security-audit-logging). Denied actions are always
 // recorded.
 type Outcome string
 
@@ -64,7 +64,7 @@ const (
 	OutcomeError   Outcome = "Error"
 )
 
-// Required audit event types (§9.5.4, §9.6.5.1) — the subset wired so far plus the
+// Required audit event types (RFC-0001 #security-audit-logging, RFC-0001 #safety-required-events) — the subset wired so far plus the
 // safety/security events; more producers append using these constants.
 const (
 	EventRobotAuthzDenied     = "ROBOT_AUTHZ_DENIED"
@@ -74,11 +74,17 @@ const (
 	EventEstopCleared         = "ESTOP_CLEARED"
 	EventEstopClearRejected   = "ESTOP_CLEAR_REJECTED"
 	EventFleetActionCancelled = "FLEETACTION_CANCELLED"
-	EventFirmwareRolloutCreat = "FIRMWARE_ROLLOUT_CREATED"
-	EventModelRolloutCreated  = "MODEL_ROLLOUT_CREATED"
-	EventSwarmadaConfigMod    = "SWARMADA_CONFIG_MODIFIED"
+	// EventFleetActionSuperseded records that the FLEET replaced this work with a
+	// newer directive, as distinct from a person cancelling it. Both end the action
+	// at phase Cancelled, so without two event types an auditor reconstructing "who
+	// stopped this" could not separate a scheduling decision from a human act
+	// (RFC-0001 #fleetaction-directive-supersession).
+	EventFleetActionSuperseded = "FLEETACTION_SUPERSEDED"
+	EventFirmwareRolloutCreat  = "FIRMWARE_ROLLOUT_CREATED"
+	EventModelRolloutCreated   = "MODEL_ROLLOUT_CREATED"
+	EventSwarmadaConfigMod     = "SWARMADA_CONFIG_MODIFIED"
 
-	// Rollout pause and operator resume (§9.6.5.1). A paused rollout has stopped
+	// Rollout pause and operator resume (RFC-0001 #safety-required-events). A paused rollout has stopped
 	// dispatching to a fleet mid-update, and the resume that releases it is an operator
 	// OVERRIDE of an automated safety halt — it abandons the robots that failed rather
 	// than retrying them (ADR-0041). Both halves are sealed: an incident review needs to
@@ -88,7 +94,7 @@ const (
 	EventModelRolloutPaused    = "MODEL_ROLLOUT_PAUSED"
 	EventRolloutResumed        = "ROLLOUT_RESUMED"
 
-	// Robot connectivity and capability lifecycle (§9.6.5.1). These seal the
+	// Robot connectivity and capability lifecycle (RFC-0001 #safety-required-events). These seal the
 	// transitions an incident reconstruction turns on: when a robot dropped, how long
 	// it was gone, when it came back, and when a capability stopped being schedulable.
 	EventRobotOffline       = "ROBOT_OFFLINE"
@@ -96,7 +102,7 @@ const (
 	EventRobotReconnected   = "ROBOT_RECONNECTED"
 	EventCapabilityDegraded = "CAPABILITY_DEGRADED"
 
-	// ZoneMaintenance window lifecycle (§9.6.5.1). A maintenance window is the
+	// ZoneMaintenance window lifecycle (RFC-0001 #safety-required-events). A maintenance window is the
 	// administrative record that robots were deliberately taken out of service — the
 	// counterpart an incident review reads next to the estop entries, and the thing that
 	// distinguishes "the fleet stopped" from "the fleet was stopped on purpose".
@@ -110,10 +116,10 @@ const (
 
 	// EventActionPausedByEstop records an in-flight action halted by an emergency stop.
 	// Unlike the maintenance requeue above, a Paused action stays bound to its robot and
-	// is never auto-resumed: an operator decides (§9.6.2.4).
+	// is never auto-resumed: an operator decides (RFC-0001 #safety-fleetaction-behaviour-during-estop).
 	EventActionPausedByEstop = "ACTION_PAUSED_BY_ESTOP"
 
-	// Firmware install and artifact-verification lifecycle (§9.6.5.1). Signature outcomes
+	// Firmware install and artifact-verification lifecycle (RFC-0001 #safety-required-events). Signature outcomes
 	// are the most safety-relevant records this specification defines: they are the
 	// evidence that unverified code was never dispatched to a robot, which is exactly the
 	// claim a safety case has to be able to make.
@@ -125,7 +131,7 @@ const (
 	EventFirmwareSignatureVerified = "FIRMWARE_SIGNATURE_VERIFIED"
 	EventFirmwareSignatureFailed   = "FIRMWARE_SIGNATURE_FAILED"
 
-	// Model update and artifact-verification lifecycle (§9.6.5.1). Model signature
+	// Model update and artifact-verification lifecycle (RFC-0001 #safety-required-events). Model signature
 	// outcomes are reported by the ADAPTER on the model_update acknowledgement, unlike
 	// firmware's, which the control plane verifies itself before dispatch — so these
 	// entries record what the robot attested, not what this process checked.
@@ -136,7 +142,7 @@ const (
 	EventModelSignatureFailed   = "MODEL_SIGNATURE_FAILED"
 
 	// EventEstopLatencyViolation records an estop acknowledgement that missed the 500 ms
-	// SLA (§9.6.2.2). The stop still happened — this is not a failed estop — but the
+	// SLA (RFC-0001 #safety-timing-requirements). The stop still happened — this is not a failed estop — but the
 	// margin an operator was relying on did not, and that is a durable fact about an
 	// adapter's conformance rather than a transient operational blip.
 	EventEstopLatencyViolation = "ESTOP_LATENCY_VIOLATION"
@@ -145,6 +151,15 @@ const (
 	// A single failed probe is noise; a SUSTAINED failure is what demotes a component and
 	// takes capabilities out of scheduling, which is the fact worth sealing.
 	EventProbeFailure = "PROBE_FAILURE"
+)
+
+// Estop resume events. Release from the post-clear window is operator-confirmed only
+// (RFC-0001 #safety-estop-state-machine): EventEstopResumeConfirmed records an operator
+// releasing a robot from Resuming to Normal, and EventEstopResumeRefused records a
+// release the control plane refused, with the reason.
+const (
+	EventEstopResumeConfirmed = "ESTOP_RESUME_CONFIRMED"
+	EventEstopResumeRefused   = "ESTOP_RESUME_REFUSED"
 )
 
 // Actor is who caused an event.
@@ -161,7 +176,7 @@ type Resource struct {
 	Name      string `json:"name"`
 }
 
-// Entry is one immutable audit record (§9.5.4 / §9.6.5.2 fields). SequenceNumber,
+// Entry is one immutable audit record (RFC-0001 #security-audit-logging / log-entry-format fields). SequenceNumber,
 // EventTime, LogVersion, SwarmadaVersion, and ChainHash are set by Record.
 type Entry struct {
 	SequenceNumber  uint64            `json:"sequence_number"`
@@ -180,7 +195,7 @@ type Entry struct {
 
 // Sink is the append-only backing store for sealed entries. Implementations MUST
 // be safe for concurrent use. A durable/external (SIEM, append-only file) sink and
-// retention (§9.6.5.4) are deployment concerns; MemorySink suffices for tests/dev.
+// retention (RFC-0001 #safety-retention-policy) are deployment concerns; MemorySink suffices for tests/dev.
 type Sink interface {
 	Append(Entry) error
 }
@@ -192,7 +207,7 @@ type Sink interface {
 // every namespace again at sequence 1 chained to genesis. An auditor verifying the file
 // then sees the chain restart, and — worse — cannot distinguish that restart from an
 // attacker truncating the log and re-sealing a shorter one, which is precisely the
-// property §9.6.5.2 exists to provide.
+// property RFC-0001 #safety-log-entry-format exists to provide.
 //
 // Optional: a Sink that cannot be read back (a write-only SIEM forwarder) simply does not
 // implement it, and Log.Resume says so rather than pretending the chain is continuous.

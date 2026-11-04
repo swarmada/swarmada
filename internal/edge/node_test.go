@@ -212,7 +212,7 @@ func TestEdge_LocalEstopFansOut(t *testing.T) {
 	}
 }
 
-// The local edge audit log is tamper-evident (the §F-4 chain), so a modified
+// The local edge audit log is tamper-evident (a hash chain), so a modified
 // edge estop record is detectable.
 func TestEdge_AuditLogTamperEvident(t *testing.T) {
 	n, sink := newNode(t)

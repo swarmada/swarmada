@@ -1,3 +1,33 @@
+# Demo A — the maintained sample fleet: one FleetZone, three Robots, two FleetActions.
+# Applied wholesale by examples/warehouse-quickstart, examples/demo-ab-live and
+# examples/full-surface-demo.
+#
+# ── WHAT THIS FILE ASSUMES, AND IT IS NOT THE INTENDED PRODUCTION POSTURE ─────────────
+#
+# The three Robot documents below only apply on a control plane with the admission
+# webhooks OFF (ENABLE_WEBHOOKS=false), which is what the quickstart overlays and
+# `make deploy-minimal` ship. With webhooks serving, vrobot.swarmada.io refuses a Robot whose FleetAdapter is
+# not already Connected/Passed, and no adapter is Connected on a namespace where nothing
+# has run yet:
+#
+#   Error from server (Invalid): admission webhook "vrobot.swarmada.io" denied the request:
+#     Robot.swarmada.io "sim-robot-001" is invalid: spec.adapter.name: Invalid value:
+#     "sim-fleet-adapter": FleetAdapter "sim-fleet-adapter" is not ready:
+#     phase=Pending conformance=Unknown (want Connected/Passed; RFC-0001 #fleetadapter-admission-gating)
+#
+# That is the gate working, not a bug: RFC-0001 #fleetadapter-admission-gating holds that a Robot is not "real"
+# until a conformant adapter can actually drive it.
+#
+# So "apply Robots from a file" is a WEBHOOKS-OFF SHORTCUT. The real path is discovery —
+# adapter connects, a DiscoveredRobot appears, an operator runs `swarmctl admit` — and a
+# YAML sample cannot express it, because two of its three steps are a running process and
+# an operator command. config/samples/first-run is the set for that path, and
+# config/samples/README.md describes it in full.
+#
+# The FleetZone and the two FleetActions at the end of this file are unaffected and apply
+# in either mode.
+# ──────────────────────────────────────────────────────────────────────────────────────
+
 apiVersion: swarmada.io/v1
 kind: FleetZone
 metadata:
@@ -5,6 +35,27 @@ metadata:
   namespace: warehouse-a
 spec:
   displayName: "Receiving and staging area — east wing"
+  # Zone geometry. Without this the Zone Controller can never derive
+  # Robot.status.currentZone (it resolves live position telemetry against a zone
+  # polygon), dispatch candidate filter 2 excludes every robot as "not in the
+  # action's zone", and no FleetAction is ever assigned.
+  physicalBounds:
+    # Must equal the floor robots report; the simulator reports floor 0.
+    floor: 0
+    # A 30m x 25m rectangle spanning (-5,-5)->(25,20), metres from the site origin.
+    # Deliberately origin-negative: the simulator spawns every robot at exactly
+    # (0.0, 0.0), and a vertex there would put the spawn point on the boundary --
+    # containment would then rest on the on-edge rule and exact float equality.
+    # A 5m margin makes (0,0) strictly interior. Also contains all three
+    # waypoints below, so a robot that has navigated stays in the zone.
+    polygon:
+      # "y" is quoted: bare y/n/yes/no/true/false are booleans under YAML 1.1
+      # scalar resolution (the "Norway problem"), so an unquoted `y:` becomes the
+      # boolean key `true`, which the API server's strict decoding rejects.
+      - { x: -5.0, "y": -5.0 }
+      - { x: 25.0, "y": -5.0 }
+      - { x: 25.0, "y": 20.0 }
+      - { x: -5.0, "y": 20.0 }
   waypoints:
     - name: receiving-dock-1
       x: 5.1
@@ -27,6 +78,11 @@ metadata:
 spec:
   manufacturer: Simulated
   model: SimBot-v1
+  # The class the ControlStream authorizer matches against the bound adapter's
+  # spec.servesRobotClasses; the runners' FleetAdapter lists simbot-v1. No RobotClass
+  # object is applied: with the webhooks off (see the header) nothing resolves the
+  # name, and authorization only compares it.
+  robotClass: simbot-v1
   adapter:
     name: sim-fleet-adapter
     version: "0.1.0"
@@ -50,6 +106,7 @@ metadata:
 spec:
   manufacturer: Simulated
   model: SimBot-v1
+  robotClass: simbot-v1
   adapter:
     name: sim-fleet-adapter
     version: "0.1.0"
@@ -70,6 +127,7 @@ metadata:
 spec:
   manufacturer: Simulated
   model: SimBot-v1
+  robotClass: simbot-v1
   adapter:
     name: sim-fleet-adapter
     version: "0.1.0"

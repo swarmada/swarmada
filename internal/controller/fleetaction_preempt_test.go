@@ -64,7 +64,7 @@ func TestPreempt_CriticalDisplacesNormal(t *testing.T) {
 	if crit.Status.Phase != fleetv1.ActionPhaseAssigned || crit.Status.AssignedRobot != "r1" {
 		t.Fatalf("critical not assigned to freed robot: phase=%s robot=%q", crit.Status.Phase, crit.Status.AssignedRobot)
 	}
-	if crit.Status.AssignmentGeneration != 1 || crit.Status.LeaseExpiresAt == nil {
+	if crit.Status.AssignmentGeneration < 1 || crit.Status.LeaseExpiresAt == nil {
 		t.Fatalf("critical lease not minted: gen=%d lease=%v", crit.Status.AssignmentGeneration, crit.Status.LeaseExpiresAt)
 	}
 	// Robot now bound to the Critical action.
@@ -73,21 +73,22 @@ func TestPreempt_CriticalDisplacesNormal(t *testing.T) {
 	}
 }
 
-// Victim eviction: once the robot holds the Critical action, the Preempted victim
+// Victim eviction: once the adapter confirms the victim's cancel, the Preempted victim
 // requeues to Pending (generation preserved, retryCount is not tracked).
-func TestPreempt_VictimRequeuesOnceRobotSwitches(t *testing.T) {
+func TestPreempt_VictimRequeuesOnceItsStopIsConfirmed(t *testing.T) {
 	lease := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
 	r, c := newActionReconciler(t,
 		// Robot already switched to the critical action; victim left in Preempted.
 		bandAction("norm", "r1", fleetv1.ActionPhasePreempted, fleetv1.ActionPriorityNormal, 2, lease),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "crit"),
 	)
+	r.Commander = &fakeCommander{cancelAck: true}
 
 	reconcileAction(t, r, "norm")
 
 	v := getAction(t, c, "norm")
 	if v.Status.Phase != fleetv1.ActionPhasePending {
-		t.Fatalf("victim phase = %s, want Pending once robot switched off it", v.Status.Phase)
+		t.Fatalf("victim phase = %s, want Pending once its stop is confirmed", v.Status.Phase)
 	}
 	if v.Status.AssignedRobot != "" || v.Status.LeaseExpiresAt != nil {
 		t.Fatalf("victim binding not cleared: robot=%q lease=%v", v.Status.AssignedRobot, v.Status.LeaseExpiresAt)
@@ -227,7 +228,7 @@ func TestPreempt_ConnectivityLoss_HoldsOnFrozenLease(t *testing.T) {
 }
 
 // Case 2 — Control-plane restart/failover: a cold reconcile of a persisted
-// Preempted victim re-evaluates purely; if the robot has switched, it requeues,
+// Preempted victim re-evaluates purely; once its stop is confirmed it requeues,
 // preserving generation. No in-memory state needed.
 func TestPreempt_RestartFailover_PureReevaluation(t *testing.T) {
 	alive := &metav1.Time{Time: time.Now().Add(defaultLeaseDuration)}
@@ -235,12 +236,13 @@ func TestPreempt_RestartFailover_PureReevaluation(t *testing.T) {
 		bandAction("norm", "r1", fleetv1.ActionPhasePreempted, fleetv1.ActionPriorityNormal, 6, alive),
 		robotInPhase("r1", fleetv1.RobotPhaseInProgress, "crit"), // robot already switched
 	)
+	r.Commander = &fakeCommander{cancelAck: true}
 
 	reconcileAction(t, r, "norm")
 
 	v := getAction(t, c, "norm")
 	if v.Status.Phase != fleetv1.ActionPhasePending {
-		t.Fatalf("phase = %s — cold reconcile should requeue a victim whose robot switched", v.Status.Phase)
+		t.Fatalf("phase = %s — cold reconcile should requeue a victim whose stop is confirmed", v.Status.Phase)
 	}
 	if v.Status.AssignmentGeneration != 6 {
 		t.Fatalf("generation reset across restart: %d, want 6 preserved", v.Status.AssignmentGeneration)

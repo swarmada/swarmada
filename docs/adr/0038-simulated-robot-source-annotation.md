@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-08-15 (proposed) · decided 2026-08-19
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §5.3 (Fleet Adapter), ADR-0005 (reference adapter policy — vendor adapters
+- **Related:** RFC-0001 "Fleet Adapter Protocol", ADR-0005 (reference adapter policy — vendor adapters
   own their own repo), ADR-0017 (the coordinate-system annotation stamp this reuses the pattern of)
 
 ## Context

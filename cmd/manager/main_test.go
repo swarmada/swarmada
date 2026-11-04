@@ -16,7 +16,7 @@ limitations under the License.
 
 package main
 
-// ControlStream mTLS wiring (RFC-0001 §9.2.7, ADR-0025): the fail-closed decision
+// ControlStream mTLS wiring (RFC-0001 #fleet-adapter-protocol-transport-security, ADR-0025): the fail-closed decision
 // and the server TLS-config builder.
 
 import (

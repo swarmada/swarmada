@@ -1,0 +1,15 @@
+# Plain-language limit 1: one RFC 2119 keyword per sentence.
+# Flags every keyword after the first in the same sentence. "MUST NOT",
+# "SHOULD NOT", "SHALL NOT" and "NOT RECOMMENDED" count once: NOT is not a token.
+# Scope (Vale 3.23): the sentence scope minus blockquotes, table cells and
+# headings, which the limits exempt; and each list item, its own block (the
+# lookbehind stops at a sentence end inside the item).
+# A sentence end is . ? or ! (plus closing quotes/brackets) followed by
+# whitespace and a character that is not a lowercase letter, or the end.
+extends: existence
+message: "'%s' is a second RFC 2119 keyword in this sentence. Limit: one keyword per sentence. Split the requirement."
+level: error
+scope: ["sentence & ~blockquote & ~table.cell & ~heading", list]
+nonword: true
+tokens:
+  - '(?<=\b(?:MUST|SHALL|SHOULD|MAY|REQUIRED|RECOMMENDED|OPTIONAL)\b(?:(?![.?!][)"''’”\]]*(?:\s+[^\p{Ll}\s]|\s*$))[\s\S])*?)\b(?:MUST|SHALL|SHOULD|MAY|REQUIRED|RECOMMENDED|OPTIONAL)\b'

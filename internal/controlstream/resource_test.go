@@ -81,7 +81,7 @@ func sendReserve(t *testing.T, stream fav1.FleetAdapterService_ControlStreamClie
 }
 
 // A reserve request is dispatched to the reserver and its verdict is returned in a
-// ResourceResponse correlated by request_id (§5.4.5).
+// ResourceResponse correlated by request_id (RFC-0001 #fleet-adapter-protocol-the-controlstream-service).
 func TestControlStream_ResourceReserveGranted(t *testing.T) {
 	client, cleanup := newTestServer(t, &Server{Reservations: fakeReserver{}})
 	defer cleanup()
@@ -134,7 +134,7 @@ func TestControlStream_ResourceReserveNilReserverDenied(t *testing.T) {
 }
 
 // A release that promotes a queued waiter pushes an async reservation_granted to
-// the promoted robot (§5.4.5). The notifier is invoked synchronously in dispatch,
+// the promoted robot (RFC-0001 #tde-shared-resource-queue-management). The notifier is invoked synchronously in dispatch,
 // so it is recorded by the time the release response is received.
 func TestControlStream_ResourceReleasePromotionNotifies(t *testing.T) {
 	notifier := &fakeGrantNotifier{}

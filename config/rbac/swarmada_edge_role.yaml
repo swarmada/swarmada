@@ -1,11 +1,14 @@
 # swarmada:edge — the Zone Controller edge node's service-account role (RFC-0001
-# §9.2.10, §9.6.2.5). Bind via a namespace-scoped RoleBinding to the edge node's
+# #security-role-definitions, RFC-0001 #safety-edge-headless-emergency-stop). Bind via a namespace-scoped RoleBinding to the edge node's
 # ServiceAccount. The edge node runs on facility-LAN hardware, so its cluster
 # access is deliberately minimal: it READS the FleetZones and Robots it guards to
-# keep its cached zone polygons / robot→zone map current (config sync), and WRITES
-# only fleetzones/status.edgeFeedUnavailable to report robots whose adapter never
-# established its EdgeStream. It CANNOT create or delete resources, cannot write
-# any spec, and holds no custom verbs.
+# keep its cached zone polygons / robot→zone map current (config sync). Its one
+# write is a merge patch of fleetzones/status.edgeFeedUnavailable, reporting robots
+# whose adapter never established its EdgeStream, so it holds patch and nothing else
+# on the status subresource. RBAC cannot narrow that verb to one field or one zone:
+# a holder can patch any field of the status of every FleetZone in the namespace it
+# is bound in. Bind it to the edge node's ServiceAccount only. It CANNOT create or
+# delete resources, cannot write any spec, and holds no custom verbs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -19,7 +22,9 @@ rules:
     resources: ["fleetzones", "robots"]
     verbs: ["get", "list", "watch"]
   # Feed reporting: raise/clear status.edgeFeedUnavailable on an edge-node zone so
-  # the Zone Controller can emit the EdgeFeedUnavailable Warning (§9.2.10).
+  # the Zone Controller can emit the EdgeFeedUnavailable Warning (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
+  # The reporter reads the zone above and merge-patches the one field; it never
+  # replaces the status, so update is not granted.
   - apiGroups: ["swarmada.io"]
     resources: ["fleetzones/status"]
-    verbs: ["get", "update", "patch"]
+    verbs: ["patch"]

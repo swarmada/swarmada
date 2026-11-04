@@ -51,13 +51,13 @@ the release semver (`vMAJOR.MINOR.PATCH`), consistent with the existing `IMG` co
 | Image | Source | Purpose | Status |
 |---|---|---|---|
 | `ghcr.io/swarmada/swarmada` | `Dockerfile` (root) → `cmd/manager` | The controller-manager | **Already the Makefile default** — this doc formalizes it, doesn't change it |
-| `ghcr.io/swarmada/swarmada-edge` | `cmd/edge` | The Zone Controller edge node (`examples/edge-node`'s binary, containerized) | Not yet built — no Dockerfile for `cmd/edge` exists today |
-| `ghcr.io/swarmada/fleet-adapter-sim` | `adapters/simulation` | The in-tree simulation adapter, containerized for the quickstart/CI (rather than requiring a local Python install) | Not yet built |
-| `ghcr.io/swarmada/fleet-adapter-ros2` | own repo: `fleet-adapter-ros2` | ROS 2 / Nav2 reference adapter | Not yet built — adapter itself is `partial`/conformant; no image yet |
-| `ghcr.io/swarmada/fleet-adapter-vda5050` | own repo: `fleet-adapter-vda5050` | VDA5050 reference adapter | Not yet built |
-| `ghcr.io/swarmada/fleet-adapter-mavlink` | own repo: `fleet-adapter-mavlink` | MAVLink/PX4 reference adapter | Not yet built |
-| `ghcr.io/swarmada/swarmtop` | own repo (planned): `swarmtop` | The terminal fleet inspector — optional container image for CI/devcontainer use; primary distribution stays the GoReleaser binary + Homebrew/Scoop, not a container | Not yet built, low priority |
-| `ghcr.io/swarmada/swarmctl` | `cmd/swarmctl` | The CLI, containerized for CI/bastion-host use — same caveat as `swarmtop`, binary is primary | Not yet built, low priority |
+| `ghcr.io/swarmada/edge` | `Dockerfile.edge` → `cmd/edge` | The Zone Controller edge node (`examples/edge-node`'s binary, containerized) | Buildable, not published — `make docker-build-edge` builds it for the host architecture and `make docker-push-edge` pushes amd64 and arm64 (`IMG_EDGE`, default `ghcr.io/swarmada/edge:latest`); no workflow pushes it |
+| `ghcr.io/swarmada/fleet-adapter-sim` | `Dockerfile.sim-adapter` → `adapters/simulation` | The in-tree simulation adapter, containerized for the quickstart/CI (rather than requiring a local Python install) | Built locally, not published — `examples/first-run/run.sh` builds it as `swarmada-sim-adapter:dev` and loads it into kind; no Makefile target or workflow pushes it |
+| `ghcr.io/swarmada/fleet-adapter-ros2` | own repo: `fleet-adapter-ros2` | ROS 2 / Nav2 reference adapter | Not built — no image; the adapter's conformance status is its row in [`adapters/REGISTRY.md`](../adapters/REGISTRY.md) |
+| `ghcr.io/swarmada/fleet-adapter-vda5050` | own repo: `fleet-adapter-vda5050` | VDA5050 reference adapter | Not built — no image |
+| `ghcr.io/swarmada/fleet-adapter-mavlink` | own repo: `fleet-adapter-mavlink` | MAVLink/PX4 reference adapter | Not built — no image |
+| `ghcr.io/swarmada/swarmtop` | `tools/swarmtop/` | The terminal fleet inspector — distributed as the GoReleaser binary + Homebrew/Scoop, not a container | Not built — no image |
+| `ghcr.io/swarmada/swarmctl` | `cmd/swarmctl` | The CLI, containerized for CI/bastion-host use — same caveat as `swarmtop`, binary is primary | Not built — no image |
 
 **Naming rule going forward:** one image per binary entrypoint, named after
 the binary, not the repository it lives in — `fleet-adapter-ros2` (repo and
@@ -71,9 +71,9 @@ gated on the image actually existing and being demo/quickstart-relevant:
 
 1. `swarmada` (controller-manager) — first, since it's the one every
    quickstart user pulls.
-2. `fleet-adapter-sim` — second, once built, since it's the adapter the
+2. `fleet-adapter-sim` — second, once published, since it's the adapter the
    quickstart's `--scenario` flow depends on.
-3. The three external reference adapters and `swarmada-edge` — later, once
+3. `edge`, once published, and the three external reference adapters, once
    each has a Dockerfile at all; no reason to mirror an image that doesn't
    exist yet.
 4. `swarmtop` / `swarmctl` — lowest priority; these are binary-first tools

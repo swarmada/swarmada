@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,9 +42,35 @@ func digestOf(s string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// signingOffConfig is the namespace policy a digest-only conformance fixture means: a
+// SwarmadaConfig that EXISTS and says signature verification is not required.
+//
+// These fixtures used to create no SwarmadaConfig at all and lean on absence reading as
+// "verification off". Absence now reads as verification ON and fails closed (ADR-0053),
+// so a fixture that means "this namespace does not require signatures" has to say so.
+// No assertion changes: what changes is that the setup states the policy it was always
+// assuming instead of borrowing it from a gap.
+func signingOffConfig(namespace string) *fleetv1.SwarmadaConfig {
+	off := false
+	return &fleetv1.SwarmadaConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: SwarmadaConfigName, Namespace: namespace},
+		Spec: fleetv1.SwarmadaConfigSpec{
+			Signing: fleetv1.SwarmadaSigningConfig{RequireSignatureVerification: &off},
+		},
+	}
+}
+
 // newFAConformance builds a Connected adapter with a conformanceReport plus its
 // report ConfigMap, and reconciles once. Returns the resulting conformance state.
-func newFAConformance(t *testing.T, report *fleetv1.ConformanceReportRef, cm *corev1.ConfigMap) fleetv1.ConformanceState {
+// extra seeds further objects — the namespace SwarmadaConfig, typically.
+func newFAConformance(t *testing.T, report *fleetv1.ConformanceReportRef, cm *corev1.ConfigMap, extra ...client.Object) fleetv1.ConformanceState {
+	t.Helper()
+	return newFAConformanceStatus(t, report, cm, extra...).Conformance
+}
+
+// newFAConformanceStatus is newFAConformance's body, returning the whole status so a test
+// can assert the operator-facing message and not only the verdict.
+func newFAConformanceStatus(t *testing.T, report *fleetv1.ConformanceReportRef, cm *corev1.ConfigMap, extra ...client.Object) fleetv1.FleetAdapterStatus {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := fleetv1.AddToScheme(scheme); err != nil {
@@ -63,6 +90,7 @@ func newFAConformance(t *testing.T, report *fleetv1.ConformanceReportRef, cm *co
 	if cm != nil {
 		objs = append(objs, cm)
 	}
+	objs = append(objs, extra...)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
 		WithStatusSubresource(&fleetv1.FleetAdapter{}).Build()
 	r := &FleetAdapterReconciler{Client: c, Scheme: scheme, now: func() time.Time { return now }}
@@ -72,7 +100,7 @@ func newFAConformance(t *testing.T, report *fleetv1.ConformanceReportRef, cm *co
 	}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	return getFA(t, c).Status.Conformance
+	return getFA(t, c).Status
 }
 
 func reportCM(name, content string) *corev1.ConfigMap {
@@ -82,12 +110,31 @@ func reportCM(name, content string) *corev1.ConfigMap {
 	}
 }
 
-// A digest-verified, conformant report yields Conformance: Passed.
+// A digest-verified, conformant report yields Conformance: Passed in a namespace whose
+// policy does not require a signature.
 func TestFleetAdapter_ConformancePassed(t *testing.T) {
 	report := `{"adapter":"acme","conformant":true}`
 	ref := &fleetv1.ConformanceReportRef{SuiteVersion: "v1.2.0", ConfigMapRef: "acme-conf", Digest: digestOf(report)}
-	if got := newFAConformance(t, ref, reportCM("acme-conf", report)); got != fleetv1.ConformanceStatePassed {
+	if got := newFAConformance(t, ref, reportCM("acme-conf", report), signingOffConfig(faNS)); got != fleetv1.ConformanceStatePassed {
 		t.Fatalf("conformance = %s, want Passed", got)
+	}
+}
+
+// ADR-0053: the SAME report, in a namespace with NO SwarmadaConfig, is Failed.
+// An absent policy is answered with the safe value, not the permissive one — this is the
+// behaviour that replaced the fail-open, asserted directly rather than only as the absence
+// of the old one.
+func TestFleetAdapter_ConformanceNoSwarmadaConfigFailsClosed(t *testing.T) {
+	report := `{"adapter":"acme","conformant":true}`
+	ref := &fleetv1.ConformanceReportRef{SuiteVersion: "v1.2.0", ConfigMapRef: "acme-conf", Digest: digestOf(report)}
+	st := newFAConformanceStatus(t, ref, reportCM("acme-conf", report))
+	if st.Conformance != fleetv1.ConformanceStateFailed {
+		t.Fatalf("conformance = %s, want Failed (no SwarmadaConfig must not read as verification off)", st.Conformance)
+	}
+	// The verdict alone would send an operator hunting for a signature to add. The message
+	// has to name the real fix, which is the missing config.
+	if !strings.Contains(st.Message, "no SwarmadaConfig in namespace") {
+		t.Errorf("message %q should name the missing SwarmadaConfig, not just the missing signature", st.Message)
 	}
 }
 

@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -31,12 +32,18 @@ import (
 	"github.com/swarmada/swarmada/internal/cli"
 )
 
-// auditNote explains where the chain comes from. The control-plane audit read
-// API and durable sink are not yet built (the manager records into an in-memory
-// sink — internal/audit.MemorySink), so `audit` operates on an EXPORTED chain:
-// newline-delimited JSON audit.Entry records from a file or stdin. The parse,
-// render, and verify path is the one a future server-side reader will feed.
-const auditNote = "reads an exported audit chain (newline-delimited JSON) from --file or stdin"
+// auditNote explains where the chain comes from. The control plane serves no
+// audit read API, so `audit` operates on an EXPORTED chain: newline-delimited
+// JSON audit.Entry records from a file or stdin, which are all the parse, render,
+// and verify path reads.
+//
+// Consequence worth stating in every --help that carries this note: -n /
+// --namespace does NOT select audit entries. It cannot — nothing here queries
+// the cluster. The manager's --audit-log-file sink is the source
+// (config/manager/manager.yaml sets it; without it the manager falls back to an
+// in-process sink and the entries are lost at exit).
+const auditNote = "reads an exported audit chain (newline-delimited JSON) from --file or stdin; " +
+	"-n/--namespace does not select entries"
 
 // newGetAuditCommand is the `audit` subcommand of `get`: `swarmctl get audit`
 // prints the audit chain (custom verb: read).
@@ -46,7 +53,7 @@ func newGetAuditCommand(o *options) *cobra.Command {
 		Use:   "audit",
 		Short: "Print the safety audit chain (custom verb: read)",
 		Long: `Print the Swarmada safety audit log — the per-namespace, hash-chained
-record of safety- and security-relevant events (RFC-0001 §9.5.4, §9.6.5) — as a
+record of safety- and security-relevant events (RFC-0001 #security-audit-logging, RFC-0001 #safety-safety-audit-log) — as a
 table. ` + auditNote + `. Reading the log is governed by the safetyauditlogs/read
 custom verb (fleet-manager and admin).`,
 		Example: `  swarmctl get audit --file audit-export.jsonl
@@ -60,7 +67,7 @@ custom verb (fleet-manager and admin).`,
 			return o.printAuditLog(entries)
 		},
 	}
-	cmd.Flags().StringVar(&file, "file", "", "Path to an exported audit chain (default: stdin)")
+	cmd.Flags().StringVar(&file, "file", "", "Path to an exported audit chain (\"-\" for stdin). Required unless stdin is a pipe")
 	return cmd
 }
 
@@ -82,7 +89,10 @@ func newVerifyAuditCommand(o *options) *cobra.Command {
 		Short: "Verify the safety audit chain's integrity (custom verb: verify)",
 		Long: `Recompute each namespace's hash chain and report any sequence gap, hash
 mismatch, or broken genesis — the signatures of a modified, deleted, or reordered
-entry (RFC-0001 §9.5.4). ` + auditNote + `. Exits non-zero if any chain fails.
+entry (RFC-0001 #safety-log-entry-format). ` + auditNote + `. Exits non-zero if any chain fails.
+A log whose newest entries were removed is not detected: what remains still chains,
+so it passes. To show nothing was cut from the end, compare the last sequence number
+per namespace with the highest sequence number recorded elsewhere.
 Governed by the safetyauditlogs/verify custom verb (fleet-manager and admin).`,
 		Example: `  swarmctl verify audit --file audit-export.jsonl`,
 		Args:    cobra.NoArgs,
@@ -94,7 +104,7 @@ Governed by the safetyauditlogs/verify custom verb (fleet-manager and admin).`,
 			return o.verifyAuditChain(entries)
 		},
 	}
-	cmd.Flags().StringVar(&file, "file", "", "Path to an exported audit chain (default: stdin)")
+	cmd.Flags().StringVar(&file, "file", "", "Path to an exported audit chain (\"-\" for stdin). Required unless stdin is a pipe")
 	return cmd
 }
 
@@ -115,10 +125,11 @@ func newExportAuditCommand(o *options) *cobra.Command {
 		Use:   "audit",
 		Short: "Export the safety audit chain (custom verb: export, admin-only)",
 		Long: `Emit the safety audit chain as newline-delimited JSON for archival or a
-regulator hand-off (RFC-0001 §9.5.4). ` + auditNote + `, and re-emits it verbatim
+regulator hand-off (RFC-0001 #safety-accessing-the-audit-log). ` + auditNote + `, and re-emits it verbatim
 to --out-file (default stdout) so the exact sealed bytes round-trip. Exporting the
-log is admin-only (safetyauditlogs/export). This is the migration-stage form: it
-re-serializes an already-exported chain until the control-plane read API lands.
+log is admin-only (safetyauditlogs/export). It re-serializes a chain that was
+already exported: the control plane serves no audit read API, and the manager's
+--audit-log-file sink is the source.
 
 (--out-file, not -o: the persistent -o/--output selects table|yaml|json output.)`,
 		Example: `  swarmctl export audit --file audit-export.jsonl --out-file audit-archive.jsonl
@@ -141,7 +152,7 @@ re-serializes an already-exported chain until the control-plane read API lands.
 			return o.exportAuditChain(entries, w)
 		},
 	}
-	cmd.Flags().StringVar(&file, "file", "", "Path to an exported audit chain to re-emit (default: stdin)")
+	cmd.Flags().StringVar(&file, "file", "", "Path to an exported audit chain to re-emit (\"-\" for stdin). Required unless stdin is a pipe")
 	cmd.Flags().StringVar(&outFile, "out-file", "", "Where to write the exported chain (default: stdout)")
 	return cmd
 }
@@ -167,6 +178,20 @@ func (o *options) exportAuditChain(entries []audit.Entry, w io.Writer) error {
 func (o *options) readAuditChain(file string) ([]audit.Entry, error) {
 	var r io.Reader
 	if file == "" || file == "-" {
+		// Fail loudly rather than reading an empty terminal. `swarmctl get audit -n <ns>`
+		// looks like a cluster query, is not one, and used to print "No audit entries." —
+		// indistinguishable from "this event type is never recorded". A verification run
+		// drew exactly that conclusion about PROBE_FAILURE and was wrong: the entry had
+		// been sealed, into a sink nothing could read. An explicit `--file -` still means
+		// "read stdin", so a pipe is never second-guessed.
+		if file == "" && cli.IsTerminalReader(o.streams.In) {
+			return nil, errors.New("no audit chain to read: --file was not given and stdin is a terminal.\n" +
+				"swarmctl cannot query the cluster for audit entries (no control-plane audit read API; " +
+				"-n/--namespace selects nothing here). The chain is the manager's --audit-log-file sink " +
+				"(config/manager/manager.yaml: /var/log/swarmada/audit.jsonl). The manager image has no " +
+				"shell, so copy that file off the node, then run " +
+				"`swarmctl get audit --file <chain>.jsonl`; use `--file -` to read stdin explicitly")
+		}
 		r = o.streams.In
 	} else {
 		f, err := os.Open(file)

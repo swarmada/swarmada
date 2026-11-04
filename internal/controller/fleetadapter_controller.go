@@ -23,13 +23,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,17 +56,17 @@ const (
 	// defaultAdapterHeartbeatInterval matches spec.heartbeatIntervalSeconds default.
 	defaultAdapterHeartbeatInterval = 10
 	// adapterMissedProbeThreshold is how many consecutive intervals of silence move
-	// an adapter to Disconnected (§9.1.12). Missing at least one but fewer than this
+	// an adapter to Disconnected (RFC-0001 #fleetadapter-status-fields-and-phase-machine). Missing at least one but fewer than this
 	// many intervals is the Degraded intermediate state.
 	adapterMissedProbeThreshold = 3
 
 	// conformanceSignatureKey is the ConfigMap data key holding the detached,
-	// "bundle:<base64>"-encoded signature over the conformance report (§9.1.12).
+	// "bundle:<base64>"-encoded signature over the conformance report (RFC-0001 #resource-model).
 	conformanceSignatureKey = "signature"
 )
 
 // FleetAdapterReconciler drives FleetAdapter.status.phase from adapter
-// connectivity (RFC-0001 §9.1.12). It is BOTH a controlstream.AdapterPresence
+// connectivity (RFC-0001 #fleetadapter-status-fields-and-phase-machine). It is BOTH a controlstream.AdapterPresence
 // (event-driven Connected/Heartbeat/Disconnected from the ControlStream) AND a
 // reconciler (the staleness backstop for a half-open stream). The RobotAdmissionGate
 // consumes status.phase == Connected (ANDed with Conformance == Passed).
@@ -73,10 +77,13 @@ const (
 type FleetAdapterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	now    func() time.Time
+	// Recorder emits the Warning Event for a superseded ControlStream. Nil emits none.
+	Recorder record.EventRecorder
+	now      func() time.Time
 }
 
 var _ controlstream.AdapterPresence = (*FleetAdapterReconciler)(nil)
+var _ controlstream.AdapterSupersession = (*FleetAdapterReconciler)(nil)
 
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleetadapters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleetadapters/status,verbs=get;update;patch
@@ -104,7 +111,7 @@ func (r *FleetAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	base := fa.DeepCopy()
 
-	// Conformance verification (§9.1.12): the digest-verified report drives
+	// Conformance verification (RFC-0001 #fleetadapter-status-fields-and-phase-machine): the digest-verified report drives
 	// status.conformance. The RobotAdmissionGate ANDs this with phase==Connected.
 	conformance, contractVersion, conformanceMsg := r.verifyConformance(ctx, fa)
 	fa.Status.Conformance = conformance
@@ -115,9 +122,9 @@ func (r *FleetAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// the same value writes nothing.
 	fa.Status.ConformanceContractVersion = contractVersion
 
-	// §9.1.12 status.connectedRobots. Counted from the spec.adapter.name index — the same
+	// RFC-0001 #fleetadapter-status-fields-and-phase-machine status.connectedRobots. Counted from the spec.adapter.name index — the same
 	// definition of "served by this adapter" projectLiveness uses — NOT from
-	// spec.servesRobotClasses: authority follows the named binding (§9.5), so a robot bound to a
+	// spec.servesRobotClasses: authority follows the named binding (RFC-0001 #security-fleet-adapter-authentication-robot-identity), so a robot bound to a
 	// different adapter is not driven through this one even when their served classes overlap.
 	//
 	// Deliberately computed HERE rather than in mutateStatus: that path runs on every heartbeat,
@@ -131,7 +138,7 @@ func (r *FleetAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		fa.Status.ConnectedRobots = n
 	}
 
-	// Liveness-staleness backstop with a Degraded intermediate (§9.1.12): as
+	// Liveness-staleness backstop with a Degraded intermediate (RFC-0001 #fleetadapter-status-fields-and-phase-machine): as
 	// heartbeats lapse an adapter moves Connected → Degraded (missed at least one
 	// but fewer than the threshold of intervals) → Disconnected (threshold reached).
 	// A fresh heartbeat within one interval recovers a Degraded adapter to Connected
@@ -159,10 +166,22 @@ func (r *FleetAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		fa.Status.Message = conformanceMsg
 	}
 
+	// Served spec fields no controller acts on (spec.tlsSecretRef, a non-default
+	// spec.protocolVersion). FleetAdapter has no admission webhook to warn at the write,
+	// so the condition and one Event carry it instead: weaker, because the author learns
+	// it by looking rather than at the write. Rides the change-gated patch below (RA-1).
+	ignored := ignoredSpecFieldsCondition(fa)
+	prevIgnored := meta.FindStatusCondition(base.Status.Conditions, fleetv1.ConditionSpecFieldsIgnored)
+	meta.SetStatusCondition(&fa.Status.Conditions, ignored)
+
 	if !reflect.DeepEqual(base.Status, fa.Status) {
 		if err := r.Status().Patch(ctx, fa, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("patching FleetAdapter status: %w", err)
 		}
+	}
+	if ignored.Status == metav1.ConditionTrue && r.Recorder != nil &&
+		(prevIgnored == nil || prevIgnored.Status != metav1.ConditionTrue || prevIgnored.Message != ignored.Message) {
+		r.Recorder.Event(fa, corev1.EventTypeWarning, fleetv1.ConditionSpecFieldsIgnored, ignored.Message)
 	}
 
 	// Re-check liveness after one interval while Connected or Degraded (a Degraded
@@ -175,7 +194,7 @@ func (r *FleetAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // verifyConformance resolves status.conformance from spec.conformanceReport
-// (§9.1.12). It fails closed to a non-Passed state: an absent report is Unknown;
+// (RFC-0001 #fleetadapter-status-fields-and-phase-machine). It fails closed to a non-Passed state: an absent report is Unknown;
 // a missing/unreadable ConfigMap or a digest that does not match the pinned
 // spec.conformanceReport.digest is Failed — the report is only honoured Passed
 // when the digest verifies AND the report attests conformant.
@@ -201,7 +220,7 @@ func (r *FleetAdapterReconciler) verifyConformance(ctx context.Context, fa *flee
 		return fleetv1.ConformanceStateFailed, "", "conformance report ConfigMap has no usable report data"
 	}
 
-	// §9.1.12 MUST: verify the digest before honouring any Passed state.
+	// RFC-0001 #fleetadapter-validation MUST: verify the digest before honouring any Passed state.
 	sum := sha256.Sum256([]byte(content))
 	got := "sha256:" + hex.EncodeToString(sum[:])
 	if got != rep.Digest {
@@ -224,15 +243,35 @@ func (r *FleetAdapterReconciler) verifyConformance(ctx context.Context, fa *flee
 		return fleetv1.ConformanceStateFailed, "", "adapter is non-conformant (failed a MUST/MUST NOT check)"
 	}
 
-	// §9.1.12 authenticity: the digest proves the report was not altered, but not that
+	// RFC-0001 #resource-model authenticity: the digest proves the report was not altered, but not that
 	// it came from the conformance authority. When the namespace enforces signature
 	// verification, the report MUST additionally carry a signature that verifies
 	// against a configured trust root. Fail closed on any problem.
-	signingCfg, err := r.namespaceSigning(ctx, fa.Namespace)
+	signingCfg, haveConfig, err := r.namespaceSigning(ctx, fa.Namespace)
 	if err != nil {
 		return fleetv1.ConformanceStateFailed, "", "resolving signing policy (fail closed): " + err.Error()
 	}
-	if signingCfg.RequireSignatureVerification {
+	if signingCfg.SignatureVerificationRequired() {
+		// A namespace with no SwarmadaConfig enforces verification (the schema default) but
+		// has nowhere to carry a trust root, so no report can ever verify here. Say that,
+		// rather than reporting the missing signature the operator would then go and add:
+		// the fix is the config, not the signature (ADR-0053).
+		if !haveConfig {
+			return fleetv1.ConformanceStateFailed, "", "no SwarmadaConfig in namespace " +
+				strconv.Quote(fa.Namespace) + "; signature verification is required by default " +
+				"(fail closed) — create swarmada-config with a trustRoot, or set " +
+				"spec.signing.requireSignatureVerification: false to turn verification off deliberately"
+		}
+		// The same shape one step on: a config that requires verification and names no
+		// trust root. Checked before the signature, because "no signature" sends the
+		// operator to add one that nothing here could verify.
+		if len(signingCfg.TrustRoots) == 0 {
+			return fleetv1.ConformanceStateFailed, "", "the SwarmadaConfig in namespace " +
+				strconv.Quote(fa.Namespace) + " requires signature verification and configures no " +
+				"trustRoots (condition " + fleetv1.ConditionSigningIncomplete + "), so no conformance " +
+				"report can verify here (fail closed) — add a trustRoot, or set " +
+				"spec.signing.requireSignatureVerification: false to turn verification off deliberately"
+		}
 		sigStr, ok := cm.Data[conformanceSignatureKey]
 		if !ok {
 			return fleetv1.ConformanceStateFailed, "", "signature verification required but the report ConfigMap has no signature"
@@ -256,6 +295,39 @@ func (r *FleetAdapterReconciler) verifyConformance(ctx context.Context, fa *flee
 		"conformance verified (" + rep.SuiteVersion + contractVersionNote(parsed.ContractVersion) + ")"
 }
 
+// ignoredSpecFieldsCondition computes SpecFieldsIgnored from fa's spec.
+//
+// spec.protocolVersion carries a schema default equal to the protocol this control
+// plane speaks, so every FleetAdapter sets it. At that value it describes what happens
+// anyway, and only a different value is reported: that is the one an author would
+// expect to change something.
+func ignoredSpecFieldsCondition(fa *fleetv1.FleetAdapter) metav1.Condition {
+	var ignored []string
+	if v := fa.Spec.ProtocolVersion; v != "" && v != controlstream.ProtocolVersion {
+		ignored = append(ignored, fmt.Sprintf("spec.protocolVersion (%q): setting this field has no effect "+
+			"in this release: the protocol is negotiated from the version the adapter sends at connect, "+
+			"and this control plane accepts only %q", v, controlstream.ProtocolVersion))
+	}
+	if fa.Spec.TLSSecretRef != "" {
+		ignored = append(ignored, "spec.tlsSecretRef: setting this field has no effect in this release: "+
+			"nothing pins the adapter's certificate to it; the adapter's identity is read from its "+
+			"client certificate's SAN alone")
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1.ConditionSpecFieldsIgnored,
+		ObservedGeneration: fa.Generation,
+		Status:             metav1.ConditionFalse,
+		Reason:             fleetv1.ReasonNoIgnoredFields,
+		Message:            "no spec field this release ignores is set",
+	}
+	if len(ignored) > 0 {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = fleetv1.ReasonIgnoredFieldsSet
+		cond.Message = strings.Join(ignored, "; ")
+	}
+	return cond
+}
+
 // reportedOrNone renders the contract version an adapter reported for status.Message, naming the
 // absent case rather than printing an empty string — "no contract version" and "an unsupported
 // contract version" are different operator problems with different fixes.
@@ -277,19 +349,33 @@ func contractVersionNote(contractVersion string) string {
 	return "; contract " + contractVersion
 }
 
-// namespaceSigning returns the namespace SwarmadaConfig's signing policy. A genuine
-// list error fails closed (returned); an ABSENT SwarmadaConfig is not an error —
-// there is no enforcement policy, so signature verification is simply not required
-// (digest-only), preserving prior behaviour.
-func (r *FleetAdapterReconciler) namespaceSigning(ctx context.Context, namespace string) (fleetv1.SwarmadaSigningConfig, error) {
+// namespaceSigning returns the namespace SwarmadaConfig's signing policy, and whether
+// there was a SwarmadaConfig to read it from. A genuine list error fails closed
+// (returned).
+//
+// An ABSENT SwarmadaConfig yields the ZERO-valued policy, whose
+// RequireSignatureVerification is nil and therefore resolves — through
+// SignatureVerificationRequired(), the one place nil semantics live (ADR-0051
+// decision 5) — to TRUE. That is the schema default (`+kubebuilder:default=true`), the
+// answer the rollout admission webhook and the firmware rollout reconciler already give
+// for the same input, and the fail-CLOSED answer for a gate that decides whether
+// unverified software may drive robots (ADR-0053, superseding ADR-0051 decision 6).
+// Nothing here re-decides nil; this function only reports what it found.
+//
+// The found flag carries NO policy. It exists so the caller can name the missing config
+// in an operator-facing message: "this report is unsigned" and "this namespace has no
+// policy that could accept a signature" reach the same verdict by different routes and
+// have different fixes. An operator who cannot tell them apart adds a signature to a
+// report in a namespace where no signature could ever be checked.
+func (r *FleetAdapterReconciler) namespaceSigning(ctx context.Context, namespace string) (fleetv1.SwarmadaSigningConfig, bool, error) {
 	var configs fleetv1.SwarmadaConfigList
 	if err := r.List(ctx, &configs, client.InNamespace(namespace)); err != nil {
-		return fleetv1.SwarmadaSigningConfig{}, fmt.Errorf("listing SwarmadaConfig: %w", err)
+		return fleetv1.SwarmadaSigningConfig{}, false, fmt.Errorf("listing SwarmadaConfig: %w", err)
 	}
 	if len(configs.Items) == 0 {
-		return fleetv1.SwarmadaSigningConfig{}, nil
+		return fleetv1.SwarmadaSigningConfig{}, false, nil
 	}
-	return configs.Items[0].Spec.Signing, nil
+	return configs.Items[0].Spec.Signing, true, nil
 }
 
 // loadTrustRoots resolves the configured trust-root Secrets into parsed public keys.
@@ -340,7 +426,7 @@ func (r *FleetAdapterReconciler) AdapterConnected(ctx context.Context, id contro
 	reconnected := false
 	r.mutateStatus(ctx, id, func(s *fleetv1.FleetAdapterStatus) {
 		// A handshake arriving while Disconnected/Degraded is a ControlStream
-		// RE-establishment (§9.3.8); a first connect (Pending/empty) is not.
+		// RE-establishment (RFC-0001 #control-plane-observability-prometheus-metrics-contract); a first connect (Pending/empty) is not.
 		if s.Phase == fleetv1.FleetAdapterPhaseDisconnected || s.Phase == fleetv1.FleetAdapterPhaseDegraded {
 			reconnected = true
 		}
@@ -361,7 +447,10 @@ func (r *FleetAdapterReconciler) AdapterConnected(ctx context.Context, id contro
 		// status.negotiatedContractVersion always means "no compatible contract", never "compatible
 		// but unrecorded".
 		if negotiated.ContractCompatible {
-			s.NegotiatedContractVersion = negotiated.ContractVersion
+			// The version agreed for the connection, which candidate filter 9 reads: 1.4.0 for any
+			// reported 1.4 version, the reported 1.3.x otherwise (contract.Negotiate, the decision
+			// the handshake made).
+			s.NegotiatedContractVersion, _ = contract.Negotiate(negotiated.ContractVersion)
 		} else {
 			s.NegotiatedContractVersion = ""
 			s.Phase = fleetv1.FleetAdapterPhaseRejected
@@ -402,6 +491,59 @@ func (r *FleetAdapterReconciler) AdapterDisconnected(ctx context.Context, id con
 			s.Message = "adapter stream closed"
 		}
 	})
+}
+
+// AdapterSuperseded records a second ControlStream under this adapter's identity replacing
+// the first, as a Warning Event on the FleetAdapter. It writes no status: the adapter is
+// still connected, on the newer stream, and its phase stays what that stream's connect set.
+//
+// The usual cause is two processes presenting one adapter certificate, and they displace
+// each other on every reconnect, so the Event says how to stop it.
+func (r *FleetAdapterReconciler) AdapterSuperseded(ctx context.Context, id controlstream.TLSIdentity, supersededPeer, newPeer string) {
+	if r.Recorder == nil {
+		return
+	}
+	fa := &fleetv1.FleetAdapter{}
+	if err := r.Get(ctx, types.NamespacedName{Name: id.AdapterName, Namespace: id.Namespace}, fa); err != nil {
+		if !errors.IsNotFound(err) {
+			log.FromContext(ctx).Error(err, "fetching FleetAdapter for supersession event", "adapter", id.AdapterName)
+		}
+		return
+	}
+	r.Recorder.Eventf(fa, corev1.EventTypeWarning, "ControlStreamSuperseded",
+		"a second ControlStream under this adapter's certificate was accepted from %s, and the stream from %s was "+
+			"closed. Two processes that share one adapter identity displace each other on every reconnect: give each "+
+			"process its own FleetAdapter and client certificate", peerOrUnknown(newPeer), peerOrUnknown(supersededPeer))
+}
+
+// SafetyStreamSuperseded records a second SafetyStream replacing the first under one
+// adapter identity: one Warning Event on the FleetAdapter, as AdapterSuperseded does for
+// the ControlStream, and no status write.
+func (r *FleetAdapterReconciler) SafetyStreamSuperseded(ctx context.Context, id controlstream.TLSIdentity, supersededPeer, newPeer string) {
+	if r.Recorder == nil {
+		return
+	}
+	fa := &fleetv1.FleetAdapter{}
+	if err := r.Get(ctx, types.NamespacedName{Name: id.AdapterName, Namespace: id.Namespace}, fa); err != nil {
+		if !errors.IsNotFound(err) {
+			log.FromContext(ctx).Error(err, "fetching FleetAdapter for supersession event", "adapter", id.AdapterName)
+		}
+		return
+	}
+	r.Recorder.Eventf(fa, corev1.EventTypeWarning, "SafetyStreamSuperseded",
+		"a second SafetyStream under this adapter's certificate was accepted from %s, and the stream from %s was "+
+			"closed; estops now go down the newer stream only, and an estop still awaiting its ack on the closed "+
+			"stream is re-sent down the newer one within its original deadline. Two processes that share one "+
+			"adapter identity displace each other on every reconnect: give each process its own FleetAdapter and "+
+			"client certificate",
+		peerOrUnknown(newPeer), peerOrUnknown(supersededPeer))
+}
+
+func peerOrUnknown(addr string) string {
+	if addr == "" {
+		return "an unknown address"
+	}
+	return addr
 }
 
 // mutateStatus applies a status mutation and patches ONLY on a material change

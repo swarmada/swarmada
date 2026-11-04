@@ -1,0 +1,6 @@
+*
+!tools/map-to-fleetzone/map_to_fleetzone.py
+!tools/map-to-fleetzone/floor_to_member_zones.py
+!tools/map-to-fleetzone/traversable.py
+!tools/map-to-fleetzone/render_zones.py
+!examples/floor-mapping/worker/zone_proposal_worker.py

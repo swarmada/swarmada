@@ -1,22 +1,24 @@
 /*
-Copyright 2026 The Swarmada Authors.
+   Copyright 2026 The Swarmada Authors.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 syntax = "proto3";
 
 package fleet_adapter.v1;
+
+import "google/protobuf/struct.proto";
 
 option go_package = "github.com/swarmada/swarmada/proto/fleet_adapter/v1;fleetadapterv1";
 option java_package = "io.swarmada.fleet.adapter.v1";
@@ -28,13 +30,13 @@ option java_package = "io.swarmada.fleet.adapter.v1";
 //
 // The control plane is the gRPC SERVER. Each Fleet Adapter is the CLIENT: it
 // dials the control plane and opens two long-lived bidirectional streams:
-//   ControlStream  — all operational traffic (actions, telemetry, heartbeat)
-//   SafetyStream   — emergency-stop only (RFC-0001 #fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams RA-6; see SafetyStream RPC)
+// ControlStream — all operational traffic (actions, telemetry, heartbeat)
+// SafetyStream — emergency-stop only (RFC-0001 #fleet-adapter-protocol-why-grpc-and-why-adapter-initiated-bidirectional-streams RA-6; see SafetyStream RPC)
 // This topology is simultaneously:
-//   * NAT/firewall friendly — robots and adapters never need a routable address
-//     or an inbound listener (a hard requirement on warehouse/hospital Wi-Fi); and
-//   * able to PUSH control-plane → adapter commands (action assignment, and above
-//     all emergency stop) to a client that dialed in.
+// * NAT/firewall friendly — robots and adapters never need a routable address
+// or an inbound listener (a hard requirement on warehouse/hospital Wi-Fi); and
+// * able to PUSH control-plane → adapter commands (action assignment, and above
+// all emergency stop) to a client that dialed in.
 //
 // The earlier flat unary design (control plane as server with AssignAction/Estop
 // as ordinary RPCs) cannot do the second: a server cannot initiate a unary call
@@ -50,22 +52,22 @@ option java_package = "io.swarmada.fleet.adapter.v1";
 // (FleetAdapter.spec.servesRobotClasses + namespace) — there is no per-robot JWT.
 //
 // SAFETY HARDENING (carried over from the Stage-2 proto pass):
-//   * fencing tokens on AssignAction/CancelAction (anti double-execution, R2/RA-2);
-//   * adapter-CONFIRMED estop via EstopAck.state (never telemetry-inferred, R4);
-//   * proto3 explicit-presence (`optional`) on safety-relevant scalars (RA-3b).
+// * fencing tokens on AssignAction/CancelAction (anti double-execution);
+// * adapter-CONFIRMED estop via EstopAck.state (never telemetry-inferred);
+// * proto3 explicit-presence (`optional`) on safety-relevant scalars (RA-3b).
 // ═══════════════════════════════════════════════════════════════════════════
 
 service FleetAdapterService {
   // ControlStream is the primary persistent connection. The adapter opens it
   // and sends AdapterHello first; the control plane replies with HelloAck.
   // Thereafter both sides multiplex:
-  //   adapter → control plane : AdapterMessage  (register/discover, telemetry,
-  //                             action status, command results, heartbeat replies)
-  //   control plane → adapter : ControlPlaneMessage (acks, pushed Commands,
-  //                             heartbeat requests)
-  // NOTE: Estop/EstopAck travel on SafetyStream, NOT on ControlStream.
-  // Command.estop (field 5) and CommandResult.estop (field 6) are retained for
-  // wire-format compatibility but are DEPRECATED — see annotations below.
+  // adapter → control plane: AdapterMessage (register/discover, telemetry,
+  // action status, command results, heartbeat replies)
+  // control plane → adapter: ControlPlaneMessage (acks, pushed Commands,
+  // heartbeat requests)
+  // NOTE: the stop travels on SafetyStream. Command.estop (field 5) is the stop's
+  // fence on ControlStream, in order with AssignActions (contract 1.4.0); its
+  // CommandResult.estop (field 6) answer is a receipt that no stop row reads.
   rpc ControlStream(stream AdapterMessage) returns (stream ControlPlaneMessage);
 
   // SafetyStream is the ONLY additional RPC in this service. It exists because
@@ -82,16 +84,17 @@ service FleetAdapterService {
   // that guarantees estop is never queued behind bulk data.
   //
   // Invariants:
-  //   * Same mTLS identity and per-robot authorization as ControlStream.
-  //   * Carries ONLY Estop Commands and EstopAck results (plus optional
-  //     safety-critical PauseCapabilities / PauseResult).
-  //   * Permanently empty in steady state — no telemetry, no action commands.
-  //   * EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
-  //   * Adapter MUST open SafetyStream in the same dial step as ControlStream.
-  //     If SafetyStream cannot be established the adapter MUST NOT declare
-  //     itself healthy and MUST retry.
-  //   * Estop and EstopAck messages are REUSED — not duplicated — via the
-  //     AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
+  // * Same mTLS identity and per-robot authorization as ControlStream.
+  // * Carries ONLY the stop latch's messages: Estop and EstopClear down; EstopAck,
+  // EstopClearAck, LocalStopReport up (plus optional PauseCapabilities / PauseResult).
+  // * Permanently empty in steady state — no telemetry, no action commands.
+  // * EstopLatencyViolation events (RFC-0001 #safety-timing-requirements) are measured on this stream.
+  // * Adapter MUST open SafetyStream in the same dial step as ControlStream.
+  // Both streams MUST be established before the adapter sends AdapterHello;
+  // if SafetyStream cannot be established the adapter sends no AdapterHello
+  // and MUST retry (RFC-0001 #fleet-adapter-protocol-connection-lifecycle).
+  // * Estop and EstopAck messages are REUSED — not duplicated — via the
+  // AdapterSafetyMessage / ControlPlaneSafetyMessage envelopes below.
   rpc SafetyStream(stream AdapterSafetyMessage) returns (stream ControlPlaneSafetyMessage);
 }
 
@@ -102,16 +105,16 @@ service FleetAdapterService {
 message AdapterMessage {
   uint64 seq = 1;
   oneof payload {
-    AdapterHello         hello          = 2;  // MUST be the first message
-    DiscoverRobot        discover       = 3;
-    RegisterRobot        register       = 4;
-    TelemetryPayload     telemetry      = 5;
-    ActionStatusUpdate     action_status    = 6;
-    CommandResult        command_result = 7;
-    HeartbeatResponse    heartbeat      = 8;
-    CapabilitiesSnapshot capabilities   = 9;
-    ResourceRequest      resource_request = 10;  // adapter-initiated reservation (RFC-0001 #tde)
-    UpdateProgress       update_progress  = 11;  // intra-update per-robot rollout progress (advisory)
+    AdapterHello hello = 2; // MUST be the first message
+    DiscoverRobot discover = 3;
+    RegisterRobot register = 4;
+    TelemetryPayload telemetry = 5;
+    ActionStatusUpdate action_status = 6;
+    CommandResult command_result = 7;
+    HeartbeatResponse heartbeat = 8;
+    CapabilitiesSnapshot capabilities = 9;
+    ResourceRequest resource_request = 10; // adapter-initiated reservation (RFC-0001 #tde)
+    UpdateProgress update_progress = 11; // intra-update per-robot rollout progress (advisory)
   }
 }
 
@@ -119,50 +122,61 @@ message AdapterMessage {
 message ControlPlaneMessage {
   uint64 seq = 1;
   oneof payload {
-    HelloAck         hello_ack    = 2;
-    RegisterAck      register_ack = 3;
-    DiscoverAck      discover_ack = 4;
-    Command          command      = 5;
-    HeartbeatRequest heartbeat    = 6;
-    ResourceResponse resource_response = 7;  // decision for an adapter ResourceRequest
+    HelloAck hello_ack = 2;
+    RegisterAck register_ack = 3;
+    DiscoverAck discover_ack = 4;
+    Command command = 5;
+    HeartbeatRequest heartbeat = 6;
+    ResourceResponse resource_response = 7; // decision for an adapter ResourceRequest
+    // Contract 1.4.0: acknowledges an outcome the adapter reported with
+    // ActionStatusUpdate.retained = true (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation,
+    // The retained outcome). An adapter below 1.4.0 ignores this arm.
+    ActionOutcomeAck outcome_ack = 8;
   }
 }
 
 // ── Handshake ─────────────────────────────────────────────────────────────────
 
 message AdapterHello {
-  string vendor           = 1;  // matches FleetAdapter.spec.vendor
-  string adapter_version  = 2;  // adapter build / semver
-  string protocol_version = 3;  // e.g. "fleet_adapter.v1"
-  string namespace        = 4;  // Swarmada namespace (also bound by mTLS)
-  // Semver of the fleet-adapter CONTRACT this adapter targets (e.g. "1.0.0") — the proto surface,
-  // the SupportedAction schema, and the conformance-suite revision, versioned together (ADR-0032).
+  string vendor = 1; // matches FleetAdapter.spec.vendor
+  string adapter_version = 2; // adapter build / semver
+  string protocol_version = 3; // e.g. "fleet_adapter.v1"
+  // Swarmada namespace. When the adapter presents a verified client certificate, its SAN
+  // (<adapter>.<namespace>.svc.cluster.local) binds the namespace: an empty value is served in
+  // the certificate's namespace, and a value that differs from it is refused at the handshake
+  // (HelloAck.accepted = false). Without a verified certificate nothing is checked and the value
+  // is used as declared.
+  string namespace = 4;
+  // Semver of the fleet-adapter CONTRACT this adapter targets (e.g. "1.4.0") — the proto surface
+  // and the SupportedAction schema, versioned together (ADR-0032). The conformance-suite revision
+  // is not part of it.
   //
   // Three version fields sit side by side here and are NOT interchangeable:
-  //   adapter_version  — the adapter's own BUILD (vendor cadence; two builds may implement one
-  //                      contract, one build may span several)
-  //   protocol_version — the wire-package IDENTITY ("fleet_adapter.v1"); an identity string, not a
-  //                      semver, so it cannot express compatibility within a range
-  //   contract_version — THIS: what compatibility is judged on
+  // adapter_version — the adapter's own BUILD (vendor cadence; two builds may implement one
+  // contract, one build may span several)
+  // protocol_version — the wire-package IDENTITY ("fleet_adapter.v1"); an identity string, not a
+  // semver, so it cannot express compatibility within a range
+  // contract_version — THIS: what compatibility is judged on
   //
   // The control plane intersects it with the range it advertises on
   // SwarmadaConfig.status.supportedContractRange (N and N-1 minor within the major). Out of range,
   // absent, or unparseable is incompatible — REGISTRATION_REJECTION_VERSION_MISMATCH, fail closed;
   // an empty value is never an implicit pass. An adapter built before this field existed therefore
-  // sends nothing and is treated as incompatible for WORK, while registration, telemetry,
-  // heartbeats and estop are unaffected.
+  // sends nothing and is treated as incompatible: RegisterRobot and DiscoverRobot on that
+  // connection are refused REGISTRATION_REJECTION_VERSION_MISMATCH, so it is given no work,
+  // while telemetry, heartbeats and estop are unaffected.
   string contract_version = 5;
 }
 
 message HelloAck {
-  bool   accepted                    = 1;
+  bool accepted = 1;
   string negotiated_protocol_version = 2;
-  string message                     = 3;
+  string message = 3;
   // The contract version the control plane agreed for this connection — the value it will hold the
   // adapter to, echoed so the adapter can confirm what was negotiated rather than assume its own
   // request was honoured. Set only when the reported contract_version is within the control
   // plane's supported range; left empty otherwise (ADR-0032). This is independent of `accepted`
-  // above: `accepted` reflects the protocol-level (wire package) handshake only, so a stream with
+  // above: `accepted` reflects the wire package and the namespace only, so a stream with
   // `accepted = true` can still carry an empty `negotiated_contract_version` — that combination
   // means the connection stands (telemetry, heartbeat, and estop all work) but the contract
   // version is incompatible, so RegisterRobot/DiscoverRobot on it are refused
@@ -173,143 +187,192 @@ message HelloAck {
 // ── Robot lifecycle: Discover / Register ──────────────────────────────────────
 
 enum RegistrationRejection {
-  REGISTRATION_REJECTION_UNSPECIFIED        = 0;
-  REGISTRATION_REJECTION_NOT_ADMITTED       = 1;  // Register: no Robot CRD exists
-  REGISTRATION_REJECTION_ALREADY_EXISTS     = 2;  // Discover: Robot/DiscoveredRobot exists
-  REGISTRATION_REJECTION_VERSION_MISMATCH   = 3;  // incompatible adapter version
-  REGISTRATION_REJECTION_NAMESPACE_MISMATCH = 4;  // robot not in adapter's namespace
-  REGISTRATION_REJECTION_INVALID_ROBOT_ID   = 5;  // robot_id malformed / empty / not a valid identifier
+  REGISTRATION_REJECTION_UNSPECIFIED = 0; // no code: on a RegisterAck, the robot is not this adapter's (RFC-0001 #fleet-adapter-protocol-the-stop-latch)
+  REGISTRATION_REJECTION_NOT_ADMITTED = 1; // Register: no Robot CRD exists
+  REGISTRATION_REJECTION_ALREADY_EXISTS = 2; // Discover: an admitted Robot exists (reconnect via Register)
+  REGISTRATION_REJECTION_VERSION_MISMATCH = 3; // incompatible adapter version
+  REGISTRATION_REJECTION_NAMESPACE_MISMATCH = 4; // robot not in adapter's namespace
+  REGISTRATION_REJECTION_INVALID_ROBOT_ID = 5; // robot_id malformed / empty / not a valid identifier
 }
 
 // First-time connection: a robot with no Robot CRD. The control plane creates a
-// DiscoveredRobot (RFC-0001 #discoveredrobot). Rejected ALREADY_EXISTS if one already exists.
+// DiscoveredRobot (RFC-0001 #discoveredrobot), or refreshes the existing one: a
+// re-announce while a DiscoveredRobot exists is accepted and updates it. Rejected
+// ALREADY_EXISTS only when a Robot with this robot_id is already admitted in the
+// namespace; that robot must reconnect with RegisterRobot.
 message DiscoverRobot {
-  string   robot_id              = 1;  // globally unique (serial / MAC)
-  string   manufacturer          = 2;
-  string   model                 = 3;
-  string   firmware_version      = 4;
-  repeated HardwareComponent hardware              = 5;
-  repeated InstalledModel    installed_models      = 6;
-  repeated string            reported_capabilities = 7;
+  // Typically taken from the robot's serial number or MAC, which are unique as a fact about
+  // the hardware. The control plane does not enforce robot_id uniqueness across namespaces
+  // and does not rely on it: the same robot_id may identify a Robot in each of two
+  // namespaces (RFC-0001 #discoveredrobot-conflict-handling-duplicate-robot-id, Case 3).
+  // Within one namespace it identifies at most one Robot; admission rejects a duplicate.
+  string robot_id = 1;
+  string manufacturer = 2;
+  string model = 3;
+  string firmware_version = 4;
+  repeated HardwareComponent hardware = 5;
+  repeated InstalledModel installed_models = 6;
+  repeated string reported_capabilities = 7;
   // Hardware MAC address, when the robot exposes one. optional for proto3 explicit
   // presence: an absent MAC ("unset") is distinct from a reported-empty string.
-  optional string            mac                   = 8;
+  optional string mac = 8;
 }
 
 message DiscoverAck {
-  bool                  accepted              = 1;
-  string                discovered_robot_name = 2;
-  string                message               = 3;
-  RegistrationRejection rejection             = 4;  // set when accepted=false
+  bool accepted = 1;
+  string discovered_robot_name = 2;
+  string message = 3;
+  RegistrationRejection rejection = 4; // set when accepted=false
   // Effective DiscoveredRobot TTL for the announcing adapter's refresh cadence:
   // the adapter sets its announce interval I = min(ttl_seconds/2, 300); 0 = TTL
-  // disabled (I defaults to 60s). Sourced from SwarmadaConfig discovery TTL.
-  int64                 ttl_seconds           = 5;
+  // disabled (I defaults to 60s). The reference control plane does not set this
+  // field at this version, so an adapter reads 0 and announces every 60s; the TTL
+  // it applies to the DiscoveredRobot (SwarmadaConfig
+  // spec.provisioning.discoveredRobotTTLMinutes) is not sent.
+  int64 ttl_seconds = 5;
 }
 
 // Reconnect of an already-admitted robot (Robot CRD exists). Creates no
 // Kubernetes resources. Rejected NOT_ADMITTED if no Robot CRD — Discover instead.
 message RegisterRobot {
-  string   robot_id          = 1;  // must match the Robot's swarmada.io/robot-id
-  string   adapter_version   = 2;
-  string   firmware_version  = 3;
+  string robot_id = 1; // must match the Robot's swarmada.io/robot-id
+  string adapter_version = 2;
+  string firmware_version = 3;
   repeated HardwareComponent reported_hardware = 4;
 }
 
 message RegisterAck {
-  bool                  accepted  = 1;
-  RegistrationRejection rejection = 2;  // set when accepted=false
-  string                message   = 3;
+  bool accepted = 1;
+  RegistrationRejection rejection = 2; // set when accepted=false, except for a robot that is not this adapter's
+  string message = 3;
   // Authoritative action state for this robot as of this moment on the control
   // plane. Set on every RegisterAck (first-time and reconnect); the adapter
-  // uses it on reconnect to detect divergence from local state (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation, RA-2).
+  // uses it on reconnect to detect divergence from local state (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation).
   RobotActionState authoritative_action_state = 4;
   // Robot.spec values the adapter needs to configure itself:
-  int32    telemetry_interval_seconds = 10;
-  string   assigned_zone              = 11;
+  int32 telemetry_interval_seconds = 10;
+  string assigned_zone = 11;
   repeated string active_capabilities = 12;
   // Edge nodes the adapter MUST dial for this robot's zone chain
-  // (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream). Empty when no FleetZone in the chain declares one.
+  // (RFC-0001 #fleet-adapter-protocol-the-edge-stream). Empty when no FleetZone in the chain declares one.
   repeated EdgeEndpoint edge_endpoints = 13;
 }
 
 message RobotActionState {
-  RobotActionPhase phase            = 1;
-  string         action_id          = 2;  // empty when phase is IDLE or UNKNOWN
+  RobotActionPhase phase = 1;
+  string action_id = 2; // empty when phase is IDLE or UNKNOWN
   // Current fencing token the adapter should be executing under; the adapter
-  // MUST reject any command with a lower token for this robot.
-  uint64         fencing_token    = 3;
+  // applies the fencing rule against it: it rejects an AssignAction or CancelAction at
+  // or below it, except an identical re-delivery of the current assignment and a
+  // CancelAction naming the executing action at the token that assigned it.
+  uint64 fencing_token = 3;
   // Current lease generation. 0 when phase is not IN_PROGRESS or REVOKING.
-  uint64         lease_generation = 4;
+  uint64 lease_generation = 4;
 }
 
 enum RobotActionPhase {
   ROBOT_ACTION_PHASE_UNSPECIFIED = 0;
-  ROBOT_ACTION_PHASE_IDLE        = 1;  // no action assigned; robot should be idle
-  ROBOT_ACTION_PHASE_IN_PROGRESS = 2;  // action active under a live lease; continue
-  ROBOT_ACTION_PHASE_REVOKING    = 3;  // lease renewal stopped; self-stop on expiry
-  ROBOT_ACTION_PHASE_CANCELLED   = 4;  // cancelled during disconnect; halt immediately
-  ROBOT_ACTION_PHASE_UNKNOWN     = 5;  // no record; halt and report
+  ROBOT_ACTION_PHASE_IDLE = 1; // no action to execute (none assigned, or held: RFC-0001 row A13); halt
+  ROBOT_ACTION_PHASE_IN_PROGRESS = 2; // action active under a live lease; continue
+  ROBOT_ACTION_PHASE_REVOKING = 3; // lease renewal stopped; self-stop on expiry; never sent for stop-held work
+  ROBOT_ACTION_PHASE_CANCELLED = 4; // cancelled during disconnect; halt immediately
+  ROBOT_ACTION_PHASE_UNKNOWN = 5; // no record; halt and report
 }
 
 // ── Pushed commands (control plane → adapter) ─────────────────────────────────
 
-// A command pushed down the stream. command_id is unique per stream and is
-// echoed in the matching CommandResult. robot_id selects the managed robot.
+// A command pushed down the stream. The control plane never reuses a command_id across streams,
+// adapters or leader terms; it is echoed in the matching CommandResult. robot_id selects the managed robot.
 message Command {
   uint64 command_id = 1;
-  string robot_id   = 2;
+  string robot_id = 2;
   oneof command {
-    AssignAction         assign_action       = 3;
-    CancelAction         cancel_action       = 4;
-    Estop              estop             = 5;  // DEPRECATED: estop travels on SafetyStream; retained for wire compatibility
-    PauseCapabilities  pause             = 6;
-    ResumeCapabilities resume            = 7;
-    ScanCapabilities   scan              = 8;
-    VerifyHardware     verify_hardware   = 9;   // optional (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist)
-    VerifyCapability   verify_capability = 10;  // optional
-    VerifyModel        verify_model      = 11;  // optional
-    PushFirmware       push_firmware     = 12;  // optional
-    ModelUpdate        model_update      = 13;  // optional
-    ReservationGranted reservation_granted = 14;  // optional; async grant of a QUEUED reservation
-    ZoneAdmission      zone_admission    = 15;  // optional; zone-capacity hold/admit (RFC-0001 #tde)
+    AssignAction assign_action = 3;
+    CancelAction cancel_action = 4;
+    Estop estop = 5; // the stop's fence (contract 1.4.0), in order with AssignActions; the stop itself travels on SafetyStream (RFC-0001 #fleet-adapter-protocol-the-stop-latch)
+    PauseCapabilities pause = 6;
+    ResumeCapabilities resume = 7;
+    ScanCapabilities scan = 8;
+    VerifyHardware verify_hardware = 9; // optional (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist)
+    VerifyCapability verify_capability = 10; // optional
+    VerifyModel verify_model = 11; // optional
+    PushFirmware push_firmware = 12; // optional
+    ModelUpdate model_update = 13; // optional
+    ReservationGranted reservation_granted = 14; // optional; async grant of a QUEUED reservation
+    ZoneAdmission zone_admission = 15; // optional; zone-capacity hold/admit (RFC-0001 #control-plane-zone-controller)
     // renew_lease refreshes the assignment lease for action_id. The adapter MUST
-    // reset its self-stop timer when lease_generation matches its current
-    // generation. Rationale for a dedicated arm (not HeartbeatRequest): lease
+    // reset its self-stop timer only for a renewal it accepts: action_id names the
+    // action it is executing under its current fencing mark and lease_generation
+    // equals the generation that action was assigned with; it answers any other
+    // renewal, including one after its local lease lapsed, renewed = false
+    // (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee,
+    // Renewal acceptance). Rationale for a dedicated arm (not HeartbeatRequest): lease
     // renewal carries explicit safety semantics — a missed renewal MUST trigger
     // autonomous action self-stop (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee); conflating it with liveness heartbeat
     // would obscure that invariant and make the self-stop condition ambiguous.
-    RenewActionLease     renew_lease       = 16;
+    RenewActionLease renew_lease = 16;
     // optional (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist); adapter
     // confirms it can serve type+payload. Issued once, at assignment-time candidate
     // selection (RFC-0001 #control-plane-scheduler) — not at FleetAction acceptance,
     // which is gated by the cheaper supported-action catalog pre-filter instead.
-    ValidateAction       validate_action   = 17;
+    ValidateAction validate_action = 17; // optional; adapter confirms it can serve type+payload
+    // Sensor-stream duty cycle. Refcounted and
+    // lease-bound — see ActivateStream's own comment for the normative rules.
+    ActivateStream activate_stream = 18; // optional; declining disables the duty cycle for this adapter's robots
+    DeactivateStream deactivate_stream = 19; // optional; an adapter declining activate_stream MUST decline this too
+    // The operating rules in force WHERE THE ROBOT NOW IS, pushed when its zone
+    // containment changes (FA-R7). It is what makes FA-R3's "honour it for the whole
+    // time the robot is in the zone, including while merely transiting" satisfiable:
+    // assign_action carries the rules for the assignment's target only, once, so an
+    // adapter that enters any other zone had no rule set for where it was.
+    ZoneConstraints zone_constraints = 20; // optional; zone-containment operating rules (ADR-0059)
   }
+
+  // The term of the control-plane leader that sent this command (contract 1.4.0): a number that
+  // rises with each election of the leader and is never reused. A 1.4.0 control plane sets it on
+  // every command it sends, from 1. 0 means no term was sent: it is lower than every term a 1.4.0
+  // control plane sends, so a control plane or a connection below 1.4.0 is not rejected for it.
+  // The adapter keeps the highest term it has seen for the robot on any message, a stop's
+  // included. It MUST reject any command other than a stop (the Estop arm, the stop's fence)
+  // whose term is lower, by not acting on it and answering CommandResult.stale_leader_term = true.
+  // It MUST accept a stop whatever its term: a stale stop can only hold a robot, while a stale
+  // assignment or release may move one a newer leader has stopped. The same rule covers an
+  // EstopClear, which carries the term too (EstopClear.leader_term; RFC-0001
+  // #fleet-adapter-protocol-the-stop-latch, The leader term).
+  // An adapter below 1.4.0 ignores this field.
+  uint64 leader_term = 21;
 }
 
 message CommandResult {
-  uint64 command_id  = 1;  // echoes Command.command_id
-  string robot_id    = 2;
+  uint64 command_id = 1; // echoes Command.command_id
+  string robot_id = 2;
   // unsupported=true is how an adapter declines an OPTIONAL command it does not
   // implement (the in-band equivalent of gRPC UNIMPLEMENTED); the result oneof
   // is then left empty.
-  bool   unsupported = 3;
+  bool unsupported = 3;
   oneof result {
-    AssignActionResult     assign_action   = 4;
-    CancelActionResult     cancel_action   = 5;
-    EstopAck             estop         = 6;  // DEPRECATED: EstopAck returned on SafetyStream; retained for wire compatibility
-    PauseResult          pause         = 7;
-    ResumeResult         resume        = 8;
-    CapabilitiesSnapshot scan          = 9;
-    VerifyResult         verify        = 10;
-    FirmwareResult       push_firmware = 11;
-    ModelUpdateResult    model_update  = 12;
+    AssignActionResult assign_action = 4;
+    CancelActionResult cancel_action = 5;
+    EstopAck estop = 6; // a receipt for the fence (Command.estop); rows S2 to S4 never read it: the stop's answer is the EstopAck on SafetyStream
+    PauseResult pause = 7;
+    ResumeResult resume = 8;
+    CapabilitiesSnapshot scan = 9;
+    VerifyResult verify = 10;
+    FirmwareResult push_firmware = 11;
+    ModelUpdateResult model_update = 12;
     ReservationGrantedAck reservation_granted = 13;
-    ZoneAdmissionAck     zone_admission = 14;
-    RenewActionLeaseResult renew_lease    = 15;
+    ZoneAdmissionAck zone_admission = 14;
+    RenewActionLeaseResult renew_lease = 15;
     ValidateActionResult validate_action = 16;
+    ActivateStreamResult activate_stream = 17;
+    DeactivateStreamResult deactivate_stream = 18;
+    ZoneConstraintsAck zone_constraints = 19;
   }
+
+  // true (contract 1.4.0): the adapter rejected the command because its leader_term was lower than
+  // the highest the adapter has seen for the robot (Command.leader_term). The adapter did not act
+  // on the command and leaves the result oneof empty. Never set for a stop.
+  bool stale_leader_term = 20;
 }
 
 // ── Action assignment (fenced) ────────────────────────────────────────────────
@@ -320,56 +383,195 @@ message CommandResult {
 // adapter can reject stale ones after a connectivity gap. The adapter persists
 // the highest accepted token per robot and rejects any AssignAction/CancelAction
 // whose token is <= that — except an identical re-delivery of the current
-// assignment, which is acked idempotently. Estop is intentionally NOT
+// assignment, which is acked idempotently, and a CancelAction naming the action
+// the adapter is executing, which is honoured at the token that assigned it.
+// The rule covers these two messages and no other: ActivateStream's token is not
+// compared with the mark, and Estop is intentionally NOT
 // fenced: a safe stop is always honored.
 
 enum AssignActionRejection {
-  ASSIGN_ACTION_REJECTION_UNSPECIFIED           = 0;  // accepted
-  ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN   = 1;  // token <= highest accepted
-  ASSIGN_ACTION_REJECTION_MISSING_FENCING_TOKEN = 2;  // no token supplied
-  ASSIGN_ACTION_REJECTION_ROBOT_BUSY            = 3;  // on a different live action
-  ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE     = 4;  // faulted / estopped / offline
-  ASSIGN_ACTION_REJECTION_INVALID_ACTION          = 5;  // unparseable / unsupported
+  ASSIGN_ACTION_REJECTION_UNSPECIFIED = 0; // accepted
+  ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN = 1; // token <= highest accepted
+  ASSIGN_ACTION_REJECTION_MISSING_FENCING_TOKEN = 2; // no token supplied
+  ASSIGN_ACTION_REJECTION_ROBOT_BUSY = 3; // on a different live action
+  ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE = 4; // faulted / estopped / offline
+  ASSIGN_ACTION_REJECTION_INVALID_ACTION = 5; // unparseable / unsupported
+  // The assignment carries an operating constraint this adapter cannot honour, or
+  // one whose subject it does not recognise (FA-R5, FA-R6). The adapter MUST
+  // decline rather than accept and ignore the rule, and MUST name the subjects in
+  // AssignActionResult.unhonourable_subjects — naming the subject is the whole of
+  // what makes this obligation testable.
+  //
+  // AN UNRECOGNISED SUBJECT IS NOT AN ABSENT SUBJECT. Treating one as absent would
+  // make the namespaced extension form a universal bypass: any site could silence
+  // a constraint by namespacing it.
+  //
+  // Declining costs the adapter nothing: the action returns to Pending and the
+  // Scheduler tries the next candidate. The control plane records it as
+  // FleetAction.status.failureReason ZoneOperatingConstraintUnmet, the CANNOT
+  // half of that reason's "distinguishing cannot honour from did not".
+  ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET = 6;
+}
+
+// OperatingConstraintMode is the resolved mode of one effective operating rule
+// (ADR-0058 §2). There is deliberately no ALLOWED value at any axis: a rule exists
+// only to narrow, absence of a rule is permission, and so a zone that takes no
+// position sends nothing. That is what makes A HOLE UNWRITABLE.
+enum OperatingConstraintMode {
+  OPERATING_CONSTRAINT_MODE_UNSPECIFIED = 0;
+  OPERATING_CONSTRAINT_MODE_DENIED = 1; // the subject is forbidden here
+  OPERATING_CONSTRAINT_MODE_LIMITED = 2; // permitted only within max, or only among allowed
+  OPERATING_CONSTRAINT_MODE_REQUIRED = 3; // the subject MUST be running (the inspection-zone mirror case)
+}
+
+// EffectiveOperatingConstraint is ONE RESOLVED operating rule. It is the wire form of
+// one FleetZone.status.restrictions.effective[] entry on the Operating axis.
+//
+// THE CARRYING MESSAGE SETS THE SCOPE, AND THE TWO SCOPES DIFFER. This type is sent by
+// two messages, and reading it as though it had one meaning is how a conformance test
+// ends up asserting the wrong set:
+//
+//   AssignAction.operating_constraints (FA-R2) — the rules in force AT THE ONE ZONE
+//     this robot is being dispatched to: its status.currentZone, which candidate
+//     filter 2 has already proven is within the resolved leaf set of spec.zone. It is
+//     read from the same projection candidate filter 12 judged that robot against, so
+//     the wire and the filter cannot disagree.
+//
+//   ZoneConstraints.operating_constraints (FA-R7) — the UNION across EVERY zone whose
+//     polygon contains the robot, folded most-restrictive. Wider than the above by
+//     construction: overlapping polygons are supported, and a robot inside two of them
+//     is bound by both (ADR-0059).
+//
+// RESOLVED, NEVER RAW, in both. The adapter is never asked to walk a zone tree and
+// never receives a rule that resolution has already superseded: the control plane sends
+// one entry per subject, already folded to the most restrictive rule anywhere in the
+// ancestor chain (FZ-R1/FZ-R4). An adapter that tried to resolve these itself would be
+// the second resolver FZ-R4 exists to forbid.
+//
+// FOR FA-R2, THE SCOPE IS THE LEAF AND NOT THE TARGET (ADR-0058 Amendment 2). Candidate
+// filter 2 admits a robot from anywhere in the SUBTREE of the action's zone, so the
+// rules that govern it are the ones in force where it actually stands — which already
+// include every ancestor's, the target's among them, because the leaf's projection is
+// the fold of itself and its chain. Sending the target's own projection instead would
+// send an EMPTY set for an action on a zone whose rule is declared one level down, and
+// the adapter would have nothing to decline.
+//
+// One narrow exception, on the FA-R2 path only: a robot the action PINS skips filter 2
+// (RFC-0001 filter 6) and may stand outside the subtree, in which case the target's own
+// chain is the floor it is held to. It is never exempt.
+message EffectiveOperatingConstraint {
+  // One of the normative core seven (camera, microphone, water, chemical, uv,
+  // speed, noise) or a namespaced extension. An adapter that does not RECOGNISE
+  // this value MUST decline under FA-R6 naming it.
+  string subject = 1;
+  OperatingConstraintMode mode = 2;
+  // The upper bound a LIMITED rule permits, as a plain non-negative decimal
+  // string: "0.4" for a speed, "65" for a noise cap. Set only under LIMITED, and
+  // never together with allowed.
+  //
+  // THE UNIT IS A PROPERTY OF THE SUBJECT, NOT OF THIS VALUE: speed is in the
+  // namespace's distance unit per second, noise is in dB(A). It is a string and
+  // not a double so an operator's site policy round-trips verbatim rather than
+  // being canonicalised into a form they did not write.
+  string max = 3;
+  // AN ALLOW-LIST: the subject is permitted ONLY as one of these values, and
+  // EVERYTHING NOT LISTED IS DENIED. This inverts the reading of every other
+  // field here — elsewhere absence is permission — so it is stated rather than
+  // left to be inferred. Set only under LIMITED, never together with max.
+  repeated string allowed = 4;
+  // The operator's own words for WHY, carried from the declaring zone. It is what
+  // a refusal shows a person asking why a robot is not moving, so it travels with
+  // the rule rather than being looked up again.
+  string reason = 5;
+  // The zone that DECLARED this rule — very often NOT the target zone, because
+  // the effective rule is the most restrictive anywhere in the ancestor chain. An
+  // adapter declining under FA-R5 names it, so an operator is sent to the object
+  // they must actually edit.
+  string declaring_zone = 6;
 }
 
 message AssignAction {
-  string action_id      = 1;  // FleetAction namespace/name
-  string action_type    = 2;  // matches FleetAction.spec.type
-  string destination  = 3 [deprecated = true];  // DEPRECATED: destination now travels in payload_json; control plane no longer sets this.
-  bytes  payload_json = 4;  // raw JSON from FleetAction.spec.payload
+  string action_id = 1; // FleetAction metadata.name; the namespace is the adapter's own (AdapterHello.namespace)
+  string action_type = 2; // matches FleetAction.spec.type
+  string destination = 3 [deprecated = true]; // DEPRECATED: destination now travels in payload_json; control plane no longer sets this.
+  bytes payload_json = 4; // raw JSON from FleetAction.spec.payload
   // fencing_token orders this assignment. `optional` so the adapter can tell
   // "no token sent" (reject) from a value of 0. Control plane MUST send >= 1.
   optional uint64 fencing_token = 5;
-  string assignment_id = 6;  // UUID for audit correlation
-  int32  priority      = 7;
-  optional int64 deadline_ms = 8;  // absent = no deadline
+  string assignment_id = 6; // UUID for audit correlation
+  int32 priority = 7;
+  optional int64 deadline_ms = 8; // absent = no deadline
   // lease_generation is the per-ACTION strictly-monotonic assignment generation
   // (distinct from fencing_token, which is per-ROBOT and totally orders commands
   // to ONE robot). lease_generation identifies this specific assignment attempt;
   // the adapter holds a valid execution lease only while the control plane
   // renews this generation via renew_lease Commands (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee).
-  optional uint64 lease_generation  = 9;
+  optional uint64 lease_generation = 9;
   // Initial lease duration in milliseconds. The adapter resets its self-stop
-  // timer on each renew_lease renewal; if no renewal arrives before the timer
+  // timer on each renew_lease renewal it accepts; if no renewal arrives before the timer
   // fires the adapter MUST bring the current action to a safe stop.
-  uint32          lease_duration_ms = 10;
+  uint32 lease_duration_ms = 10;
+  // The RESOLVED EFFECTIVE operating rules in force AT THE ZONE THIS ROBOT IS
+  // BEING SENT TO (FA-R2), one entry per subject — the same set candidate filter
+  // 12 judged the robot against, read from the one projection so the wire and the
+  // filter cannot disagree. An adapter that accepts this assignment MUST
+  // honour every one of them for the whole time the robot is in the zone,
+  // INCLUDING WHILE MERELY TRANSITING: the rule constrains the robot's STATE, not
+  // the action (FA-R3). An adapter that cannot honour one, or does not recognise
+  // its subject, MUST decline (FA-R5/FA-R6) rather than accept and ignore it.
+  //
+  // EMPTY MEANS NO RULE IS IN FORCE, WHICH IS PERMISSION — never "everything is
+  // denied". Absence of a rule is permission at every axis (ADR-0058 §2).
+  repeated EffectiveOperatingConstraint operating_constraints = 11;
+  // The verb a Custom action performs: FleetAction.spec.customType, set only
+  // when action_type is "Custom" and the action names one (contract 1.4.0). An
+  // adapter takes the verb from here when it is set, and from the payload's
+  // `operation` otherwise, which stays accepted. Both set and different: the
+  // adapter MUST decline INVALID_ACTION. A verb the adapter does not serve: it
+  // MUST decline INVALID_ACTION, never run it as some other Custom verb. An
+  // adapter below 1.4.0 ignores this field and reads the payload, so a payload
+  // meant for one keeps naming its verb as `operation`.
+  string custom_type = 12;
 }
 
 message AssignActionResult {
-  bool                accepted  = 1;
-  string              message   = 2;
-  AssignActionRejection rejection = 3;  // set when accepted=false
+  bool accepted = 1;
+  string message = 2;
+  AssignActionRejection rejection = 3; // set when accepted=false
   // accepted_fencing_token echoes the token the adapter is now fenced at, so the
   // control plane can confirm its assignment won (or learn it was superseded).
-  optional uint64     accepted_fencing_token = 4;
+  optional uint64 accepted_fencing_token = 4;
+  // The operating subjects this adapter could NOT honour, set alongside
+  // rejection = ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET (FA-R5).
+  //
+  // Declare/honour/attest are claims a control plane cannot verify; DECLINE is an
+  // observable message on a wire, and this field is what makes it observable.
+  // A decline that does not name the subject is not testable and does not satisfy
+  // FA-R5.
+  repeated string unhonourable_subjects = 5;
+}
+
+// CancelCause is WHY the control plane is cancelling, machine-readable
+// (RFC-0001 Directive supersession on the wire). CancelAction.reason is free text
+// for a human: it cannot be parsed and MUST NOT be used to classify an event.
+// Additive; UNSPECIFIED preserves the pre-existing untyped cancel and MUST NOT be
+// read as any specific cause.
+enum CancelCause {
+  CANCEL_CAUSE_UNSPECIFIED = 0; // legacy/untyped cancel — no cause stated
+  CANCEL_CAUSE_OPERATOR = 1; // swarmada.io/cancel-requested, under the `cancel` verb
+  CANCEL_CAUSE_SUPERSEDED = 2; // a newer directive for this robot replaces this action
+  CANCEL_CAUSE_CAPABILITY_LOSS = 3; // required capability degraded
+  CANCEL_CAUSE_REVOCATION = 4; // lease revocation after connectivity loss
 }
 
 message CancelAction {
   string action_id = 1;
-  string reason  = 2;
-  // Must be >= the adapter's highest accepted token; a stale cancel is rejected
-  // so it cannot abort a newer assignment.
+  string reason = 2;
+  // Must be above the adapter's highest accepted token, except a cancel naming the
+  // action the adapter is executing, which is honoured at the token that assigned
+  // it; a stale cancel is rejected so it cannot abort a newer assignment.
   optional uint64 fencing_token = 3;
+  CancelCause cause = 4; // machine-readable cause; UNSPECIFIED states none
 }
 
 // CancelDisposition reports how the robot handled a cancel_action issued for
@@ -378,17 +580,30 @@ message CancelAction {
 // that does not set it leaves UNSPECIFIED, which the control plane treats as
 // STOPPED_SAFELY (backward-compatible with the pre-existing "ack = stopped" cancel).
 enum CancelDisposition {
-  CANCEL_DISPOSITION_UNSPECIFIED    = 0;  // legacy / non-capability-loss cancel — treated as stopped-safely
-  CANCEL_DISPOSITION_STOPPED_SAFELY = 1;  // action halted at a safe point → control plane requeues (→ Pending)
-  CANCEL_DISPOSITION_COMPLETED      = 2;  // robot finished the action (lost cap not needed to finish) → cancel is a no-op
-  CANCEL_DISPOSITION_RECOVERED      = 3;  // could not safely finish/hand off; robot recovered (load returned / to base) → action Failed
+  CANCEL_DISPOSITION_UNSPECIFIED = 0; // legacy / non-capability-loss cancel — treated as stopped-safely
+  CANCEL_DISPOSITION_STOPPED_SAFELY = 1; // action halted at a safe point → control plane requeues (→ Pending)
+  CANCEL_DISPOSITION_COMPLETED = 2; // robot finished the action (lost cap not needed to finish) → cancel is a no-op
+  CANCEL_DISPOSITION_RECOVERED = 3; // could not safely finish/hand off; robot recovered (load returned / to base) → action Failed
+  // The stop was commanded and the robot's rest could not be witnessed: the platform has
+  // no motion channel independent of the command path (ADR-0071), so the adapter does not
+  // claim STOPPED_SAFELY (contract 1.4.0). Meaningful only with acknowledged = true. An
+  // adapter sends it only to a control plane that negotiated 1.4.0 or later; to an older
+  // one it answers acknowledged = false. It does not prove the lease dead: RFC-0001's
+  // action table (#safety-action-table) states what follows (row A3 for a requeue, a
+  // held Revoking action's included; the lease alone for any other cancel).
+  // A compute runtime does not send it (compute.v1 reuses this enum; a run has no motion).
+  CANCEL_DISPOSITION_STOP_UNCONFIRMED = 4;
 }
 
 message CancelActionResult {
-  bool   acknowledged = 1;
-  string message      = 2;
-  bool   stale        = 3;  // true if rejected because the token was stale
-  CancelDisposition disposition = 4;  // capability-loss disposition; UNSPECIFIED = stopped-safely
+  bool acknowledged = 1;
+  string message = 2;
+  bool stale = 3; // true if rejected because the token was stale
+  CancelDisposition disposition = 4; // capability-loss disposition; UNSPECIFIED = stopped-safely
+  // Echoes the CancelCause acted on, so the acknowledgement is self-describing to a
+  // reader who never saw the command. Echoing a cause it did not receive is a
+  // conformance defect.
+  CancelCause cause = 5;
 }
 
 // ── Assignment lease renewal ──────────────────────────────────────────────────
@@ -401,28 +616,30 @@ message CancelActionResult {
 //
 // A dedicated Command arm is used rather than piggybacking on HeartbeatRequest
 // because:
-//   1. Missed renewal MUST trigger autonomous action self-stop; merging this with
-//      liveness heartbeat conflates two orthogonal safety properties.
-//   2. RenewActionLeaseResult carries running=false, letting the adapter surface
-//      action completion to a transiently out-of-contact control plane.
+// 1. Missed renewal MUST trigger autonomous action self-stop; merging this with
+// liveness heartbeat conflates two orthogonal safety properties.
+// 2. RenewActionLeaseResult carries running=false, letting the adapter surface
+// action completion to a transiently out-of-contact control plane.
 
 message RenewActionLease {
-  string action_id           = 1;  // FleetAction namespace/name; identifies the lease
-  uint64 lease_generation  = 2;  // must match the adapter's current lease_generation
-  uint32 lease_duration_ms = 3;  // new lease duration from this renewal timestamp
+  string action_id = 1; // FleetAction metadata.name, as in AssignAction; identifies the lease
+  uint64 lease_generation = 2; // must match the adapter's current lease_generation
+  uint32 lease_duration_ms = 3; // lease duration, timed by the adapter from its receipt of this renewal
 }
 
 message RenewActionLeaseResult {
-  // false if lease_generation is stale (adapter has a newer or no generation);
-  // the adapter ignores the renewal and does NOT reset its self-stop timer.
-  bool   renewed            = 1;
+  // false if lease_generation is not the generation the executing action was assigned with,
+  // if action_id is not the action executing under the current fencing mark, or
+  // if the local lease already lapsed; the adapter ignores the renewal and does
+  // NOT reset its self-stop timer.
+  bool renewed = 1;
   // false if the robot is no longer executing action_id (completed, failed, or
   // self-stopped). The control plane uses this to detect silent action completion
   // during a connectivity gap.
-  bool   running            = 2;
+  bool running = 2;
   // The adapter's current lease_generation (for control-plane diagnostics).
   uint64 current_generation = 3;
-  string message            = 4;
+  string message = 4;
 }
 
 // ── Emergency stop (confirmed) ────────────────────────────────────────────────
@@ -443,29 +660,29 @@ message RenewActionLeaseResult {
 // provide: estop travels on its own stream, is never fenced, and STOPPED is only ever
 // adapter-confirmed (never inferred from absent motion or a timeout).
 message Estop {
-  string estop_id     = 1;  // UUID for idempotency and audit
-  string reason       = 2;
-  string issued_by    = 3;  // authenticated identity, for attribution only
-  int64  issued_at_ms = 4;
+  string estop_id = 1; // the stop ID: random, at least 128 bits, the same on every copy and re-send; compared only for equality
+  string reason = 2;
+  string issued_by = 3; // authenticated identity, for attribution only
+  int64 issued_at_ms = 4;
 }
 
 enum EstopState {
   ESTOP_STATE_UNSPECIFIED = 0;
-  ESTOP_STATE_STOPPING    = 1;  // command received; robot is decelerating
-  ESTOP_STATE_STOPPED     = 2;  // CONFIRMED halted in a safe state
-  ESTOP_STATE_FAILED      = 3;  // could not confirm a stop — escalate immediately
+  ESTOP_STATE_STOPPING = 1; // received and braking; rest not yet confirmed — never a stop
+  ESTOP_STATE_STOPPED = 2; // CONFIRMED halted in a safe state
+  ESTOP_STATE_FAILED = 3; // could not confirm a stop — escalate immediately
 }
 
 // The control plane MUST treat a robot as STOPPED only on EstopAck.state =
 // ESTOP_STATE_STOPPED — never by inferring it from absent motion or a timeout.
 message EstopAck {
-  string     estop_id        = 1;  // echoes the request
-  EstopState state           = 2;  // confirmed by the adapter, not inferred
-  string     message         = 3;
-  int64      confirmed_at_ms = 4;
-  // Epoch-ms at which the adapter issued the hardware stop command (RFC-0001 #safety-timing-requirements, the
-  // <1s ACK→hardware boundary). optional for explicit presence: unset ("not
-  // reported") is distinct from epoch 0.
+  string estop_id = 1; // echoes the request
+  EstopState state = 2; // confirmed by the adapter, not inferred
+  string message = 3;
+  int64 confirmed_at_ms = 4;
+  // Epoch-ms at which the adapter issued the hardware stop command, which it does
+  // before sending this ack (RFC-0001 #safety-timing-requirements). optional for
+  // explicit presence: unset ("not reported") is distinct from epoch 0.
   optional int64 stop_initiated_at = 5;
 }
 
@@ -479,130 +696,346 @@ message EstopAck {
 
 // Adapter → control plane on SafetyStream.
 message AdapterSafetyMessage {
-  uint64 seq      = 1;  // per-stream monotonic counter; audit/gap-detection only
-  string robot_id = 2;  // managed robot; same per-robot authz as ControlStream
+  uint64 seq = 1; // per-stream monotonic counter; audit/gap-detection only
+  string robot_id = 2; // managed robot; same per-robot authz as ControlStream
   oneof payload {
-    EstopAck          estop_ack    = 3;  // RFC-0001 #safety-timing-requirements SLA measured on receipt of this
-    PauseResult       pause_result = 4;  // optional: safety-critical pause confirmation
+    EstopAck estop_ack = 3; // RFC-0001 #safety-timing-requirements SLA measured on receipt of this
+    PauseResult pause_result = 4; // optional: safety-critical pause confirmation
+    EstopClearAck estop_clear_ack = 5; // contract 1.4.0: the adapter lifted the stop a clear named
+    LocalStopReport local_stop = 6; // contract 1.4.0: the robot's local latch
   }
 }
 
 // Control plane → adapter on SafetyStream.
 message ControlPlaneSafetyMessage {
-  uint64 seq      = 1;
+  uint64 seq = 1;
   string robot_id = 2;
   oneof payload {
-    Estop             estop = 3;  // reuses Estop (estop_id, reason, issued_by, issued_at_ms)
-    PauseCapabilities pause = 4;  // optional: safety-critical capability pause
+    Estop estop = 3; // reuses Estop (estop_id, reason, issued_by, issued_at_ms)
+    PauseCapabilities pause = 4; // optional: safety-critical capability pause
+    EstopClear estop_clear = 5; // contract 1.4.0: ends one stop, by its stop ID
   }
+}
+
+// ── The stop latch (contract 1.4.0; RFC-0001 #fleet-adapter-protocol-the-stop-latch) ──────────
+//
+// An adapter below 1.4.0 ignores these arms. The control plane sends no EstopClear to it.
+
+// Control plane → adapter on SafetyStream: the clear of one stop. It is sent only once the clear's
+// write has landed, and it lifts the latch only for the stop it names.
+message EstopClear {
+  string estop_id = 1; // the stop ID of the stop this clear ends
+  string cleared_by = 2; // authenticated identity, for attribution only
+  int64 cleared_at_ms = 3;
+  string ends_local_set = 4; // the set ID of the local set this clear ends, or empty
+  uint64 leader_term = 5; // the term of the leader that sends it (The leader term)
+}
+
+// Adapter → control plane on SafetyStream: the stop a clear named is lifted.
+message EstopClearAck {
+  string estop_id = 1; // the stop ID the adapter has lifted
+  int64 lifted_at_ms = 2;
+}
+
+// Adapter → control plane on SafetyStream: the robot's local latch.
+message LocalStopReport {
+  bool latched = 1; // the robot's local latch is set; true whenever unreadable is true
+  int64 changed_at_ms = 2; // when it was set, or reset at the robot
+  string source = 3; // the edge node's zone, or "robot"; for attribution only
+  string set_id = 4; // the latest set whose clear has not taken effect; empty if none
+  bool unreadable = 5; // the adapter cannot read the local latch; the robot is then in the end state
 }
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 
 message TelemetryPayload {
-  string        robot_id     = 1;
-  int64         timestamp_ms = 2;  // Unix ms; always present
-  RobotPosition position     = 3;
-  BatteryStatus battery      = 4;
-  RobotPhase    phase        = 5;
+  string robot_id = 1;
+  int64 timestamp_ms = 2; // Unix ms; always present
+  RobotPosition position = 3;
+  BatteryStatus battery = 4;
+  RobotPhase phase = 5;
   // Delta-compressed: only components whose status changed since the last
   // payload; ALL components on the first payload after (re)connect.
   repeated HardwareStatusUpdate hardware = 6;
-  string        current_action = 7;  // empty if idle
+  string current_action = 7; // empty if idle
 }
 
 // Scalars below use proto3 explicit presence because 0 / 0.0 / false are valid,
 // safety-relevant readings; without presence a dropped field deserializes to
 // zero and is indistinguishable from a real reading — a phantom origin (0,0) or
-// a false 0% battery (review RA-3b).
+// a false 0% battery (RA-3b).
 message RobotPosition {
-  optional double x     = 1;  // metres, zone frame; 0.0 is a valid coordinate
-  optional double y     = 2;
-  optional double yaw   = 3;  // radians; 0.0 is a valid heading
-  optional int32  floor = 4;  // 0 = ground is a valid floor; absent != ground
-  optional double altitude = 5;  // metres (geodetic/aerial); AGL/MSL per SwarmadaConfig; frame-exclusive with floor
+  optional double x = 1; // metres, zone frame; 0.0 is a valid coordinate
+  optional double y = 2;
+  optional double yaw = 3; // radians; 0.0 is a valid heading
+  optional int32 floor = 4; // 0 = ground is a valid floor; absent != ground
+  // metres (geodetic/aerial); AGL/MSL per SwarmadaConfig. Reported alongside floor, not
+  // instead of it: zone containment compares floor in every frame, Geodetic included
+  // (RFC-0001 FZ-Z1).
+  optional double altitude = 5;
 }
 
 message BatteryStatus {
-  optional int32  percent  = 1;  // 0–100; 0 is a valid (critical) reading
-  optional bool   charging = 2;  // absent = unknown, NOT "false"
-  optional double voltage  = 3;  // volts; 0.0 is meaningful
-  optional int32  estimated_minutes_remaining = 4;  // 0 = critical; absent = unknown
+  optional int32 percent = 1; // 0–100; 0 is a valid (critical) reading
+  optional bool charging = 2; // absent = unknown, NOT "false"
+  optional double voltage = 3; // volts; 0.0 is meaningful
+  optional int32 estimated_minutes_remaining = 4; // 0 = critical; absent = unknown
 }
 
 // ── Action status ─────────────────────────────────────────────────────────────
 
 enum ActionState {
   ACTION_STATE_UNSPECIFIED = 0;
-  ACTION_STATE_RUNNING     = 1;
-  ACTION_STATE_SUCCEEDED   = 2;
-  ACTION_STATE_FAILED      = 3;
-  ACTION_STATE_PAUSED      = 4;
-  ACTION_STATE_CANCELLED   = 5;
-  ACTION_STATE_STOPPED     = 6;  // clean commanded stop (reconnect IDLE/REVOKING-expired, edge estop); NOT a failure
-  ACTION_STATE_UNKNOWN     = 7;  // no control-plane record (reconnect UNKNOWN phase); robot halts and reports
+  ACTION_STATE_RUNNING = 1;
+  ACTION_STATE_SUCCEEDED = 2;
+  ACTION_STATE_FAILED = 3;
+  ACTION_STATE_PAUSED = 4;
+  ACTION_STATE_CANCELLED = 5;
+  // Commanded stop; NOT terminal. After any stop (edge, fence, Estop) the adapter follows it
+  // with the terminal report RFC-0001 #fleet-adapter-protocol-the-stop-latch requires.
+  ACTION_STATE_STOPPED = 6;
+  ACTION_STATE_UNKNOWN = 7; // no control-plane record (reconnect UNKNOWN phase); robot halts and reports
+}
+
+// ActionEndCause is HOW an action ended, as reported by the adapter. It exists
+// separately from CancelCause because in-place preemption sends no cancel_action at
+// all: there the terminal ActionStatusUpdate is the only report of why the action
+// ended. An enum rather than free text because the value feeds a safety audit entry
+// and an operator-facing distinction between work a person stopped and work the
+// fleet replaced; neither can rest on a string.
+enum ActionEndCause {
+  ACTION_END_CAUSE_UNSPECIFIED = 0; // no cause stated — NOT a claim of any cause
+  ACTION_END_CAUSE_SUPERSEDED = 1; // replaced by a newer directive for this robot
+  ACTION_END_CAUSE_CANCELLED_BY_OPERATOR = 2; // ended on a cancel carrying CANCEL_CAUSE_OPERATOR
+  ACTION_END_CAUSE_CAPABILITY_LOSS = 3;
+  ACTION_END_CAUSE_LEASE_EXPIRED = 4; // self-stop on an unrenewed lease
+  ACTION_END_CAUSE_ESTOP = 5; // halted by an emergency stop
+  ACTION_END_CAUSE_EXECUTION_FAILURE = 6; // the robot could not complete the action
 }
 
 message ActionStatusUpdate {
-  string    action_id = 1;
-  ActionState state   = 2;
-  string    message = 3;
-  // fencing_token the robot is currently executing under, echoed so the control
-  // plane can detect a robot still acting on a superseded assignment.
+  string action_id = 1;
+  ActionState state = 2;
+  string message = 3;
+  // fencing_token the reported action was assigned with, echoed so the control
+  // plane can tie the report to that run and detect a robot still acting on a
+  // superseded assignment. The control plane refuses a report whose token is absent
+  // or differs from the token the action was assigned with.
   optional uint64 fencing_token = 4;
-  int32     progress_pct = 5;  // 0–100; 0 if unknown
+  int32 progress_pct = 5; // 0–100; 0 if unknown
+  // How the action ENDED; REQUIRED on a terminal state that is not SUCCEEDED. An
+  // adapter that cannot determine the cause MUST leave this unset rather than guess:
+  // a defaulted zero is indistinguishable from a reported value, the same
+  // explicit-presence discipline INSTALL_OUTCOME_UNSPECIFIED follows.
+  ActionEndCause end_cause = 6;
+  // REQUIRED iff end_cause = ACTION_END_CAUSE_SUPERSEDED: the action_id of the
+  // AssignAction that displaced this one. This is what makes a supersession
+  // structurally distinguishable from an operator cancellation rather than only
+  // differently labelled — an operator cancellation has no superseding action and
+  // can never populate it. A SUPERSEDED report with this empty is malformed, and the
+  // control plane MUST treat it as ACTION_END_CAUSE_UNSPECIFIED rather than accept an
+  // unattributable supersession.
+  string superseding_action_id = 7;
+  // true (contract 1.4.0): a terminal outcome retained from before this connection
+  // (RFC-0001 #fleet-adapter-protocol-reconnect-action-state-reconciliation, The retained
+  // outcome). The adapter retains the terminal outcome of its last action for a robot, with
+  // its report token (fencing_token), until the control plane acknowledges it with an
+  // ActionOutcomeAck, and sends it with retained = true on each reconnect once it has
+  // processed every RegisterAck. Only a retained outcome carries retained = true. A retained
+  // outcome is not work: the adapter continues nothing for it. What the control plane does
+  // with it is row A13 of RFC-0001 #safety-action-table. An adapter sends it only to a
+  // control plane that negotiated 1.4.0 or later; a control plane below 1.4.0 ignores it.
+  bool retained = 8;
+}
+
+// The control plane's acknowledgement of a retained outcome (contract 1.4.0), the
+// outcome_ack arm of ControlPlaneMessage. It names the action and the outcome's report
+// token. The control plane sends it only once it has recorded the outcome, the action
+// already holds a terminal outcome, it has decided the outcome under a stop, or a direct
+// read of the API server finds the action gone; never for a report token that does not
+// match the action's assignment. On it the adapter stops retaining that outcome; until
+// then the adapter reports the outcome again on every reconnect. An adapter below 1.4.0
+// ignores it.
+message ActionOutcomeAck {
+  string action_id = 1; // the action whose terminal outcome the control plane has read
+  uint64 fencing_token = 2; // that outcome's report token
+}
+
+// ── Semantic events ───────────────────────────────────────────────────────────
+//
+// TaskEvent is an event an execution raises while it runs, defined here as a
+// standalone, reusable message. No field of ActionStatusUpdate carries it: an
+// adapter does not send it on this protocol. It is defined here so `compute/v1`
+// (the Grpc binding's service) can import and reuse the same message for a
+// Service-contract executor's status stream, rather than defining a second event
+// message for a second execution kind.
+//
+// NOTE the field numbers. Fields 6, 7 and 8 of ActionStatusUpdate are taken, by
+// end_cause, superseding_action_id and retained above. ActionStatusUpdate has no
+// field that carries TaskEvent.
+
+// EventSubjectKind is the execution kind an event was raised by. One value today
+// (a robot-dispatched FleetAction); reserved so a later execution kind is an
+// additive enum value, not a reinterpretation of `seq`'s scope.
+enum EventSubjectKind {
+  EVENT_SUBJECT_KIND_UNSPECIFIED = 0; // a receiver MUST read this as ACTION
+  EVENT_SUBJECT_KIND_ACTION = 1; // the FleetAction identified by action_id
+}
+
+message TaskEvent {
+  string type = 1; // e.g. "IntruderDetected" — capability/executor-defined, opaque
+  uint64 seq = 2; // monotonic per (subject_kind, subject id); the idempotency key
+  int64 time_ms = 3;
+  google.protobuf.Struct payload = 4;
+  bool terminal = 5; // marks the event that ends a Continuous execution
+  EventSubjectKind subject_kind = 6; // UNSPECIFIED means ACTION
 }
 
 // ── Heartbeat ─────────────────────────────────────────────────────────────────
 // Works as a normal request/response now that it travels over the stream: the
 // control plane pushes HeartbeatRequest, the adapter replies HeartbeatResponse.
+// There is deliberately no unsolicited adapter→control-plane heartbeat arm — the
+// control plane owns the cadence, so liveness cannot be asserted by the side being
+// measured.
+//
+// robot_id selects between the two questions the exchange can ask, and an adapter
+// MUST answer both:
+//
+//   * NON-EMPTY — per-robot: "is robot_id alive?". Sent before a robot whose
+//     telemetry has gone quiet is declared Offline (the confirming exchange).
+//   * EMPTY — adapter-scoped: "is this adapter alive?". Sent on a cadence of
+//     spec.heartbeatIntervalSeconds so the adapter's liveness has a floor and not
+//     only a timeout. It names no robot and asserts nothing about any robot; the
+//     control plane projects adapter presence onto the robots it serves.
+//
+// In both cases the reply MUST echo the request's robot_id, empty or not.
 
 message HeartbeatRequest {
-  string robot_id   = 1;
-  int64  sent_at_ms = 2;
+  // Empty means adapter-scoped (see above), not "unknown robot".
+  string robot_id = 1;
+  int64 sent_at_ms = 2;
 }
 
 message HeartbeatResponse {
-  string        robot_id      = 1;
-  RobotPhase    phase         = 2;
-  BatteryStatus battery       = 3;
-  int64         received_at_ms = 4;
+  // Echoes HeartbeatRequest.robot_id, including when it is empty.
+  string robot_id = 1;
+  // phase/battery describe the named robot and are meaningless on an
+  // adapter-scoped reply; leave them unset there.
+  RobotPhase phase = 2;
+  BatteryStatus battery = 3;
+  int64 received_at_ms = 4;
 }
 
 // ── Capabilities: scan / pause / resume ───────────────────────────────────────
 
-message ScanCapabilities {}  // request a full (non-delta) snapshot
+message ScanCapabilities {} // request a full (non-delta) snapshot
 
 message CapabilitiesSnapshot {
-  string   robot_id         = 1;
-  repeated HardwareComponent hardware         = 2;  // ALL components
-  repeated InstalledModel    installed_models = 3;  // ALL models
-  int64    snapshot_ms      = 4;
-   repeated SupportedAction   supported_actions = 5;  // the action catalog this adapter can serve (discovery)
+  string robot_id = 1;
+  repeated HardwareComponent hardware = 2; // ALL components
+  repeated InstalledModel installed_models = 3; // ALL models
+  int64 snapshot_ms = 4;
+  repeated SupportedAction supported_actions = 5; // the action catalog this adapter can serve (discovery)
   // Firmware install state as the robot reports it (ADR-0033). Optional: an adapter
   // that does not implement push_firmware leaves it unset, and the control plane
   // keeps its own firmwareVersion record untouched.
-  FirmwareState              firmware          = 6;
+  FirmwareState firmware = 6;
+  // ALL sensor streams this robot can serve. Additive,
+  // discovered the same way as supported_actions: pulled via Command.scan,
+  // projected read-only to Robot.status.sensorStreams[]. Optional: an adapter
+  // that declares none is unaffected and offers no ActivateStream target.
+  repeated SensorStream sensor_streams = 7;
+  // The operating SUBJECTS this robot's adapter can honour while the robot is in
+  // a zone that restricts one: camera, microphone, water, chemical, uv, speed,
+  // noise, or a namespaced extension (`example.com/leaf-blower`). Additive, and
+  // discovered on exactly the path sensor_streams above already takes: pulled via
+  // Command.scan, projected read-only to
+  // Robot.status.honouredOperatingConstraints[] (RFC-0001 amendment
+  // "Zone Restrictions", FA-R1).
+  //
+  // THIS IS NOT THE CAPABILITY VOCABULARY AND THE TWO NEVER MEET (ADR-0058 §7). A
+  // capability answers "can this robot be asked to do X"; an operating subject
+  // answers "is X happening right now". The deciding case is a robot TRANSITING a
+  // ward with a live microphone: no action was refused, no capability was
+  // required, and the constraint was still broken. A subject that happens to
+  // collide with a capability name means nothing.
+  //
+  // DECLARING NONE IS NOT A BREACH, AND IT IS NOT PERMISSION EITHER. An adapter
+  // that leaves this empty is conformant; its robots are simply withheld from any
+  // zone restricting a subject, because an empty declaration satisfies no subject
+  // (ADR-0058 Amendment 1 §A1.2). An adapter built before this field existed
+  // cannot set it and is withheld on the same footing — a cost that decision
+  // accepts rather than resolves permissively.
+  //
+  // The control plane DROPS any entry outside the vocabulary rather than
+  // rejecting the whole declaration, so one malformed subject cannot cost a robot
+  // the valid ones beside it. A dropped subject is an undeclared subject.
+  repeated string honoured_operating_constraints = 8;
+}
+
+// ActivationCost classifies whether ActivateStream has a real power/bandwidth
+// cost for this stream (ON_DEMAND — the duty cycle below exists for this
+// case) or the sensor is already powered regardless of activation (ALWAYS_ON,
+// e.g. a mic array that is never switched off). Advisory to the control
+// plane; it changes no admission or scheduling decision.
+enum ActivationCost {
+  ACTIVATION_COST_UNSPECIFIED = 0;
+  ACTIVATION_COST_ALWAYS_ON = 1;
+  ACTIVATION_COST_ON_DEMAND = 2;
+}
+
+// SensorStream declares one named sensor a robot can serve as an
+// ActivateStream target. A task author discovers
+// what a robot can see before writing a task the same way they discover what
+// actions it can serve — via SupportedAction, the analogous discovery entry
+// above; admission/scheduling can then reject a reference to a stream no
+// candidate robot offers (SensorStreamNotOffered) before ever
+// committing a robot.
+//
+// ABSENCE IS NOT SIGNAL. Copies the PositionFrame rule (message PositionFrame, below):
+// a gap in frames on an activated stream MUST NOT be interpreted as absence
+// of the thing being looked for. A consumer whose stream dries up fails on
+// its own timeout; it MUST NOT silently report "nothing detected".
+//
+// BANDWIDTH ADMISSION IS EXPLICITLY OUT OF SCOPE.
+// Nothing here declares or lets the control plane enforce a per-stream
+// bitrate: adapters cannot declare one accurately enough to admit against — a
+// "5 fps JPEG" stream spans an order of magnitude with resolution and scene
+// complexity, and varies during a run. In its place the edge runtime compares
+// DELIVERED rate against the rate requested at activation and raises a
+// StreamDegraded semantic event (a TaskEvent.type value; TaskEvent is above) when it
+// falls short — reported, never admitted against. An unreported degradation
+// is otherwise indistinguishable from a stream-splitting failure at the
+// control plane, which is why the report exists even though the
+// budget does not.
+message SensorStream {
+  string stream_id = 1; // "front-rgb", "mic-array", "lidar-2d" — adapter-defined, stable
+  string media_type = 2; // "image/jpeg", "audio/l16", "application/vnd.pointcloud"
+  double native_rate_hz = 3;
+  repeated string required_capabilities = 4; // robot capabilities that must be Active for this stream to serve
+  ActivationCost activation_cost = 5;
+  bool supports_clip = 6; // can serve a pre/post-roll window
+  uint32 clip_pre_seconds_max = 7;
 }
 
 message PauseCapabilities {
-  string   reason                  = 1;
-  repeated string capability_names = 2;  // only pauseable:true capabilities
-  bool     require_stop_before_ack = 3;  // adapter MUST reach physical stop first
+  string reason = 1;
+  repeated string capability_names = 2; // only pauseable:true capabilities
+  bool require_stop_before_ack = 3; // adapter MUST reach physical stop first
 }
 
 message PauseResult {
-  bool   paused  = 1;
+  bool paused = 1;
   string message = 2;
 }
 
 message ResumeCapabilities {
-  string   reason                  = 1;
+  string reason = 1;
   repeated string capability_names = 2;
 }
 
 message ResumeResult {
-  bool   resumed = 1;
+  bool resumed = 1;
   string message = 2;
 }
 
@@ -616,8 +1049,8 @@ message ResumeResult {
 // (RFC-0001 #tde) are control-plane-initiated and ride the zone_admission Command.
 
 message ResourceRequest {
-  uint64 request_id = 1;   // unique per stream; echoed in ResourceResponse
-  string robot_id   = 2;
+  uint64 request_id = 1; // unique per stream; echoed in ResourceResponse
+  string robot_id = 2;
   oneof request {
     ReserveResource reserve = 3;
     ReleaseResource release = 4;
@@ -625,8 +1058,8 @@ message ResourceRequest {
 }
 
 message ResourceResponse {
-  uint64 request_id = 1;   // echoes ResourceRequest.request_id
-  string robot_id   = 2;
+  uint64 request_id = 1; // echoes ResourceRequest.request_id
+  string robot_id = 2;
   oneof response {
     ReserveResult reserve = 3;
     ReleaseResult release = 4;
@@ -634,20 +1067,20 @@ message ResourceResponse {
 }
 
 message ReserveResource {
-  string resource_name = 1;   // SharedResource name; resolved up the zone tree
+  string resource_name = 1; // SharedResource name; looked up across the robot's namespace
 }
 
 enum ReservationState {
   RESERVATION_STATE_UNSPECIFIED = 0;
-  RESERVATION_STATE_GRANTED     = 1;  // robot may proceed now
-  RESERVATION_STATE_QUEUED      = 2;  // hold at boundary; await reservation_granted
-  RESERVATION_STATE_DENIED      = 3;  // resource unknown / unreachable from the zone
+  RESERVATION_STATE_GRANTED = 1; // robot may proceed now
+  RESERVATION_STATE_QUEUED = 2; // hold at boundary; await reservation_granted
+  RESERVATION_STATE_DENIED = 3; // resource unknown / unreachable from the zone
 }
 
 message ReserveResult {
-  ReservationState state          = 1;
-  int32            queue_position = 2;  // 0 when GRANTED
-  string           message        = 3;
+  ReservationState state = 1;
+  int32 queue_position = 2; // 0 when GRANTED
+  string message = 3;
 }
 
 message ReleaseResource {
@@ -655,28 +1088,117 @@ message ReleaseResource {
 }
 
 message ReleaseResult {
-  bool   released = 1;
-  string message  = 2;
+  bool released = 1;
+  string message = 2;
 }
 
 // Async grant of a previously QUEUED reservation (control plane → adapter),
 // carried as a Command so it is acknowledged like any other pushed command.
-message ReservationGranted { string resource_name = 1; }
-message ReservationGrantedAck { bool acknowledged = 1; }
+message ReservationGranted {
+  string resource_name = 1;
+}
+message ReservationGrantedAck {
+  bool acknowledged = 1;
+}
 
 // Zone-capacity hold/admit (control plane → adapter). admit=false holds the robot
 // at the leaf-zone boundary when the zone is at maxConcurrentRobots; admit=true
 // releases it when a slot frees.
-message ZoneAdmission { string zone_name = 1; bool admit = 2; string message = 3; }
-message ZoneAdmissionAck { bool acknowledged = 1; }
+message ZoneAdmission {
+  string zone_name = 1;
+  bool admit = 2;
+  string message = 3;
+}
+message ZoneAdmissionAck {
+  bool acknowledged = 1;
+}
+
+// ZoneConstraints is the operating rule set in force WHERE THE ROBOT NOW IS
+// (ADR-0059, FA-R7). Pushed by the control plane when that rule set changes -- a
+// containment change that alters it, or a change to a containing zone's restrictions --
+// and at no other time (RFC-0001-zone-restrictions, FA-R7); a containment change that
+// leaves the rule set unchanged sends nothing. The reference control plane also sends it
+// to each robot standing in a zone when the robot's adapter registers a ControlStream,
+// since a newly connected adapter process holds no rule set.
+//
+// # It makes an EXISTING obligation satisfiable; it adds none
+//
+// FA-R3 already requires an adapter to honour an operating rule "for the whole time
+// the robot is in the zone, including while merely transiting". FA-R2 only ever sent
+// it the rules for the ASSIGNMENT TARGET's chain, once, at assignment. So an adapter
+// that entered any other zone -- a corridor it transits, an overlapping bay, a zone
+// whose rule was written after dispatch -- had no rule set for where it now was, and
+// could not comply with an obligation this contract already placed on it. This message
+// is that rule set.
+//
+// # RESOLVED AND UNIONED, never raw
+//
+// The plane derives which zones CONTAIN the robot (every zone whose polygon contains
+// its position, not the one arbitrated onto Robot.status.currentZone for reporting),
+// unions their already-resolved projections, and folds most-restrictive. The adapter
+// is never asked to walk a zone tree and never asked to do point-in-polygon: one
+// evaluator of these rules, in one place (FZ-R4).
+//
+// # EMPTY MEANS NO RULE IS IN FORCE, WHICH IS PERMISSION
+//
+// Never "everything is denied". Absence of a rule is permission at every axis
+// (ADR-0058 section 2), and a push carrying an empty list is how the plane says a robot
+// has LEFT a restricted region. An adapter that read empty as a lockout would strand
+// every robot that walked out of a ward.
+//
+// # THE RULE ARRIVES AFTER THE ROBOT CROSSES THE BOUNDARY
+//
+// Stated on the wire because an implementer needs it: the loop is telemetry-up then
+// command-down, so there is a lag between a robot entering a zone and this message
+// arriving. THIS MESSAGE DOES NOT MAKE A ZONE SAFE. It makes FA-R3 satisfiable for an
+// adapter that wants to comply, which is a different and smaller claim. An adapter that
+// needs a genuine safety boundary evaluates geometry locally, and this contract does
+// not carry geometry -- see ADR-0059 section 6 for what would.
+message ZoneConstraints {
+  // The zones whose polygons contain the robot, sorted by name. Carried so a refusal
+  // or a log line can name WHERE the rule came from, and so an adapter can tell a
+  // containment change from a rule edit. It is the containment SET and not the single
+  // reported location: a robot inside two overlapping zones is inside both, and is
+  // bound by both.
+  repeated string containing_zones = 1;
+  // The RESOLVED EFFECTIVE operating rules in force across every zone above, one entry
+  // per subject, folded most-restrictive. The same wire type AssignAction carries, so
+  // an adapter has ONE representation of an operating rule to implement rather than
+  // two that could diverge — but NOT the same scope: AssignAction carries the rules at
+  // the ONE zone the robot is dispatched to, and this carries the UNION across every
+  // zone containing it. See EffectiveOperatingConstraint's own comment.
+  //
+  // DENIED, LIMITED AND REQUIRED ALL TRAVEL. Required is the inspection-zone mirror
+  // case -- entering a zone can oblige a subject to be ON, not only off -- and a push
+  // that only ever forbade would implement half the enum.
+  repeated EffectiveOperatingConstraint operating_constraints = 2;
+  // Set when at least one containing zone's own restriction set could not be resolved
+  // (FZ-R6). The rules above are then INCOMPLETE, and an adapter MUST treat the push as
+  // a fail-closed signal for the named zones rather than as a complete answer: an
+  // unresolvable restriction is not an absent restriction.
+  repeated string unresolved_zones = 3;
+}
+
+message ZoneConstraintsAck {
+  // The adapter received the set and has applied it to the robot. It is a RECEIPT and
+  // an ATTESTATION, not a measurement: nothing in a control plane can verify that a
+  // camera is off (ADR-0058 section 12). The plane records what was claimed.
+  bool acknowledged = 1;
+  // The subjects the adapter cannot honour where the robot now is, named the same way
+  // AssignActionResult names them. An adapter that acknowledges while naming subjects
+  // has told the plane it is in a zone it cannot comply with -- which the plane can
+  // report but cannot fix, because the robot is already there.
+  repeated string unhonourable_subjects = 2;
+  string message = 3;
+}
 
 // ── Optional operations: probes / firmware / model (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist) ───────────────────
 
 enum ProbeStatus {
   PROBE_STATUS_UNSPECIFIED = 0;
-  PROBE_STATUS_HEALTHY     = 1;
-  PROBE_STATUS_DEGRADED    = 2;
-  PROBE_STATUS_FAILED      = 3;
+  PROBE_STATUS_HEALTHY = 1;
+  PROBE_STATUS_DEGRADED = 2;
+  PROBE_STATUS_FAILED = 3;
 }
 
 message VerifyHardware {
@@ -690,8 +1212,8 @@ message VerifyCapability {
 }
 
 message VerifyModel {
-  string model_name      = 1;
-  bytes  synthetic_input = 2;
+  string model_name = 1;
+  bytes synthetic_input = 2;
   map<string, double> expected_metrics = 3;
 }
 
@@ -702,46 +1224,54 @@ message VerifyResult {
 }
 
 message PushFirmware {
-  string target_version       = 1;
-  string firmware_uri         = 2;
-  string firmware_checksum    = 3;  // sha256:<hex>; integrity check
+  string target_version = 1;
+  string firmware_uri = 2;
+  string firmware_checksum = 3; // sha256:<hex>; integrity check
   // Signature URI or sigstore bundle for the firmware artifact (publisher-trust
-  // check, DD-S1). The adapter MUST verify it against
-  // SwarmadaConfig.spec.signing.trustRoots before install and fail closed on
-  // failure. Required when SwarmadaConfig.spec.signing.requireSignatureVerification.
+  // check, DD-S1). The adapter MUST verify it against the publisher keys
+  // provisioned to the adapter before install and fail closed on failure; the
+  // protocol carries no trust root, and SwarmadaConfig.spec.signing.trustRoots is
+  // read by the control plane only. Required when
+  // SwarmadaConfig.spec.signing.requireSignatureVerification.
   string firmware_signature_ref = 4;
 }
 
 message FirmwareResult {
-  bool   accepted        = 1;  // download begun
-  string message         = 2;
+  bool accepted = 1; // download begun
+  string message = 2;
   // DN or fingerprint of the trust-root key that verified the signature;
-  // populated when accepted=true. Recorded in the FIRMWARE_SIGNATURE_VERIFIED
-  // audit event (DD-S1).
+  // populated when accepted=true. Not read by the control plane at v0.4: the
+  // FIRMWARE_SIGNATURE_VERIFIED audit event records the control plane's own
+  // verification before dispatch (DD-S1).
   string verified_signer = 3;
 }
 
 message ModelUpdate {
-  string model_name        = 1;
-  string old_version       = 2;
-  string new_version       = 3;
-  string model_uri         = 4;
-  string model_checksum    = 5;  // sha256:<hex>
+  string model_name = 1;
+  string old_version = 2;
+  string new_version = 3;
+  string model_uri = 4;
+  string model_checksum = 5; // sha256:<hex>
   // Signature URI or sigstore bundle for the model artifact (publisher-trust
-  // check, DD-S1). The adapter MUST verify it against
-  // SwarmadaConfig.spec.signing.trustRoots before install and fail closed on
-  // failure. Required when SwarmadaConfig.spec.signing.requireSignatureVerification.
+  // check, DD-S1). The adapter MUST verify it against the publisher keys
+  // provisioned to the adapter before install and fail closed on failure; the
+  // protocol carries no trust root, and SwarmadaConfig.spec.signing.trustRoots is
+  // read by the control plane only. Required when
+  // SwarmadaConfig.spec.signing.requireSignatureVerification.
   string model_signature_ref = 6;
   // When true, this is an Auto rollback (RFC-0001 #design-details-why-is-modelrollout-rollback-manual-by-default): the adapter MUST reactivate the
   // robot-retained new_version (the version the robot was on before the failed
   // update) WITHOUT downloading — model_uri is empty and no signature/checksum is
   // sent, because the artifact is already present and was verified on first install.
+  // A rollback installs no artifact, so the signature-and-checksum obligation of
+  // RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist does not apply
+  // to it; like any install it ends in a terminal UpdateProgress outcome.
   bool rollback = 7;
 }
 
 message ModelUpdateResult {
-  bool   acknowledged    = 1;
-  string message         = 2;
+  bool acknowledged = 1;
+  string message = 2;
   // DN or fingerprint of the trust-root key that verified the signature;
   // populated when acknowledged=true. Recorded in the MODEL_SIGNATURE_VERIFIED
   // audit event (DD-S1).
@@ -751,28 +1281,29 @@ message ModelUpdateResult {
 // UpdateProgress reports intra-update per-robot progress during a firmware or model
 // rollout, so the control plane can surface it as
 // FirmwareRollout/ModelRollout.status.currentBatch[].updatePhase. It is ADVISORY
-// telemetry and MUST NOT be treated as a terminal outcome. Emitting it is OPTIONAL
+// telemetry and MUST NOT be treated as a terminal outcome. Emitting progress is OPTIONAL
 // for an adapter — a silent adapter simply leaves the phase at the control plane's
-// initial value.
+// initial value — but the LAST message of every install the adapter accepts is REQUIRED:
+// it carries the terminal outcome (below).
 //
 // What IS authoritative differs by kind, and the difference is load-bearing:
-//   - model:    the robot reports per-model state on its own status
-//               (installedModels[].status / failureReason), so an install FAILURE is
-//               observable and is sealed as MODEL_UPDATE_FAILED
-//               (RFC-0001 #safety-required-events).
-//   - firmware: FirmwareResult.accepted means "download begun" — an ACCEPTANCE ack,
-//               not a completion signal. No message in this contract reports a
-//               firmware install failure, which is why FIRMWARE_INSTALL_FAILED is
-//               marked deferred rather than pending: closing it requires a contract
-//               change here, not controller work.
+// - model: the robot reports per-model state on its own status
+// (installedModels[].status / failureReason), so an install FAILURE is
+// observable and is sealed as MODEL_UPDATE_FAILED
+// (RFC-0001 #safety-required-events).
+// - firmware: FirmwareResult.accepted means "download begun" — an ACCEPTANCE ack,
+// not a completion signal. A firmware install failure is reported by this
+// message's terminal outcome (outcome = FAILED, failure_reason,
+// resulting_version) and by FirmwareState on the CapabilitiesSnapshot, and is
+// sealed as FIRMWARE_INSTALL_FAILED (RFC-0001 #safety-required-events).
 message UpdateProgress {
-  string     robot_id = 1;
-  UpdateKind kind     = 2;  // which rollout this progress belongs to
+  string robot_id = 1;
+  UpdateKind kind = 2; // which rollout this progress belongs to
   // Phase string; MUST match the CRD updatePhase enum for the kind
   // (firmware: Pulling / Installing / Verifying / Rebooting;
-  //  model:    Downloading / Verifying / Installing / HealthChecking).
-  string     phase    = 3;
-  int32      percent  = 4;  // 0-100 completion, optional (0 if unknown)
+  // model: Downloading / Verifying / Installing / HealthChecking).
+  string phase = 3;
+  int32 percent = 4; // 0-100 completion, optional (0 if unknown)
 
   // ── Terminal outcome (ADR-0033) ────────────────────────────────────────────
   // Set on the LAST message of an install, and only then. While outcome is
@@ -783,15 +1314,34 @@ message UpdateProgress {
   // terminal outcome for every install it accepts. Declining the optional
   // command remains free; accepting one and going silent wedges the rollout,
   // because a control plane cannot distinguish that from a slow install.
-  InstallOutcome outcome        = 5;
+  InstallOutcome outcome = 5;
   // Why the install failed. Set only with outcome = FAILED; it is the operator's
   // only account of the failure and is recorded verbatim in the audit entry.
-  string         failure_reason = 6;
+  string failure_reason = 6;
   // The version the robot is ACTUALLY running now that the install is over. On
   // SUCCEEDED it is the target; on FAILED it is what the robot fell back to, which
   // is the fact an operator needs and cannot infer — a failed install may leave the
   // robot on the old version, on a recovery image, or somewhere else entirely.
-  string         resulting_version = 7;
+  string resulting_version = 7;
+
+  // Which MODEL this report is about (kind = UPDATE_KIND_MODEL only; ignored for
+  // firmware, where a robot has one).
+  //
+  // An adapter that implements model_update SHOULD set it, and MUST set it if it can
+  // have two model installs in flight at once. Without it the control plane has to
+  // recover the model by asking which rollout the robot is in, and a robot legitimately
+  // sits in two rollouts' batches at once — models are independent, so a robot being
+  // Updating for nav-stack is still eligible for vision-stack. That question then has
+  // more than one answer and the outcome lands on whichever model sorted first.
+  //
+  // Omitting it stays wire-compatible: the control plane falls back to correlation and
+  // REFUSES to guess when the answer is ambiguous, so an outcome is deferred to the
+  // CapabilitiesSnapshot recovery carrier (ADR-0033) rather than misattributed.
+  //
+  // It names the model, it does not license the report: a FAILED outcome for a model the
+  // control plane never entered this robot into a batch for is still not recorded, since
+  // an adapter that DECLINES an artifact has installed nothing and changed nothing.
+  string model_name = 8;
 }
 
 // InstallOutcome is the terminal result of a firmware or model install.
@@ -800,56 +1350,56 @@ message UpdateProgress {
 // "failed", and this value gates a safety-relevant audit entry. UNSPECIFIED means
 // the install has not finished — never "assume success" and never "assume failure".
 enum InstallOutcome {
-  INSTALL_OUTCOME_UNSPECIFIED = 0;  // not terminal; still in progress
-  INSTALL_OUTCOME_SUCCEEDED   = 1;
-  INSTALL_OUTCOME_FAILED      = 2;
+  INSTALL_OUTCOME_UNSPECIFIED = 0; // not terminal; still in progress
+  INSTALL_OUTCOME_SUCCEEDED = 1;
+  INSTALL_OUTCOME_FAILED = 2;
 }
 
 // UpdateKind disambiguates which rollout an UpdateProgress belongs to.
 enum UpdateKind {
   UPDATE_KIND_UNSPECIFIED = 0;
-  UPDATE_KIND_FIRMWARE    = 1;
-  UPDATE_KIND_MODEL       = 2;
+  UPDATE_KIND_FIRMWARE = 1;
+  UPDATE_KIND_MODEL = 2;
 }
 
 // ── Common component / model types ────────────────────────────────────────────
 
 enum HardwareStatus {
   HARDWARE_STATUS_UNSPECIFIED = 0;
-  HARDWARE_STATUS_HEALTHY     = 1;
-  HARDWARE_STATUS_DEGRADED    = 2;
-  HARDWARE_STATUS_FAILED      = 3;
+  HARDWARE_STATUS_HEALTHY = 1;
+  HARDWARE_STATUS_DEGRADED = 2;
+  HARDWARE_STATUS_FAILED = 3;
   // Intentionally not in service — an operator/edge toggle turned the component
   // off. Distinct from FAILED (fault): benign, reversible, and NOT critical.
-  HARDWARE_STATUS_DISABLED    = 4;
+  HARDWARE_STATUS_DISABLED = 4;
 }
 
 enum ModelStatus {
   MODEL_STATUS_UNSPECIFIED = 0;
-  MODEL_STATUS_ACTIVE      = 1;
-  MODEL_STATUS_UPDATING    = 2;
-  MODEL_STATUS_FAILED      = 3;
-  MODEL_STATUS_INACTIVE    = 4;
+  MODEL_STATUS_ACTIVE = 1;
+  MODEL_STATUS_UPDATING = 2;
+  MODEL_STATUS_FAILED = 3;
+  MODEL_STATUS_INACTIVE = 4;
 }
 
 enum RobotPhase {
   ROBOT_PHASE_UNSPECIFIED = 0;
-  ROBOT_PHASE_IDLE        = 1;
-  ROBOT_PHASE_ASSIGNED    = 2;
+  ROBOT_PHASE_IDLE = 1;
+  ROBOT_PHASE_ASSIGNED = 2;
   ROBOT_PHASE_IN_PROGRESS = 3;
-  ROBOT_PHASE_CHARGING    = 4;
-  ROBOT_PHASE_ERROR       = 5;
-  ROBOT_PHASE_OFFLINE     = 6;
+  ROBOT_PHASE_CHARGING = 4;
+  ROBOT_PHASE_ERROR = 5;
+  ROBOT_PHASE_OFFLINE = 6;
   ROBOT_PHASE_MAINTENANCE = 7;
-  ROBOT_PHASE_DISCOVERED  = 8;
+  ROBOT_PHASE_DISCOVERED = 8;
 }
 
 message HardwareComponent {
-  string         name              = 1;  // unique within the robot
-  string         type              = 2;  // Lidar | Camera | Gripper | ...
-  string         model             = 3;  // manufacturer model; informational
-  HardwareStatus status            = 4;
-  string         degradation_reason = 5;
+  string name = 1; // unique within the robot
+  string type = 2; // Lidar | Camera | Gripper |...
+  string model = 3; // manufacturer model; informational
+  HardwareStatus status = 4;
+  string degradation_reason = 5;
 
   // Numeric/boolean attributes of the component, feeding
   // DiscoveredRobot.status.reportedHardware[] (RFC-0001 #discoveredrobot) and, after the admission merge, the
@@ -863,25 +1413,25 @@ message HardwareComponent {
   //
   // Types follow DiscoveredRobot.status.reportedHardware[]
   // (api/v1/discoveredrobot_types.go), the direct consumer of these values.
-  optional double max_payload_kg     = 6;   // kg; lift/tow ceiling
-  optional double resolution_mp      = 7;   // megapixels
-  optional double range_m            = 8;   // metres; sensor max range
-  optional double horizontal_fov_deg = 9;   // degrees; 360 for a spinning lidar
-  optional bool   depth_capable      = 10;  // absent = unknown, NOT "not depth-capable"
-  optional double frame_rate_fps     = 11;  // frames per second
-  optional double platform_length_mm = 12;  // millimetres; chassis footprint
-  optional double platform_width_mm  = 13;
+  optional double max_payload_kg = 6; // kg; lift/tow ceiling
+  optional double resolution_mp = 7; // megapixels
+  optional double range_m = 8; // metres; sensor max range
+  optional double horizontal_fov_deg = 9; // degrees; 360 for a spinning lidar
+  optional bool depth_capable = 10; // absent = unknown, NOT "not depth-capable"
+  optional double frame_rate_fps = 11; // frames per second
+  optional double platform_length_mm = 12; // millimetres; chassis footprint
+  optional double platform_width_mm = 13;
 }
 
 message InstalledModel {
-  string      name            = 1;
-  string      version         = 2;
-  ModelStatus status          = 3;
-  string      running_version = 4;  // may lag version during a ModelRollout
+  string name = 1;
+  string version = 2;
+  ModelStatus status = 3;
+  string running_version = 4; // may lag version during a ModelRollout
   // Why this model is in MODEL_STATUS_FAILED; empty for any other status.
   // Without it, status = FAILED says a model is unusable but not why, and the
   // reason is gone by the time an operator looks (ADR-0033).
-  string      failure_reason  = 5;
+  string failure_reason = 5;
 }
 
 // FirmwareState is the robot's firmware install state, as the ROBOT reports it.
@@ -894,34 +1444,34 @@ message InstalledModel {
 message FirmwareState {
   // The version the robot is running right now. This is the robot's own report,
   // distinct from FirmwareRollout's record of what it pushed.
-  string                running_version   = 1;
-  FirmwareInstallStatus status            = 2;
+  string running_version = 1;
+  FirmwareInstallStatus status = 2;
   // The version a FAILED or in-flight install was trying to reach. Paired with
   // running_version it answers the question a failed rollout actually raises:
   // what was attempted, and what is the robot left on.
-  string                attempted_version = 3;
+  string attempted_version = 3;
   // Why the last install failed; set only with status = FAILED.
-  string                failure_reason    = 4;
+  string failure_reason = 4;
 }
 
 enum FirmwareInstallStatus {
-  FIRMWARE_INSTALL_STATUS_UNSPECIFIED = 0;  // not reported by this adapter
-  FIRMWARE_INSTALL_STATUS_RUNNING     = 1;  // no install in flight
-  FIRMWARE_INSTALL_STATUS_UPDATING    = 2;
+  FIRMWARE_INSTALL_STATUS_UNSPECIFIED = 0; // not reported by this adapter
+  FIRMWARE_INSTALL_STATUS_RUNNING = 1; // no install in flight
+  FIRMWARE_INSTALL_STATUS_UPDATING = 2;
   // The last install did not complete. The robot is running running_version, which
   // is NOT attempted_version — a robot is never left in an unknown firmware state.
-  FIRMWARE_INSTALL_STATUS_FAILED      = 3;
+  FIRMWARE_INSTALL_STATUS_FAILED = 3;
 }
 
 message HardwareStatusUpdate {
-  string         component_name     = 1;
-  HardwareStatus status             = 2;
-  string         degradation_reason = 3;
+  string component_name = 1;
+  HardwareStatus status = 2;
+  string degradation_reason = 3;
 }
 
 // ---------------------------------------------------------------------------
 // EdgeService — served by the Zone Controller EDGE NODE on the facility LAN,
-// not by the control plane (RA-10-D1, RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
+// not by the control plane (RFC-0001 #fleet-adapter-protocol-the-edge-stream, RFC-0001 #safety-edge-headless-emergency-stop). The adapter dials
 // every endpoint listed in RegisterAck.edge_endpoints and holds one EdgeStream
 // per edge node, with the same dial-out, mTLS, and reconnect-backoff
 // discipline as the ControlStream. The stream survives control-plane
@@ -933,14 +1483,14 @@ service EdgeService {
 
 message AdapterEdgeMessage {
   oneof msg {
-    PositionFrame position  = 1;  // fire-and-forget pose tee, per telemetry tick
-    EstopAck      estop_ack = 2;  // confirmed ack for an edge-issued estop
+    PositionFrame position = 1; // fire-and-forget pose tee, per telemetry tick
+    EstopAck estop_ack = 2; // confirmed ack for an edge-issued estop, covering every robot it stopped
   }
 }
 
 message EdgeControlMessage {
   oneof msg {
-    Estop estop = 1;  // headless zone-scoped estop (RFC-0001 #safety-edge-headless-emergency-stop)
+    Estop estop = 1; // headless estop; names no robot: the adapter stops every robot it serves via this edge node (RFC-0001 #fleet-adapter-protocol-the-edge-stream)
   }
 }
 
@@ -949,14 +1499,101 @@ message EdgeControlMessage {
 // superseded by the next. Absence of frames MUST NOT be interpreted as a
 // breach or trigger an estop (RFC-0001 #safety-edge-headless-emergency-stop).
 message PositionFrame {
-  string        robot_id = 1;
+  string robot_id = 1;
   RobotPosition position = 2;
-  int64         ts_ms    = 3;  // adapter clock, epoch milliseconds
+  int64 ts_ms = 3; // adapter clock, epoch milliseconds
 }
 
 message EdgeEndpoint {
-  string zone    = 1;  // FleetZone declaring the edge node
-  string address = 2;  // host:port on the facility LAN
+  string zone = 1; // FleetZone declaring the edge node
+  string address = 2; // host:port on the facility LAN
+}
+
+// ── Sensor stream activation (the duty cycle) ─────────────────────────────────
+//
+// StreamSink names where frames go: the resolved compute runtime endpoint —
+// for a contract: Service ComputeEndpoint, the SAME pinned address
+// the pinned-endpoint resolver already resolved, never the Service VIP —
+// on the EdgeEndpoint/PositionFrame precedent directly above. FRAMES MUST NOT
+// ENTER THE CONTROL PLANE: the adapter (or the edge node relaying for it)
+// ships frames to this address DIRECTLY, on its own data-path connection: the
+// control plane records only that a stream is active, never what it carries.
+// A conforming adapter/edge node MUST NOT route sensor-stream bytes through
+// ControlStream, EdgeStream, or any other control-plane-terminated channel.
+// This is NORMATIVE and it IS conformance-checked: adapters/CONFORMANCE.md C18.2
+// baselines the ControlStream's byte rate while idle, activates a stream, and
+// requires the rate not to rise to carry it.
+//
+// WHAT A GREEN C18.2 DOES AND DOES NOT ESTABLISH, stated here because this
+// comment is what an adapter author reads. It is a byte-rate comparison, so it
+// detects RELAYING -- a stream's worth of traffic appearing on a channel that
+// must not carry it -- and NOT steganography: an adapter dribbling frames
+// through an existing field below the threshold passes the check and still
+// violates this rule. Honour the rule; do not read a passing report as proof.
+message StreamSink {
+  string address = 1; // host:port of the compute runtime; resolved, never a Service DNS name/VIP
+}
+
+enum ClipWindowMode {
+  CLIP_WINDOW_MODE_UNSPECIFIED = 0;
+  CLIP_WINDOW_MODE_CONTINUOUS = 1; // stream continuously at rate_hz
+  CLIP_WINDOW_MODE_SNAPSHOT = 2; // exactly one frame
+  CLIP_WINDOW_MODE_CLIP = 3; // pre/post-roll window around a trigger; requires supports_clip
+}
+
+message ClipWindow {
+  ClipWindowMode mode = 1;
+  uint32 pre_seconds = 2; // meaningful only for CLIP; bounded by clip_pre_seconds_max
+  uint32 post_seconds = 3; // meaningful only for CLIP
+}
+
+// ActivateStream is the control plane's ONLY way to turn a sensor on, and it
+// is REFCOUNTED per (robot_id, stream_id): the control plane issues ONE
+// activation per (robot, stream) at the MAX rate_hz any live consumer
+// requested, and re-issues it (a fresh command at a possibly higher rate_hz,
+// same robot+stream, next fencing_token) as further consumers join — never a
+// second, independent activation. DeactivateStream is issued by the control
+// plane itself once the LAST consumer leaves non-terminal state. An author
+// therefore never writes "turn it off", and cannot leak an activation by
+// forgetting to: the mechanism is server-side reference counting, not a task
+// obligation.
+//
+// LEASE-BOUND, AND THE SAFE DIRECTION IS OFF — the INVERSE of Estop's lease
+// direction, deliberately. Estop is never fenced and never lease-bound
+// because the failure that matters for a stop is "not applied": a safe stop
+// MUST always be honoured, so nothing may gate it. A stream is the opposite
+// case: the failure that matters is "left on" — an unattended, still-powered
+// sensor is itself the hazard, cost and privacy exposure this lease exists
+// to bound. So lease_expires_ms is renewed (by a fresh ActivateStream carrying
+// the same fencing_token) only while a consumer is genuinely live, and the
+// adapter MUST stop the stream at expiry absent a renewal — a control-plane
+// partition therefore STOPS the camera; it can never leave one running.
+message ActivateStream {
+  string robot_id = 1;
+  string stream_id = 2;
+  double rate_hz = 3;
+  ClipWindow window = 4;
+  repeated StreamSink sinks = 5; // WHERE frames go — never the control plane, see StreamSink above
+  uint64 fencing_token = 6;
+  int64 lease_expires_ms = 7; // adapter MUST stop the stream at expiry absent a renewal
+}
+
+message ActivateStreamResult {
+  bool activated = 1;
+  string message = 2;
+}
+
+// DeactivateStream is control-plane-initiated ONLY — refcounting is
+// server-side, so an adapter never infers deactivation from anything but
+// this message or its own lease expiring.
+message DeactivateStream {
+  string robot_id = 1;
+  string stream_id = 2;
+}
+
+message DeactivateStreamResult {
+  bool deactivated = 1;
+  string message = 2;
 }
 
 // ValidateAction asks the adapter whether it can serve an action's type+payload
@@ -965,26 +1602,87 @@ message EdgeEndpoint {
 // chosen robot — not at FleetAction/FleetTask acceptance, which instead uses the
 // cheaper supported-action catalog pre-filter; unsupported=true means unconfirmed
 // (not servable).
-message ValidateAction       { string action_type = 1; bytes payload_json = 2; }
-message ValidateActionResult { bool servable = 1; string message = 2; }
+message ValidateAction {
+  string action_type = 1;
+  bytes payload_json = 2;
+  // As AssignAction.custom_type, read the same way (contract 1.4.0): a verb the
+  // adapter does not serve, or one that disagrees with the payload's
+  // `operation`, is servable=false.
+  string custom_type = 3;
+}
+message ValidateActionResult {
+  bool servable = 1;
+  string message = 2;
+}
 
 // SupportedAction is one entry in an adapter's discoverable action catalog
 // (carried in CapabilitiesSnapshot). It declares an action `type` the adapter
 // can serve, the capabilities a robot needs to be eligible, and a coarse
 // parameter descriptor. Discovery (this catalog, pulled via Command.scan) is the
 // cheap pre-filter; ValidateAction is the authoritative per-instance check.
+//
+// # WHAT AN ACTION PRODUCES, not only what it takes
+//
+// `params` declares the action's INPUTS and, until `results`, nothing declared
+// its OUTPUTS. A binding that feeds one step's output into a later step's input
+// could therefore be checked in only one direction: the consuming end was
+// verifiable against `params`, and the producing end was not verifiable at all,
+// because no descriptor said what a robot action emits. A binding onto a robot
+// action was accepted whatever it named, and the mismatch surfaced at dispatch
+// on a real robot rather than at admission.
+//
+// `results` closes that by reusing `ActionParam` rather than inventing a second
+// descriptor shape. The fields carry their natural output reading: `name` is the
+// result key, `kind`/`unit` its type and unit, `allowed` the closed set an enum
+// result can take, and `min`/`max` its numeric bounds. `required` means the
+// action always emits this key — a consumer binding to a non-required result
+// must tolerate its absence.
+//
+// ADDITIVE. Field 5 is new; an adapter that declares no `results` is unchanged
+// and reads as "makes no statement about its outputs", which is what every
+// adapter built before this field meant. A checker MUST treat an empty `results`
+// as unknown rather than as "produces nothing", or it would reject every binding
+// onto every adapter that predates this field.
+//
+// # ONE ENTRY PER CUSTOM VERB
+//
+// `custom_type` (field 6, contract 1.4.0) keys an entry by the verb a `Custom`
+// action performs, matching FleetAction.spec.customType. Set it only when
+// `action_type` is "Custom". A keyed entry declares ONE verb: its
+// `required_capabilities`, `params` and `results` are that verb's. A `Custom`
+// entry with an empty `custom_type` keeps the meaning every entry had before
+// this field: it declares each Custom verb the adapter serves that no keyed
+// entry names. For a verb V a reader uses the entry keyed V when there is one,
+// and the unkeyed `Custom` entry otherwise. (`action_type`, `custom_type`) is
+// unique within a catalog.
+//
+// A keyed entry MAY also declare the verb in its params, as the `operation`
+// parameter (kind "enum", allowed exactly [custom_type], NOT required), so a
+// reader that does not read `custom_type` still tells the entries apart. It is
+// not required because an adapter reading `custom_type` serves a payload that
+// omits `operation`, and a catalog saying otherwise would be false.
+//
+// A READER THAT DOES NOT READ `custom_type` (any control plane below 1.4.0)
+// treats every entry sharing an `action_type` as ONE declaration of that type:
+// the type is declared if any entry declares it, no single entry's `params`,
+// `required_capabilities` or `results` is the type's, and the reader MUST NOT
+// refuse a catalog because an `action_type` repeats. That is what such a
+// control plane already does, so a catalog with several `Custom` entries breaks
+// none of them.
 message SupportedAction {
-  string          action_type           = 1;  // matches FleetAction.spec.type
-  repeated string required_capabilities = 2;  // robot must have these Active
-  repeated ActionParam params           = 3;  // coarse payload parameter descriptors
-  string          description           = 4;
+  string action_type = 1; // matches FleetAction.spec.type
+  repeated string required_capabilities = 2; // robot must have these Active
+  repeated ActionParam params = 3; // coarse payload parameter descriptors
+  string description = 4;
+  repeated ActionParam results = 5; // coarse descriptors for what the action EMITS
+  string custom_type = 6; // the one Custom verb this entry declares; empty = every verb no keyed entry names
 }
 message ActionParam {
-  string          name     = 1;
-  string          unit     = 2;  // e.g. "kg", "m", "s"; empty if none
-  string          kind     = 3;  // "number" | "string" | "bool" | "enum"
-  double          min      = 4;  // for number; unset => 0
-  double          max      = 5;  // for number; unset => 0
-  repeated string allowed  = 6;  // permitted values for kind=enum
-  bool            required = 7;
+  string name = 1;
+  string unit = 2; // e.g. "kg", "m", "s"; empty if none
+  string kind = 3; // "number" | "string" | "bool" | "enum"
+  double min = 4; // for number; unset => 0
+  double max = 5; // for number; unset => 0
+  repeated string allowed = 6; // permitted values for kind=enum
+  bool required = 7;
 }

@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Swarmada Authors <maintainers@swarmada.io>
+
+{{- if and .Values.controlStream.enabled .Values.controlStream.tls.certManager.enabled (not .Values.controlStream.tls.existingSecret) -}}
+{{- $fullname := include "swarmada.fullname" . -}}
+{{- $svc := include "swarmada.controlStreamService" . -}}
+{{- $caIssuer := printf "%s-controlstream-ca-issuer" $fullname -}}
+# ─────────────────────────────────────────────────────────────────────────────
+# cert-manager materials for ControlStream mTLS (RFC-0001
+# #fleet-adapter-protocol-transport-security, ADR-0025), mirroring
+# config/controlstream-tls/certificate.yaml. A self-signed root bootstraps a CA;
+# the CA issues the server certificate and every adapter client certificate. The
+# manager mounts the server Secret and uses its ca.crt as
+# --fleet-adapter-client-ca-file, so an adapter is trusted exactly when this CA
+# issued its certificate.
+#
+# Each leaf names what it is for. The server certificate's second SAN has the
+# <adapter>.<namespace>.svc.cluster.local shape an adapter identity is read from,
+# and a leaf with no extended key usage verifies as a client too, so the server
+# certificate carries server auth only and each client certificate client auth only.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-controlstream-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-controlstream-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ $fullname }}-controlstream-ca
+  secretName: {{ $fullname }}-controlstream-ca
+  duration: 87600h # 10y root
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ $fullname }}-controlstream-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $caIssuer }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $fullname }}-controlstream-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-controlstream-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" . | nindent 4 }}
+spec:
+  # tls.crt / tls.key / ca.crt, mounted by the manager Deployment.
+  secretName: {{ include "swarmada.controlStreamTLSSecret" . }}
+  {{- with .Values.controlStream.tls.certManager.duration }}
+  duration: {{ . }}
+  {{- end }}
+  {{- with .Values.controlStream.tls.certManager.renewBefore }}
+  renewBefore: {{ . }}
+  {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  dnsNames:
+    - {{ $svc }}.{{ .Release.Namespace }}.svc
+    - {{ $svc }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    name: {{ $caIssuer }}
+    kind: Issuer
+{{- range .Values.controlStream.tls.certManager.adapterClients }}
+{{- $name := required "controlStream.tls.certManager.adapterClients[].name is required: it must equal the FleetAdapter's metadata.name" .name }}
+{{- $ns := required "controlStream.tls.certManager.adapterClients[].namespace is required: it must equal the FleetAdapter's namespace" .namespace }}
+---
+# Client certificate for FleetAdapter {{ $ns }}/{{ $name }}. The ControlStream binds a
+# connection to that FleetAdapter by this SAN, and to nothing else.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-adapter-{{ $name }}-{{ $ns }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "swarmada.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ .secretName | default (printf "%s-%s-client-tls" $name $ns) }}
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: {{ $name }}
+  dnsNames:
+    - {{ $name }}.{{ $ns }}.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: {{ $caIssuer }}
+    kind: Issuer
+{{- end }}
+{{- end }}

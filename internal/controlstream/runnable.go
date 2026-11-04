@@ -34,7 +34,7 @@ import (
 // manager's lifecycle and graceful-shutdown signal.
 //
 // Transport security: when tlsCfg is non-nil the listener terminates mTLS
-// (RFC-0001 §9.2.7, ADR-0025). The crypto policy — RequireAndVerifyClientCert, the
+// (RFC-0001 #fleet-adapter-protocol-transport-security, ADR-0025). The crypto policy — RequireAndVerifyClientCert, the
 // client-CA pool, and the TLS 1.3 floor — is built by the caller
 // (cmd/manager/main.go) and applied here; the runnable does not decide policy. When
 // tlsCfg is nil the listener is plaintext: [Start] logs a prominent warning and that
@@ -73,11 +73,11 @@ func (g *GRPCRunnable) Start(ctx context.Context) error {
 	fav1.RegisterFleetAdapterServiceServer(gs, g.server)
 
 	if g.tlsCfg != nil {
-		g.logger().Info("serving ControlStream with mTLS (RFC-0001 §9.2.7)",
+		g.logger().Info("serving ControlStream with mTLS (RFC-0001 #fleet-adapter-protocol-transport-security)",
 			"address", lis.Addr().String())
 	} else {
 		g.logger().Info(
-			"serving ControlStream WITHOUT mTLS (dev mode) — RFC-0001 §9.2.7 requires mTLS in production",
+			"serving ControlStream WITHOUT mTLS (dev mode) — RFC-0001 #fleet-adapter-protocol-transport-security requires mTLS in production",
 			"address", lis.Addr().String())
 	}
 
@@ -97,10 +97,12 @@ func (g *GRPCRunnable) Start(ctx context.Context) error {
 	}
 }
 
-// NeedLeaderElection returns false: Fleet Adapters dial in and every control-plane
-// replica must accept streams, so the server runs on all replicas rather than the
-// leader alone. Multi-replica Robot.status projection coordination is future work;
-// the reference single-instance deployment is unaffected.
+// NeedLeaderElection returns false: the server listens on every replica, so an adapter that
+// reaches a replica that does not lead is answered with a status (Unavailable, "not the
+// leader") rather than a refused connection. Which streams are served is decided per stream:
+// Server.Leadership serves them only while this process leads and closes them when it stops
+// (leadership.go). Multi-replica Robot.status projection coordination is future work; the
+// reference single-instance deployment is unaffected.
 func (g *GRPCRunnable) NeedLeaderElection() bool { return false }
 
 func (g *GRPCRunnable) logger() logr.Logger {

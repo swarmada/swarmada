@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A tiny, dependency-free evaluator for the RFC-0001 §9.3.8 alert expressions.
+"""A tiny, dependency-free evaluator for the metrics-contract alert expressions.
 
 The demo-test CI gate scrapes the controller-manager's ``/metrics`` endpoint
 directly — there is no Prometheus or Alertmanager in the kind quickstart — so it
-must evaluate each §9.3.8 alert ``expr`` itself. This module parses the Prometheus
-text-exposition format into a :class:`Snapshot` and evaluates the seven §9.3.8
-expressions VERBATIM from deploy/swarmada/templates/prometheusrule.yaml.
+must evaluate each metrics-contract alert ``expr`` itself. This module parses the Prometheus
+text-exposition format into a :class:`Snapshot` and evaluates the seven RFC-0001
+#control-plane-observability-prometheus-metrics-contract expressions VERBATIM from
+deploy/swarmada/templates/prometheusrule.yaml.
 
 Two evaluation shapes, both grounded in a Prometheus range window:
 
@@ -99,7 +100,7 @@ def parse_metrics(text: str) -> list[Sample]:
         try:
             value = float(value_str)
         except ValueError:
-            continue  # +Inf/NaN histogram edge — skip; not needed by §9.3.8 exprs
+            continue  # +Inf/NaN histogram edge — skip; not needed by metrics-contract exprs
         samples.append(Sample(name, labels, value))
     return samples
 
@@ -174,34 +175,43 @@ def _bucket_deltas(
     return [(le, cur[le] - base.get(le, 0.0)) for le in sorted(cur)]
 
 
-# ── The seven §9.3.8 alert expressions (verbatim exprs from prometheusrule.yaml) ──
+# ── The seven metrics-contract alert expressions (verbatim exprs from prometheusrule.yaml) ──
 #
 # Each returns (fired: bool, observed: float, detail: str). ``increase``/``rate``
 # expressions take a baseline; instant gauges ignore it.
 
-def estop_latency_slo_breach(cur: Snapshot, base: Snapshot | None = None) -> tuple[bool, float, str]:
+def estop_latency_slo_breach(
+    cur: Snapshot, base: Snapshot | None = None
+) -> tuple[bool, float, str]:
     """increase(swarmada_estop_latency_violations_total[5m]) > 0"""
     delta = cur.sum("swarmada_estop_latency_violations_total") - (
         base.sum("swarmada_estop_latency_violations_total") if base else 0.0)
     return delta > 0, delta, "estop ACK latency violations (>500ms)"
 
 
-def telemetry_dropped_frames(cur: Snapshot, base: Snapshot | None = None) -> tuple[bool, float, str]:
+def telemetry_dropped_frames(
+    cur: Snapshot, base: Snapshot | None = None
+) -> tuple[bool, float, str]:
     """increase(swarmada_telemetry_dropped_frames_total[5m]) > 0"""
     delta = cur.sum("swarmada_telemetry_dropped_frames_total") - (
         base.sum("swarmada_telemetry_dropped_frames_total") if base else 0.0)
     return delta > 0, delta, "telemetry frames dropped (sink not Drop)"
 
 
-def telemetry_tsdb_write_errors(cur: Snapshot, base: Snapshot | None = None) -> tuple[bool, float, str]:
+def telemetry_tsdb_write_errors(
+    cur: Snapshot, base: Snapshot | None = None
+) -> tuple[bool, float, str]:
     """increase(swarmada_telemetry_tsdb_write_errors_total[5m]) > 0"""
     delta = cur.sum("swarmada_telemetry_tsdb_write_errors_total") - (
         base.sum("swarmada_telemetry_tsdb_write_errors_total") if base else 0.0)
     return delta > 0, delta, "TSDB sink write errors"
 
 
-def scheduler_assignment_latency_high(cur: Snapshot, base: Snapshot | None = None) -> tuple[bool, float, str]:
-    """histogram_quantile(0.99, rate(...assignment_latency_seconds_bucket{priority="Normal"}[10m])) > 60"""
+def scheduler_assignment_latency_high(
+    cur: Snapshot, base: Snapshot | None = None
+) -> tuple[bool, float, str]:
+    """histogram_quantile(0.99, rate(...assignment_latency_seconds_bucket{priority="Normal"}[10m]))
+    > 60"""
     buckets = _bucket_deltas(
         base or Snapshot(""), cur,
         "swarmada_scheduler_assignment_latency_seconds_bucket", priority="Normal")
@@ -209,13 +219,17 @@ def scheduler_assignment_latency_high(cur: Snapshot, base: Snapshot | None = Non
     return p99 > 60, p99, "P99 Normal-priority assignment latency (s)"
 
 
-def fleetaction_stuck_revoking(cur: Snapshot, base: Snapshot | None = None) -> tuple[bool, float, str]:
+def fleetaction_stuck_revoking(
+    cur: Snapshot, base: Snapshot | None = None
+) -> tuple[bool, float, str]:
     """swarmada_fleetactions_by_phase{phase="Revoking"} > 0"""
     v = cur.max("swarmada_fleetactions_by_phase", phase="Revoking")
     return v > 0, v, "FleetActions in Revoking"
 
 
-def fleet_adapter_disconnected(cur: Snapshot, base: Snapshot | None = None) -> tuple[bool, float, str]:
+def fleet_adapter_disconnected(
+    cur: Snapshot, base: Snapshot | None = None
+) -> tuple[bool, float, str]:
     """swarmada_fleet_adapter_connected == 0"""
     series = cur.series("swarmada_fleet_adapter_connected")
     disconnected = [s for s in series if s.value == 0]

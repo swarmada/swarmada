@@ -20,26 +20,33 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// ClearEstop resets an estopped robot to Normal.
-func TestClearEstop_ResetsToNormal(t *testing.T) {
+// An operator clear enters the post-clear supervised window; it does NOT release
+// the robot to Normal. RFC-0001 #safety-estop-state-machine gives the machine as
+// Stopped -> Resuming -> Normal and assigns the two edges to different actors: the
+// control plane authors Resuming when the clear is accepted, and leaves it only
+// when an operator confirms the robot's release. Clearing
+// straight to Normal collapses the two and returns a robot to the scheduler's
+// candidate set before anything has confirmed it can move.
+func TestClearEstop_EntersResumingNotNormal(t *testing.T) {
 	d, c, _ := newDispatcher(t, "acme")
 	// Put the robot under a confirmed stop.
 	setState(t, c, fleetv1.RobotEstopStopped)
 
-	state, err := d.ClearEstop(context.Background(), ns, "amr-1", "admin")
+	state, err := d.ClearEstop(context.Background(), ns, "amr-1", "admin", Ends{})
 	if err != nil {
 		t.Fatalf("ClearEstop: %v", err)
 	}
-	if state != fleetv1.RobotEstopNormal {
-		t.Fatalf("returned state = %s, want Normal", state)
+	if state != fleetv1.RobotEstopResuming {
+		t.Fatalf("returned state = %s, want Resuming", state)
 	}
-	if got := estopState(t, c); got != fleetv1.RobotEstopNormal {
-		t.Fatalf("estopState = %s, want Normal after clear", got)
+	if got := estopState(t, c); got != fleetv1.RobotEstopResuming {
+		t.Fatalf("estopState = %s, want Resuming after clear", got)
 	}
 }
 
@@ -47,7 +54,7 @@ func TestClearEstop_ResetsToNormal(t *testing.T) {
 func TestClearEstop_NoOpWhenNormal(t *testing.T) {
 	d, _, _ := newDispatcher(t, "acme") // robot starts with empty (Normal) estopState
 
-	state, err := d.ClearEstop(context.Background(), ns, "amr-1", "admin")
+	state, err := d.ClearEstop(context.Background(), ns, "amr-1", "admin", Ends{})
 	if err != nil {
 		t.Fatalf("ClearEstop: %v", err)
 	}
@@ -57,27 +64,32 @@ func TestClearEstop_NoOpWhenNormal(t *testing.T) {
 }
 
 // ClearEstop clears the Failed state too (a robot that could not be confirmed
-// stopped) so it can be returned to service after operator inspection.
-func TestClearEstop_ClearsFailed(t *testing.T) {
+// stopped) so it can be returned to service after operator inspection — and it
+// goes through the same supervised window. A robot whose stop was never confirmed
+// is the LAST one that should skip the interval in which its capabilities restore.
+func TestClearEstop_ClearsFailedIntoResuming(t *testing.T) {
 	d, c, _ := newDispatcher(t, "acme")
 	setState(t, c, fleetv1.RobotEstopFailed)
 
-	if _, err := d.ClearEstop(context.Background(), ns, "amr-1", "admin"); err != nil {
+	if _, err := d.ClearEstop(context.Background(), ns, "amr-1", "admin", Ends{}); err != nil {
 		t.Fatalf("ClearEstop: %v", err)
 	}
-	if got := estopState(t, c); got != fleetv1.RobotEstopNormal {
-		t.Fatalf("estopState = %s, want Normal", got)
+	if got := estopState(t, c); got != fleetv1.RobotEstopResuming {
+		t.Fatalf("estopState = %s, want Resuming", got)
 	}
 }
 
 func setState(t *testing.T, c client.Client, state fleetv1.RobotEstopState) {
 	t.Helper()
-	robot := &fleetv1.Robot{}
-	if err := c.Get(context.Background(), client.ObjectKey{Name: "amr-1", Namespace: ns}, robot); err != nil {
-		t.Fatal(err)
-	}
-	robot.Status.EstopState = state
-	if err := c.Status().Update(context.Background(), robot); err != nil {
+	// Read and written again on a conflict: the stop's record lands beside it, as on an API server.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		robot := &fleetv1.Robot{}
+		if err := c.Get(context.Background(), client.ObjectKey{Name: "amr-1", Namespace: ns}, robot); err != nil {
+			return err
+		}
+		robot.Status.EstopState = state
+		return c.Status().Update(context.Background(), robot)
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

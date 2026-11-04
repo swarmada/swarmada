@@ -1,0 +1,65 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Demonstrates the RobotProbe CRD: an active hardware probe whose repeated
+# results — not a timeout, and not a telemetry tick — drive a component's health
+# and, through it, the capabilities that depend on that component. The single
+# stage below declares one probe against `lidar_top`; watch
+# `RobotProbe.status` accumulate consecutive successes and failures against the
+# declared thresholds, and `Robot.status.hardware[]` follow them. Apply it with:
+#
+#     kubectl apply -f config/samples/robotprobe_demo.yaml -l swarmada.io/demo-step=probe
+#
+# NO STATUS IS DECLARED ANYWHERE IN THIS FILE. Every probe result, streak,
+# hardware status and robot phase the runbook displays is written by a
+# controller from a real VerifyHardware RPC over the ControlStream.
+---
+# STEP: probe. A hardware probe on lidar_top — the component every robot in the
+# healthy-fleet scenario manifest reports (adapters/scenarios/presets/healthy-fleet.yaml).
+#
+# The thresholds are the ADR-0012 defaults made explicit, so the runbook can
+# quote them without a reader having to resolve the three-level fallback
+# (per-probe → SwarmadaConfig.spec.health.defaultProbe*Threshold → 3/2):
+#
+#   failureThreshold: 3   three consecutive failing cycles before the debounced
+#                         status.lastProbeResult leaves Healthy
+#   recoveryThreshold: 2  two consecutive Healthy cycles before it comes back
+#
+# intervalSeconds is the API minimum (10) so the demo runs in a minute rather
+# than five: three failing cycles are 30 seconds, not three.
+#
+# That sentence was true as specification and false as behaviour until 2026-09-06:
+# the controller re-triggered itself on its own status write, so the ramp to
+# failureThreshold ran at reconcile rate and three failing cycles cost
+# milliseconds against an unreachable adapter. ADR-0050 paces a cycle at
+# intervalSeconds, so the arithmetic above holds again. A failure must now
+# persist 20-30s before lidar_top is demoted, and an outage under 20s
+# ((failureThreshold-1) x intervalSeconds) cannot cross the threshold at all.
+apiVersion: swarmada.io/v1
+kind: RobotProbe
+metadata:
+  name: lidar-liveness
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo-step: probe
+spec:
+  # Every robot in the namespace, so status.robotResults[] shows the failing
+  # robot's streak next to two healthy ones and the debounce is legible.
+  robotSelector: {}
+  probeType: hardware
+  targetComponent: lidar_top
+  intervalSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  recoveryThreshold: 2

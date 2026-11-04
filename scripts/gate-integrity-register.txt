@@ -1,0 +1,109 @@
+# gate-integrity-register.txt — every place in this repository where a check declines to run,
+# discards a failure, reports an obligation away, or has no invocation at all.
+#
+# READ BY scripts/check-gate-integrity.py. Format, one entry per line:
+#
+#     kind :: key :: count :: reason
+#
+#   skip     a test or check that declines to run.  count = sites at that key
+#   swallow  a gate invocation whose failure is discarded (`|| true`, `|| echo`)
+#   inert    a graded obligation reported notApplicable rather than graded
+#   unwired  a real gate with no call site — DEBT. count is 0; the LIST may only shrink
+#   exempt   a file the gate's naming convention read as a gate and which is not one
+#
+# The key is the file's LAST TWO PATH SEGMENTS plus the enclosing function, target or
+# section. Two segments rather than a full path so this register is portable between
+# checkouts that hold different subsets of the tree. A key that would name two files is
+# exit 2, never a silent merge of their counts.
+#
+# THIS IS NOT THE ONLY REGISTER. Any file named gate-integrity-register.txt in a directory
+# the gate walks is loaded too, and its entries count exactly as this file's do. A subtree
+# that is not in every checkout keeps its entries in a register beside it, so a checkout
+# without the subtree has neither its files nor entries that would report them REPAIRED.
+# This file lists only what every checkout carries. An entry named in two registers is
+# exit 2, the same refusal as a key that names two files.
+#
+# THIS IS A RATCHET, NOT AN AMNESTY. It fails in four directions, on the same terms the
+# documentation-voice register already uses:
+#
+#     NEW       a site not listed here
+#     WORSE     more sites at a key than are listed
+#     SHRUNK    fewer — lower the number. An accurate register is the whole product
+#     REPAIRED  a listed site that no longer exists, or an `unwired` gate that is now wired
+#
+# WHY A COUNT AND NOT A LINE NUMBER. A skip is not a line: an edit above one moves it, and a
+# line-keyed register would go red on unrelated edits and be switched off inside a week.
+#
+# WHY EVERY ENTRY CARRIES A REASON. A skip is legitimate — the optional control-plane
+# binaries are real, and adapters released from other repositories are really absent. The
+# requirement is not zero skips. It is that every skip is NAMED, EXPECTED and COUNTED, so a
+# new one cannot hide inside a green run. An entry with no reason is refused at load.
+
+# ── skip · Go: the optional envtest control plane ────────────────────────────────────────
+# The supported optional path. Without the control-plane binaries the envtest suites do not
+# run and the package's fake-client tests still do. `make setup-envtest` installs them and
+# these five go to zero — which is the only form of "envtest passed" that means anything.
+skip :: controller/suite_test.go::TestEnvtestHarnessIsUsable :: 1 :: envtest binaries absent is the supported optional path; the harness reports it rather than passing quietly
+skip :: controller/suite_test.go::requireEnvtest :: 2 :: the two gates every envtest case passes through: binaries absent, and harness came up broken. The second is a FAILING run reported honestly, not a pass
+skip :: webhook/suite_envtest_test.go::TestWebhookEnvtestHarnessIsUsable :: 1 :: the webhook half of the same optional path
+skip :: webhook/suite_envtest_test.go::requireWebhookEnvtest :: 2 :: the webhook half of the same two gates
+skip :: heldwork/main_test.go::TestHeldWorkRigIsUsable :: 1 :: the held-work package's half of the same optional path (its own TestMain rig, internal/webhook/heldwork); CI=true or SWARMADA_REQUIRE_ENVTEST=1 turns it into a failure
+skip :: heldwork/main_test.go::requireRig :: 2 :: the held-work rig's half of the same two gates: binaries absent, and the rig came up broken. The second is a FAILING run reported honestly (TestMain exits non-zero), not a pass
+skip :: webhook/computeworkloadtemplate_admission_envtest_test.go::TestEnvtest_WebhookRefusesPrivilegedModeOverTheWire :: 1 :: the same optional path for the one webhook case that stands up its OWN envtest environment, with the generated webhook manifest installed rather than the package harness's no-webhook one. Without the binaries the over-the-wire refusal of privileged mode is asserted nowhere; the handler's own unit tests still run and do not cover the registration
+skip :: swarmctl/estop_operator_path_envtest_test.go::startEstopPath :: 1 :: the same optional path for the swarmctl cases that stand up their OWN envtest environment (the generated webhook manifest, the estop reconcilers and swarmctl's own commands); the one skip is in the helper they share (the operator path, own-trigger and wider-stop cases). Without the binaries the operator's trigger, clear and resume through the robots/status estop guard is asserted nowhere, and the guard's own over-the-wire test skips with it. Required mode (SWARMADA_REQUIRE_ENVTEST=1 or CI=true) fails instead of skipping
+
+# ── skip · Go: an input that is genuinely not in this checkout ───────────────────────────
+# The dangerous shape, and the reason this register exists: absence is the NORMAL state, so
+# the skip is invisible in a green run. Each is listed so its disappearance — or a fourth
+# one appearing — is a change somebody sees.
+skip :: contract/adapter_versions_test.go::TestInTreeAdaptersReportASupportedContractVersion :: 1 :: one t.Skipf, reached by the three externally released reference adapters. Their absence is normal, so this subtest silently establishes nothing about three of the six adapters it enumerates
+skip :: contract/version_test.go::TestVersion_MatchesConformanceHarness :: 1 :: skips when the harness file cannot be read. The pair it compares is now also asserted by a gate that fails CLOSED on the same condition, so this skip no longer stands alone
+skip :: swarmctl/docsurface_test.go::TestDocWalkDoesNotEscapeTheCorpus :: 1 :: the case needs a symlink; filesystems that refuse one cannot host the test
+skip :: ui/views_phase2_test.go::TestFilterNarrowsListsButNotCrossReferences :: 1 :: needs more than one robot in the fixture fleet to have anything to filter
+skip :: webhook/estop_record_key_rows_envtest_test.go::recordKeyRows :: 1 :: the concurrent re-parent row needs two zone edits whose webhooks both read the tree before either write is stored, which envtest cannot force; when that does not happen in 40 attempts the row skips and says so. The fan-out scope and repair-path unit rows pin the same fix on every run
+
+# ── skip · Go: a precondition of the CONTRACT VERSION itself ─────────────────────────────
+# Both fire only while the contract is at minor 0. They are the file's only statement of the
+# real N/N-1 skew window, so at minor 0 that window is asserted nowhere. The contract is past
+# minor 0 today and both run; they are listed because the condition returns on a major bump.
+skip :: contract/version_test.go::TestMinorBump_KeepsEveryPreviousMinorAdapterQualified :: 1 :: dormant while the contract is past minor 0; live again the day a major bump resets the minor
+skip :: webhook/robot_admission_gate_test.go::TestAdmissionGate_AdmitsAgainstThePreviousMinor :: 1 :: the admission-gate half of the same dormancy
+
+# ── skip · Go: deliberate, and saying so ─────────────────────────────────────────────────
+skip :: swarmctl/registry_derivation_test.go::TestRegistryCoversEveryCRDInAPIV1 :: 1 :: an unconditional t.Skip on an UNDECIDED question — whether the registry must cover every CRD or a named subset. The file says in a comment that it is skipped and does not pass; this register is where that is counted
+skip :: webhook/kind_admission_manual_test.go::TestKindAdmission_ServeWebhook :: 1 :: opt-in manual test; needs an env var, a cert directory and a cluster pointed at the process
+skip :: controller/maintenance_window_test.go::TestWithinMaintenanceWindow_WeekWrap :: 1 :: guards a hand-written fixture date against being edited to a non-Sunday; unreachable while the fixture is correct
+
+# ── skip · Python ────────────────────────────────────────────────────────────────────────
+skip :: python/test_citation_gate_scope.py::private_patterns :: 1 :: the boundary declaration is itself declared private, so this fixture has nothing to read in a checkout that does not carry it
+skip :: python/test_pinned_reports_are_on_the_current_suite.py::test_every_report_pending_re_recording_is_a_pinned_report :: 1 :: conformance-reports/ is generated by `make conformance-profiles` and not published, so a clone without it holds none of the pending-re-recording entries listed under it. The skip fires only when that directory is absent, names the entries it did not check, and the entries are checked in full wherever the directory exists
+
+# ── skip · shell: a check that announces it is not checking ──────────────────────────────
+skip :: hack/check-proto3.sh::- :: 1 :: THE PROTO BREAKING-CHANGE CHECK. Prints "no 'main' branch — skipping" and exits 0 in any checkout without that branch, which is every checkout with no version control. See the swallow entry for the same file: even where it DOES run it cannot fail
+skip :: full-surface-demo/run.sh::launch_edge_node :: 1 :: the edge node (cmd/edge) is not in every checkout; the run says so rather than reporting the EdgeStream surface covered
+skip :: full-surface-demo/run.sh::run_assertions :: 1 :: the assertion half of the same absence
+skip :: full-surface-demo/run.sh::print_coverage_summary :: 1 :: narration of the two above in the closing summary, not a skip of its own. Counted because the gate reads printed lines and cannot tell narration from decision, and a rule that could would also hide a real one
+skip :: warehouse-quickstart/run.sh::launch_swarmtop :: 1 :: the optional terminal inspector; the quickstart proceeds without it
+
+skip :: scripts/check-publication-boundary.sh::- :: 1 :: SKIP_IF_UNAVAILABLE=1 is an explicit opt-in for a checkout without the guard, which lives outside the published tree; the run then prints "SKIPPED — this checkout was NOT verified against the ruleset". Unset, a missing guard exits 2
+
+# ── swallow · a gate invocation whose failure cannot reach anyone ────────────────────────
+swallow :: hack/check-proto3.sh::- :: 1 :: `buf breaking … || echo` — ADVISORY BY DESIGN pre-1.0, and therefore a check that cannot fail even on the runner where it does run. Deliberate and documented in the file; listed so the deliberateness is counted rather than assumed
+swallow :: scripts/check-publication-boundary.sh::- :: 1 :: `git config --get swarmada.boundary-guard || true` reads an optional setting, where unset is an answer rather than an error. The next statement handles an absent guard: exit 2, or the skip below when asked for it. No verdict is discarded
+
+# ── unwired · a real gate with no call site. DEBT. This list may only shrink ─────────────
+# Each is a working pass/fail checker that nothing invokes: no recipe line, no workflow run
+# block, no invoked script. They are recorded rather than exempted because they ARE gates —
+# calling them exempt to make this run green would be the defect this file exists to catch,
+# committed in the act of catching it.
+#
+# None in this register today. An entry for a subtree not in every checkout lives beside it.
+
+# ── exempt · the naming convention read these as gates and they are not ──────────────────
+# Classification, not debt. Each returns no verdict about the repository.
+#
+# None in this register today. An entry for a subtree not in every checkout lives beside it.
+
+# ── skip · the self-test's own planted defects ───────────────────────────────────────────
+skip :: scripts/test-check-gate-integrity.sh::expect :: 3 :: not skips: the three PLANTED skips this gate's self-test writes into its scratch tree, held here as printf literals. Counted because a rule that could tell a plant from the real thing could also be used to disguise the real thing
+skip :: python/test_conformance_runs_on_the_harness_floor.py::test_the_guard_sees_each_shape_of_too_new_name :: 1 :: not this test's skip. The reader attributes a skipif to the function ABOVE it: the site is the `skipif(version_info < (3, 11))` on test_the_shim_is_used_rather_than_the_standard_library_class, which asserts that conformance.model.StrEnum is the module's own class and not the standard library's. Below 3.11 there is no standard library class to confuse it with, so the import succeeding IS the proof and there is nothing left to assert

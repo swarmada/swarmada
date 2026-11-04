@@ -49,6 +49,22 @@ func Confirm(streams IOStreams, prompt string, assumeYes bool) (bool, error) {
 	}
 }
 
+// IsTerminalReader reports whether in is a real *os.File attached to an
+// interactive terminal. Anything else — a pipe, a redirect, a test buffer — is
+// not, so a command that treats "stdin is a terminal" as "the operator gave me
+// no input" stays scriptable and testable.
+//
+// Note the deliberately opposite default to stdinIsTerminal below: Confirm has
+// to treat a test buffer as interactive so tests can feed it a y/n answer, while
+// a reader of piped DATA has to treat one as piped input.
+func IsTerminalReader(in interface{}) bool {
+	f, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
+}
+
 // stdinIsTerminal reports whether in is an interactive TTY. A non-*os.File
 // reader (a test buffer) is treated as interactive so tests can feed input; a
 // real *os.File that is not a terminal (a pipe or redirect) is not.

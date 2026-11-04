@@ -31,4 +31,9 @@ spec:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
             - --leader-elect
+            # Repeated from config/manager/manager.yaml: `args` on a Container has no
+            # merge key, so a strategic-merge patch replaces the whole list and would
+            # otherwise silently drop the durable audit sink. The volume and
+            # mount DO merge (by name / mountPath) and are not repeated.
+            - --audit-log-file=/var/log/swarmada/audit.jsonl
             - --fleet-adapter-insecure-authz=true

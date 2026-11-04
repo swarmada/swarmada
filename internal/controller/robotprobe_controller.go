@@ -22,12 +22,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -52,19 +55,88 @@ const (
 	defaultProbeRecoveryThreshold int32 = 2
 )
 
-// RobotProbeReconciler runs active RobotProbe health checks (RFC-0001 §9.1.6): it
+// RobotProbeReconciler runs active RobotProbe health checks (RFC-0001 #robotprobe): it
 // verifies each selected robot via its Fleet Adapter and binds the proto
 // ProbeStatus into RobotProbe.status. Binding is fail-safe: a probe that cannot
 // confirm health (RPC error, timeout, or unsupported) is never reported Healthy.
 type RobotProbeReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// Audit seals PROBE_FAILURE (§9.6.5.1) into the tamper-evident chain. Nil disables
+	// Audit seals PROBE_FAILURE (RFC-0001 #safety-required-events) into the tamper-evident chain. Nil disables
 	// recording; probing is unaffected.
 	Audit audit.Recorder
 	// Prober runs the verify RPC. Nil means no prober is wired (the ControlStream
 	// command-push path is not up); every robot then reports Unknown, never Healthy.
 	Prober probe.Prober
+	// APIReader reads a robot uncached, for the fresh read after a hardware write lost to
+	// a conflict (see propagateHardwareStatus). Nil falls back to Client.
+	APIReader client.Reader
+
+	// now is the clock the cycle-pacing gate reads. Nil means time.Now.
+	now func() time.Time
+
+	// lastCycle records, per RobotProbe, when a probe cycle was last ISSUED, so the
+	// cycle rate stays spec.intervalSeconds whatever enqueued the reconcile. See
+	// cycleDue for why this is in memory rather than in status.
+	cycleMu   sync.Mutex
+	lastCycle map[types.NamespacedName]time.Time
+}
+
+func (r *RobotProbeReconciler) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// cycleDue reports whether a new probe cycle may be issued for this RobotProbe, and
+// when to come back if it may not.
+//
+// RFC-0001 §9.1.7 defines spec.intervalSeconds as "how often the control plane issues
+// the probe RPC to each targeted robot" — a cycle RATE, not merely a requeue hint. The
+// RequeueAfter at the end of Reconcile does not hold that rate on its own, because this
+// controller watches its own RobotProbe: the status patch a changing cycle makes
+// re-enqueues the object immediately. During a failure ramp every cycle changes
+// consecutiveFailures, so every cycle re-triggers the next one, and ADR-0012's debounce
+// — a count of intervalSeconds-paced cycles — is consumed at reconcile rate instead of
+// over failureThreshold × intervalSeconds. On the unreachable-adapter path, where
+// Dispatcher.roundTrip returns ErrUnreachable without waiting for anything, that is
+// milliseconds — the failure mode most likely to flap crossed the threshold fastest.
+//
+// Gating here restores the rate whatever enqueued the reconcile: the self-triggered wake
+// still runs, finds the cycle not yet due, and requeues the remainder without issuing a
+// Verify RPC. It is a rate limit on the probe, not a sleep — no reconcile blocks.
+//
+// The anchor is in memory on purpose. It is scratch state for one pacing decision; it
+// must not cost a status write per cycle (RA-1); and losing it costs at most one early
+// cycle per probe after a restart, which is the same trade RobotReconciler.beats makes.
+// Leader election means one reconciler owns it.
+func (r *RobotProbeReconciler) cycleDue(key types.NamespacedName, interval time.Duration) (time.Duration, bool) {
+	now := r.clock()
+	r.cycleMu.Lock()
+	defer r.cycleMu.Unlock()
+	if last, ok := r.lastCycle[key]; ok {
+		if elapsed := now.Sub(last); elapsed < interval {
+			wait := interval - elapsed
+			if wait > interval {
+				wait = interval // clock went backwards; never wait longer than one interval
+			}
+			return wait, false
+		}
+	}
+	if r.lastCycle == nil {
+		r.lastCycle = map[types.NamespacedName]time.Time{}
+	}
+	r.lastCycle[key] = now
+	return 0, true
+}
+
+// forgetCycle drops a probe's pacing anchor, so a recreated RobotProbe of the same name
+// probes at once rather than inheriting the deleted one's cycle clock.
+func (r *RobotProbeReconciler) forgetCycle(key types.NamespacedName) {
+	r.cycleMu.Lock()
+	delete(r.lastCycle, key)
+	r.cycleMu.Unlock()
 }
 
 // +kubebuilder:rbac:groups=swarmada.io,resources=robotprobes,verbs=get;list;watch
@@ -79,6 +151,9 @@ func (r *RobotProbeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	rp := &fleetv1.RobotProbe{}
 	if err := r.Get(ctx, req.NamespacedName, rp); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.forgetCycle(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -105,6 +180,20 @@ func (r *RobotProbeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// (spec.health.*) when the RobotProbe leaves them unset, and to the built-in
 	// constants when no SwarmadaConfig is readable.
 	defIntervalS, defTimeoutS := r.probeDefaults(ctx, req.Namespace)
+
+	intervalS := rp.Spec.IntervalSeconds
+	if intervalS <= 0 {
+		intervalS = defIntervalS
+	}
+	interval := time.Duration(intervalS) * time.Second
+
+	// One probe cycle per intervalSeconds (RFC-0001 §9.1.7), whatever enqueued this
+	// reconcile — including this controller's own status patch. Placed AFTER the
+	// kill-switch check so a disableAllProbes flip still takes effect on the next
+	// reconcile (ADR-0024): reconcilePaused issues no RPC and is never rate-limited.
+	if wait, due := r.cycleDue(req.NamespacedName, interval); !due {
+		return ctrl.Result{RequeueAfter: wait}, nil
+	}
 
 	timeoutS := rp.Spec.TimeoutSeconds
 	if timeoutS <= 0 {
@@ -149,7 +238,7 @@ func (r *RobotProbeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			successes = recoveryT
 		}
 
-		// §9.1.6.5 step 2 — propagate a SUSTAINED result into the robot's own hardware status.
+		// RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream step 2 — propagate a SUSTAINED result into the robot's own hardware status.
 		//
 		// TRANSITION-ONLY (RA-1). The streaks above are clamped at their thresholds, so a sustained
 		// failure sits at failures == failureT on EVERY subsequent tick; acting on that state would
@@ -158,6 +247,12 @@ func (r *RobotProbeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if crossed, target := probeHardwareEdge(rp, prev, failures, successes, failureT, recoveryT); crossed != hwEdgeNone {
 			hwStatus, reason := fleetv1.HardwareHealthy, ""
 			if crossed == hwEdgeDegraded {
+				// Never empty: the telemetry sink reads a non-empty degradationReason as the
+				// mark of a probe verdict it must not lower, so an adapter that answered
+				// with no message still leaves one.
+				if msg == "" {
+					msg = fmt.Sprintf("probe %s failed %d consecutive cycles", rp.Name, failures)
+				}
 				hwStatus, reason = fleetv1.HardwareDegraded, msg
 				// Sealed on the same crossing the demotion rides: this is the moment a
 				// sustained failure starts costing the robot capabilities, and it fires
@@ -201,11 +296,7 @@ func (r *RobotProbeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.V(1).Info("probe cycle", "result", newStatus.LastProbeResult, "consecutiveFailures", newStatus.ConsecutiveFailures)
 	}
 
-	intervalS := rp.Spec.IntervalSeconds
-	if intervalS <= 0 {
-		intervalS = defIntervalS
-	}
-	return ctrl.Result{RequeueAfter: time.Duration(intervalS) * time.Second}, nil
+	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
 // probesDisabled reports whether the namespace kill-switch
@@ -309,7 +400,7 @@ func (r *RobotProbeReconciler) probeThresholds(ctx context.Context, rp *fleetv1.
 	return failure, recovery
 }
 
-// recordProbeFailure seals PROBE_FAILURE (§9.6.5.1) when a probe crosses its failure
+// recordProbeFailure seals PROBE_FAILURE (RFC-0001 #safety-required-events) when a probe crosses its failure
 // threshold for a robot.
 //
 // failed_metrics names WHICH thresholds were missed, not merely that some were. A probe
@@ -387,7 +478,7 @@ func (r *RobotProbeReconciler) probeRobot(ctx context.Context, rp *fleetv1.Robot
 		SyntheticInput: syntheticInput,
 	})
 	if err != nil {
-		// Unreachable / timeout — the probe could not confirm health (§9.1.6.3
+		// Unreachable / timeout — the probe could not confirm health (RFC-0001 #robotprobe-the-verify-probe-commands
 		// FAILED). Never reported Healthy.
 		return probe.StatusFailed, "probe RPC failed: " + err.Error(), nil
 	}
@@ -455,7 +546,7 @@ func probeHardwareEdge(
 	return hwEdgeNone, ""
 }
 
-// propagateHardwareStatus writes one component's health onto Robot.status.hardware[] (§9.1.6.5
+// propagateHardwareStatus writes one component's health onto Robot.status.hardware[] (RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream
 // step 2), leaving every other component untouched.
 //
 // Change-gated: a component already in the target state writes nothing, so a crossing that merely
@@ -464,6 +555,18 @@ func probeHardwareEdge(
 // A component the robot does not inventory is a no-op rather than an append — the probe's target is
 // operator-supplied and may not match the robot's actual hardware, and inventing an inventory entry
 // from a probe would make Robot.status.hardware disagree with the adapter's own manifest.
+//
+// A component the robot reported Failed stays Failed. Only the robot's own report moves it, and
+// the resume check refuses while it is Failed (RFC-0001 #safety-estop-state-machine); a probe
+// verdict, Degraded or recovered, would lower it. The probe still records or releases its verdict
+// in the degradationReason, which is what the status sink holds a later healthy report against.
+//
+// The write carries the resourceVersion it read. robot comes from the cache, and a merge patch
+// replaces the whole list: from a view older than the status sink's last write, it put back what
+// that view held, and a Failed component the robot had just reported came back Healthy. The
+// projector does not report an unchanged Failed again, and this write is made only on a threshold
+// crossing, so neither side would repair it. A conflict reads the robot again, uncached, and redoes
+// the change on what it reads.
 func (r *RobotProbeReconciler) propagateHardwareStatus(
 	ctx context.Context,
 	robot *fleetv1.Robot,
@@ -472,33 +575,59 @@ func (r *RobotProbeReconciler) propagateHardwareStatus(
 	reason string,
 	lastHealthy *metav1.Time,
 ) error {
-	idx := -1
-	for i := range robot.Status.Hardware {
-		if robot.Status.Hardware[i].Name == component {
-			idx = i
-			break
+	reread := false
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if reread {
+			key := client.ObjectKeyFromObject(robot)
+			*robot = fleetv1.Robot{}
+			if err := r.robotReader().Get(ctx, key, robot); err != nil {
+				// Deleted since the first read: there is nothing left to write.
+				return client.IgnoreNotFound(err)
+			}
 		}
-	}
-	if idx < 0 {
-		return nil
-	}
-	cur := robot.Status.Hardware[idx]
-	if cur.Status == status && cur.DegradationReason == reason {
-		return nil // already there — no write
-	}
+		reread = true
+		idx := -1
+		for i := range robot.Status.Hardware {
+			if robot.Status.Hardware[i].Name == component {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil
+		}
+		cur := robot.Status.Hardware[idx]
+		if cur.Status == fleetv1.HardwareFailed {
+			// Robot-reported: only its own report moves it. The verdict is still set or
+			// released through the reason, so a later report of the component healthy is
+			// held, or not, by what the probe says then.
+			status = fleetv1.HardwareFailed
+		}
+		if cur.Status == status && cur.DegradationReason == reason {
+			return nil // already there — no write
+		}
 
-	base := robot.DeepCopy()
-	robot.Status.Hardware[idx].Status = status
-	robot.Status.Hardware[idx].DegradationReason = reason
-	if status == fleetv1.HardwareHealthy {
-		now := metav1.Now()
-		robot.Status.Hardware[idx].LastHealthyAt = &now
-	} else if lastHealthy != nil {
-		// §9.1.6.5: lastHealthyAt is the timestamp of the last SUCCESSFUL probe, carried from the
-		// previous result so an operator can see how long the component has been bad.
-		robot.Status.Hardware[idx].LastHealthyAt = lastHealthy
+		base := robot.DeepCopy()
+		robot.Status.Hardware[idx].Status = status
+		robot.Status.Hardware[idx].DegradationReason = reason
+		if status == fleetv1.HardwareHealthy {
+			now := metav1.Now()
+			robot.Status.Hardware[idx].LastHealthyAt = &now
+		} else if lastHealthy != nil {
+			// RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream: lastHealthyAt is the timestamp of the last SUCCESSFUL probe, carried from the
+			// previous result so an operator can see how long the component has been bad.
+			robot.Status.Hardware[idx].LastHealthyAt = lastHealthy
+		}
+		return r.Status().Patch(ctx, robot, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+// robotReader is the uncached APIReader when one is wired, else Client.
+func (r *RobotProbeReconciler) robotReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
 	}
-	return r.Status().Patch(ctx, robot, client.MergeFrom(base))
+	return r.Client
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────

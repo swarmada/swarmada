@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Package command pushes server→adapter Commands down live ControlStreams and
-// correlates the returned CommandResult by command_id (RFC-0001 §9.2, backlog
-// §E-2). It is the control-plane command-push path the active-probe, lease-renew,
+// correlates the returned CommandResult by command_id (RFC-0001 §9.2). It is the
+// control-plane command-push path the active-probe, lease-renew,
 // and model-update flows ride on.
 //
 // The current consumer is the RobotProbe controller: Dispatcher implements
@@ -32,11 +32,14 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/controlstream"
 	"github.com/swarmada/swarmada/internal/probe"
+	"github.com/swarmada/swarmada/internal/robotid"
 	fav1 "github.com/swarmada/swarmada/proto/fleet_adapter/v1"
 )
 
@@ -57,15 +60,46 @@ type CommandSender = controlstream.CommandSender
 type Dispatcher struct {
 	// Client resolves a robot to its managing Fleet Adapter (spec.adapter.name).
 	Client client.Client
-
-	now     func() time.Time
-	timeout time.Duration
+	// OnStreamRegistered, when set, is called on its own goroutine once for each verified
+	// ControlStream registered, after it is registered, so a push it makes goes down that
+	// stream. The manager sets it to the Zone Controller's re-send of each served robot's
+	// zone rule set: an adapter process that connects or reconnects starts with none
+	// (FA-R7). It is set before any stream is registered and not changed after.
+	OnStreamRegistered func(identity controlstream.TLSIdentity)
+	Term               LeaderTerm // stamps every Command, and sends none without leadership (term.go)
+	// RequireRegister, when set (the manager sets it), sends an AssignAction only to a robot whose
+	// register has been processed on its adapter's current ControlStream (fence.go).
+	RequireRegister bool
+	// RequireContract, when set, sends an AssignAction only on a ControlStream that negotiated
+	// contract 1.4.0 (StreamNegotiated): row A15's send check, its version bullet (RFC-0001
+	// #safety-action-table). The manager sets it from --require-latch-contract, off at v0.4: the
+	// in-tree deployments run the simulation adapter at 1.3.0.
+	RequireContract bool
+	// APIReader reads the API server past the cache. The motion gate (fence.go) reads the Robot
+	// through it, so a stop state written a moment earlier is seen. Nil falls back to Client.
+	APIReader client.Reader
+	// Recorder raises an Event on a Robot whose fences could not be sent on a new ControlStream.
+	// Nil logs only.
+	Recorder record.EventRecorder
+	now      func() time.Time
+	timeout  time.Duration
 
 	mu        sync.Mutex
-	streams   map[string]CommandSender            // adapterKey → live sender
-	pending   map[uint64]chan *fav1.CommandResult // command_id → result channel
-	beats     map[string]chan struct{}            // namespace/robotID → heartbeat waiter
+	streams   map[string]CommandSender  // adapterKey → live sender
+	pending   map[uint64]pendingCommand // command_id → the command's waiter
+	beats     map[string]chan struct{}  // namespace/wire robot_id → heartbeat waiter
 	idCounter uint64
+	fence     fenceState // stops in force and readiness per robot (fence.go)
+}
+
+// pendingCommand is a pushed Command awaiting its result, with the stream it went down
+// and the robot it was pushed for. A result must come back the same way to resolve it.
+// robotID is the wire robot_id the Command carried (robotid.Wire), which is what the
+// adapter's result names.
+type pendingCommand struct {
+	sender  CommandSender
+	robotID string
+	ch      chan *fav1.CommandResult
 }
 
 var _ probe.Prober = (*Dispatcher)(nil)
@@ -77,7 +111,7 @@ func New(c client.Client) *Dispatcher {
 		Client:  c,
 		timeout: defaultTimeout,
 		streams: map[string]CommandSender{},
-		pending: map[uint64]chan *fav1.CommandResult{},
+		pending: map[uint64]pendingCommand{},
 		beats:   map[string]chan struct{}{},
 	}
 }
@@ -94,6 +128,12 @@ func adapterKey(namespace, adapter string) string { return namespace + "/" + ada
 // RegisterStream records a live ControlStream for an adapter identity and returns
 // a deregister func to call when the stream closes. An unverified identity is not
 // registered — nothing may be pushed to an unauthenticated stream.
+//
+// Registering also starts this stream's adapter liveness cadence (see
+// adapter_liveness.go): the control plane owns the heartbeat direction by contract, so a
+// registered stream is exactly the scope over which the periodic HeartbeatRequest is
+// defined. The returned deregister stops it, so no beat outlives its stream. It then
+// calls OnStreamRegistered, when set.
 func (d *Dispatcher) RegisterStream(identity controlstream.TLSIdentity, sender CommandSender) func() {
 	if !identity.Verified {
 		return func() {}
@@ -102,35 +142,58 @@ func (d *Dispatcher) RegisterStream(identity controlstream.TLSIdentity, sender C
 	d.mu.Lock()
 	d.streams[key] = sender
 	d.mu.Unlock()
+	stopBeats := d.startAdapterBeats(identity, sender)
+	if d.OnStreamRegistered != nil {
+		go d.OnStreamRegistered(identity)
+	}
 	return func() {
+		stopBeats()
 		d.mu.Lock()
 		if d.streams[key] == sender {
 			delete(d.streams, key)
 		}
 		d.mu.Unlock()
+		d.forgetStream(sender)
 	}
 }
 
-// RouteResult delivers a CommandResult to the waiting Verify, correlated by
-// command_id. It never blocks the ControlStream receive loop (buffered channel);
-// a result for an unknown/expired command_id is dropped.
-func (d *Dispatcher) RouteResult(result *fav1.CommandResult) {
+// RouteResult delivers a CommandResult to the waiting caller, correlated by command_id.
+// It never blocks the ControlStream receive loop (buffered channel); a result for an
+// unknown/expired command_id is dropped and returns nil.
+//
+// command_id is a per-process counter, so it is easy to guess, and the robot_id gate in
+// front of this only proves the sender serves the robot it names. So a result resolves
+// its command only when it arrived on the stream the command was pushed down (sender)
+// and names the robot the command was pushed for. Anything else is dropped, and the
+// returned error, wrapping controlstream.ErrMisroutedResult, is the caller's to log and
+// audit (RFC-0001 #security-fleet-adapter-authentication-robot-identity).
+func (d *Dispatcher) RouteResult(sender CommandSender, result *fav1.CommandResult) error {
 	if result == nil {
-		return
+		return nil
 	}
+	id := result.GetCommandId()
 	d.mu.Lock()
-	ch := d.pending[result.GetCommandId()]
+	p, ok := d.pending[id]
 	d.mu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- result:
-		default:
-		}
+	if !ok {
+		return nil
 	}
+	if p.sender != sender {
+		return fmt.Errorf("%w: command %d was pushed down a different ControlStream", controlstream.ErrMisroutedResult, id)
+	}
+	if result.GetRobotId() != p.robotID {
+		return fmt.Errorf("%w: command %d was pushed for robot %q, the result names %q",
+			controlstream.ErrMisroutedResult, id, p.robotID, result.GetRobotId())
+	}
+	select {
+	case p.ch <- result:
+	default:
+	}
+	return nil
 }
 
 // Verify pushes a verify_* Command to robotID's adapter and binds the returned
-// VerifyResult (RFC-0001 §9.1.6). A missing stream, send failure, or absent
+// VerifyResult (RFC-0001 #robotprobe-the-verify-probe-commands). A missing stream, send failure, or absent
 // result returns ErrUnreachable — the caller resolves that to Failed, never
 // Healthy. An adapter that declines the probe (CommandResult.unsupported) returns
 // a non-error Result with Unsupported=true.
@@ -151,12 +214,24 @@ func (d *Dispatcher) Verify(ctx context.Context, namespace, robotID string, req 
 // CommandResult. A missing stream, send failure, or no result within the window
 // returns ErrUnreachable; a cancelled ctx returns its error. It is the shared
 // send-and-correlate core for every command-push flow (verify_*, model_update, …).
+//
+// robotID is the Robot's object name; callers name robots the way the control plane
+// stores them. The Command carries the robot's wire robot_id instead, the id its adapter
+// announced (robotid.Wire), because that is the only id the adapter knows the robot by.
 func (d *Dispatcher) roundTrip(ctx context.Context, namespace, robotID string, cmd *fav1.Command) (*fav1.CommandResult, error) {
 	robot := &fleetv1.Robot{}
 	if err := d.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: robotID}, robot); err != nil {
 		return nil, fmt.Errorf("command: robot %q lookup: %w", robotID, err)
 	}
+	return d.roundTripTo(ctx, robot, cmd)
+}
 
+// roundTripTo is roundTrip for a Robot already read. The wire robot_id is resolved once,
+// here, and the result is matched on that id: a Command in flight when the annotation is
+// re-pointed is answered under the id it was sent to or not at all, and then it returns
+// ErrUnreachable at the end of the window.
+func (d *Dispatcher) roundTripTo(ctx context.Context, robot *fleetv1.Robot, cmd *fav1.Command) (*fav1.CommandResult, error) {
+	namespace, wireID := robot.Namespace, robotid.Wire(robot)
 	key := adapterKey(namespace, robot.Spec.Adapter.Name)
 	d.mu.Lock()
 	sender := d.streams[key]
@@ -165,20 +240,20 @@ func (d *Dispatcher) roundTrip(ctx context.Context, namespace, robotID string, c
 		return nil, fmt.Errorf("%w: no ControlStream to adapter %q", ErrUnreachable, robot.Spec.Adapter.Name)
 	}
 
-	id, ch := d.register()
+	id, ch := d.register(sender, wireID)
 	defer d.deregister(id)
-	cmd.RobotId = robotID
+	cmd.RobotId = wireID
 	cmd.CommandId = id
 
-	if err := sender.Send(&fav1.ControlPlaneMessage{
-		Payload: &fav1.ControlPlaneMessage_Command{Command: cmd},
-	}); err != nil {
-		return nil, fmt.Errorf("%w: send: %v", ErrUnreachable, err)
+	// The one send site of every Command: d.send stamps the leader term, and sends nothing
+	// from a process that does not hold leadership (term.go).
+	if err := d.send(sender, cmd); err != nil {
+		return nil, err
 	}
 
 	select {
 	case res := <-ch:
-		return res, nil
+		return termChecked(ctx, robot, cmd, res)
 	case <-time.After(d.timeout):
 		return nil, fmt.Errorf("%w: no CommandResult within %s", ErrUnreachable, d.timeout)
 	case <-ctx.Done():
@@ -187,6 +262,7 @@ func (d *Dispatcher) roundTrip(ctx context.Context, namespace, robotID string, c
 }
 
 // RouteHeartbeat delivers an inbound HeartbeatResponse to a waiting Heartbeat call.
+// robotID is the wire robot_id the response names.
 //
 // Correlation is by robot_id, not by a command id: HeartbeatRequest/Response carry no
 // correlation field, and adding one would be a wire change for a question that does not
@@ -208,8 +284,9 @@ func (d *Dispatcher) RouteHeartbeat(namespace, robotID string) {
 	}
 }
 
-// Heartbeat pushes a HeartbeatRequest for robotID and reports whether the adapter answered
-// within the dispatcher's timeout (RFC-0001 §9.6.3.2 — the confirming exchange before a
+// Heartbeat pushes a HeartbeatRequest for the Robot named robotID, under its wire robot_id
+// (robotid.Wire), and reports whether the adapter answered
+// within the dispatcher's timeout (RFC-0001 #safety-control-plane-response — the confirming exchange before a
 // robot is declared Offline).
 //
 // Three outcomes, and the caller must not collapse them:
@@ -230,7 +307,8 @@ func (d *Dispatcher) Heartbeat(ctx context.Context, namespace, robotID string) (
 		return false, fmt.Errorf("%w: no ControlStream to adapter %q", ErrUnreachable, robot.Spec.Adapter.Name)
 	}
 
-	key := adapterKey(namespace, robotID)
+	wireID := robotid.Wire(robot)
+	key := adapterKey(namespace, wireID)
 	ch := make(chan struct{}, 1)
 	d.mu.Lock()
 	d.beats[key] = ch
@@ -245,7 +323,7 @@ func (d *Dispatcher) Heartbeat(ctx context.Context, namespace, robotID string) (
 
 	if err := sender.Send(&fav1.ControlPlaneMessage{
 		Payload: &fav1.ControlPlaneMessage_Heartbeat{Heartbeat: &fav1.HeartbeatRequest{
-			RobotId: robotID, SentAtMs: d.clock().UnixMilli(),
+			RobotId: wireID, SentAtMs: d.clock().UnixMilli(),
 		}},
 	}); err != nil {
 		return false, fmt.Errorf("%w: send: %v", ErrUnreachable, err)
@@ -264,14 +342,27 @@ func (d *Dispatcher) Heartbeat(ctx context.Context, namespace, robotID string) (
 var _ controlstream.ResourceGrantNotifier = (*Dispatcher)(nil)
 
 // PushReservationGranted pushes a reservation_granted Command to robotID's adapter
-// and binds the ReservationGrantedAck (§5.4.5). A missing stream / send failure /
+// and binds the ReservationGrantedAck (RFC-0001 #tde-shared-resource-queue-management). A missing stream / send failure /
 // timeout returns ErrUnreachable (wrapped) — the caller knows the promoted robot
 // was not told to proceed, so it stays held at the boundary (fail-safe).
+//
+// Unlike the other pushes, robotID is a WIRE robot_id, not an object name: an adapter
+// reserves a resource under the robot_id it announced, and the queue promotes that id.
+// It is resolved to its Robot through the annotation (robotid.Lookup).
 func (d *Dispatcher) PushReservationGranted(ctx context.Context, namespace, robotID, resourceName string) (bool, error) {
 	cmd := &fav1.Command{Command: &fav1.Command_ReservationGranted{
 		ReservationGranted: &fav1.ReservationGranted{ResourceName: resourceName},
 	}}
-	res, err := d.roundTrip(ctx, namespace, robotID, cmd)
+	robot, err := robotid.Lookup(ctx, d.Client, namespace, robotID)
+	if err != nil {
+		return false, fmt.Errorf("command: %w", err)
+	}
+	if robot == nil {
+		return false, fmt.Errorf("command: no Robot in namespace %q carries robot_id %q", namespace, robotID)
+	}
+	// A grant lets the robot move on, so a stop that holds it withholds the grant until the
+	// robot is released (fence.go, roundTripMotion).
+	res, err := d.roundTripMotion(ctx, robot, motion{resource: resourceName, robotID: robotID}, cmd)
 	if err != nil {
 		return false, err
 	}
@@ -288,19 +379,36 @@ func (d *Dispatcher) NotifyReservationGranted(_ context.Context, namespace, robo
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		defer cancel()
-		_, _ = d.PushReservationGranted(ctx, namespace, robotID, resourceName)
+		if _, err := d.PushReservationGranted(ctx, namespace, robotID, resourceName); errors.Is(err, ErrWithheldByStop) {
+			log.Log.WithName("command-dispatcher").Info("reservation_granted withheld until the robot is released",
+				"namespace", namespace, "robot", robotID, "resource", resourceName, "reason", err.Error())
+		}
 	}()
 }
 
 // PushZoneAdmission pushes a zone_admission Command (hold/admit at a leaf-zone
-// boundary, §9.3.4/§5.4.4) and binds the ZoneAdmissionAck. A missing stream / send
+// boundary, RFC-0001 #control-plane-zone-controller/RFC-0001 #control-plane-zone-controller) and binds the ZoneAdmissionAck. A missing stream / send
 // failure / timeout returns ErrUnreachable (wrapped) — the boundary hold/admit was
 // not delivered.
+//
+// An admit lets the robot move on, so a stop that holds the robot withholds it until the robot is
+// released (ErrWithheldByStop; fence.go, roundTripMotion). A hold moves nothing and is never
+// withheld; it drops an admit withheld for the same zone, so the release does not send it.
 func (d *Dispatcher) PushZoneAdmission(ctx context.Context, namespace, robotID, zoneName string, admit bool) (bool, error) {
 	cmd := &fav1.Command{Command: &fav1.Command_ZoneAdmission{
 		ZoneAdmission: &fav1.ZoneAdmission{ZoneName: zoneName, Admit: admit},
 	}}
-	res, err := d.roundTrip(ctx, namespace, robotID, cmd)
+	robot := &fleetv1.Robot{}
+	if err := d.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: robotID}, robot); err != nil {
+		return false, fmt.Errorf("command: robot %q lookup: %w", robotID, err)
+	}
+	var res *fav1.CommandResult
+	var err error
+	if admit {
+		res, err = d.roundTripMotion(ctx, robot, motion{zone: zoneName}, cmd)
+	} else {
+		res, err = d.roundTripHold(ctx, robot, motion{zone: zoneName}, cmd)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -316,12 +424,15 @@ func (d *Dispatcher) NotifyZoneAdmission(_ context.Context, namespace, robotID, 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		defer cancel()
-		_, _ = d.PushZoneAdmission(ctx, namespace, robotID, zoneName, admit)
+		if _, err := d.PushZoneAdmission(ctx, namespace, robotID, zoneName, admit); errors.Is(err, ErrWithheldByStop) {
+			log.Log.WithName("command-dispatcher").Info("zone_admission admit withheld until the robot is released",
+				"namespace", namespace, "robot", robotID, "zone", zoneName, "reason", err.Error())
+		}
 	}()
 }
 
 // ModelUpdate is the payload for a server→adapter model_update Command (RFC-0001
-// §9.3.6): it tells the adapter to fetch, verify, and install a model version.
+// RFC-0001 #control-plane-ota-model-update-manager): it tells the adapter to fetch, verify, and install a model version.
 type ModelUpdate struct {
 	ModelName         string
 	OldVersion        string
@@ -398,7 +509,7 @@ type ValidateOutcome struct {
 // admission and re-checked at assignment; a missing stream or an `unsupported`
 // reply both leave the action UNCONFIRMED — never falsely servable.
 type ActionValidator interface {
-	ValidateAction(ctx context.Context, namespace, robotID, actionType string, payloadJSON []byte) (ValidateOutcome, error)
+	ValidateAction(ctx context.Context, namespace, robotID, actionType, customType string, payloadJSON []byte) (ValidateOutcome, error)
 }
 
 var _ ActionValidator = (*Dispatcher)(nil)
@@ -407,10 +518,14 @@ var _ ActionValidator = (*Dispatcher)(nil)
 // the ValidateActionResult. Pure inspection — reserves nothing, moves no robot. A
 // missing stream / send failure / timeout returns ErrUnreachable (wrapped); an
 // adapter replying `unsupported` yields ValidateOutcome{Unsupported: true}.
-func (d *Dispatcher) ValidateAction(ctx context.Context, namespace, robotID, actionType string, payloadJSON []byte) (ValidateOutcome, error) {
+//
+// customType is the Custom verb (spec.customType), carried as ValidateAction.custom_type so
+// the adapter judges the verb the assignment will carry; empty for every other type.
+func (d *Dispatcher) ValidateAction(ctx context.Context, namespace, robotID, actionType, customType string, payloadJSON []byte) (ValidateOutcome, error) {
 	cmd := &fav1.Command{Command: &fav1.Command_ValidateAction{ValidateAction: &fav1.ValidateAction{
 		ActionType:  actionType,
 		PayloadJson: payloadJSON,
+		CustomType:  customType,
 	}}}
 	res, err := d.roundTrip(ctx, namespace, robotID, cmd)
 	if err != nil {
@@ -478,12 +593,12 @@ func copyMetrics(m map[string]float64) map[string]float64 {
 	return out
 }
 
-func (d *Dispatcher) register() (id uint64, ch chan *fav1.CommandResult) {
+func (d *Dispatcher) register(sender CommandSender, robotID string) (id uint64, ch chan *fav1.CommandResult) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.idCounter++
 	ch = make(chan *fav1.CommandResult, 4)
-	d.pending[d.idCounter] = ch
+	d.pending[d.idCounter] = pendingCommand{sender: sender, robotID: robotID, ch: ch}
 	return d.idCounter, ch
 }
 

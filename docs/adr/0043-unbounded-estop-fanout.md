@@ -3,11 +3,11 @@
 - **Status:** accepted
 - **Date:** 2026-08-20 (proposed and decided)
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.6.2.1 (estop scopes — the parallel-dispatch requirement this implements), §9.6.2.2 (timing requirements, fleet-scope row), §9.3.8 (metrics contract), ADR-0042 (`swarmada_estop_fanout_duration_seconds` — the metric that made the gap visible), ADR-0016 (per-adapter estop delivery timeout)
+- **Related:** RFC-0001 "Estop Scopes" (the parallel-dispatch requirement this implements), "Timing Requirements" (fleet-scope row), "Observability: Prometheus Metrics Contract", ADR-0042 (`swarmada_estop_fanout_duration_seconds` — the metric that made the gap visible), ADR-0016 (per-adapter estop delivery timeout)
 
 ## Context
 
-RFC-0001 §9.6.2.1 requires the control plane to send an `estop` Command to every in-scope
+RFC-0001's "Estop Scopes" requires the control plane to send an `estop` Command to every in-scope
 robot's Fleet Adapter **in parallel — not sequentially — so that each command is issued
 independently and a slow acknowledgement from one robot does not delay the estop signal to
 others.**
@@ -43,7 +43,7 @@ defect the change exists to remove, at a coarser granularity — it only needs a
 N to expose it. With `N = 16` and a zone of 200 robots where the first 16 adapters are silent,
 robot 17's stop is not even *issued* until a 2s delivery timeout expires; with several such
 waves the last robot is again tens of seconds late, and again every measured round trip is
-healthy. A bound would be a resource guard purchased with precisely the property §9.6.2.1
+healthy. A bound would be a resource guard purchased with precisely the property "Estop Scopes"
 requires.
 
 There is no bound that is both safe and useful here. Any N small enough to meaningfully cap
@@ -82,7 +82,7 @@ already be catastrophic.
 ## Consequences
 
 - **Episode wall clock becomes the SLOWEST robot rather than the SUM.** A fan-out now completes
-  within roughly one confirm-timeout regardless of fleet size, which is what makes the §9.6.2.2
+  within roughly one confirm-timeout regardless of fleet size, which is what makes the "Timing Requirements"
   fleet-scope row satisfiable at all.
 - **Peak API-server write concurrency now scales with fleet size** during an episode: up to one
   `Robot.status` patch per in-scope robot. This is the real cost of the decision and the thing to

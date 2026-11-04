@@ -27,7 +27,7 @@ import (
 )
 
 // SafetyInput is a physical local safety signal wired to the edge node — a light
-// curtain, an e-stop button, or a safety-PLC digital output (§9.6.2.5). Tripped
+// curtain, an e-stop button, or a safety-PLC digital output (RFC-0001 #safety-edge-headless-emergency-stop). Tripped
 // reports whether the input is CURRENTLY asserting an emergency stop. Implementations
 // wrap the real hardware; the reference FileSafetyInput reads a digital line exposed
 // as a file (e.g. Linux sysfs GPIO). Wiring the actual line is a manual step.

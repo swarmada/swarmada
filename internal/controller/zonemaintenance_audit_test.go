@@ -31,7 +31,7 @@ import (
 	"github.com/swarmada/swarmada/internal/audit"
 )
 
-// ZoneMaintenance producers for the §9.6.5.1 chain. A maintenance window is the
+// ZoneMaintenance producers for the RFC-0001 #safety-required-events chain. A maintenance window is the
 // administrative record that robots were taken out of service deliberately — the entry an
 // incident review reads next to the estop ones to tell "the fleet stopped" from "the fleet
 // was stopped on purpose".

@@ -1,0 +1,88 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Three adapter client identities, so this cluster can also run live sim_adapter.py
+# processes (UC-1.5's "the model reaches the fleet" beat, and parity with
+# config/overlays/demo-ab-live). Neither UC-1.5's gate nor UC-1.7's defaulting needs
+# a live robot — both are decided in the control plane — so a runbook that skips the
+# adapters simply leaves these Secrets unused.
+#
+# One identity per concurrently-live robot: internal/command/dispatcher.go keys its
+# live-ControlStream map by "<namespace>/<adapter-name>", so two processes sharing an
+# identity silently overwrite each other in that map.
+#
+# These duplicate the Certificates in ../quickstart-mtls and ../demo-ab-live rather
+# than composing them, because those overlays also carry the CA, Issuer, server cert
+# and ControlStream Service that ../../controlstream-tls already provides — composing
+# either would collide on those resource IDs. Factoring the three identities into a
+# shared base would fix that, and would mean editing existing overlays; not done here.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sim-fleet-adapter-client
+  namespace: system
+spec:
+  secretName: sim-fleet-adapter-client-tls
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: sim-fleet-adapter
+  dnsNames:
+    - sim-fleet-adapter.warehouse-a.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sim-fleet-adapter-2-client
+  namespace: system
+spec:
+  secretName: sim-fleet-adapter-2-client-tls
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: sim-fleet-adapter-2
+  dnsNames:
+    - sim-fleet-adapter-2.warehouse-a.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sim-fleet-adapter-3-client
+  namespace: system
+spec:
+  secretName: sim-fleet-adapter-3-client-tls
+  duration: 2160h # 90d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: sim-fleet-adapter-3
+  dnsNames:
+    - sim-fleet-adapter-3.warehouse-a.svc.cluster.local
+  usages:
+    - client auth
+  issuerRef:
+    name: controlstream-ca-issuer
+    kind: Issuer

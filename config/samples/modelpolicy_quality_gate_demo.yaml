@@ -1,0 +1,31 @@
+# UC-1.5 — closed-loop quality gate -> auto-deploy (RFC-0001 #modelpolicy).
+#
+# A ModelPolicy declares the gate a trained model must clear before it may reach
+# robots. A training pipeline POSTs its metrics to the policy's HMAC-authenticated
+# endpoint; the ModelPolicy controller evaluates them and, ONLY on pass, creates a
+# ModelRollout. On fail it records the decision and the failed rules and creates
+# nothing.
+#
+# NOTE ON "WEBHOOK": this is an inbound HTTP receiver
+# (internal/controller/modelpolicy_webhook.go, served on :9444), NOT a Kubernetes
+# admission webhook. It does not need ENABLE_WEBHOOKS. See the runbook.
+apiVersion: swarmada.io/v1
+kind: ModelPolicy
+metadata:
+  name: nav-quality-gate
+  namespace: warehouse-a
+spec:
+  modelName: nav
+  targetKind: Robot
+  targetRobotSelector:
+    matchLabels:
+      swarmada.io/model: SimBot-250
+  trigger:
+    type: Webhook
+    webhook:
+      enabled: true
+      authSecretRef: modelpolicy-hmac
+  qualityGate:
+    minPickSuccessRate: 0.95
+    maxFailureRate: 0.02
+  autoDeployOn: QualityGatePass

@@ -35,7 +35,7 @@ func (c *captureRecorder) Record(e audit.Entry) (audit.Entry, error) {
 }
 
 // Auto-creating a ModelRollout on a quality-gate pass seals a MODEL_ROLLOUT_CREATED
-// entry into the §9.5.4 audit chain, with the controller as the service-account
+// entry into the RFC-0001 #security-audit-logging audit chain, with the controller as the service-account
 // actor and the created rollout as the resource.
 func TestModelPolicy_RolloutCreationIsAudited(t *testing.T) {
 	trig := modelTriggerPayload{ModelVersion: "4.1.0", ModelURI: "oci://reg/item-recognition:4.1.0", ModelChecksum: testChecksum, Metrics: passingMetrics()}

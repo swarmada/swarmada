@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-08-19 (proposed) · decided 2026-08-20
 - **Deciders:** Maintainers
-- **Related:** RFC-0001 §9.3.8 (metrics contract), §9.6.2.1 (estop scopes — the parallel-dispatch requirement, sequential when this ADR was written), §9.6.2.2 (timing requirements), §9.6.5.1 (required events), ADR-0016 (per-adapter estop delivery timeout), `drawbacks.md` item 15
+- **Related:** RFC-0001 "Observability: Prometheus Metrics Contract", "Estop Scopes" (the parallel-dispatch requirement, sequential when this ADR was written), "Timing Requirements", "Required Events", ADR-0016 (per-adapter estop delivery timeout), `drawbacks.md` item 15
 
 ## Context
 
@@ -19,7 +19,7 @@ the metric itself.
 The dispatcher stamps `sentAt` per robot immediately before that robot's send and computes
 `latency := clock() - sentAt` after its ack. Zone and namespace estops fan out **sequentially**
 through that same primitive — one robot at a time, each robot's outcome awaited before the next
-is sent (a disclosed gap, §9.6.2.1 and `drawbacks.md` item 15). Sequential dispatch therefore
+is sent (a disclosed gap — RFC-0001, "Estop Scopes", and `drawbacks.md` item 15). Sequential dispatch therefore
 delays the **send**, not the round trip.
 
 The consequence is that the instrument reports health precisely when the fleet is least safe:
@@ -30,7 +30,7 @@ The consequence is that the instrument reports health precisely when the fleet i
 - Nothing in the metrics surface says so.
 
 A second, smaller defect compounded it. All five emit sites hard-coded `scope="robot"`, so the
-`scope` label documented in §9.3.8 as `robot | zone | namespace` had exactly one value in
+`scope` label documented in the metrics contract as `robot | zone | namespace` had exactly one value in
 practice — a zone estop was indistinguishable from a single-robot one even in principle.
 
 Fixing the label alone does not fix the measurement. It relabels healthy observations: the
@@ -61,7 +61,7 @@ in scope resolving.
 `scope` is also plumbed properly: `TriggerEstop` takes a typed `metrics.EstopScope` supplied by
 each of the three reconcilers, so the per-robot series is correctly attributed too.
 
-§9.6.2.2 gains a fleet-scope timing row naming this metric, and states explicitly that the
+"Timing Requirements" gains a fleet-scope timing row naming this metric, and states explicitly that the
 per-send row does not imply it.
 
 ## Consequences
@@ -73,8 +73,8 @@ per-send row does not imply it.
   of that particular bug, so this histogram is what would catch a regression to serialised
   dispatch. It is now a guard rather than an indictment.
 - **Two estop latency metrics now exist and mean different things.** The risk is an operator
-  alerting on the wrong one. Mitigated in the metric help text, in §9.3.8's row, and by the
-  §9.6.2.2 note stating that a green `swarmada_estop_command_latency_seconds` is not evidence
+  alerting on the wrong one. Mitigated in the metric help text, in the metrics contract's row, and by the
+  "Timing Requirements" note stating that a green `swarmada_estop_command_latency_seconds` is not evidence
   that a zone or namespace estop met its bound.
 - **`scope` is a signature change across an interface** (`TriggerEstop`) and its test doubles.
   Carrying it as a parameter rather than inferring it is deliberate: below the fan-out every

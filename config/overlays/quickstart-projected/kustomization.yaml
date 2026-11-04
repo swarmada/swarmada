@@ -24,9 +24,8 @@ kind: Kustomization
 # Sibling overlay: config/overlays/quickstart-dev is the LIVE path, which runs a
 # real sim_adapter.py and therefore KEEPS ControlStream enabled.
 #
-# `make deploy` (config/default) is untouched by this and still serves
-# ControlStream — that is the right default for a developer cluster a real
-# adapter will dial into.
+# `make deploy` (config/controlstream-tls) is untouched by this and serves
+# ControlStream with mTLS, which is what a cluster a real adapter dials into needs.
 
 resources:
   - ../../default

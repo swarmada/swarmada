@@ -187,7 +187,7 @@ func TestAssignmentGate_CoversPreemptionPath(t *testing.T) {
 }
 
 // SCOPE: the gate must not revoke work already in flight. An adapter degrading under a running
-// action is the lease/Revoking machinery's business (§9.6.3.5), not this filter's — yanking it here
+// action is the lease/Revoking machinery's business (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee), not this filter's — yanking it here
 // would be an unconfirmed stop.
 func TestAssignmentGate_DoesNotRevokeRunningWork(t *testing.T) {
 	running := assignedAction("t1", "r1", fleetv1.ActionPhaseInProgress, 3, nil)
@@ -223,7 +223,8 @@ func TestFilterDispatchEligible_MemoizesAndPreservesOrder(t *testing.T) {
 		*robotInPhase("r2", fleetv1.RobotPhaseIdle, ""),
 		*robotInPhase("r3", fleetv1.RobotPhaseIdle, ""),
 	}
-	out, excluded := r.filterDispatchEligible(context.Background(), in)
+	out, excluded, _, _ := r.filterDispatchEligible(context.Background(),
+		pendingInBand("t1", fleetv1.ActionPriorityNormal), in)
 	if len(out) != 3 || len(excluded) != 0 {
 		t.Fatalf("eligible = %d, excluded = %d; want 3/0", len(out), len(excluded))
 	}
@@ -249,7 +250,8 @@ func TestFilterDispatchEligible_MixedFleetReportsReasons(t *testing.T) {
 	missing := robotInPhase("r3", fleetv1.RobotPhaseIdle, "")
 	missing.Spec.Adapter = fleetv1.AdapterRef{Name: "adapter-gone"}
 
-	out, excluded := r.filterDispatchEligible(context.Background(),
+	out, excluded, _, _ := r.filterDispatchEligible(context.Background(),
+		pendingInBand("t1", fleetv1.ActionPriorityNormal),
 		[]fleetv1.Robot{*robotInPhase("r1", fleetv1.RobotPhaseIdle, ""), *onB, *missing})
 
 	if len(out) != 1 || out[0].Name != "r1" {

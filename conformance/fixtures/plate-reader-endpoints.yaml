@@ -1,0 +1,95 @@
+# Copyright 2026 The Swarmada Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# The ComputeEndpoint declarations for the three in-tree fixtures. The harness
+# reads these as "what the endpoint under test declares" — CE2.6 (return only
+# declared results), CE3.4 / CE5.4 (a request/response binding must not claim
+# the Service contract), CE6.1 (raise only declared event types) and CE6.6
+# (declared delivery timing) are all checked AGAINST this file rather than
+# against the harness's own expectations. An endpoint's declaration is the
+# thing a control plane admits against, so it is the thing to test against.
+---
+apiVersion: swarmada.io/v1
+kind: ComputeEndpoint
+metadata:
+  name: plate-reader-http
+  namespace: perception
+  annotations:
+    # CE6.6 — events arrive IN THE REPLY, not as observed. A loop.until written
+    # against a resident source and pointed here changes meaning without
+    # changing shape, so the timing is declared, not inferred.
+    conformance.swarmada.io/event-delivery-timing: reply
+spec:
+  binding: Http
+  contract: App
+  provision:
+    existing: {service: plate-reader-http, namespace: perception, port: http}
+  parameters:
+    - {name: region, kind: enum, allowed: ["US", "EU"], required: false}
+    - {name: minPlateConfidence, kind: number, min: 0.0, max: 1.0, required: false}
+  results:
+    - {name: plate, kind: string}
+    - {name: confidence, kind: number}
+    - {name: rowId, kind: string}
+    # Not part of the plate-reading contract: an observable the harness uses to
+    # tell a cached BODY from re-done WORK (CE1.3). Declared rather than
+    # smuggled, because an undeclared result field is exactly what CE2.6 fails.
+    - {name: workCount, kind: number}
+  emitsEvents: [PlateRead, NoPlateFound]
+  probe: {path: /healthz, intervalSeconds: 10, failureThreshold: 3}
+---
+apiVersion: swarmada.io/v1
+kind: ComputeEndpoint
+metadata:
+  name: plate-reader-mcp
+  namespace: perception
+  annotations:
+    conformance.swarmada.io/event-delivery-timing: reply
+spec:
+  binding: Mcp
+  contract: App
+  provision:
+    existing: {service: plate-reader-mcp, namespace: perception, port: http}
+  # No `parameters` and no `results`: for an MCP endpoint the typed-contract
+  # object disappears. tools/list returns the input schema from the server
+  # itself, so the declaration cannot drift from the implementation because it
+  # IS the implementation's declaration.
+  emitsEvents: [PlateRead, NoPlateFound]
+---
+apiVersion: swarmada.io/v1
+kind: ComputeEndpoint
+metadata:
+  name: plate-reader-grpc
+  namespace: perception
+  annotations:
+    conformance.swarmada.io/event-delivery-timing: reply
+spec:
+  binding: Grpc
+  contract: App
+  provision:
+    existing: {service: plate-reader-grpc, namespace: perception, port: grpc}
+  results:
+    - {name: plate, kind: string}
+    - {name: confidence, kind: number}
+    - {name: rowId, kind: string}
+    - {name: workCount, kind: number}
+  emitsEvents: [PlateRead, NoPlateFound]
+---
+apiVersion: swarmada.io/v1
+kind: ComputeEndpoint
+metadata:
+  name: plate-watcher-grpc
+  namespace: perception
+  annotations:
+    # A RESIDENT executor emits as it observes, so a waiting consumer resumes
+    # while the producer is still running.
+    conformance.swarmada.io/event-delivery-timing: observation
+spec:
+  binding: Grpc
+  contract: Service
+  provision:
+    existing: {service: plate-watcher-grpc, namespace: perception, port: grpc}
+  # contract: Service requires pinEndpoint: true — splitting a stream across
+  # replicas silently degrades tracking rather than failing.
+  streamPolicy: {pinEndpoint: true, onEndpointLoss: Replace}
+  emitsEvents: [FrameObserved, RunSelfStopped, StreamReplaced]

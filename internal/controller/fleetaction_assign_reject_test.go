@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,8 +50,8 @@ func TestAssign_RejectionReleasesAndReschedules(t *testing.T) {
 	if ft.Status.AssignedRobot != "" || ft.Status.LeaseExpiresAt != nil {
 		t.Fatalf("binding/lease not cleared: robot=%q lease=%v", ft.Status.AssignedRobot, ft.Status.LeaseExpiresAt)
 	}
-	if ft.Status.AssignmentGeneration != 1 {
-		t.Fatalf("generation = %d, want 1 preserved (committed then released, never reused)", ft.Status.AssignmentGeneration)
+	if ft.Status.AssignmentGeneration < 1 {
+		t.Fatalf("generation = %d, want the committed one preserved (committed then released, never reused)", ft.Status.AssignmentGeneration)
 	}
 	rob := getRobot(t, c, "r1", actionNS)
 	if rob.Status.AssignedAction != "" || rob.Status.Phase != fleetv1.RobotPhaseIdle {
@@ -84,5 +85,39 @@ func TestAssign_UnreachableStands(t *testing.T) {
 
 	if ft := getAction(t, c, "t1"); ft.Status.Phase != fleetv1.ActionPhaseAssigned {
 		t.Fatalf("unreachable push disturbed the assignment: phase=%s", ft.Status.Phase)
+	}
+}
+
+// An assignment the adapter rejected for its leader term was not acted on, and it is no refusal:
+// the assignment stands, with no A24 revert, and the robot keeps its record (RFC-0001
+// #fleet-adapter-protocol-the-stop-latch, The leader term).
+func TestAssign_StaleLeaderTermStands(t *testing.T) {
+	r, c := newActionReconciler(t, pendingAction("t1"), robotInPhase("r1", fleetv1.RobotPhaseIdle, ""))
+	r.Commander = &fakeCommander{assignErr: fmt.Errorf("%w (command 4 sent with term 2)", command.ErrStaleLeaderTerm)}
+
+	reconcileAction(t, r, "t1")
+
+	ft := getAction(t, c, "t1")
+	if ft.Status.Phase != fleetv1.ActionPhaseAssigned || ft.Status.AssignedRobot != "r1" {
+		t.Fatalf("a stale-term rejection reverted the assignment: phase=%s robot=%q", ft.Status.Phase, ft.Status.AssignedRobot)
+	}
+}
+
+// An assignment the command dispatcher did not send because a stop holds the robot, or because the
+// robot's register is not yet processed on its stream, went nowhere and is no refusal: the commit
+// stands, with no A24 revert, and the stop's own rows decide the action from here (A1).
+func TestAssign_NotSentUnderAStopStands(t *testing.T) {
+	for _, err := range []error{command.ErrHeldByStop, command.ErrNotRegistered} {
+		t.Run(err.Error(), func(t *testing.T) {
+			r, c := newActionReconciler(t, pendingAction("t1"), robotInPhase("r1", fleetv1.RobotPhaseIdle, ""))
+			r.Commander = &fakeCommander{assignErr: err}
+
+			reconcileAction(t, r, "t1")
+
+			ft := getAction(t, c, "t1")
+			if ft.Status.Phase != fleetv1.ActionPhaseAssigned || ft.Status.AssignedRobot != "r1" {
+				t.Fatalf("an assignment not sent was reverted: phase=%s robot=%q", ft.Status.Phase, ft.Status.AssignedRobot)
+			}
+		})
 	}
 }

@@ -3,9 +3,12 @@
 
 {{- if .Values.controlStream.enabled -}}
 # ControlStream gRPC Service — Fleet Adapters connect here (--fleet-adapter-bind-
-# address). RFC-0001 §9.2 mandates mTLS in production; terminate/verify certs at
-# the adapter/gateway per docs. Exposed as ClusterIP by default; set
-# controlStream.service.type=LoadBalancer to reach adapters outside the cluster.
+# address). The manager terminates mTLS itself (RFC-0001
+# #fleet-adapter-protocol-transport-security); its server certificate names this
+# Service, so an adapter dials <fullname>-controlstream.<namespace>.svc and verifies
+# it. Exposed as ClusterIP by default; set controlStream.service.type=LoadBalancer to
+# reach adapters outside the cluster (their certificate must then also carry the
+# address they dial).
 apiVersion: v1
 kind: Service
 metadata:

@@ -46,7 +46,7 @@ func TestConnectivityThresholds_InvertedPairIsRejected(t *testing.T) {
 	_, err := validateSwarmadaConfig(cfgWithThresholds(600, 60))
 	if err == nil {
 		t.Fatal("T2 < T1 was accepted; the graduated connectivity response is incoherent " +
-			"and RFC-0001 #safety-thresholds states admission rejects it")
+			"and safety-threshold states admission rejects it")
 	}
 	if !strings.Contains(err.Error(), "connectivityCriticalThresholdSeconds") {
 		t.Fatalf("the error must name the offending field, got: %v", err)

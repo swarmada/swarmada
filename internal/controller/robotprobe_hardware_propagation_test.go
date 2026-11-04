@@ -30,7 +30,7 @@ import (
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 )
 
-// RFC-0001 §9.1.6.5 step 2: a SUSTAINED probe failure degrades the component in
+// RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream step 2: a SUSTAINED probe failure degrades the component in
 // Robot.status.hardware[]; recovery clears it.
 //
 // The rule under test is the EDGE, not the state. Streaks are clamped at their thresholds, so a

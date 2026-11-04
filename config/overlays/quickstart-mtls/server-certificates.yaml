@@ -46,6 +46,14 @@ spec:
   privateKey:
     algorithm: ECDSA
     size: 256
+  # This CA also issues every adapter client certificate, and the second SAN has the
+  # <adapter>.<namespace>.svc.cluster.local shape an adapter identity is read from. With
+  # no usages the leaf carries no extended key usage and would verify as a client too, so
+  # it is limited to server auth.
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
   dnsNames:
     - swarmada-controlstream.system.svc
     - swarmada-controlstream.system.svc.cluster.local

@@ -30,7 +30,7 @@ import (
 	"github.com/swarmada/swarmada/internal/admission"
 )
 
-// Operator admission completes HERE, not in the CLI (§9.1.2.5). `swarmctl admit` records the
+// Operator admission completes HERE, not in the CLI (RFC-0001 #discoveredrobot-controller-behavior-on-admit). `swarmctl admit` records the
 // operator's parameters on the DiscoveredRobot; this controller builds the Robot and removes
 // the staging object, so promotion from discovered to schedulable happens in one place for
 // both the operator and auto-admit paths.
@@ -40,7 +40,7 @@ func marked(t *testing.T, name string, p admission.Params) *fleetv1.DiscoveredRo
 	t.Helper()
 	dr := discovered(name, time.Hour, fleetv1.DiscoveredRobotPhaseDiscovered)
 	dr.Status.Manufacturer = "Acme"
-	dr.Status.AdapterVersion = "1.0"
+	dr.Status.AdapterVersion = "1.0.0"
 	encoded, err := p.Encode()
 	if err != nil {
 		t.Fatalf("encoding params: %v", err)
@@ -53,7 +53,7 @@ func admitClass(name string) *fleetv1.RobotClass {
 	return &fleetv1.RobotClass{
 		ObjectMeta: metav1.ObjectMeta{Namespace: drNS, Name: name},
 		Spec: fleetv1.RobotClassSpec{
-			BaseAdapter: fleetv1.BaseAdapterRef{Name: "acme-adapter", Version: "2.0"},
+			BaseAdapter: fleetv1.BaseAdapterRef{Name: "acme-adapter", Version: "2.0.0"},
 			Hardware:    []fleetv1.HardwareComponent{{Name: "lidar", Type: fleetv1.HardwareTypeLidar}},
 		},
 	}
@@ -85,7 +85,7 @@ func TestOperatorAdmit_CreatesTheRobotThenRemovesTheStagingObject(t *testing.T) 
 	}
 	// Built through the shared builder, so the class template applies exactly as it does on
 	// the CLI-validated preview.
-	if robot.Spec.Adapter.Version != "2.0" || len(robot.Spec.Hardware) != 1 {
+	if robot.Spec.Adapter.Version != "2.0.0" || len(robot.Spec.Hardware) != 1 {
 		t.Errorf("class template not applied: %+v", robot.Spec)
 	}
 	// The Robot exists first, then the staging object goes. A DiscoveredRobot deleted before
@@ -120,7 +120,7 @@ func TestOperatorAdmit_ExistingRobotStillClearsTheStagingObject(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: drNS, Name: "amr-042"},
 		Spec: fleetv1.RobotSpec{
 			Zone: "zone-aisle-c1", Manufacturer: "Acme",
-			Adapter: fleetv1.AdapterRef{Name: "acme-adapter", Version: "2.0"},
+			Adapter: fleetv1.AdapterRef{Name: "acme-adapter", Version: "2.0.0"},
 		},
 	}
 	p := admission.Params{Zone: "zone-aisle-c1", Adapter: "acme-adapter", Name: "amr-042"}

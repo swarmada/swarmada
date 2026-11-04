@@ -1,0 +1,23 @@
+# The FleetAdapter the ROS 2 adapter connects as on a robot run. Its name and namespace are
+# the identity in the adapter's client certificate
+# (fleet-adapter-ros2.warehouse-a.svc.cluster.local), which ../object-store/setup.sh has the
+# chart issue; a connection presenting that certificate is this adapter and no other.
+#
+# It serves one robot class, and the ControlStream refuses every robot-scoped message for a
+# robot of any other class. The conformance report is the generated ConfigMap in
+# kustomization.yaml, pinned here by the digest of its exact bytes.
+apiVersion: swarmada.io/v1
+kind: FleetAdapter
+metadata:
+  name: fleet-adapter-ros2
+  namespace: warehouse-a
+spec:
+  vendor: ros2
+  simulated: false
+  servesRobotClasses:
+    - ros2-nav2-v1
+  heartbeatIntervalSeconds: 10
+  conformanceReport:
+    suiteVersion: "C0-C19"
+    configMapRef: fleet-adapter-ros2-conformance
+    digest: "sha256:8d42654477cf9260ec2925076463f9c666a74bb065f2e2dcc4eceb305dd0e4bf"

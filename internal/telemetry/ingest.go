@@ -24,7 +24,9 @@ import (
 )
 
 // namespaceOf extracts the Kubernetes namespace from a "namespace/name" RobotID,
-// returning "" when the id is not namespaced.
+// returning "" when the id is not namespaced. A robot_id on the wire carries no
+// namespace, so a frame's namespace is planeNamespace(f), which prefers the one the
+// ControlStream server set from the adapter's verified identity.
 func namespaceOf(robotID string) string {
 	if i := strings.IndexByte(robotID, '/'); i >= 0 {
 		return robotID[:i]
@@ -38,13 +40,15 @@ func namespaceOf(robotID string) string {
 // sink never sees high-cadence churn.
 type StatusSink interface {
 	// ApplyMaterialUpdate writes the changed fields of upd onto the robot's
-	// status. Only non-nil fields of the update are applied.
-	ApplyMaterialUpdate(ctx context.Context, upd MaterialUpdate) error
+	// status. Only non-nil fields of the update are applied. It reports whether a
+	// status write was made: an update can be material to the projector and still
+	// change nothing the sink writes.
+	ApplyMaterialUpdate(ctx context.Context, upd MaterialUpdate) (wrote bool, err error)
 }
 
 // PositionObserver is a per-frame subscriber to the ingest fan-out, used by the
 // Zone Controller to derive Robot.status.currentZone from position telemetry
-// (RFC-0001 §9.3.4, §9.3.7 — "the Zone Controller's position subscription,
+// (RFC-0001 #control-plane-zone-controller, RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split — "the Zone Controller's position subscription,
 // consumed upstream of any sink"). It is invoked on every frame, independent of
 // the TSDB and status planes. Implementations MUST be safe for concurrent use and
 // MUST NOT write Robot.status except on a material transition (a zone change) —
@@ -72,7 +76,7 @@ type Ingestor struct {
 	Sink StatusSink
 	// PositionObserver, when non-nil, receives every frame for zone derivation. It
 	// is consumed upstream of the TSDB and Sink, so zone derivation is independent
-	// of sink configuration (§9.3.7 Invariant 2).
+	// of sink configuration (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split Invariant 2).
 	PositionObserver PositionObserver
 }
 
@@ -91,7 +95,7 @@ func NewIngestor(tsdb TSDBWriter, projector *Projector, sink StatusSink) *Ingest
 // does not suppress the material status write.
 func (i *Ingestor) Ingest(ctx context.Context, f Frame) error {
 	// Zone derivation consumes the frame upstream of any sink, so it is unaffected
-	// by TSDB sink state (§9.3.7 Invariant 2). It writes Robot.status only on a
+	// by TSDB sink state (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split Invariant 2). It writes Robot.status only on a
 	// zone transition, never per tick (RA-1).
 	if i.PositionObserver != nil {
 		i.PositionObserver.ObservePosition(ctx, f)
@@ -99,19 +103,26 @@ func (i *Ingestor) Ingest(ctx context.Context, f Frame) error {
 
 	tsdbErr := i.TSDB.WriteSamples(ctx, f.Samples())
 	if tsdbErr != nil {
-		// The frame's samples were not forwardable to the TSDB sink (§9.3.8). This
+		// The frame's samples were not forwardable to the TSDB sink (RFC-0001 #control-plane-observability-prometheus-metrics-contract). This
 		// never fires for a Drop/unset sink (NoopWriter never errors); the sink also
 		// records the classified tsdb_write_errors on its side.
-		metrics.IncTelemetryDroppedFrame(namespaceOf(f.RobotID), f.Adapter)
+		metrics.IncTelemetryDroppedFrame(planeNamespace(f), f.Adapter)
 	}
 	if upd := i.Projector.Project(f); upd != nil && i.Sink != nil {
-		if err := i.Sink.ApplyMaterialUpdate(ctx, *upd); err != nil {
+		wrote, err := i.Sink.ApplyMaterialUpdate(ctx, *upd)
+		if err != nil {
+			// The transition did not reach Robot.status. The projector takes it back,
+			// so the next frame still reporting it writes it.
+			i.Projector.Unsent(upd)
 			return err
 		}
-		// Count the material Robot.status write by its transition type (§9.3.8).
-		// This only fires on a material transition — never per telemetry tick — so
-		// the counter is the observable proof of the RA-1 material-transition gate.
-		metrics.IncTelemetryStatusWrite(namespaceOf(upd.RobotID), upd.TransitionType)
+		// Count the material Robot.status write by its transition type (RFC-0001 #control-plane-observability-prometheus-metrics-contract).
+		// This only fires on a material transition — never per telemetry tick — and
+		// only when the sink wrote, so the counter is the observable proof of the RA-1
+		// material-transition gate: a transition the sink does not write is not counted.
+		if wrote {
+			metrics.IncTelemetryStatusWrite(planeNamespace(f), upd.TransitionType)
+		}
 	}
 	return tsdbErr
 }

@@ -1,0 +1,88 @@
+# Copyright 2026 The Swarmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The in-cluster simulation adapter for `make first-run`, on a Helm install named
+# `swarmada` in namespace `swarmada-system`.
+#
+# It is the same image and the same Deployment as config/overlays/demo-webhooks/sim-adapter
+# (Dockerfile.sim-adapter; no ServiceAccount token, no RBAC, read-only root, non-root),
+# changed in three places only (its args list is restated whole, so it keeps the
+# overlay's --artifact-dir):
+#   - it runs in the release namespace, because its client certificate Secret is issued
+#     there by the chart (controlStream.tls.certManager.adapterClients);
+#   - it dials the chart's Service, swarmada-controlstream.swarmada-system.svc:9445, which
+#     is the name the chart's server certificate carries;
+#   - it mounts that Secret, sim-fleet-adapter-warehouse-a-client-tls.
+# That overlay's FleetAdapter, conformance ConfigMap and Namespace are dropped:
+# config/samples/first-run declares its own, with a generated report.
+#
+# The cluster starts this process from the manifest; nobody starts it by hand.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: swarmada-system
+
+resources:
+  - ../../../config/overlays/demo-webhooks/sim-adapter
+
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: swarmada.io/v1
+      kind: FleetAdapter
+      metadata:
+        name: sim-fleet-adapter
+        namespace: warehouse-a
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: sim-fleet-adapter-conformance
+        namespace: warehouse-a
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: warehouse-a
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sim-fleet-adapter
+        namespace: system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: adapter
+                args:
+                  - --endpoint=swarmada-controlstream.swarmada-system.svc:9445
+                  - --namespace=warehouse-a
+                  - --robot-id=sim-robot-001
+                  - --zone=warehouse-a
+                  - --vendor=simulation
+                  - --tls-ca=/etc/swarmada/tls/ca.crt
+                  - --tls-cert=/etc/swarmada/tls/tls.crt
+                  - --tls-key=/etc/swarmada/tls/tls.key
+                  - --artifact-dir=/var/lib/sim-adapter/artifacts
+                  # A demo setting: re-send register every 5 s while the robot is not
+                  # admitted, so it is picked up within seconds of `swarmctl admit`. Unset,
+                  # the adapter follows RFC-0001's provisioning-loop interval, 60 s here.
+                  - --provisioning-interval=5
+            volumes:
+              - name: client-tls
+                secret:
+                  secretName: sim-fleet-adapter-warehouse-a-client-tls

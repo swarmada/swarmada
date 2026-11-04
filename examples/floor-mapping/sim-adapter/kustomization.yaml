@@ -1,0 +1,48 @@
+# The in-cluster simulation adapter from examples/first-run, with the floor-mapping
+# artifact directory added: explore-floor segments are saved under it, at
+# <namespace>/<action-name>/, and the map reference names the ArtifactStore
+# floor-maps (../overlay/artifact-store.yaml) that declares a claim over the same
+# directory.
+#
+# The directory is a hostPath on the kind node because that is what an adapter on
+# the host machine writes through a kind extraMount; the simulation adapter stands
+# in for that adapter and writes the same place.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: swarmada-system
+
+resources:
+  - ../../first-run/sim-adapter
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sim-fleet-adapter
+        namespace: system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: adapter
+                args:
+                  - --endpoint=swarmada-controlstream.swarmada-system.svc:9445
+                  - --namespace=warehouse-a
+                  - --robot-id=sim-robot-001
+                  - --zone=warehouse-a
+                  - --vendor=simulation
+                  - --tls-ca=/etc/swarmada/tls/ca.crt
+                  - --tls-cert=/etc/swarmada/tls/tls.crt
+                  - --tls-key=/etc/swarmada/tls/tls.key
+                  - --artifact-dir=/var/lib/swarmada/floor-maps
+                  - --artifact-store=floor-maps
+                volumeMounts:
+                  - name: floor-maps
+                    mountPath: /var/lib/swarmada/floor-maps
+            volumes:
+              - name: floor-maps
+                hostPath:
+                  path: /var/lib/swarmada/floor-maps
+                  type: Directory

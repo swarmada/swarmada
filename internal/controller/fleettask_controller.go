@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,11 +45,11 @@ import (
 // RBAC — standalone marker group (blank lines both sides): controller-gen drops +kubebuilder:rbac
 // markers folded into a type's doc comment (see the FleetAction controller for the same note).
 
-// +kubebuilder:rbac:groups=swarmada.io,resources=fleettasks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=swarmada.io,resources=fleettasks,verbs=get;list;watch
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleettasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleettasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleetactions,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=swarmada.io,resources=fleetactions/status,verbs=get;list;watch
+// +kubebuilder:rbac:groups=swarmada.io,resources=fleetactions/status,verbs=get
 
 // FleetTaskReconciler reconciles a composite FleetTask by generating and aggregating child
 // FleetActions.
@@ -68,6 +69,68 @@ func childName(taskName, actionName string) string {
 }
 
 const ownedByLabel = "swarmada.io/fleettask"
+
+// ConditionChildrenAdmitted is False while the API server refuses a child FleetAction
+// this task tried to create, naming the action and the refusal, and True once a later
+// pass creates every child it tried to. A task that never had a refusal does not
+// carry it.
+//
+// It is a condition of its own because none of the existing types says this. Each
+// already has one meaning (a valid dependency graph, a valid flow tree, an evaluable
+// flow, a complete policy, a finished saga, a held draft), and Ready is the task-wide
+// readiness the specification describes and no controller writes; setting Ready False
+// for this one cause would make its absence claim every other cause was checked.
+const ConditionChildrenAdmitted = "ChildrenAdmitted"
+
+// EventChildAdmissionRefused is the Warning Event emitted, once per refusal, when the
+// API server refuses a child FleetAction.
+const EventChildAdmissionRefused = "ChildAdmissionRefused"
+
+// isAdmissionRefusal reports whether a create was refused by admission (a validating
+// webhook or policy, or schema validation) rather than failing for a transient reason.
+// A refusal is a statement about the object; an unreachable webhook is not.
+func isAdmissionRefusal(err error) bool {
+	return errors.IsForbidden(err) || errors.IsInvalid(err)
+}
+
+// recordChildRefused makes a refused child create visible on the task: the
+// ChildrenAdmitted condition False, naming the action and the admission message, and
+// one Warning Event. It writes only when the condition changes (RA-1), under the
+// resourceVersion the reconcile read, so a pass that read the task before its own
+// earlier refusal was visible cannot write it or emit its Event a second time. It
+// always returns the create error, so the create is retried on the manager's backoff:
+// the cause (an adapter's catalog, a policy) can clear without any change to the task.
+func (r *FleetTaskReconciler) recordChildRefused(ctx context.Context, original *fleetv1.FleetTask, member string, child *fleetv1.FleetAction, createErr error) error {
+	refusal := fmt.Errorf("creating child %q: %w", member, createErr)
+	msg := fmt.Sprintf("the API server refused child FleetAction %q for action %q (type %s), so that action cannot start until the cause clears: %v",
+		child.Name, member, child.Spec.Type, createErr)
+	if prev := apimeta.FindStatusCondition(original.Status.Conditions, ConditionChildrenAdmitted); prev != nil &&
+		prev.Status == metav1.ConditionFalse && prev.Message == msg {
+		return refusal
+	}
+	refused := original.DeepCopy()
+	setCond(refused, ConditionChildrenAdmitted, metav1.ConditionFalse, "AdmissionRefused", msg)
+	refused.Status.ObservedGeneration = refused.Generation
+	if err := r.Status().Patch(ctx, refused, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("%w (recording the refusal on the task: %v)", refusal, err)
+	}
+	if r.Recorder != nil {
+		r.Recorder.Event(refused, "Warning", EventChildAdmissionRefused, msg)
+	}
+	return refusal
+}
+
+// markChildrenAdmitted takes back a recorded refusal once a pass has created every
+// child it tried to. It changes only the in-memory status; the pass's own status
+// patch writes it.
+func markChildrenAdmitted(task *fleetv1.FleetTask) {
+	c := apimeta.FindStatusCondition(task.Status.Conditions, ConditionChildrenAdmitted)
+	if c == nil || c.Status == metav1.ConditionTrue {
+		return
+	}
+	setCond(task, ConditionChildrenAdmitted, metav1.ConditionTrue, "Admitted",
+		"no child create was refused on the latest pass; the earlier refusal no longer applies")
+}
 
 // ── phase helpers (over the FleetAction/atomic ActionPhase vocabulary) ─────────────
 
@@ -109,6 +172,33 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if isGroupTerminal(task.Status.Phase) {
 		return ctrl.Result{}, nil
 	}
+
+	// ── DRAFT GATE — the "no auto-dispatch" guarantee, enforced in one place ──
+	//
+	// A draft is a PROPOSAL. Nothing below this point may run for it: no child action
+	// is generated, no robot is selected, no flow is scheduled. Returning here rather
+	// than filtering later is deliberate — the guarantee is only as good as the
+	// narrowest path that bypasses it, and there are two scheduling paths below (flow
+	// and dependsOn) that would each have needed their own check.
+	//
+	// A human clears spec.draft to activate. The task then reconciles from the top on
+	// the next pass exactly as if it had been written by hand, because at that point
+	// it is indistinguishable from one.
+	if task.Spec.Draft {
+		return ctrl.Result{}, r.holdAsDraft(ctx, &task)
+	}
+	if err := r.markActivated(ctx, &task); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// spec.flow is a SEPARATE scheduling path, mutually exclusive
+	// with dependsOn (CEL-enforced at admission). ABSENT FLOW, EVERYTHING
+	// BELOW THIS POINT IS UNCHANGED FROM v0.3 — this branch is the entirety
+	// of flow's integration into this reconciler.
+	if task.Spec.Flow != nil {
+		return r.reconcileFlow(ctx, req, &task)
+	}
+
 	original := task.DeepCopy()
 
 	// 1. Validate the dependency graph (belt-and-suspenders to admission).
@@ -120,15 +210,26 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	setCond(&task, "DependencyGraphValid", metav1.ConditionTrue, "Valid", "dependency graph is acyclic and complete")
 
-	// 2. Load existing children by deterministic name; build the per-action view.
+	// 2. Load existing children by deterministic name; build the per-action view. An object of
+	// that name the task does not control is not a child: no fan-out, prune or status read
+	// touches it, and its member is held as a name conflict (reported after the fan-out).
 	children := map[string]*fleetv1.FleetAction{}
+	conflicted := map[string]bool{}
+	var conflict func() error
 	for i := range task.Spec.Actions {
 		a := &task.Spec.Actions[i]
 		var child fleetv1.FleetAction
 		err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: childName(task.Name, a.Name)}, &child)
-		if err == nil {
+		switch {
+		case err == nil && ownedChild(&child, &task):
 			children[a.Name] = child.DeepCopy()
-		} else if !errors.IsNotFound(err) {
+		case err == nil:
+			conflicted[a.Name] = true
+			if conflict == nil {
+				member, name := a.Name, child.Name
+				conflict = func() error { return r.recordChildNameConflict(ctx, original, member, name) }
+			}
+		case !errors.IsNotFound(err):
 			return ctrl.Result{}, fmt.Errorf("getting child %q: %w", a.Name, err)
 		}
 	}
@@ -140,6 +241,9 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if _, exists := children[a.Name]; exists {
 			continue // already generated
 		}
+		if conflicted[a.Name] {
+			continue // held: its name is taken by an object the task does not own
+		}
 		if a.Trigger == fleetv1.TriggerModeOnEvent {
 			continue // dormant until activated (append/patch); event surface is a later RFC
 		}
@@ -148,7 +252,7 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Create all currently-eligible actions in one pass. RFC-0001 composition schedules each action
 	// independently; coordinated multi-robot start — holding eligible children at Assigned until all
-	// are Assigned, then releasing together — is specified in RFC-0007, not here.
+	// are Assigned, then releasing together — is not implemented and not specified in this version.
 	toCreate := make([]string, 0, len(eligible))
 	for name, ok := range eligible {
 		if ok {
@@ -156,6 +260,12 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 	sort.Strings(toCreate)
+	// A refused create stops further creates on this pass but not the fan-out below:
+	// a refusal is a statement about one child, and a cancel, pause or return written
+	// on the task still has to reach every child that exists (RFC-0001
+	// #fleettask-declarative-desired-state). The refusal is recorded and returned
+	// after the fan-out, so the create is still retried on the manager's backoff.
+	var refused func() error
 	for _, name := range toCreate {
 		a := actionByName(task.Spec.Actions, name)
 		child := &fleetv1.FleetAction{
@@ -172,23 +282,32 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		if err := r.Create(ctx, child); err != nil {
 			if errors.IsAlreadyExists(err) {
-				continue // raced with a prior reconcile; adopt on next pass
+				continue // raced with a prior reconcile; the next pass adopts it if this task owns it
+			}
+			if isAdmissionRefusal(err) {
+				member, createErr := name, err
+				refused = func() error { return r.recordChildRefused(ctx, original, member, child, createErr) }
+				break
 			}
 			return ctrl.Result{}, fmt.Errorf("creating child %q: %w", name, err)
 		}
 		children[name] = child
 	}
+	if refused == nil && conflict == nil {
+		markChildrenAdmitted(&task)
+	}
 
 	// 4. desiredState fan-out: the composite is authoritative for owned children. While the task
 	// is compensating, its non-terminal primary actions are being rolled back, so their effective
 	// desired state is Cancelled regardless of spec.desiredState — otherwise the fan-out would
-	// undo the cancellation enactFailure issued when it entered Compensating.
+	// undo the cancellation enactFailure issued when it entered Compensating. A Failed child
+	// awaiting its retry takes the write too (takesWrite).
 	fanoutState := task.Spec.DesiredState
 	if task.Status.Phase == fleetv1.FleetTaskPhaseCompensating {
 		fanoutState = fleetv1.DesiredStateCancelled
 	}
 	for name, child := range children {
-		if isTerminal(child.Status.Phase) {
+		if !takesWrite(child) {
 			continue
 		}
 		if child.Spec.DesiredState != fanoutState {
@@ -199,24 +318,40 @@ func (r *FleetTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		}
 	}
+	if refused != nil {
+		return ctrl.Result{}, refused()
+	}
+	if conflict != nil {
+		return ctrl.Result{}, conflict()
+	}
 
 	// 5. Rebuild the status projection.
 	rebuildActionStatus(&task, children)
 
 	// 6. Aggregate phase + apply failure/completion policy.
-	r.aggregate(ctx, &task, children)
+	if err := r.aggregate(ctx, &task, children); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// 6b. Drive the compensation saga while the task is Compensating: generate each Succeeded
 	// action's compensation child in reverse dependency order, track it, and resolve to
 	// Compensated (all undos done) or Failed (a compensation itself failed → fail closed).
+	var held error
 	if task.Status.Phase == fleetv1.FleetTaskPhaseCompensating {
-		if err := r.driveCompensation(ctx, &task, children); err != nil {
+		c, err := r.driveCompensation(ctx, &task, children)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if c != nil {
+			held = r.holdCompensationConflict(&task, original, c.member, c.name)
 		}
 	}
 	finishIfTerminal(&task)
 
-	return ctrl.Result{}, r.patchStatus(ctx, &task, original)
+	if err := r.patchStatus(ctx, &task, original); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, held
 }
 
 // dependenciesMet reports whether every DependsOn predecessor has reached the action's
@@ -239,12 +374,13 @@ func dependenciesMet(a *fleetv1.FleetTaskAction, children map[string]*fleetv1.Fl
 	return true
 }
 
-// aggregate computes the group phase and enacts the failure policy.
-func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.FleetTask, children map[string]*fleetv1.FleetAction) {
+// aggregate computes the group phase and enacts the failure policy. An error is a member the
+// failure policy could not cancel; the task is then left non-terminal, so the next pass tries again.
+func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.FleetTask, children map[string]*fleetv1.FleetAction) error {
 	// Once the saga has started, driveCompensation owns the task phase; do not recompute it back
 	// toward Running/Pending here (RFC-0001 §9.1.5).
 	if task.Status.Phase == fleetv1.FleetTaskPhaseCompensating || task.Status.Phase == fleetv1.FleetTaskPhaseCompensated {
-		return
+		return nil
 	}
 	total := len(task.Spec.Actions)
 	succeeded, failedOrBlocked, nonTerminal := 0, 0, 0
@@ -256,7 +392,7 @@ func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.Fleet
 			succeeded++
 		case exists && (child.Status.Phase == fleetv1.ActionPhaseFailed || child.Status.Phase == fleetv1.ActionPhaseCancelled):
 			failedOrBlocked++
-		case dependencyPermanentlyFailed(a, children):
+		case dependencyPermanentlyFailed(task, a, children):
 			failedOrBlocked++ // permanently ineligible
 		default:
 			nonTerminal++
@@ -265,16 +401,36 @@ func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.Fleet
 
 	task.Status.ActionSummary = fmt.Sprintf("%d/%d Succeeded", succeeded, total)
 
+	// completionPolicy: Quorum with no spec.quorum is not a policy, it is an
+	// incomplete one, and it must fail CLOSED. Admission refuses it with a
+	// CEL rule on spec (api/v1/fleettask_types.go); this is the same
+	// belt-and-suspenders re-check validateGraph performs for dependsOn, for
+	// the same reasons — an object stored before the rule existed, a raw
+	// write, a downgrade. Defaulting the threshold to 0 made `succeeded >= 0`
+	// true on the very first pass, so the task reported Succeeded having run
+	// nothing. Reading nil as All is the other candidate and is
+	// worse: it invents a policy the author did not write, on a field that is
+	// immutable after creation, so nobody can correct it afterwards.
+	if task.Spec.CompletionPolicy == fleetv1.CompletionPolicyQuorum && task.Spec.Quorum == nil {
+		setCond(task, "CompletionPolicyValid", metav1.ConditionFalse, "QuorumUnset",
+			"completionPolicy: Quorum requires spec.quorum; with no threshold the task can never be judged complete, so it is failed rather than reported Succeeded against a threshold of 0")
+		return r.enactFailure(ctx, task, children)
+	}
+	setCond(task, "CompletionPolicyValid", metav1.ConditionTrue, "Valid", "completionPolicy is complete")
+
+	// Past the guard, a Quorum task always carries a threshold; the zero here
+	// is unreachable for Quorum and unread for every other policy.
+	quorum := int32(0)
+	if task.Spec.Quorum != nil {
+		quorum = *task.Spec.Quorum
+	}
+
 	completionMet := func() bool {
 		switch task.Spec.CompletionPolicy {
 		case fleetv1.CompletionPolicyAny:
 			return succeeded >= 1
 		case fleetv1.CompletionPolicyQuorum:
-			q := int32(0)
-			if task.Spec.Quorum != nil {
-				q = *task.Spec.Quorum
-			}
-			return int32(succeeded) >= q
+			return int32(succeeded) >= quorum
 		default: // All
 			return succeeded == total
 		}
@@ -286,11 +442,7 @@ func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.Fleet
 		case fleetv1.CompletionPolicyAny:
 			return remainingPossible >= 1
 		case fleetv1.CompletionPolicyQuorum:
-			q := int32(0)
-			if task.Spec.Quorum != nil {
-				q = *task.Spec.Quorum
-			}
-			return int32(remainingPossible) >= q
+			return int32(remainingPossible) >= quorum
 		default:
 			return remainingPossible == total
 		}
@@ -298,7 +450,7 @@ func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.Fleet
 
 	if completionMet() {
 		task.Status.Phase = fleetv1.FleetTaskPhaseSucceeded
-		return
+		return nil
 	}
 	if nonTerminal == 0 {
 		// Everything terminal and the policy unmet. Distinguish WHY before calling it a
@@ -317,58 +469,95 @@ func (r *FleetTaskReconciler) aggregate(ctx context.Context, task *fleetv1.Fleet
 		if task.Spec.DesiredState == fleetv1.DesiredStateCancelled &&
 			task.Spec.FailurePolicy != fleetv1.FailurePolicyCompensate {
 			task.Status.Phase = fleetv1.FleetTaskPhaseCancelled
-			return
+			return nil
 		}
-		r.enactFailure(ctx, task, children)
-		return
+		return r.enactFailure(ctx, task, children)
 	}
 	if !stillPossible() {
+		// An operator's cancellation makes the policy unmeetable the moment its first
+		// member reaches Cancelled, while the others are still winding down. That is
+		// the cancellation taking effect, not a failure: wait for every member to be
+		// terminal and end Cancelled above. Compensate is not short-circuited, for the
+		// same reason as there.
+		if task.Spec.DesiredState == fleetv1.DesiredStateCancelled &&
+			task.Spec.FailurePolicy != fleetv1.FailurePolicyCompensate {
+			task.Status.Phase = fleetv1.FleetTaskPhaseRunning
+			return nil
+		}
 		// policy can no longer be met even though some are still running
 		switch task.Spec.FailurePolicy {
 		case fleetv1.FailurePolicyContinueOthers:
 			task.Status.Phase = fleetv1.FleetTaskPhaseRunning // let independents finish; fail when all terminal
 		default:
-			r.enactFailure(ctx, task, children)
-			return
+			return r.enactFailure(ctx, task, children)
 		}
 	}
 	if succeeded == 0 && nonTerminal == 0 {
 		task.Status.Phase = fleetv1.FleetTaskPhasePending
-		return
+		return nil
 	}
 	task.Status.Phase = fleetv1.FleetTaskPhaseRunning
+	return nil
 }
 
 // enactFailure applies FailFast / ContinueOthers / Compensate once the policy is unmeetable.
-func (r *FleetTaskReconciler) enactFailure(ctx context.Context, task *fleetv1.FleetTask, children map[string]*fleetv1.FleetAction) {
+// Every non-terminal member, and a Failed member awaiting its retry (takesWrite), is set to
+// desiredState Cancelled first; a member that could not be is returned as an error and the task
+// keeps its phase, because a terminal task is never reconciled again and the member would never
+// be cancelled.
+func (r *FleetTaskReconciler) enactFailure(ctx context.Context, task *fleetv1.FleetTask, children map[string]*fleetv1.FleetAction) error {
+	cancelMembers := func() error {
+		for _, child := range children {
+			if takesWrite(child) && child.Spec.DesiredState != fleetv1.DesiredStateCancelled {
+				co := child.DeepCopy()
+				child.Spec.DesiredState = fleetv1.DesiredStateCancelled
+				if err := r.Patch(ctx, child, client.MergeFrom(co)); err != nil {
+					return fmt.Errorf("cancelling member %s for the task's failure policy: %w", child.Name, err)
+				}
+			}
+		}
+		return nil
+	}
 	switch task.Spec.FailurePolicy {
 	case fleetv1.FailurePolicyCompensate:
 		// Stop any non-terminal primary work, then enter Compensating. The saga itself —
 		// generating each Succeeded action's compensation child in reverse dependency order,
 		// tracking it, and the Compensated / fail-closed decision — is driven by
 		// driveCompensation after aggregation (RFC-0001 §9.1.5).
-		for _, child := range children {
-			if !isTerminal(child.Status.Phase) && child.Spec.DesiredState != fleetv1.DesiredStateCancelled {
-				co := child.DeepCopy()
-				child.Spec.DesiredState = fleetv1.DesiredStateCancelled
-				_ = r.Patch(ctx, child, client.MergeFrom(co))
-			}
+		if err := cancelMembers(); err != nil {
+			return err
 		}
 		if task.Status.Phase != fleetv1.FleetTaskPhaseCompensating && r.Recorder != nil {
 			r.Recorder.Event(task, "Warning", "Compensating", "completionPolicy unmet; compensating succeeded actions in reverse dependency order")
 		}
 		task.Status.Phase = fleetv1.FleetTaskPhaseCompensating
 	default: // FailFast (and ContinueOthers once nothing is left running)
-		for name, child := range children {
-			if !isTerminal(child.Status.Phase) && child.Spec.DesiredState != fleetv1.DesiredStateCancelled {
-				co := child.DeepCopy()
-				child.Spec.DesiredState = fleetv1.DesiredStateCancelled
-				_ = r.Patch(ctx, child, client.MergeFrom(co))
-				_ = name
-			}
+		if err := cancelMembers(); err != nil {
+			return err
 		}
 		task.Status.Phase = fleetv1.FleetTaskPhaseFailed
 	}
+	return nil
+}
+
+// takesWrite reports whether the task still writes a child's spec.desiredState: a non-terminal
+// child, or a Failed child that row A23 returns to Pending (awaitsRetry). Such a child is Failed
+// only for its backoff. Aggregation counts it lost on that first Failed, but the task's cancel
+// must still reach it: once FailFast or a cancel has settled the task it is never reconciled
+// again, and the retry would run under a task that reads Failed or Cancelled (RFC-0001
+// #fleettask-completion-failure-and-compensation). A Failed child that will not run again is
+// settled and is left as it is.
+//
+// A child failed by row A3 (StopUnconfirmed) is left out although it awaits its retry. It keeps
+// its robot until A3 releases it, and a stop on that robot holds it as work (row A6). The task
+// holds no estop-clear, and this controller does not yet hold its cancel of a member a stop
+// holds (row A4's v0.4 note), so writing Cancelled here would let the task end held work. Its
+// retry can still run under a settled task, as RFC-0001 discloses for v0.4.
+func takesWrite(child *fleetv1.FleetAction) bool {
+	if !isTerminal(child.Status.Phase) {
+		return true
+	}
+	return awaitsRetry(child) && child.Status.FailureReason != reasonStopUnconfirmed
 }
 
 // compensationComplete reports whether every compensation the saga still owes has reached
@@ -449,8 +638,14 @@ func compensationEligible(task *fleetv1.FleetTask, aName string, children map[st
 // eligible compensation children (reverse dependency order), projects the phases onto the status,
 // and resolves the task to Compensated (all undos done) or Failed (a compensation itself failed —
 // the task fails closed and awaits an operator, it never loops or issues further compensations).
-func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleetv1.FleetTask, children map[string]*fleetv1.FleetAction) error {
+//
+// A compensation child name taken by a FleetAction the task does not control is returned as a
+// conflict: that undo stays Pending and is not generated, and nothing is read from or written
+// to the object.
+func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleetv1.FleetTask, children map[string]*fleetv1.FleetAction) (*compensationConflict, error) {
 	compPhase := map[string]string{}
+	var conflict *compensationConflict
+	conflicted := map[string]bool{}
 
 	// Reconstruct phases from any compensation children that already exist.
 	for i := range task.Spec.Actions {
@@ -461,6 +656,12 @@ func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleet
 		var cc fleetv1.FleetAction
 		err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: compChildName(task.Name, a.Name)}, &cc)
 		switch {
+		case err == nil && !ownedChild(&cc, task):
+			compPhase[a.Name] = compPhasePending
+			conflicted[a.Name] = true
+			if conflict == nil {
+				conflict = &compensationConflict{member: a.Name, name: cc.Name}
+			}
 		case err == nil:
 			switch cc.Status.Phase {
 			case fleetv1.ActionPhaseSucceeded:
@@ -473,7 +674,7 @@ func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleet
 		case errors.IsNotFound(err):
 			compPhase[a.Name] = compPhasePending
 		default:
-			return fmt.Errorf("getting compensation child for %q: %w", a.Name, err)
+			return nil, fmt.Errorf("getting compensation child for %q: %w", a.Name, err)
 		}
 	}
 
@@ -494,8 +695,8 @@ func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleet
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			if compPhase[name] != compPhasePending {
-				continue // not owed, already running, or already done
+			if compPhase[name] != compPhasePending || conflicted[name] {
+				continue // not owed, already running, already done, or its name is taken
 			}
 			if !compensationEligible(task, name, children, compPhase) {
 				continue // wait for successors' undo
@@ -511,11 +712,11 @@ func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleet
 			}
 			comp.Spec.DesiredState = fleetv1.DesiredStateRunning // a compensation always runs to completion
 			if err := controllerutil.SetControllerReference(task, comp, r.Scheme); err != nil {
-				return fmt.Errorf("setting owner ref on compensation %q: %w", name, err)
+				return nil, fmt.Errorf("setting owner ref on compensation %q: %w", name, err)
 			}
 			if err := r.Create(ctx, comp); err != nil {
 				if !errors.IsAlreadyExists(err) {
-					return fmt.Errorf("creating compensation child %q: %w", name, err)
+					return nil, fmt.Errorf("creating compensation child %q: %w", name, err)
 				}
 			}
 			compPhase[name] = compPhaseInProgress
@@ -545,7 +746,7 @@ func (r *FleetTaskReconciler) driveCompensation(ctx context.Context, task *fleet
 	default:
 		task.Status.Phase = fleetv1.FleetTaskPhaseCompensating
 	}
-	return nil
+	return conflict, nil
 }
 
 // ── small helpers ────────────────────────────────────────────────────────────
@@ -559,9 +760,34 @@ func actionByName(actions []fleetv1.FleetTaskAction, name string) *fleetv1.Fleet
 	return nil
 }
 
-func dependencyPermanentlyFailed(a *fleetv1.FleetTaskAction, children map[string]*fleetv1.FleetAction) bool {
+func dependencyPermanentlyFailed(task *fleetv1.FleetTask, a *fleetv1.FleetTaskAction, children map[string]*fleetv1.FleetAction) bool {
+	byName := make(map[string]*fleetv1.FleetTaskAction, len(task.Spec.Actions))
+	for i := range task.Spec.Actions {
+		byName[task.Spec.Actions[i].Name] = &task.Spec.Actions[i]
+	}
+	return blockedForever(a, byName, children, map[string]bool{})
+}
+
+// blockedForever reports whether a can never start. It is TRANSITIVE: a predecessor
+// that was never created, because its own predecessor failed or was cancelled, will
+// never be created, so everything behind it is blocked too. Checking only the direct
+// predecessors counted the tail of a stopped chain as still running, which left a
+// cancelled chain reported Failed and a ContinueOthers chain Running for ever. seen
+// guards the walk; the graph is validated acyclic before aggregation runs.
+func blockedForever(a *fleetv1.FleetTaskAction, byName map[string]*fleetv1.FleetTaskAction,
+	children map[string]*fleetv1.FleetAction, seen map[string]bool) bool {
+	if seen[a.Name] {
+		return false
+	}
+	seen[a.Name] = true
 	for _, dep := range a.DependsOn {
-		if pred, ok := children[dep]; ok && terminallyUnsatisfiable(pred.Status.Phase) {
+		if pred, ok := children[dep]; ok {
+			if terminallyUnsatisfiable(pred.Status.Phase) {
+				return true
+			}
+			continue
+		}
+		if predSpec, ok := byName[dep]; ok && blockedForever(predSpec, byName, children, seen) {
 			return true
 		}
 	}
@@ -602,8 +828,15 @@ func setCond(task *fleetv1.FleetTask, condType string, status metav1.ConditionSt
 	})
 }
 
+// patchStatus writes the task's status when the pass changed it, and makes no call
+// when it did not. Both scheduling paths end every pass here, so without the check an
+// unchanged task sent an empty merge patch on each pass: nothing moved, but each was
+// still a status write request (RA-1, RFC-0001 #fleettask-ownership-status-aggregation-and-ra-1).
 func (r *FleetTaskReconciler) patchStatus(ctx context.Context, task *fleetv1.FleetTask, original *fleetv1.FleetTask) error {
 	task.Status.ObservedGeneration = task.Generation
+	if equality.Semantic.DeepEqual(original.Status, task.Status) {
+		return nil
+	}
 	if err := r.Status().Patch(ctx, task, client.MergeFrom(original)); err != nil {
 		return fmt.Errorf("patching fleettask status: %w", err)
 	}
@@ -661,4 +894,48 @@ func (r *FleetTaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&fleetv1.FleetTask{}).
 		Owns(&fleetv1.FleetAction{}).
 		Complete(r)
+}
+
+// markActivated answers the draft gate once spec.draft has been cleared: the task leaves
+// Draft for Pending and AwaitingActivation turns False, so a dispatched task does not go
+// on asking for an approval that has been given. A no-op for a task that was never held.
+func (r *FleetTaskReconciler) markActivated(ctx context.Context, task *fleetv1.FleetTask) error {
+	held := task.Status.Phase == fleetv1.FleetTaskPhaseDraft
+	waiting := apimeta.IsStatusConditionTrue(task.Status.Conditions, ConditionAwaitingActivation)
+	if !held && !waiting {
+		return nil
+	}
+	original := task.DeepCopy()
+	if held {
+		task.Status.Phase = fleetv1.FleetTaskPhasePending
+	}
+	apimeta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+		Type:    ConditionAwaitingActivation,
+		Status:  metav1.ConditionFalse,
+		Reason:  "Activated",
+		Message: "spec.draft was cleared; the task is dispatched as written",
+	})
+	return r.patchStatus(ctx, task, original)
+}
+
+// holdAsDraft parks a drafted task at phase Draft and generates nothing.
+//
+// Idempotent, and quiet: a draft can sit for a long time waiting for a person, and a
+// controller that rewrote its status on every resync would turn a waiting task into a
+// write loop against etcd.
+func (r *FleetTaskReconciler) holdAsDraft(ctx context.Context, task *fleetv1.FleetTask) error {
+	if task.Status.Phase == fleetv1.FleetTaskPhaseDraft &&
+		apimeta.IsStatusConditionTrue(task.Status.Conditions, ConditionAwaitingActivation) {
+		return nil
+	}
+	original := task.DeepCopy()
+	task.Status.Phase = fleetv1.FleetTaskPhaseDraft
+	apimeta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+		Type:   ConditionAwaitingActivation,
+		Status: metav1.ConditionTrue,
+		Reason: "DraftAwaitingActivation",
+		Message: "composed but not dispatched; clear spec.draft to activate. " +
+			"No child actions exist and no robot has been asked to do anything.",
+	})
+	return r.patchStatus(ctx, task, original)
 }

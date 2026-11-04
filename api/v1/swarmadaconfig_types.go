@@ -20,23 +20,34 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // SwarmadaHealthConfig holds health-tracking tunables for the namespace.
 type SwarmadaHealthConfig struct {
-	// TelemetryIntervalSeconds: default passive telemetry rate for robots.
+	// TelemetryIntervalSeconds is specified as the namespace default passive
+	// telemetry rate for robots. No controller reads it at this version: the interval
+	// an adapter is acked with comes from Robot.spec.telemetryIntervalSeconds or
+	// RobotClass.spec.defaultTelemetry only.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=60
 	TelemetryIntervalSeconds int32 `json:"telemetryIntervalSeconds,omitempty"`
-	// CapabilityRescanIntervalSeconds: full capability snapshot via
-	// ScanCapabilities RPC. 0 disables periodic rescanning.
+	// CapabilityRescanIntervalSeconds is specified as the period of a full
+	// capability snapshot request (the ScanCapabilities command); 0 disables it. No
+	// controller reads it at this version and no ScanCapabilities command is ever
+	// sent, so no periodic rescan happens at any value.
 	// +kubebuilder:default=300
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600
 	CapabilityRescanIntervalSeconds int32 `json:"capabilityRescanIntervalSeconds,omitempty"`
-	// DefaultHardwareProbeIntervalSeconds: default for RobotProbe resources.
+	// DefaultHardwareProbeIntervalSeconds is the RobotProbe controller's fallback for
+	// a RobotProbe whose spec.intervalSeconds is not positive. That field carries a
+	// CRD default (60) the API server always applies, so this value is not used in
+	// practice.
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=10
 	// +kubebuilder:validation:Maximum=3600
 	DefaultHardwareProbeIntervalSeconds int32 `json:"defaultHardwareProbeIntervalSeconds,omitempty"`
-	// DefaultProbeTimeoutSeconds is the default probe timeout.
+	// DefaultProbeTimeoutSeconds is the RobotProbe controller's fallback for a
+	// RobotProbe whose spec.timeoutSeconds is not positive. That field carries a CRD
+	// default (10) the API server always applies, so this value is not used in
+	// practice.
 	// +kubebuilder:default=5
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=60
@@ -51,12 +62,21 @@ type SwarmadaHealthConfig struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
 	DefaultProbeRecoveryThreshold int32 `json:"defaultProbeRecoveryThreshold,omitempty"`
-	// ConnectivityOfflineThresholdSeconds: seconds without telemetry before Offline.
+	// ConnectivityOfflineThresholdSeconds is the age of a Robot's
+	// status.connectivity.lastSeenAt past which the Robot reconciler runs a
+	// confirming heartbeat exchange (three attempts, five seconds apart) and, if
+	// none is answered, sets the phase to Offline. lastSeenAt is stamped from the
+	// bound Fleet Adapter's ControlStream liveness, not from the robot's telemetry.
+	// Offline does not change status.health.
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=5
 	// +kubebuilder:validation:Maximum=3600
 	ConnectivityOfflineThresholdSeconds int32 `json:"connectivityOfflineThresholdSeconds,omitempty"`
-	// ConnectivityCriticalThresholdSeconds: seconds Offline before Critical.
+	// ConnectivityCriticalThresholdSeconds is how long a Robot must have been
+	// Offline, measured from status.offlineSince, before the ConnectivityCritical
+	// condition is set True. It raises the condition, a metric and an audit entry;
+	// it does not change status.health or reassign work. Must exceed
+	// ConnectivityOfflineThresholdSeconds (enforced by the admission webhook).
 	// +kubebuilder:default=120
 	// +kubebuilder:validation:Minimum=30
 	// +kubebuilder:validation:Maximum=86400
@@ -74,7 +94,10 @@ type SwarmadaSchedulingConfig struct {
 	// DefaultAcceptDegradedCapabilities: namespace-level default.
 	// +kubebuilder:default=false
 	DefaultAcceptDegradedCapabilities bool `json:"defaultAcceptDegradedCapabilities,omitempty"`
-	// ActionRequeueBackoffSeconds: wait time between action requeue attempts.
+	// ActionRequeueBackoffSeconds is the backoff before a failed FleetAction is
+	// requeued to Pending, applied only to a FleetAction that sets no
+	// spec.retryPolicy. It does not set the re-check interval for a Pending
+	// action with no eligible robot.
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600
@@ -104,27 +127,29 @@ type SwarmadaSchedulingConfig struct {
 	// +kubebuilder:default=true
 	HonorPreferredRobot *bool `json:"honorPreferredRobot,omitempty"`
 
-	// LeaseDurationSeconds is the task-lease horizon (§9.6.3.5): how long a robot may
+	// LeaseDurationSeconds is the task-lease duration (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee): how long a robot may
 	// execute an assigned action without a renewal before it MUST self-stop.
 	//
 	// This is a SAFETY bound, not a tuning knob. The resolved value is both written to
-	// FleetAction.status.leaseExpiresAt and sent to the robot as Command.lease_duration_ms,
-	// which arms the adapter's self-stop timer (§9.2.8 "Task-lease self-stop", §9.6.3.3
+	// FleetAction.status.leaseExpiresAt and sent to the robot as lease_duration_ms on
+	// AssignAction and RenewActionLease,
+	// which arms the adapter's self-stop timer (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist "Task-lease self-stop", RFC-0001 #safety-fleet-adapter-local-behaviour-during-connectivity-loss
 	// item 1). Raising it directly extends how long a robot that has lost its link keeps
 	// moving before halting itself — hence the 300s ceiling. The 10s floor keeps the
-	// horizon above the derived renewal interval by a workable margin.
+	// lease above the derived renewal interval by a workable margin.
 	//
-	// The renewal interval is always leaseDurationSeconds/3 (§9.3.2) and is NOT separately
-	// configurable: deriving it makes it impossible to widen the horizon without also
+	// The renewal interval is always leaseDurationSeconds/3 (RFC-0001 #control-plane-scheduler) and is NOT separately
+	// configurable: deriving it makes it impossible to lengthen the lease without also
 	// renewing proportionally sooner (ADR-0044).
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=10
 	// +kubebuilder:validation:Maximum=300
 	LeaseDurationSeconds int32 `json:"leaseDurationSeconds,omitempty"`
 
-	// ClockSkewMarginSeconds is the margin added before a lease is treated as provably
-	// expired (§9.6.3.5 condition 3: now ≥ leaseExpiresAt + skew). It absorbs clock
-	// disagreement between the control plane and the robot.
+	// ClockSkewMarginSeconds is the clock-skew margin of the lease horizon, which RFC-0001
+	// #safety-action-table defines once (assignment-lease condition 3
+	// holds once that horizon has passed). It absorbs the delivery delay of an assignment
+	// or renewal and the drift between the control plane's clock and the robot's timer.
 	//
 	// Also a safety bound: too small and the control plane may reassign an action while
 	// the robot still believes its lease is live — a double-execution window; too large
@@ -149,7 +174,11 @@ const (
 
 // SwarmadaProvisioningConfig holds robot provisioning settings.
 type SwarmadaProvisioningConfig struct {
-	// Mode controls the discovery-to-admission flow.
+	// Mode is specified to control the discovery-to-admission flow. No controller
+	// reads it at this version, and neither value changes behaviour: a robot that
+	// connects is recorded as a DiscoveredRobot and becomes a Robot only when it is
+	// admitted, and TwoPhase does not suppress auto-admit (autoAdmitRobotClass and
+	// autoAdmitZone govern that). Admission warns when it is set to DirectRegister.
 	// +kubebuilder:default=TwoPhase
 	Mode ProvisioningMode `json:"mode,omitempty"`
 	// DiscoveredRobotTTLMinutes: auto-delete un-admitted DiscoveredRobots after this time.
@@ -168,7 +197,7 @@ type SwarmadaProvisioningConfig struct {
 	AutoAdmitZone string `json:"autoAdmitZone,omitempty"`
 	// AutoRemoveOfflineRobots opts an auto-admitted Robot into automatic removal once its
 	// adapter presence is gone (phase Offline) and any assigned action's lease is provably
-	// dead (§9.6.3.5). Off by default. Only Robots that were auto-admitted (ADR-0014) are
+	// dead (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee). Off by default. Only Robots that were auto-admitted (ADR-0014) are
 	// eligible — operator-created robots are never removed, regardless of this setting.
 	// This reclaims ephemeral robots (e.g. a robot) killed without a clean disconnect (ADR-0030).
 	// +optional
@@ -189,27 +218,30 @@ type SwarmadaMaintenanceConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600
 	DefaultGracefulDrainTimeoutSeconds int32 `json:"defaultGracefulDrainTimeoutSeconds,omitempty"`
-	// DefaultAutoResumeMinutes: 0 means no auto-resume (operator must resume).
+	// DefaultAutoResumeMinutes is specified as the namespace default for
+	// ZoneMaintenance.spec.autoResumeAfterMinutes (0 = no auto-resume). No controller
+	// reads it at this version: the ZoneMaintenance controller reads only the
+	// window's own spec.autoResumeAfterMinutes, which defaults to 0.
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=480
 	DefaultAutoResumeMinutes int32 `json:"defaultAutoResumeMinutes,omitempty"`
-	// RequireEstopClearBeforeResume is the namespace default for the ZoneMaintenance
-	// field of the same name: block resume of a paused robot until any active estop
-	// on it is cleared.
-	// Enforced by the ZoneMaintenance controller as the namespace-level fallback
-	// when ZoneMaintenance.spec.requireEstopClearBeforeResume is unset.
+	// RequireEstopClearBeforeResume is specified as the namespace default for the
+	// ZoneMaintenance field of the same name: block resume of a paused robot until
+	// any active estop on it is cleared. It is unreachable at v0.4: the API server
+	// defaults ZoneMaintenance.spec.requireEstopClearBeforeResume to true, so a
+	// window that omits it is gated whatever this value says.
 	// +optional
 	// +kubebuilder:default=true
 	RequireEstopClearBeforeResume *bool `json:"requireEstopClearBeforeResume,omitempty"`
 }
 
-// ── Telemetry pipeline (RFC-0001 §9.1.11.7, §9.3.7) ───────────────────────────
+// ── Telemetry pipeline (RFC-0001 #swarmadaconfig-telemetry-pipeline-and-status-projection, RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split) ───────────────────────────
 
 // TelemetrySinkType selects the high-cadence TSDB sink. The empty default is a
 // deliberate "unconfigured" signal, NOT a silent drop: the control plane enters
 // observed-degraded mode and raises the TelemetrySinkUnconfigured condition until
-// a real store or an explicit Drop is set (§9.3.7 Invariant 1).
+// a real store or an explicit Drop is set (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split Invariant 1).
 // +kubebuilder:validation:Enum="";Drop;PrometheusRemoteWrite;VictoriaMetrics;Mimir
 type TelemetrySinkType string
 
@@ -221,13 +253,14 @@ const (
 	TelemetrySinkDrop TelemetrySinkType = "Drop"
 	// TelemetrySinkPrometheusRemoteWrite writes via Prometheus remote-write.
 	TelemetrySinkPrometheusRemoteWrite TelemetrySinkType = "PrometheusRemoteWrite"
-	// TelemetrySinkVictoriaMetrics writes via the VictoriaMetrics ingest API.
+	// TelemetrySinkVictoriaMetrics writes via the Prometheus remote-write protocol
+	// to a VictoriaMetrics remote-write endpoint.
 	TelemetrySinkVictoriaMetrics TelemetrySinkType = "VictoriaMetrics"
 	// TelemetrySinkMimir writes via a Grafana Mimir remote-write endpoint.
 	TelemetrySinkMimir TelemetrySinkType = "Mimir"
 )
 
-// TelemetrySink is the high-cadence TSDB sink target (§9.1.11.1).
+// TelemetrySink is the high-cadence TSDB sink target (RFC-0001 #swarmadaconfig-schema).
 type TelemetrySink struct {
 	// Type selects the sink. MUST be set explicitly by the operator; the empty
 	// default raises TelemetrySinkUnconfigured rather than silently dropping.
@@ -239,7 +272,7 @@ type TelemetrySink struct {
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
-// SwarmadaTelemetryConfig configures the two-data-plane split (§9.3.7): where
+// SwarmadaTelemetryConfig configures the two-data-plane split (RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split): where
 // high-cadence telemetry goes and how the material Robot.status projection is
 // throttled. High-cadence telemetry goes to the TSDB sink, never to etcd (RA-1).
 type SwarmadaTelemetryConfig struct {
@@ -266,7 +299,7 @@ type SwarmadaTelemetryConfig struct {
 	MaterialBatteryThresholds []int32 `json:"materialBatteryThresholds,omitempty"`
 }
 
-// ── Artifact signing (RFC-0001 §9.1.11.1, §9.5.5) ─────────────────────────────
+// ── Artifact signing (RFC-0001 #swarmadaconfig-schema, #security-model-and-firmware-registry-credentials) ─────────────────────────────
 
 // SigningSecretKeyRef selects a key within a namespace-local Secret holding a
 // PEM-encoded cosign public key or x509 signing certificate.
@@ -278,7 +311,7 @@ type SigningSecretKeyRef struct {
 }
 
 // SigningTrustRoot is a public-key anchor against which artifact signatures are
-// verified (§9.1.11.1).
+// verified (RFC-0001 #swarmadaconfig-schema).
 type SigningTrustRoot struct {
 	// Name is a logical identifier, written to the audit-log detail.
 	Name string `json:"name"`
@@ -287,20 +320,38 @@ type SigningTrustRoot struct {
 }
 
 // SwarmadaSigningConfig configures artifact signature verification for firmware
-// and model updates (§9.1.11.1). Adapters verify artifacts against these trust
-// roots before install and fail closed on failure.
+// and model updates (RFC-0001 #swarmadaconfig-schema). The control plane reads these trust
+// roots itself and sends them to no adapter: the FirmwareRollout controller verifies a firmware
+// signature against them before dispatch, and FleetAdapter conformance verification checks a
+// report's signature against them.
 type SwarmadaSigningConfig struct {
-	// RequireSignatureVerification, when true (default), forces adapters to verify
-	// every firmware/model artifact against a trust root before install.
+	// RequireSignatureVerification, when true (default), makes the control plane verify a
+	// FirmwareRollout artifact's signature against a trust root before dispatch, requires a
+	// ModelRollout to name a signature the adapter verifies, and requires a signed conformance
+	// report. Set it to false to turn verification off for this namespace; unset means true.
 	// +kubebuilder:default=true
-	RequireSignatureVerification bool `json:"requireSignatureVerification,omitempty"`
-	// TrustRoots are the public-key anchors. At least one is required when
-	// RequireSignatureVerification is true (enforced by the SwarmadaConfig
-	// admission webhook — see the note on SwarmadaConfig).
+	// +optional
+	RequireSignatureVerification *bool `json:"requireSignatureVerification,omitempty"`
+	// A pointer because false is a real, different-from-absent value for a signing gate,
+	// which api-principles.md ("Optional scalars are pointers") requires a pointer for. As
+	// a non-pointer bool with omitempty it could not be set to false AT ALL: the zero value
+	// serialized away and structural defaulting put the default back, so an operator who
+	// turned verification off got it on with no error. Read it through
+	// SignatureVerificationRequired(), never directly. This note is deliberately kept out
+	// of the field's doc comment so it stays out of the published CRD description: the
+	// blank line below it is what keeps it out, because controller-gen reads only the
+	// comment block directly above a field.
+
+	// TrustRoots are the public-key anchors. At least one is needed for any artifact to
+	// verify when RequireSignatureVerification is true; a config with neither is
+	// INCOMPLETE rather than invalid, so admission warns instead of rejecting and every
+	// consumer fails closed until a root is added (ADR-0051).
 	// +optional
 	TrustRoots []SigningTrustRoot `json:"trustRoots,omitempty"`
-	// RekorURL, when set, requires the artifact's signature entry to appear in the
-	// named transparency log before acceptance.
+	// RekorURL, when set, requires a FirmwareRollout artifact's entry to appear in
+	// the named transparency log before the control plane dispatches it. Checked
+	// only by the FirmwareRollout controller, and only when signature verification
+	// is required; ModelRollout artifacts are not checked against the log.
 	// +optional
 	RekorURL string `json:"rekorUrl,omitempty"`
 
@@ -312,13 +363,27 @@ type SwarmadaSigningConfig struct {
 	// MUST come from the operator. With it pinned, the entry's inclusion proof and
 	// signed-entry-timestamp are verified cryptographically and a forged response fails closed.
 	//
-	// Optional for compatibility: when unset the check degrades to index presence only, and the
-	// controller reports that it did so rather than implying a verified entry.
+	// Optional for compatibility: when unset the check degrades to index presence only. The
+	// controller records that only in a debug-level log line; no condition, Event or status
+	// field reports it.
 	// +optional
 	RekorPublicKey *SigningSecretKeyRef `json:"rekorPublicKey,omitempty"`
 }
 
-// ── Emergency-stop delivery (RFC-0001 §9.1.11.8) ──────────────────────────────
+// SignatureVerificationRequired reports whether this namespace enforces artifact
+// signature verification.
+//
+// nil resolves to TRUE, and that is forced rather than chosen: the field carries
+// +kubebuilder:default=true, so the API server materializes an omitted key as true. An
+// accessor that read nil as false would disagree with the API server about the same
+// object. It also means the zero-valued SwarmadaSigningConfig returned for a namespace
+// with NO SwarmadaConfig reads as enforcement ON, which is the fail-closed answer for a
+// signing gate (ADR-0051).
+func (s SwarmadaSigningConfig) SignatureVerificationRequired() bool {
+	return s.RequireSignatureVerification == nil || *s.RequireSignatureVerification
+}
+
+// ── Emergency-stop delivery (RFC-0001 #swarmadaconfig-estop-delivery-configuration) ──────────────────────────────
 
 // EstopPartialDeliveryBehavior selects the response when some adapters in a zone
 // have not ACKd an estop while others have.
@@ -329,82 +394,102 @@ type EstopPartialDeliveryBehavior string
 const (
 	// EstopBlockNewActions blocks new assignments to the zone until full delivery.
 	EstopBlockNewActions EstopPartialDeliveryBehavior = "BlockNewActions"
-	// EstopAlert emits a Warning only and does not block assignments.
+	// EstopAlert emits a Warning only and adds no zone-wide block; Scheduler
+	// filter 10 still withholds every robot under an active stop, whatever this value.
 	EstopAlert EstopPartialDeliveryBehavior = "Alert"
 )
 
-// EstopRetryPolicy bounds estop redelivery on non-ACK (§9.1.11.8).
+// EstopRetryPolicy bounds estop redelivery on non-ACK (RFC-0001 #swarmadaconfig-estop-delivery-configuration).
 type EstopRetryPolicy struct {
-	// MaxAttempts is the retry ceiling; 0 = retry indefinitely until ACK or clear.
+	// MaxAttempts is specified as the redelivery ceiling (0 = retry until ACK or
+	// clear). No code reads it at this version: the estop dispatcher makes a single
+	// delivery attempt per robot and never retries.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=0
 	MaxAttempts int32 `json:"maxAttempts,omitempty"`
-	// RetryIntervalMs is the delay between attempts.
+	// RetryIntervalMs is specified as the delay between redelivery attempts. No code
+	// reads it at this version: the estop dispatcher never retries a delivery.
 	// +kubebuilder:validation:Minimum=50
 	// +kubebuilder:default=250
 	RetryIntervalMs int32 `json:"retryIntervalMs,omitempty"`
 }
 
-// EstopDeliveryConfig governs estop delivery over the SafetyStream (§9.1.11.8).
+// EstopDeliveryConfig governs estop delivery over the SafetyStream (RFC-0001 #swarmadaconfig-estop-delivery-configuration).
 type EstopDeliveryConfig struct {
-	// PerAdapterTimeoutMs is the max wait for one adapter to ACK before retrying.
-	// ACK means stop INITIATED, not complete.
+	// PerAdapterTimeoutMs is the maximum wait for an adapter's EstopAck for a robot.
+	// ACK means stop INITIATED, not complete. When it passes with no ACK the robot's
+	// estopState becomes Failed (a dropped estop); the delivery is not retried.
 	// +kubebuilder:validation:Minimum=100
 	// +kubebuilder:default=500
 	PerAdapterTimeoutMs int32 `json:"perAdapterTimeoutMs,omitempty"`
-	// RetryPolicy bounds redelivery.
+	// RetryPolicy is specified to bound redelivery. No code reads it at this
+	// version: the estop dispatcher makes a single delivery attempt per robot.
 	// +optional
 	RetryPolicy EstopRetryPolicy `json:"retryPolicy,omitempty"`
-	// PartialDeliveryBehavior selects the response when delivery is partial.
+	// PartialDeliveryBehavior is specified to select the response when some adapters
+	// have not ACKd an estop. No code reads it at this version: there is no
+	// partial-delivery aggregation, and each robot's unconfirmed stop is reported on
+	// its own estopState (Failed).
 	// +kubebuilder:default=BlockNewActions
 	PartialDeliveryBehavior EstopPartialDeliveryBehavior `json:"partialDeliveryBehavior,omitempty"`
 }
 
-// SwarmadaEstopConfig configures emergency-stop delivery (§9.1.11.8).
+// SwarmadaEstopConfig configures emergency-stop delivery (RFC-0001 #swarmadaconfig-estop-delivery-configuration).
 type SwarmadaEstopConfig struct {
 	// Delivery governs SafetyStream estop delivery and retry.
 	// +optional
 	Delivery EstopDeliveryConfig `json:"delivery,omitempty"`
-	// RequireExplicitClearAfterEstop is documented for traceability (always true):
-	// robots that ACKd an estop MUST NOT resume until an operator explicitly clears
-	// it.
+	// RequireExplicitClearAfterEstop records, for traceability, that a robot which ACKd an
+	// estop MUST NOT resume until an operator explicitly clears it. The prohibition is
+	// UNCONDITIONAL: there is no auto-clear path in the control plane, so this field
+	// describes the rule rather than controlling it, and setting it false changes nothing.
+	// Admission warns when it is set false rather than silently accepting the value.
 	// +kubebuilder:default=true
-	RequireExplicitClearAfterEstop bool `json:"requireExplicitClearAfterEstop,omitempty"`
+	// +optional
+	RequireExplicitClearAfterEstop *bool `json:"requireExplicitClearAfterEstop,omitempty"`
 }
 
-// ── Action cancellation on disconnect (RFC-0001 §9.1.11.9) ──────────────────────
+// ── Action cancellation on disconnect (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect) ──────────────────────
 
 // ActionCancellationPolicy governs FleetAction fate when its assigned robot
-// disconnects. The lease model (§9.6.3.5) remains the primary dual-execution
+// disconnects. The lease model (RFC-0001 #safety-assignment-lease-and-the-single-executor-guarantee) remains the primary dual-execution
 // safeguard; this is an additional wall-clock policy layer.
 // +kubebuilder:validation:Enum=Never;AfterTimeout;WhenActionExpired
 type ActionCancellationPolicy string
 
 // ActionCancellationPolicy values.
 const (
-	// ActionCancellationNever keeps the action Revoking until an operator cancels
-	// (safest for non-idempotent actions).
+	// ActionCancellationNever gives a lost robot's action no automatic outcome: an
+	// operator cancels it (RFC-0001 #safety-action-table, rows
+	// A9 and A10). Safest for non-idempotent actions.
 	ActionCancellationNever ActionCancellationPolicy = "Never"
-	// ActionCancellationAfterTimeout auto-cancels after DisconnectTimeoutSeconds.
+	// ActionCancellationAfterTimeout lets row A9 reassign a Revoking action once
+	// DisconnectTimeoutSeconds have passed since status.disconnectedAt, its lease is
+	// provably dead and no stop holds its robot. It moves no held work (RFC-0001 #safety-action-table, Terms).
 	ActionCancellationAfterTimeout ActionCancellationPolicy = "AfterTimeout"
-	// ActionCancellationWhenActionExpired auto-cancels when the action's own timeout hits.
+	// ActionCancellationWhenActionExpired lets row A10 cancel a Revoking action once
+	// its own timeoutSeconds has elapsed and its lease is provably dead, unless it is
+	// held work (RFC-0001 #safety-action-table, Terms).
 	ActionCancellationWhenActionExpired ActionCancellationPolicy = "WhenActionExpired"
 )
 
-// SwarmadaActionCancellationConfig configures disconnect handling (§9.1.11.9).
+// SwarmadaActionCancellationConfig configures disconnect handling (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect).
 type SwarmadaActionCancellationConfig struct {
 	// OnDisconnect selects the policy. Never (default) is safest for
 	// non-idempotent actions.
 	// +kubebuilder:default=Never
 	OnDisconnect ActionCancellationPolicy `json:"onDisconnect,omitempty"`
-	// DisconnectTimeoutSeconds is the wall-clock ceiling before a Revoking action is
-	// auto-cancelled. Required when OnDisconnect is AfterTimeout.
+	// DisconnectTimeoutSeconds is the wait since status.disconnectedAt that row A9
+	// (RFC-0001 #safety-action-table) adds to its lease and estop
+	// gates before a Revoking action is reassigned to another robot; it is not
+	// cancelled, so a non-idempotent action can run twice. Required when
+	// OnDisconnect is AfterTimeout.
 	// +optional
 	// +kubebuilder:validation:Minimum=30
 	DisconnectTimeoutSeconds *int32 `json:"disconnectTimeoutSeconds,omitempty"`
 }
 
-// ── Traffic Deconfliction Engine tunables (RFC-0001 §9.1.11.10, §9.4) ─────────
+// ── Traffic Deconfliction Engine tunables (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration, #tde) ─────────
 
 // ReservationExpiryAction selects what happens when a Reserved slot expires
 // before zone entry is confirmed.
@@ -432,7 +517,7 @@ const (
 	TDEReleaseReservedOnly TDERecoveryFallback = "ReleaseReservedOnly"
 )
 
-// TDERecoveryConfig tunes TDE startup recovery (§9.1.11.10).
+// TDERecoveryConfig tunes TDE startup recovery (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration).
 type TDERecoveryConfig struct {
 	// ZoneControllerWaitTimeoutSeconds is how long the TDE waits for the Zone
 	// Controller to report Ready before applying ConservativeRecoveryFallback.
@@ -445,11 +530,12 @@ type TDERecoveryConfig struct {
 	ConservativeRecoveryFallback TDERecoveryFallback `json:"conservativeRecoveryFallback,omitempty"`
 }
 
-// SwarmadaTrafficDeconflictionConfig exposes the TDE tunables (§9.1.11.10). All
-// TDE semantics are specified in §9.4; this is only the configuration surface.
+// SwarmadaTrafficDeconflictionConfig exposes the TDE tunables (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration). All
+// TDE semantics are specified in RFC-0001 #tde; this is only the configuration surface.
 type SwarmadaTrafficDeconflictionConfig struct {
-	// TDECallTimeoutMs bounds a RequestReservation call; exceeding it denies the
-	// reservation and returns the action to Pending.
+	// TDECallTimeoutMs is specified to bound a RequestReservation call, denying the
+	// reservation when exceeded. No code reads it at this version: no TDE call site
+	// applies a timeout from it.
 	// +kubebuilder:validation:Minimum=50
 	// +kubebuilder:default=200
 	TDECallTimeoutMs int32 `json:"tdeCallTimeoutMs,omitempty"`
@@ -464,7 +550,10 @@ type SwarmadaTrafficDeconflictionConfig struct {
 	// +kubebuilder:validation:Minimum=60
 	// +kubebuilder:default=360
 	DisconnectedReservationTTLSeconds int32 `json:"disconnectedReservationTTLSeconds,omitempty"`
-	// OnReservationExpiry selects the action when a Reserved slot expires.
+	// OnReservationExpiry is specified to select the action when a Reserved slot
+	// expires. No code reads it at this version, and neither value is applied: an
+	// expired reservation stops counting against zone capacity, but nothing releases
+	// it from FleetZone status or returns its action to Pending.
 	// +kubebuilder:default=ReleaseAndRequeue
 	OnReservationExpiry ReservationExpiryAction `json:"onReservationExpiry,omitempty"`
 	// MinRetryAfterSeconds bounds the FleetAction reconciler backoff floor on Denied.
@@ -480,7 +569,7 @@ type SwarmadaTrafficDeconflictionConfig struct {
 	Recovery TDERecoveryConfig `json:"recovery,omitempty"`
 }
 
-// ── Coordinate system (RFC-0001 §9.1.11.11) ───────────────────────────────────
+// ── Coordinate system (RFC-0001 #swarmadaconfig-coordinate-system) ───────────────────────────────────
 
 // LengthUnit is the distance unit for all x/y coordinates in the namespace.
 // +kubebuilder:validation:Enum=Meters;Millimeters
@@ -507,7 +596,7 @@ const (
 )
 
 // ReferenceFrame selects the spatial reference convention for a namespace
-// (§9.1.11.11). A namespace picks exactly one; the control plane never mixes or
+// (RFC-0001 #swarmadaconfig-coordinate-system). A namespace picks exactly one; the control plane never mixes or
 // auto-converts between them.
 // +kubebuilder:validation:Enum=Local;Geodetic
 type ReferenceFrame string
@@ -549,7 +638,7 @@ const (
 )
 
 // CoordinateOrigin describes the physical site origin — the (0,0) point all x/y
-// are measured from (§9.1.11.11).
+// are measured from (RFC-0001 #swarmadaconfig-coordinate-system).
 type CoordinateOrigin struct {
 	// Description is a human-readable description of the site origin.
 	// Informational; aligns operators and tooling.
@@ -559,7 +648,7 @@ type CoordinateOrigin struct {
 }
 
 // GeodeticFrame holds the datum and altitude reference for a Geodetic coordinate
-// system (§9.1.11.11). Required when referenceFrame is Geodetic and MUST be unset
+// system (RFC-0001 #swarmadaconfig-coordinate-system). Required when referenceFrame is Geodetic and MUST be unset
 // when referenceFrame is Local (enforced by the SwarmadaConfig validating webhook).
 type GeodeticFrame struct {
 	// Datum is the horizontal datum. WGS84 only at v0.1.
@@ -573,7 +662,7 @@ type GeodeticFrame struct {
 // SwarmadaCoordinateSystemConfig declares the facility-wide spatial conventions in
 // which every coordinate elsewhere in the API is ALREADY expressed — FleetZone
 // physicalBounds/waypoints, Robot.status.position, and the edge PositionFrame
-// stream (§9.1.11.11). It is declarative and descriptive: the control plane never
+// stream (RFC-0001 #swarmadaconfig-coordinate-system). It is declarative and descriptive: the control plane never
 // transforms coordinates, only validates, annotates, and informs consumers.
 type SwarmadaCoordinateSystemConfig struct {
 	// ReferenceFrame selects Local (default) or Geodetic conventions for the
@@ -588,7 +677,7 @@ type SwarmadaCoordinateSystemConfig struct {
 	// +kubebuilder:default=Radians
 	AngleUnit AngleUnit `json:"angleUnit,omitempty"`
 	// GroundFloor is the integer floor value that denotes ground level;
-	// Robot.status.position.floor and FleetZone.spec.floor are interpreted
+	// Robot.status.position.floor and FleetZone.spec.physicalBounds.floor are interpreted
 	// relative to it. 0 = ground.
 	// +kubebuilder:default=0
 	GroundFloor int32 `json:"groundFloor,omitempty"`
@@ -601,19 +690,32 @@ type SwarmadaCoordinateSystemConfig struct {
 	Geodetic *GeodeticFrame `json:"geodetic,omitempty"`
 }
 
-// ── Status (RFC-0001 §9.1.11.1 conditions table, §9.3.7 Invariant 1) ──────────
+// ── Status (RFC-0001 #swarmadaconfig-schema conditions table, RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split Invariant 1) ──────────
 
 // SwarmadaConfig status condition types and reasons.
 const (
 	// ConditionTelemetrySinkUnconfigured is True when spec.telemetry.sink.type is
-	// unset — high-cadence telemetry is not forwarded and frames are counted in
-	// swarmada_telemetry_dropped_frames_total. It is False once a real store or an
-	// explicit Drop is set (§9.1.11.1, §9.3.7 Invariant 1).
+	// unset — high-cadence telemetry is discarded by the no-op writer and is not
+	// counted in swarmada_telemetry_dropped_frames_total. It is False once a real store or an
+	// explicit Drop is set (RFC-0001 #swarmadaconfig-schema, RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split Invariant 1).
 	ConditionTelemetrySinkUnconfigured = "TelemetrySinkUnconfigured"
 	// ReasonSinkNotConfigured is the reason when sink.type is unset.
 	ReasonSinkNotConfigured = "SinkNotConfigured"
 	// ReasonSinkConfigured is the reason when a real store or Drop is set.
 	ReasonSinkConfigured = "SinkConfigured"
+
+	// ConditionSigningIncomplete is True when spec.signing requires signature
+	// verification and configures no trustRoots. Every consumer of the policy then
+	// fails closed, so no FleetAdapter conformance report, firmware or model artifact
+	// can verify in the namespace until a trustRoot is added (ADR-0051: incomplete,
+	// not invalid). The auto-created SwarmadaConfig starts in this state.
+	ConditionSigningIncomplete = "SigningIncomplete"
+	// ReasonNoTrustRoots is the reason when verification is required and no trustRoot is configured.
+	ReasonNoTrustRoots = "NoTrustRoots"
+	// ReasonTrustRootsConfigured is the reason when verification is required and a trustRoot is configured.
+	ReasonTrustRootsConfigured = "TrustRootsConfigured"
+	// ReasonVerificationDisabled is the reason when requireSignatureVerification is false.
+	ReasonVerificationDisabled = "VerificationDisabled"
 )
 
 // SwarmadaConfigStatus is the observed state of a SwarmadaConfig.
@@ -628,9 +730,11 @@ type SwarmadaConfigStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// SupportedContractRange is the fleet-adapter contract-version range this control plane
-	// accepts (a semver range, e.g. ">=1.0.0 <1.1.0"): the implemented minor and its predecessor
-	// within the current major (ADR-0032). An adapter reporting a version outside it is rejected
-	// at the handshake with REGISTRATION_REJECTION_VERSION_MISMATCH.
+	// accepts, as a two-clause semver range ">=MAJOR.(N-1).0 <MAJOR.(N+1).0": the implemented
+	// minor N and its predecessor within the current major (ADR-0032); at minor 0, that minor
+	// alone. An adapter reporting a version outside it keeps its ControlStream connection
+	// (telemetry, heartbeat and estop are unaffected), and every RegisterRobot and DiscoverRobot
+	// it sends is refused with REGISTRATION_REJECTION_VERSION_MISMATCH.
 	//
 	// It is ADVERTISED, not configured: the controller populates it from the compiled-in contract
 	// version (internal/contract.Version), so an operator can answer "which adapters can this
@@ -649,22 +753,22 @@ type SwarmadaConfigSpec struct {
 	Scheduling   SwarmadaSchedulingConfig   `json:"scheduling,omitempty"`
 	Provisioning SwarmadaProvisioningConfig `json:"provisioning,omitempty"`
 	Maintenance  SwarmadaMaintenanceConfig  `json:"maintenance,omitempty"`
-	// Telemetry configures the two-data-plane split (§9.1.11.7, §9.3.7).
+	// Telemetry configures the two-data-plane split (RFC-0001 #swarmadaconfig-telemetry-pipeline-and-status-projection, RFC-0001 #control-plane-telemetry-pipeline-and-the-two-data-plane-split).
 	// +optional
 	Telemetry SwarmadaTelemetryConfig `json:"telemetry,omitempty"`
-	// Signing configures artifact signature trust roots (§9.1.11.1).
+	// Signing configures artifact signature trust roots (RFC-0001 #swarmadaconfig-schema).
 	// +optional
 	Signing SwarmadaSigningConfig `json:"signing,omitempty"`
-	// Estop configures emergency-stop delivery (§9.1.11.8).
+	// Estop configures emergency-stop delivery (RFC-0001 #swarmadaconfig-estop-delivery-configuration).
 	// +optional
 	Estop SwarmadaEstopConfig `json:"estop,omitempty"`
-	// ActionCancellation configures disconnect handling (§9.1.11.9).
+	// ActionCancellation configures disconnect handling (RFC-0001 #swarmadaconfig-action-cancellation-on-disconnect).
 	// +optional
 	ActionCancellation SwarmadaActionCancellationConfig `json:"actionCancellation,omitempty"`
-	// TrafficDeconfliction exposes the TDE tunables (§9.1.11.10).
+	// TrafficDeconfliction exposes the TDE tunables (RFC-0001 #swarmadaconfig-traffic-deconfliction-engine-configuration).
 	// +optional
 	TrafficDeconfliction SwarmadaTrafficDeconflictionConfig `json:"trafficDeconfliction,omitempty"`
-	// CoordinateSystem declares facility-wide spatial conventions (§9.1.11.11).
+	// CoordinateSystem declares facility-wide spatial conventions (RFC-0001 #swarmadaconfig-coordinate-system).
 	// +optional
 	CoordinateSystem SwarmadaCoordinateSystemConfig `json:"coordinateSystem,omitempty"`
 }
@@ -673,15 +777,19 @@ type SwarmadaConfigSpec struct {
 //
 // Exactly one SwarmadaConfig per namespace, with the fixed name "swarmada-config".
 // Auto-created with defaults when a namespace is initialized (first FleetZone created).
-// Provides namespace-level tunables for health tracking, re-scanning,
-// provisioning, scheduling, and maintenance behaviour.
+// Provides namespace-level tunables for health tracking, provisioning, scheduling,
+// maintenance, estop delivery and traffic deconfliction. Several fields are
+// validated and defaulted but read by no controller at this version; each one's
+// description says so.
 //
-// The name MUST be "swarmada-config" (§9.3.1). Cross-field rules from §9.1.11
+// The name MUST be "swarmada-config" (RFC-0001 #control-plane-swarmada-api-server). Cross-field rules from RFC-0001 #swarmadaconfig
 // (AfterTimeout ⇒ disconnectTimeoutSeconds; disconnectedReservationTTLSeconds >
 // disconnectTimeoutSeconds; sink.endpoint required for a real store;
-// requireSignatureVerification ⇒ non-empty trustRoots) are enforced by a
-// SwarmadaConfig admission webhook — deferred, not yet built (§F). The empty
-// default sink.type is deliberately NOT rejected here: auto-creation (§9.1.11.3)
+// connectivityCriticalThresholdSeconds > connectivityOfflineThresholdSeconds;
+// referenceFrame Geodetic ⇔ geodetic block) are enforced by the SwarmadaConfig
+// admission webhook. requireSignatureVerification with no trustRoots is warned
+// about, not rejected. The empty
+// default sink.type is deliberately NOT rejected here: auto-creation (RFC-0001 #swarmadaconfig-auto-creation-on-namespace-initialization)
 // produces a defaulted config the operator then completes.
 //
 // +kubebuilder:object:root=true
@@ -705,4 +813,15 @@ type SwarmadaConfigList struct {
 
 func init() {
 	SchemeBuilder.Register(&SwarmadaConfig{}, &SwarmadaConfigList{})
+}
+
+// ExplicitClearRequiredAfterEstop reports whether an estopped robot needs an explicit
+// operator clear before it may resume.
+//
+// It is ALWAYS true. The prohibition is enforced by the absence of any auto-clear path, not
+// by this field, so the stored value cannot change the answer. It is an accessor rather
+// than a constant so that every read goes through one documented place, and so the shape
+// matches the other default-true booleans in this API (ADR-0052).
+func (e SwarmadaEstopConfig) ExplicitClearRequiredAfterEstop() bool {
+	return true
 }

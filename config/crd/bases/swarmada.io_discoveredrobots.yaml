@@ -34,7 +34,7 @@ spec:
       type: date
     - jsonPath: .status.ttlExpiresAt
       name: TTL
-      type: date
+      type: string
     name: v1
     schema:
       openAPIV3Schema:
@@ -43,8 +43,9 @@ spec:
           RPC for a robot with no existing Robot CRD in the namespace.\nOperators
           review DiscoveredRobots and admit them with:\n\n\tswarmctl admit robot <name>
           --zone <leaf-zone>\n\nDiscoveredRobot.spec is always empty — this is a read-only
-          resource.\nOperators CANNOT edit it; admission is exclusively via swarmctl
-          admit."
+          resource.\nOperators do not edit it; a robot is admitted by swarmctl admit
+          or by the\nnamespace's auto-admit settings, and rejected by swarmctl delete
+          robot."
         properties:
           apiVersion:
             description: |-
@@ -81,7 +82,9 @@ spec:
                 description: AdapterVersion is the Fleet Adapter version string.
                 type: string
               connectedAt:
-                description: ConnectedAt is the time the Fleet Adapter called Discover.
+                description: |-
+                  ConnectedAt is the time of the most recent Discover for this robot. It is
+                  rewritten on every re-announce, and the TTL window is measured from it.
                 format: date-time
                 type: string
               firmwareVersion:
@@ -89,8 +92,9 @@ spec:
                 type: string
               lastAnnouncedAt:
                 description: |-
-                  LastAnnouncedAt is the most recent time the Fleet Adapter re-announced this
-                  robot (the discovery-TTL liveness refresh); TTLExpiresAt is derived from it.
+                  LastAnnouncedAt is specified as the most recent time the Fleet Adapter
+                  re-announced this robot. Never written at v0.4; ConnectedAt carries that
+                  time instead, and TTLExpiresAt is derived from it.
                 format: date-time
                 type: string
               macAddress:
@@ -239,12 +243,16 @@ spec:
                 minLength: 1
                 type: string
               suggestedRobotClass:
-                description: RobotClass suggested by the Fleet Adapter (may be empty).
+                description: |-
+                  SuggestedRobotClass is the sole entry of the mTLS-verified FleetAdapter's
+                  spec.servesRobotClasses; empty when that adapter is unknown or serves zero
+                  or several classes. Not taken from anything the adapter self-reports.
                 type: string
               ttlExpiresAt:
                 description: |-
-                  TTLExpiresAt is the time at which this resource will be auto-deleted
-                  if the robot has not been admitted or rejected.
+                  TTLExpiresAt is the time at which the DiscoveredRobot controller deletes
+                  this resource if the robot has not been admitted or rejected. Each
+                  re-announce moves it forward.
                 format: date-time
                 type: string
             required:

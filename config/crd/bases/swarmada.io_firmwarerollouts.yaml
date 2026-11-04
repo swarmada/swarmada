@@ -56,26 +56,46 @@ spec:
             properties:
               deliveryMechanism:
                 default: PullOnIdle
-                description: Delivery controls whether the robot pulls or is pushed
-                  the update.
+                description: |-
+                  Delivery is specified to control whether the robot pulls or is pushed the
+                  update. No controller reads it at this version: every FirmwareRollout is
+                  delivered as PullOnIdle, and PushImmediate pushes nothing.
                 enum:
                 - PullOnIdle
                 - PushImmediate
+                type: string
+              desiredState:
+                allOf:
+                - enum:
+                  - Running
+                  - Paused
+                - enum:
+                  - Running
+                  - Paused
+                default: Running
+                description: |-
+                  DesiredState is the operator's level-triggered intent for this rollout.
+                  Writing `Paused` withholds dispatch of any further robot; writing `Running`
+                  withdraws that hold. It does NOT release a pauseOnError halt — see
+                  RolloutDesiredState and ADR-0041 — so an operator cannot use it to push a
+                  rollout past a failure the halt exists to surface.
                 type: string
               firmwareChecksum:
                 description: |-
                   FirmwareChecksum is the SHA-256 digest of the firmware artifact, as
                   "sha256:<64 hex>". The detached signature is verified over this value; the
-                  robot re-verifies the downloaded bytes against it before install (§9.1.7.1).
+                  robot re-verifies the downloaded bytes against it before install (RFC-0001 #firmwarerollout-schema).
                 pattern: ^sha256:[a-f0-9]{64}$
                 type: string
               firmwareSignatureRef:
                 description: |-
-                  FirmwareSignatureRef references the detached signature or sigstore bundle for
-                  the artifact, verified against SwarmadaConfig.spec.signing.trustRoots before
-                  any dispatch. When requireSignatureVerification is true this MUST be set;
-                  omitting it fails the rollout closed (§9.1.7.1, §9.2.8). Supported forms: an
-                  OCI/https/s3 ref, or an inline "bundle:<base64>" signature.
+                  FirmwareSignatureRef references the detached signature for the artifact,
+                  verified against SwarmadaConfig.spec.signing.trustRoots before any dispatch.
+                  When requireSignatureVerification is true this MUST be set; omitting it fails
+                  the rollout closed (RFC-0001 #firmwarerollout-schema, #fleet-adapter-protocol-fleet-adapter-compliance-checklist). Supported forms: an
+                  oci:// ref (digest- or tag-addressed, including a cosign signature tag), an
+                  https:// URL, or an inline "bundle:<base64>" raw signature. Any other scheme,
+                  s3:// included, fails the rollout closed while signing is enforced.
                 type: string
               firmwareUri:
                 description: FirmwareURI is the download URL for the firmware artifact.
@@ -94,14 +114,15 @@ spec:
 
                   ModelRollout.NewVersion IS pattern-constrained to bare major.minor.patch,
                   because that controller refuses downgrades via versionIsNewer and therefore
-                  needs a parseable order. The asymmetry is deliberate (RFC-0001 D2).
+                  needs a parseable order. The asymmetry is deliberate.
                 minLength: 1
                 type: string
               rollbackPolicy:
                 default: Manual
                 description: |-
-                  RollbackPolicy controls what happens on failure.
-                  Manual is strongly recommended (Auto can create fleet version inconsistency).
+                  RollbackPolicy is specified to control what happens on failure. No controller
+                  reads it on a FirmwareRollout at this version: neither value changes what
+                  happens on failure, and Auto rolls nothing back.
                 enum:
                 - Manual
                 - Auto
@@ -125,7 +146,9 @@ spec:
                     type: integer
                   requireIdleState:
                     default: true
-                    description: 'RequireIdleState: only update robots in Idle phase.'
+                    description: |-
+                      RequireIdleState: only update robots in Idle phase. Set false to allow updating a
+                      robot that is executing an action; unset means true.
                     type: boolean
                 type: object
               strategy:
@@ -151,7 +174,7 @@ spec:
                           enters the batch while a failure stands, though in-flight updaters continue.
 
                           The operator resumes with `swarmctl rollout resume`, which is gated on the
-                          rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                          rollout-resume custom verb (RFC-0001 #security-permission-matrix) and writes the swarmada.io/rollout-resume
                           annotation the controller consumes. Resume EXCLUDES the robots that failed from
                           further attempts by this rollout rather than retrying them (ADR-0041); a fixed
                           artifact needs a fresh rollout. Excluded robots are named in
@@ -171,8 +194,10 @@ spec:
                     type: string
                 type: object
               targetSelector:
-                description: TargetSelector selects which robots receive this firmware
-                  update.
+                description: |-
+                  TargetSelector selects which robots receive this firmware update. It is
+                  re-resolved on every reconcile, so a robot relabelled mid-rollout joins or
+                  leaves the rollout.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -288,7 +313,7 @@ spec:
                 x-kubernetes-list-type: map
               currentBatch:
                 description: |-
-                  CurrentBatch is the per-robot active update batch (§6.6). Each entry carries
+                  CurrentBatch is the per-robot active update batch (RFC-0001 #firmwarerollout-schema). Each entry carries
                   the robot's live updatePhase, sourced from adapter UpdateProgress.
                 items:
                   description: |-
@@ -310,8 +335,10 @@ spec:
                       description: Namespace is the robot's namespace.
                       type: string
                     previousVersion:
-                      description: PreviousVersion is the robot's firmware/model version
-                        before this update.
+                      description: |-
+                        PreviousVersion is the robot's firmware version before this update. Filled
+                        on a FirmwareRollout only; a ModelRollout leaves it empty at v0.4 and records
+                        the previous model version in status.rollbackVersions instead.
                       type: string
                     robotName:
                       description: RobotName is the robot currently in the active
@@ -397,8 +424,10 @@ spec:
                 format: int32
                 type: integer
               startedAt:
-                description: StartedAt/CompletedAt/PausedAt are top-level rollout
-                  timing stamps.
+                description: |-
+                  StartedAt/CompletedAt/PausedAt are top-level rollout timing stamps. At v0.4
+                  only PausedAt is written (on the transition into Paused, dropped on leaving
+                  it); StartedAt and CompletedAt are written by no controller and stay empty.
                 format: date-time
                 type: string
             type: object

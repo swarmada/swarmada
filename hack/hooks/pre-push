@@ -35,8 +35,25 @@ checker="$root/scripts/check-publication-boundary.sh"
 
 echo "pre-push: publication boundary guard (STRICT) …" >&2
 
+# The commits this push publishes, read from the refs git passes on stdin
+# (<local ref> <local sha> <remote ref> <remote sha>). A deleted ref publishes nothing; a
+# new branch publishes whatever the remote does not have yet.
+msgs=$(mktemp); trap 'rm -f "$msgs"' EXIT
+while read -r _lref lsha _rref rsha; do
+  case "$lsha" in *[!0]*) ;; *) continue ;; esac
+  case "$rsha" in
+    *[!0]*) git log --format=%B "$rsha..$lsha" >> "$msgs" ;;
+    *)      git log --format=%B "$lsha" --not --remotes="$1" >> "$msgs" ;;
+  esac
+done
+
 rc=0
 STRICT=1 "$checker" || rc=$?
+
+if [ -s "$msgs" ]; then
+  echo "pre-push: the same guard over the commit messages being pushed …" >&2
+  STRICT=1 "$checker" --messages < "$msgs" || rc=$?
+fi
 
 if [ "$rc" -eq 0 ]; then
   echo "pre-push: boundary clean." >&2
@@ -44,6 +61,6 @@ if [ "$rc" -eq 0 ]; then
 fi
 
 echo "" >&2
-echo "pre-push: BLOCKED — the boundary guard rejected this tree (exit $rc)." >&2
+echo "pre-push: BLOCKED — the boundary guard rejected this tree or a commit message (exit $rc)." >&2
 echo "pre-push: fix the findings above, or push with --no-verify if you have judged them." >&2
 exit 1

@@ -3,12 +3,23 @@
 - **Status:** accepted
 - **Date:** 2026-07-25
 - **Deciders:** Control Plane / CRD-controller capability
-- **Related:** RFC-0001 §9.2.3 (globally-unique robot_id), §9.3.1 (telemetry status projection), ADR-0014 (auto-admit DiscoveredRobots), ADR-0027 (suggested robot class on discover)
+- **Related:** RFC-0001 "The ControlStream service" (robot_id), "Telemetry Pipeline and the Two-Data-Plane Split" (telemetry status projection), ADR-0014 (auto-admit DiscoveredRobots), ADR-0027 (suggested robot class on discover)
+
+> **Correction note (2026-09-24).** This record originally called `robot_id` "globally
+> unique" (in Related and in Context). The control plane does not enforce that and does not
+> rely on it: RFC-0001 #discoveredrobot-conflict-handling-duplicate-robot-id, Case 3, permits
+> the same `robot_id` for a Robot in each of two namespaces. A serial number or MAC is unique
+> as a fact about the hardware, not as a property the control plane checks. Resolution is
+> therefore scoped to the namespace the message arrived on (`findRobotByIDInNamespace`,
+> `internal/controller/install_state_projection.go`, which replaced `resolveRobot`), and a
+> duplicate is refused only within one namespace. The Consequences bullets "Uniqueness is
+> load-bearing" and "Cluster-wide List on resolve" describe the lookup as it was when this
+> decision was taken. The decision itself — the annotation is the join key — is unchanged.
 
 ## Context
 
 Telemetry arrives on the Fleet Adapter ControlStream keyed by the wire
-`robot_id` — a stable, globally-unique identifier (serial / MAC) chosen by the
+`robot_id` — a stable identifier (typically a serial number or MAC) chosen by the
 robot, not by the operator. The material-projection sink
 (`internal/controller/robot_status_sink.go`) must resolve that `robot_id` to the
 one Robot CRD it belongs to before it can write `status.battery`/`status.hardware`.

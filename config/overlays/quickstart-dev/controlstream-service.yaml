@@ -13,10 +13,10 @@
 # limitations under the License.
 #
 # Exposes the manager's ControlStream port (--fleet-adapter-bind-address,
-# default :9443) as a Service, so a local demo adapter — or, in principle, an
+# default :9445) as a Service, so a local demo adapter — or, in principle, an
 # in-cluster one — can reach it by name instead of a pod-direct port-forward.
 # Not part of config/default: production ControlStream exposure is a
-# deployment concern tied to the mTLS work in backlog §F, not decided here.
+# deployment concern tied to the deferred mTLS work, not decided here.
 
 apiVersion: v1
 kind: Service
@@ -30,6 +30,6 @@ spec:
     control-plane: controller-manager
   ports:
     - name: fleet-adapter
-      port: 9443
-      targetPort: 9443
+      port: 9445
+      targetPort: 9445
       protocol: TCP

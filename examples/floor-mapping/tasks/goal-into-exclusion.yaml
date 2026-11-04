@@ -1,0 +1,27 @@
+# Work addressed to the keep-out is refused by the control plane: the action's
+# spec.zone is the exclusion zone, which carries entry: Denied, so dispatch refuses
+# it with reason ZoneEntryDenied, quotes the operator's reason, and assigns no robot.
+#
+# The refusal is by the zone the action names. The goal in the payload is not checked
+# against any polygon: an action addressed to floor-room-a with this same goal is
+# dispatched. Keeping the robot out of the keep-out itself is the robot's job, through
+# the keep-out mask its adapter loads (keepouts_ref, in ConfigMap floor-keepouts).
+#
+# The payload is written as `raw:` (base64 of the JSON), as in explore-floor.yaml.
+#
+# `onFailure: Alert`, as on every robot action in these samples, for the reason
+# explore-floor.yaml gives: a failed action is never dispatched again without an operator.
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: goal-into-keepout
+  namespace: warehouse-a
+spec:
+  type: Navigate
+  zone: floor-room-a-keepout-1
+  priority: Normal
+  onFailure: Alert
+  requiredCapabilities: [navigation]
+  payload:
+    # {"x":1.5,"y":1.5}
+    raw: eyJ4IjoxLjUsInkiOjEuNX0=

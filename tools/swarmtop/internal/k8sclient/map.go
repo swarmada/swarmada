@@ -345,6 +345,7 @@ func mapFleetZone(z *swarmadav1.FleetZone) ZoneView {
 		ParentZone:          z.Spec.ParentZone,
 		IsLeaf:              z.Status.IsLeaf,
 		ChildZones:          append([]string(nil), z.Status.ChildZones...),
+		MemberZones:         append([]string(nil), z.Spec.MemberZones...),
 		RobotCount:          z.Status.RobotCount,
 		CurrentConcurrent:   z.Status.CurrentConcurrentRobots,
 		MaxConcurrentRobots: z.Spec.MaxConcurrentRobots,

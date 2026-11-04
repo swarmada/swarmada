@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# full-surface demo-test — the HEADLESS CI gate (make demo-test).
+# full-surface demo-test — a HEADLESS gate that no CI job runs (make demo-test).
 #
 # Brings up a real Swarmada control plane on a throwaway kind cluster, drives the
 # full-surface coverage scenario live through the reference sim adapter, applies
-# the deterministic fault fixtures the four range-based §9.3.8 alerts need, runs the
+# the deterministic fault fixtures the four range-based metrics-contract alerts need, runs the
 # Python assertion driver (demo_test.py) against the CRD API + scraped /metrics, and
 # ALWAYS deletes the cluster on exit. Prints ✅/❌; the exit code is the gate.
 #
 # Human-in-the-loop watching is `make demo` (examples/warehouse-quickstart). This is
-# the CI counterpart: no swarmtop, no pauses, assertions only.
+# the headless counterpart: no swarmtop, no pauses, assertions only.
 #
 # TRANSPORT: this gate deploys config/overlays/quickstart-mtls, NOT the plaintext
 # quickstart-dev overlay, and it requires cert-manager (installed automatically) plus
@@ -36,6 +36,7 @@
 # What is REAL vs PROJECTED (honest, matching examples/warehouse-quickstart):
 #   - REAL from the live adapter + control plane: status.hardware degrade→fail→recover,
 #     FleetAction Revoking (comms drop → lease expiry), Assigned/InProgress (scheduler),
+#     FleetAction Succeeded (the live robot reports arriving at its target),
 #     the adapter-connected gauge, the reconnect counter, and RA-1 (status_writes vs
 #     frames_received). RobotPhase Discovered and Offline are also real, produced by
 #     discovered_offline_fixture — the Robot controller writes both. They need a fixture
@@ -43,12 +44,12 @@
 #     they were supplied by the breakage itself, which is not coverage.
 #   - PROJECTED via kubectl --subresource=status (the RA-1 anti-pattern; RFC-0001
 #     §9.1.3 reserves status to controllers): RobotPhase Idle-bootstrap,
-#     Charging, Error, Maintenance, FleetAction Succeeded, and status.estopState
+#     Charging, Error, Maintenance, and status.estopState
 #     Stopping→Stopped→Normal. The estop states are projected because this scenario
 #     issues no real TriggerEstop, not because the transport cannot carry one — see
 #     project_estop_states. Idle-bootstrap applies ONLY to robots with no Fleet
 #     Adapter: the Robot reconciler owns Discovered->Idle and advances a robot from
-#     fresh adapter liveness (ADR-0029, RFC-0001 §9.3.3), so a robot nothing is
+#     fresh adapter liveness (ADR-0029, RFC-0001 #control-plane-robot-health-and-connectivity), so a robot nothing is
 #     connected to never goes live and never becomes schedulable. The live robot
 #     advances on its own. demo_test.py asserts these were
 #     OBSERVED, which is weaker than asserting the control plane produced them; the run
@@ -56,7 +57,9 @@
 #   - Fault FIXTURES for the range alerts: a SwarmadaConfig pointing the TSDB sink at
 #     an unreachable endpoint (dropped-frames + tsdb-write-errors), a delayed estop
 #     ack via SWARMADA_SIM_ESTOP_ACK_DELAY_MS (estop-latency SLO breach), and a task
-#     held >60s with no capable robot (scheduler assignment-latency).
+#     held >60s with no capable robot (scheduler assignment-latency). The robot that
+#     finally takes that task is live: a second sim adapter process serves it under its
+#     own FleetAdapter identity, so the assignment is answered and completed for real.
 #
 # Env knobs (all optional):
 #   DEMOTEST_CLUSTER      kind cluster name (default: swarmada-demotest)
@@ -64,10 +67,11 @@
 #   DEMOTEST_KEEP=1       do NOT delete the cluster on exit (debugging)
 #   ESTOP_ACK_DELAY_MS    delay injected into the live estop ack (default: 750)
 #   SCHED_STALL_SECONDS   how long the no-capable-robot task is held (default: 65)
+#   LIVE_COMPLETE_TIMEOUT how long the live robot has to complete its first FleetAction (default: 60)
 #   CERT_MANAGER_VERSION  cert-manager release to install (default: v1.16.2, pinned so a
 #                         run does not change under you between invocations)
 #
-# EDGE SURFACE: cmd/edge is not published in this repository, so a public checkout skips
+# EDGE SURFACE: when cmd/edge is not built in this checkout, the run skips
 # every EdgeStream (C8) beat — coherently: the zone advertises no spec.edgeNode, no edge
 # node is launched, the safety input is not tripped, and the EdgeStream assertion is not
 # run. The closing COVERAGE SUMMARY names each skipped assertion on EVERY run. Nothing is
@@ -92,6 +96,9 @@ EDGE_DIR="$(mktemp -d)"           # edge config + safety-input file live here
 EDGE_SAFETY_FILE="$EDGE_DIR/safety-input"
 EDGE_LOG="/tmp/demotest-edge.log"
 ADAPTER_LOG="/tmp/demotest-adapter.log"
+SCHED_ROBOT="demotest-sched-robot"
+SCHED_ADAPTER="sim-fleet-adapter-2"
+SCHED_ADAPTER_LOG="/tmp/demotest-sched-adapter.log"
 PY="$(command -v python3 || command -v python)"
 CTX="kind-${CLUSTER}"
 PIDS=()
@@ -110,6 +117,9 @@ EDGE_AVAILABLE=0
 # must match the FleetAdapter resource this run creates (sim-fleet-adapter).
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
 ADAPTER_TLS_DIR="/tmp/demotest-${CLUSTER}-adapter-tls"
+# The scheduler-latency fixture's robot has its own adapter process, and so its own
+# client certificate: sim-fleet-adapter-2, from config/overlays/demo-ab-live.
+SCHED_ADAPTER_TLS_DIR="/tmp/demotest-${CLUSTER}-sched-adapter-tls"
 
 step() { echo; echo "==> $*"; }
 info() { echo "    $*"; }
@@ -119,7 +129,7 @@ fail() { echo "❌ $*" >&2; exit 1; }
 # DEMOTEST_WALKTHROUGH=1 turns demo-test into a guided tour: before each phase it
 # explains WHAT it does, WHAT to expect, and HOW to see it yourself, then waits for
 # Enter. DEMOTEST_NO_PROMPT=1 (or a non-TTY, e.g. CI) keeps the explanations but skips
-# the pauses. Default (both unset) is the silent headless CI gate.
+# the pauses. Default (both unset) is the silent headless gate.
 WALKTHROUGH="${DEMOTEST_WALKTHROUGH:-}"
 
 # narrate TITLE -- then heredoc body on stdin: printed only in walkthrough mode.
@@ -160,8 +170,8 @@ preflight() {
   [[ -f proto/fleet_adapter/v1/fleet_adapter_pb2.py ]] || make proto-py
 
   # Resolve the edge surface ONCE, here, before any step advertises or consumes it.
-  # cmd/edge is not published in this repository (it is held for a later release), so
-  # a public checkout runs without it and the EdgeStream beats are skipped COHERENTLY
+  # A checkout without cmd/edge runs without the edge node, and the EdgeStream beats are
+  # skipped COHERENTLY
   # — see EDGE_AVAILABLE above and print_coverage_summary below, which names the
   # skipped assertions on every run.
   if [ -d "$REPO_ROOT/cmd/edge" ]; then
@@ -199,25 +209,29 @@ install_cert_manager() {
   done
 }
 
+# wait_for_adapter_client_cert [ADAPTER DIR] — fetch ADAPTER's client keypair into DIR
+# (default: the live adapter's, into $ADAPTER_TLS_DIR).
 wait_for_adapter_client_cert() {
-  info "waiting for cert-manager to issue the adapter client certificate…"
+  local adapter="${1:-sim-fleet-adapter}" dir="${2:-$ADAPTER_TLS_DIR}"
+  local secret="${adapter}-client-tls"
+  info "waiting for cert-manager to issue the $adapter client certificate…"
   local waited=0
-  until kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls >/dev/null 2>&1; do
-    [ "$waited" -ge 120 ] && fail "cert-manager never issued sim-fleet-adapter-client-tls"
+  until kubectl -n "$MANAGER_NS" get secret "$secret" >/dev/null 2>&1; do
+    [ "$waited" -ge 120 ] && fail "cert-manager never issued $secret"
     sleep 2; waited=$((waited + 2))
   done
-  kubectl -n "$MANAGER_NS" wait --for=condition=Ready certificate/sim-fleet-adapter-client --timeout=120s >/dev/null 2>&1 || true
-  rm -rf "$ADAPTER_TLS_DIR"; mkdir -p "$ADAPTER_TLS_DIR"; chmod 700 "$ADAPTER_TLS_DIR"
-  kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls \
-    -o jsonpath='{.data.tls\.crt}' | base64 -d > "$ADAPTER_TLS_DIR/tls.crt"
-  kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls \
-    -o jsonpath='{.data.tls\.key}' | base64 -d > "$ADAPTER_TLS_DIR/tls.key"
-  kubectl -n "$MANAGER_NS" get secret sim-fleet-adapter-client-tls \
-    -o jsonpath='{.data.ca\.crt}' | base64 -d > "$ADAPTER_TLS_DIR/ca.crt"
-  chmod 600 "$ADAPTER_TLS_DIR"/*
-  [ -s "$ADAPTER_TLS_DIR/tls.crt" ] && [ -s "$ADAPTER_TLS_DIR/tls.key" ] && [ -s "$ADAPTER_TLS_DIR/ca.crt" ] \
-    || fail "adapter client certificate material is incomplete in $ADAPTER_TLS_DIR"
-  info "adapter client certificate ready ✓ ($ADAPTER_TLS_DIR)"
+  kubectl -n "$MANAGER_NS" wait --for=condition=Ready "certificate/${adapter}-client" --timeout=120s >/dev/null 2>&1 || true
+  rm -rf "$dir"; mkdir -p "$dir"; chmod 700 "$dir"
+  kubectl -n "$MANAGER_NS" get secret "$secret" \
+    -o jsonpath='{.data.tls\.crt}' | base64 -d > "$dir/tls.crt"
+  kubectl -n "$MANAGER_NS" get secret "$secret" \
+    -o jsonpath='{.data.tls\.key}' | base64 -d > "$dir/tls.key"
+  kubectl -n "$MANAGER_NS" get secret "$secret" \
+    -o jsonpath='{.data.ca\.crt}' | base64 -d > "$dir/ca.crt"
+  chmod 600 "$dir"/*
+  [ -s "$dir/tls.crt" ] && [ -s "$dir/tls.key" ] && [ -s "$dir/ca.crt" ] \
+    || fail "adapter client certificate material is incomplete in $dir"
+  info "$adapter client certificate ready ✓ ($dir)"
 }
 
 bring_up() {
@@ -254,9 +268,17 @@ bring_up() {
   # exactly this reason. Nothing here is projected to work around it.
   install_cert_manager
   info "deploying via config/overlays/quickstart-mtls (DEV/DEMO ONLY)"
-  kubectl apply -k config/overlays/quickstart-mtls
+  # --server-side: this overlay includes config/crd/bases/, whose
+  # computeworkloadtemplates.swarmada.io CRD (~526KB) breaks client-side apply's
+  # last-applied-configuration annotation (262144-byte cap).
+  kubectl apply -k config/overlays/quickstart-mtls --server-side --force-conflicts
+  # A second adapter identity, for the scheduler-latency fixture's robot (see
+  # scheduler_stall_fixture). One Certificate from config/overlays/demo-ab-live, issued by
+  # the CA the overlay above creates; its SAN names FleetAdapter sim-fleet-adapter-2.
+  kubectl apply -f config/overlays/demo-ab-live/adapter-client-cert-2.yaml
   kubectl -n "$MANAGER_NS" rollout status "deployment/$MANAGER_DEPLOY" --timeout=180s
   wait_for_adapter_client_cert
+  wait_for_adapter_client_cert "$SCHED_ADAPTER" "$SCHED_ADAPTER_TLS_DIR"
 }
 
 apply_fleet_and_fixtures() {
@@ -338,12 +360,17 @@ EOF
   # FleetAdapter controller actually validates — so the run exercises verifyConformance and
   # populates status.conformanceContractVersion by the production path. Without it the adapter
   # sits at conformance=Unknown, every robot is withheld from dispatch, and no task can ever
-  # reach Assigned/InProgress (which is exactly how this gate failed before).
-  local report_json report_digest
-  report_json='{"adapter":"simulation","conformant":true,"contract_version":"1.0.0"}'
-  report_digest="sha256:$(printf '%s' "$report_json" | shasum -a 256 | awk '{print $1}')"
+  # reach Assigned/InProgress (which is exactly how this gate failed before). The report is one
+  # the conformance harness wrote (hack/sim-conformance-report.sh: a harness run when it can,
+  # otherwise the recorded one, test/samples/testdata/recorded-sim-adapter-report.json),
+  # never a verdict typed here.
+  local report_file report_digest
+  report_file="$(mktemp)"
+  bash hack/sim-conformance-report.sh "$report_file" || fail "could not produce a conformance report for the simulation adapter"
+  report_digest="sha256:$(shasum -a 256 <"$report_file" | awk '{print $1}')"
   kubectl create configmap sim-adapter-conformance -n "$NS" \
-    --from-literal=report.json="$report_json" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --from-file=report.json="$report_file" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  rm -f "$report_file"
 
   cat <<EOF | kubectl apply -f -
 apiVersion: swarmada.io/v1
@@ -353,14 +380,39 @@ metadata:
   namespace: $NS
 spec:
   vendor: simulation
+  # The class config/samples/demo_a.yaml gives the sample Robots. The ControlStream
+  # authorizer refuses every robot-scoped message from this adapter unless the robot's
+  # class is listed here.
+  servesRobotClasses: [simbot-v1]
   endpoint: "127.0.0.1:${CS_PORT}"
-  # The run is ~2 min and NOTHING refreshes lastHeartbeat: this run is insecure, so ControlStream
-  # sees no verified mTLS identity and AdapterPresence never fires. With the default interval the
-  # controller's staleness backstop flips the projected Connected -> Disconnected mid-run and races
-  # step 6.8's Connected->Disconnected->Connected walk, leaving fleet_adapter_connected at 0 so
-  # AdapterDisconnected fires but never clears. A long interval makes 6.8 the ONLY thing that moves
-  # this phase, which is exactly what that beat is for.
+  # The run is ~2 min. The phase projected below is written before launch_live_adapter starts
+  # the adapter; once it connects over mTLS, its verified handshake and heartbeats keep the phase
+  # Connected and lastHeartbeat fresh (AdapterConnected / AdapterHeartbeat,
+  # internal/controller/fleetadapter_controller.go). The long interval keeps the controller's
+  # staleness backstop from demoting the projected phase before then. Step 6.8's
+  # Connected->Disconnected->Connected walk runs on demotest-idle-adapter, not on this adapter.
   heartbeatIntervalSeconds: 600
+  conformanceReport:
+    suiteVersion: "C1-C15"
+    configMapRef: sim-adapter-conformance
+    digest: "$report_digest"
+EOF
+
+  # The scheduler-latency fixture's adapter: a second live sim adapter process serves
+  # demotest-sched-robot under this identity (scheduler_stall_fixture). A robot bound to
+  # sim-fleet-adapter would reach an adapter that serves only $LIVE_ROBOT, which never
+  # answers for it, so the delayed assignment could not happen. Same harness report.
+  cat <<EOF | kubectl apply -f -
+apiVersion: swarmada.io/v1
+kind: FleetAdapter
+metadata:
+  name: $SCHED_ADAPTER
+  namespace: $NS
+spec:
+  vendor: simulation
+  servesRobotClasses: [simbot-v1]
+  endpoint: "127.0.0.1:${CS_PORT}"
+  heartbeatIntervalSeconds: 10
   conformanceReport:
     suiteVersion: "C1-C15"
     configMapRef: sim-adapter-conformance
@@ -386,11 +438,11 @@ spec:
   heartbeatIntervalSeconds: 600
 EOF
 
-  # The phase half CANNOT be real here: this run is insecure, so ControlStream sees no verified
-  # mTLS identity and AdapterPresence.AdapterConnected never fires (internal/controlstream/
-  # server.go). Project Connected with a fresh lastHeartbeat so the adapter is dispatch-eligible
-  # for the timed fixtures; step 6.8 later walks it Connected->Disconnected->Connected for the
-  # AdapterDisconnected fire+clear. Labeled projected, like every other mTLS-gated beat.
+  # Projected because the live adapter is not running yet: launch_live_adapter starts it after
+  # the fixtures, and its verified mTLS handshake then sets Connected itself (AdapterConnected,
+  # internal/controlstream/server.go). Project Connected with a fresh lastHeartbeat so the
+  # adapter is dispatch-eligible for the timed fixtures before then. The AdapterDisconnected
+  # fire+clear walk (step 6.8) runs on demotest-idle-adapter. Labeled projected.
   kubectl patch fleetadapter/sim-fleet-adapter -n "$NS" --subresource=status --type=merge \
     -p "{\"status\":{\"phase\":\"Connected\",\"lastHeartbeat\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" \
     >/dev/null 2>&1 || true
@@ -461,8 +513,11 @@ walk_canary_phases() {
         sleep "${CANARY_DWELL:-2}"
       fi
     done
-    kubectl patch fleetaction/demotest-canary-task -n "$NS" --subresource=status --type=merge \
-      -p '{"status":{"phase":"Succeeded"}}' >/dev/null 2>&1 || true
+    # Retire the canary out of Revoking so SwarmadaFleetActionStuckRevoking can clear. It is
+    # deleted, not walked on to Succeeded: completion is asserted only from the live robot,
+    # whose adapter reports arrival, and a projected Succeeded here would satisfy the same
+    # assertion without anything having completed.
+    kubectl delete fleetaction/demotest-canary-task -n "$NS" --wait=false >/dev/null 2>&1 || true
   ) &
   PIDS+=($!)
 }
@@ -470,7 +525,7 @@ walk_canary_phases() {
 launch_edge_node() {
   step "2.5 — Build + launch the edge node (cmd/edge) for EdgeStream coverage"
   if [ "$EDGE_AVAILABLE" != "1" ]; then
-    info "⏭  cmd/edge not present in this checkout — skipping EdgeStream coverage (edge node held for a later release)"
+    info "⏭  cmd/edge not present in this checkout — skipping EdgeStream coverage"
     info "   the zone advertises no spec.edgeNode and step 6.5 will not trip the safety input;"
     info "   the closing coverage summary names every assertion this costs."
     return 0
@@ -535,10 +590,9 @@ project_estop_states() {
 project_adapter_phase() {
   # Project FleetAdapter connectivity Connected→Disconnected→Connected so
   # swarmada_fleet_adapter_connected goes 1→0→1 (SwarmadaFleetAdapterDisconnected fires
-  # AND clears). Presence-driven connectivity needs mTLS (insecure streams carry no
-  # adapter identity, so AdapterConnected never fires and the gauge would sit at 0,
-  # firing-but-never-clearing). Setting phase=Connected WITH a fresh lastHeartbeat keeps
-  # the FleetAdapter controller from reverting it (it only demotes on heartbeat staleness).
+  # AND clears). No adapter process runs for demotest-idle-adapter, so presence never moves
+  # its phase and the walk is projected. Setting phase=Connected WITH a fresh lastHeartbeat
+  # keeps the FleetAdapter controller from reverting it (it only demotes on heartbeat staleness).
   # Each state must outlast the 15s metrics-sweeper interval so a sweep samples it —
   # otherwise fleet_adapter_connected never reflects the transition and the alert can't
   # fire OR clear (the bug that left it firing-but-never-cleared).
@@ -592,7 +646,8 @@ launch_live_adapter() {
       -p '{"status":{"phase":"Idle","batteryPercent":85}}'
   done
   local pflog; pflog="$(mktemp)"
-  kubectl -n "$MANAGER_NS" port-forward service/swarmada-controlstream "${CS_PORT}:9443" >"$pflog" 2>&1 &
+  # Stays up for the whole run: scheduler_stall_fixture's adapter dials it too.
+  kubectl -n "$MANAGER_NS" port-forward service/swarmada-controlstream "${CS_PORT}:9445" >"$pflog" 2>&1 &
   PIDS+=($!)
   for _ in $(seq 1 15); do grep -q "Forwarding from" "$pflog" && break; sleep 1; done
   ( cd "$REPO_ROOT"
@@ -624,6 +679,56 @@ launch_live_adapter() {
   info "adapter launched (estop-ack delay ${ESTOP_ACK_DELAY_MS}ms); log: $ADAPTER_LOG"
 }
 
+# live_action_succeeded: a FleetAction held by the live robot reached Succeeded. Only the
+# adapter's report of arrival moves a FleetAction there; nothing in this script writes it.
+live_action_succeeded() {
+  local held
+  held=$(kubectl get fleetactions -n "$NS" \
+    -o jsonpath='{range .items[*]}{.status.assignedRobot}={.status.phase}{"\n"}{end}' 2>/dev/null || true)
+  grep -qx "$LIVE_ROBOT=Succeeded" <<<"$held"
+}
+
+wait_live_completion() {
+  # The live robot finishes one real FleetAction BEFORE any drill touches it. Every beat that
+  # follows stops it short of its target: the projected estopState walk pauses its action, and
+  # the edge trip confirms a real stop. An action assigned alongside them never arrives, so
+  # completion is taken first, and the Succeeded it leaves is what demo_test.py observes.
+  step "5 — Wait for $LIVE_ROBOT to complete a real FleetAction (adapter-reported arrival)"
+  local waited=0 limit="${LIVE_COMPLETE_TIMEOUT:-60}"
+  until live_action_succeeded; do
+    ((waited >= limit)) &&
+      fail "$LIVE_ROBOT completed no FleetAction within ${limit}s (the adapter reports SUCCEEDED on arrival)"
+    sleep 2
+    waited=$((waited + 2))
+  done
+  info "$LIVE_ROBOT completed a FleetAction for real ✓ (after ${waited}s)"
+
+  # Then give it work that lasts: a real Navigate across the zone to (-4, 19), about 24 m
+  # from where the first task left it, so the robot is genuinely InProgress while the poller
+  # runs and the drills below have a moving robot to interrupt. The target is inside the
+  # warehouse-a polygon, so the edge geofence has no reason to act on it.
+  # payload.raw is bytes, so base64: {"x":-4.0,"y":19.0}
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata: {name: demotest-live-long-route, namespace: $NS}
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: High
+  requiredCapabilities: [navigation]
+  payload: {raw: eyJ4IjotNC4wLCJ5IjoxOS4wfQ==}
+EOF
+  waited=0
+  until [[ "$(kubectl get robot "$LIVE_ROBOT" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null)" == InProgress ]]; do
+    ((waited >= limit)) &&
+      fail "$LIVE_ROBOT did not start demotest-live-long-route within ${limit}s"
+    sleep 2
+    waited=$((waited + 2))
+  done
+  info "$LIVE_ROBOT is InProgress on demotest-live-long-route (real, ~24s of driving) ✓"
+}
+
 port_forward_metrics() {
   step "4 — Port-forward /metrics"
   kubectl -n "$MANAGER_NS" port-forward "deployment/$MANAGER_DEPLOY" "${METRICS_PORT}:8080" \
@@ -635,29 +740,49 @@ port_forward_metrics() {
 }
 
 scheduler_stall_fixture() {
-  # Assignment-latency fixture. A Normal task requires an uncommon capability; a
-  # DEDICATED Idle robot lacks it, so the task stays Pending. After the stall we grant
-  # the capability → the scheduler assigns it and records a >60s Pending→Assigned
-  # latency (>60s bucket → SwarmadaSchedulerAssignmentLatencyHigh fires). A dedicated
-  # robot is required because the three sample robots are busy/nondeterministically
-  # placed — the task would otherwise never land on an Idle capable robot.
-  step "6 — Scheduler assignment-latency fixture (dedicated robot, phase=Idle PROJECTED, ~${SCHED_STALL_SECONDS}s)"
-  info "demotest-sched-robot's status.phase=Idle is patched by hand here and again after the"
-  info "capability grant — same shortcut as the pool above (no Discovered->Idle owner exists)."
-  kubectl apply -f - <<EOF >/dev/null 2>&1 || true
+  # Assignment-latency fixture. A Normal task requires an uncommon capability that no
+  # robot has, so it stays Pending. After the stall the capability is granted to a
+  # DEDICATED, live, Idle robot, the scheduler assigns the task, and dispatch records a
+  # >60s Pending->Assigned latency (>60s bucket -> SwarmadaSchedulerAssignmentLatencyHigh
+  # fires). A dedicated robot is required because the three sample robots are
+  # busy/nondeterministically placed; the task would otherwise never land on an Idle
+  # capable robot.
+  #
+  # The robot is live: a second sim adapter process serves it as FleetAdapter
+  # $SCHED_ADAPTER, so its phase, battery and currentZone come from its own telemetry, and
+  # validate_action and the assignment are answered by an adapter that serves it. Its one
+  # other capability is one no task here requires, so it takes no other work while it
+  # waits.
+  step "6 — Scheduler assignment-latency fixture (dedicated LIVE robot, ~${SCHED_STALL_SECONDS}s)"
+  info "$SCHED_ROBOT: served by its own sim adapter ($SCHED_ADAPTER); phase and zone are real"
+  kubectl apply -f - <<EOF >/dev/null
 apiVersion: swarmada.io/v1
 kind: Robot
-metadata: {name: demotest-sched-robot, namespace: $NS}
+metadata:
+  name: $SCHED_ROBOT
+  namespace: $NS
+  annotations: {swarmada.io/robot-id: $SCHED_ROBOT}
 spec:
   manufacturer: Simulated
   model: SchedCanary
-  adapter: {name: sim-fleet-adapter, version: "0.1.0"}
+  robotClass: simbot-v1
+  adapter: {name: $SCHED_ADAPTER, version: "0.1.0"}
   zone: warehouse-a
-  capabilities: [{name: navigation, type: hardware-native, pauseable: false}]
+  capabilities: [{name: demotest-sched-idle-cap, type: hardware-native, pauseable: false}]
 EOF
-  kubectl patch robot/demotest-sched-robot -n "$NS" --subresource=status --type=merge \
-    -p '{"status":{"phase":"Idle","batteryPercent":90}}' >/dev/null 2>&1 || true
-  kubectl apply -f - <<EOF >/dev/null 2>&1 || true
+  ( cd "$REPO_ROOT"
+    exec env PYTHONUNBUFFERED=1 PYTHONPATH="proto${PYTHONPATH:+:$PYTHONPATH}" \
+      "$PY" adapters/simulation/sim_adapter.py \
+      --endpoint "127.0.0.1:${CS_PORT}" --namespace "$NS" --robot-id "$SCHED_ROBOT" \
+      --zone warehouse-a --vendor simulation --scenario healthy-fleet \
+      --tls-ca "$SCHED_ADAPTER_TLS_DIR/ca.crt" \
+      --tls-cert "$SCHED_ADAPTER_TLS_DIR/tls.crt" \
+      --tls-key "$SCHED_ADAPTER_TLS_DIR/tls.key" \
+      --tls-server-name "swarmada-controlstream.${MANAGER_NS}.svc"
+  ) >"$SCHED_ADAPTER_LOG" 2>&1 &
+  PIDS+=($!)
+  info "$SCHED_ROBOT adapter launched; log: $SCHED_ADAPTER_LOG"
+  kubectl apply -f - <<EOF >/dev/null
 apiVersion: swarmada.io/v1
 kind: FleetAction
 metadata: {name: demotest-slow-task, namespace: $NS}
@@ -669,10 +794,8 @@ spec:
 EOF
   (
     sleep "$SCHED_STALL_SECONDS"
-    kubectl patch robot/demotest-sched-robot -n "$NS" --type=json \
+    kubectl patch "robot/$SCHED_ROBOT" -n "$NS" --type=json \
       -p '[{"op":"add","path":"/spec/capabilities/-","value":{"name":"demotest-uncommon-cap","type":"hardware-native","pauseable":false}}]' >/dev/null 2>&1 || true
-    kubectl patch robot/demotest-sched-robot -n "$NS" --subresource=status --type=merge \
-      -p '{"status":{"phase":"Idle"}}' >/dev/null 2>&1 || true
   ) &
   PIDS+=($!)
 }
@@ -696,7 +819,7 @@ EOF
 #
 #   Offline — a Robot bound to demotest-idle-adapter (which has NO ControlStream, so nothing
 #     projects liveness onto it) whose status.connectivity.lastSeenAt is stamped an hour in the
-#     past. The controller then does the real §9.6.3.2 work: it sees stale telemetry, tries
+#     past. The controller then does the real RFC-0001 #safety-control-plane-response work: it sees stale telemetry, tries
 #     three HeartbeatRequests five seconds apart, gets ErrUnreachable for each, and declares
 #     Offline itself. The ONLY projected value is lastSeenAt — an INPUT. The decision, the
 #     confirming exchange and the phase write are all the control plane's.
@@ -746,7 +869,7 @@ EOF
 }
 
 run_assertions() {
-  step "7 — Run the assertion driver (poll CRDs + evaluate §9.3.8 alerts + RA-1)"
+  step "7 — Run the assertion driver (poll CRDs + evaluate metrics-contract alerts + RA-1)"
   local dur="${DEMOTEST_DURATION:-$((SCHED_STALL_SECONDS + 30))}" rc=0
   "$PY" examples/full-surface-demo/demo_test.py \
     --namespace "$NS" --context "$CTX" \
@@ -781,18 +904,18 @@ print_coverage_summary() {
   if [ "$EDGE_AVAILABLE" = "1" ]; then
     echo "    ✅ every surface this gate covers was exercised, including EdgeStream (C8)."
   else
-    echo "    ⏭  NOT EXERCISED in this checkout — cmd/edge is not published in this repository:"
+    echo "    ⏭  NOT EXERCISED in this checkout — cmd/edge is not built in this checkout:"
     echo "         • C8 EdgeStream end-to-end (EdgeService / AdapterEdgeMessage), the third RPC service"
     echo "         • the edge-issued headless estop and its confirmed EstopAck (step 6.5 / 7.5)"
     echo "         • FleetZone.spec.edgeNode + status.edgeFeedUnavailable, and the Zone Controller's"
     echo "           EdgeFeedUnavailable / EdgeFeedRestored events"
     echo "       Everything else below the edge surface — dispatch, telemetry, estop projection,"
-    echo "       the §9.3.8 alerts and RA-1 — WAS asserted. No assertion was removed to get here:"
+    echo "       the metrics-contract alerts and RA-1 — WAS asserted. No assertion was removed to get here:"
     echo "       the EdgeStream checks are skipped, not weakened, and they run in a checkout"
     echo "       that has cmd/edge."
   fi
   # Also name the gap that persists even WITH an edge node, so a green run never reads as
-  # "everything in §9.3.8 was proven".
+  # "everything in metrics-contract was proven".
   echo "    ⏭  NOT EXERCISED in any checkout: swarmada_estop_latency_violations_total"
   echo "       (EstopLatencySLOBreach) — the estop states are projected, so the counter that"
   echo "       needs a real SafetyStream estop is never incremented. Documented known-gap."
@@ -804,7 +927,7 @@ print_coverage_summary() {
 }
 
 # dump_diagnostics: printed before teardown when the gate fails, so a CI run (which
-# deletes the cluster) still captures what to fix — task placement and which §9.3.8
+# deletes the cluster) still captures what to fix — task placement and which RFC-0001 #control-plane-observability-prometheus-metrics-contract
 # metrics are actually emitted with what labels.
 dump_diagnostics() {
   step "DIAGNOSTICS (gate failed) — capture before teardown"
@@ -836,12 +959,14 @@ dump_diagnostics() {
   kubectl get robots,fleetactions -n "$NS" -o wide >&2 2>&1 || true
   echo "---- robot phases + estopState ----" >&2
   kubectl get robots -n "$NS" -o "custom-columns=NAME:.metadata.name,PHASE:.status.phase,ESTOP:.status.estopState,TASK:.status.assignedTask,BATT:.status.batteryPercent" >&2 2>&1 || true
-  echo "---- §9.3.8 metrics actually emitted ----" >&2
+  echo "---- metrics-contract metrics actually emitted ----" >&2
   curl -s "http://127.0.0.1:${METRICS_PORT}/metrics" 2>/dev/null | grep -E \
     'fleet_adapter_connected|fleetactions_by_phase|robots_by_phase|robots_in_estop|frames_received|status_writes|dropped_frames|tsdb_write_errors|estop_latency_violations|assignment_latency_seconds_count' \
     | grep -v '^#' >&2 2>&1 || true
   echo "---- adapter log (estop/safety/edge lines) ----" >&2
   grep -iE "estop|safety|edge|EDGE_ESTOP" "$ADAPTER_LOG" 2>/dev/null | tail -n 20 >&2 2>&1 || true
+  echo "---- scheduler-latency fixture adapter log ($SCHED_ROBOT) ----" >&2
+  tail -n 20 "$SCHED_ADAPTER_LOG" >&2 2>&1 || true
   echo "---- manager log (estop / adapter-presence / dispatcher) ----" >&2
   kubectl -n "$MANAGER_NS" logs "deployment/$MANAGER_DEPLOY" --tail=400 2>/dev/null \
     | grep -iE "estop|TriggerEstop|SafetyStream|adapter.*connect|presence|dispatch|lease" \
@@ -850,13 +975,13 @@ dump_diagnostics() {
 
 main() {
   narrate "What this is" <<'EOF'
-demo-test is the headless CI gate for the full-surface sim harness. It brings up a
+demo-test is the headless gate for the full-surface sim harness (no CI job runs it). It brings up a
 real Swarmada control plane on a throwaway kind cluster, drives the full-surface
 scenario live through the reference sim adapter, applies deterministic fault fixtures,
-asserts every targeted RobotPhase / FleetAction phase / estop-state and the §9.3.8 alert
+asserts every targeted RobotPhase / FleetAction phase / estop-state and the metrics-contract alert
 expressions + RA-1, then deletes the cluster. This is the WALKTHROUGH view — same run,
 narrated. (Set DEMOTEST_NO_PROMPT=1 to skip the Enter prompts; unset DEMOTEST_WALKTHROUGH
-for the silent CI view.)
+for the silent view.)
 EOF
   pause_step "Enter to begin"
 
@@ -881,14 +1006,16 @@ EOF
   launch_edge_node          # before the adapter, so the endpoint is live when it dials
   launch_live_adapter
   port_forward_metrics
+  wait_live_completion
 
   narrate "Steps 6-7 — fixtures + assertions (concurrent)" <<EOF
 Now the timed fixtures fire CONCURRENTLY with the assertion poller (they must overlap
 polling — a fixture that finished before polling started would read as "never observed").
 What runs and what to expect:
   • scheduler stall  — a Normal task stays Pending ~${SCHED_STALL_SECONDS}s, then a
-                       dedicated Idle robot gains the capability → >60s assignment
-                       latency → SchedulerAssignmentLatencyHigh fires.
+                       dedicated live Idle robot (its own sim adapter) gains the
+                       capability → >60s assignment latency →
+                       SchedulerAssignmentLatencyHigh fires.
   • estop walk       — $LIVE_ROBOT estopState Stopping→Stopped(hold >15s)→Normal →
                        robots_in_estop gauge → RobotEstopUncleared fires then clears.
   • adapter walk     — FleetAdapter Connected→Disconnected→Connected → fleet_adapter_
@@ -905,7 +1032,7 @@ Runs ~$((SCHED_STALL_SECONDS + 30))s, then prints ✅/❌ and deletes the cluste
 EOF
   pause_step "Enter to run the fixtures + assertions"
   scheduler_stall_fixture      # bg
-  project_estop_states         # bg: estopState walk (real path is mTLS-gated; see README)
+  project_estop_states         # bg: estopState walk (projected: nothing here issues a TriggerEstop; see README)
   project_adapter_phase        # bg: FleetAdapter connectivity walk (AdapterDisconnected fire+clear)
   walk_canary_phases           # bg: projected phase/task-phase walk on the taskless canary
   discovered_offline_fixture   # bg: REAL Discovered + Offline, written by the control plane

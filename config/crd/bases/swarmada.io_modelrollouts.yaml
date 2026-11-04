@@ -20,6 +20,9 @@ spec:
     - jsonPath: .spec.modelName
       name: Model
       type: string
+    - jsonPath: .spec.targetKind
+      name: Target
+      type: string
     - jsonPath: .spec.newVersion
       name: Version
       type: string
@@ -38,9 +41,16 @@ spec:
         description: |-
           ModelRollout is the Schema for the modelrollouts API.
 
-          Key difference from FirmwareRollout: when a ModelRollout begins for a robot,
-          all capabilities listed in spec.grantsCapabilities are set to Unavailable for
-          that robot until the update completes and the model returns to Active status.
+          Key difference from FirmwareRollout: while a robot's copy of the model is
+          Updating, the model-driven capabilities it provides are derived Inactive (reason
+          "providing model rolling out") until the robot reports the model Active again.
+
+          A rollout targets Robots. spec.targetKind EdgeNode (an edge or zone-controller
+          box) is specified but not implemented at this version: the controller refuses such
+          a rollout and updates no node. A rollout never targets an
+          endpoint executor: a ComputeEndpoint has no ControlStream, so a ModelUpdate has
+          no way to reach it, and endpoint model policy is a version requirement plus a
+          scheduling gate and result provenance instead (ADR-0006).
         properties:
           apiVersion:
             description: |-
@@ -68,19 +78,44 @@ spec:
               whichever list the controller happened to apply second would decide, making the outcome an
               artefact of iteration order rather than of the declaration. Rejecting at admission is the
               only place the operator still has the context to say which they meant.
+
+              The two eligibility axes are kind-exclusive. requiredHardware enumerates ROBOT
+              hardware types (Lidar, Gripper, LoadPlatform…), none of which describes an edge
+              box, so it is rejected on an EdgeNode-targeted rollout rather than silently
+              ignored; requiredNodeCapabilities is the edge axis and is rejected on a
+              robot-targeted one. Stating each as a rule keeps a mis-set field an admission
+              error instead of a rollout that quietly selects the wrong set.
             properties:
               attestationRef:
                 description: |-
                   AttestationRef optionally references a signed {modelDigest, metrics}
-                  attestation produced by the evaluation job. When present, the control plane
-                  verifies the signature and that the digest matches modelChecksum, binding the
-                  quality-gate metrics to the artifact being shipped (ADR-0020). Enforcement is
-                  configurable and defaults off.
+                  attestation produced by the evaluation job, specified to bind the
+                  quality-gate metrics to the artifact being shipped (ADR-0020). Specified, not
+                  implemented at v0.4: no controller resolves or verifies it.
+                type: string
+              desiredState:
+                allOf:
+                - enum:
+                  - Running
+                  - Paused
+                - enum:
+                  - Running
+                  - Paused
+                default: Running
+                description: |-
+                  DesiredState is the operator's level-triggered intent for this rollout.
+                  Writing `Paused` withholds dispatch of any further robot; writing `Running`
+                  withdraws that hold. It does NOT release a pauseOnError halt — see
+                  RolloutDesiredState and ADR-0041 — so an operator cannot use it to push a
+                  rollout past a failure the halt exists to surface.
                 type: string
               grantsCapabilities:
                 description: |-
                   GrantsCapabilities lists capabilities that become Active when this model
-                  is Active. These capabilities are set to Unavailable during the update.
+                  is Active. During the update nothing writes an Unavailable status: while a
+                  robot's copy of the model is Updating, the capability derivation reports each
+                  model-driven capability that model provides as Inactive (reason "providing
+                  model rolling out").
 
                   MaxItems bounds CEL cost (see Robot.spec.hardware's comment): the disjointness rule on
                   this type cross-products the two lists, and the API server refuses to install a CRD
@@ -95,7 +130,7 @@ spec:
                 description: |-
                   MaxDownloadTimeMinutes: specified so that if a model download exceeds this
                   duration on a given robot, that robot's update is marked Failed.
-                  0 means no limit. Specified, not implemented at v0.3: no controller reads
+                  0 means no limit. Specified, not implemented at v0.4: no controller reads
                   this field or times a download against it.
                 format: int32
                 maximum: 480
@@ -105,10 +140,10 @@ spec:
                 description: |-
                   ModelChecksum is the SHA-256 digest of the model artifact, as
                   "sha256:<64 hex>". It is carried to the adapter in the model_update Command so
-                  the robot re-verifies the downloaded bytes before install (§9.2.8), and — when
-                  signing is enforced — the detached signature is verified over this value
-                  against the SwarmadaConfig trust roots before any dispatch (parity with
-                  FirmwareRollout, ADR-0020).
+                  the robot re-verifies the downloaded bytes before install (RFC-0001 #fleet-adapter-protocol-fleet-adapter-compliance-checklist), and the
+                  adapter verifies the detached signature over this value. Unlike
+                  FirmwareRollout, the ModelRollout control plane verifies no signature before
+                  dispatch at v0.4 (ADR-0020).
                 pattern: ^sha256:[a-f0-9]{64}$
                 type: string
               modelName:
@@ -120,10 +155,12 @@ spec:
               modelSignatureRef:
                 description: |-
                   ModelSignatureRef references the detached signature or sigstore bundle for the
-                  model artifact, verified against SwarmadaConfig.spec.signing.trustRoots before
-                  any dispatch. When requireSignatureVerification is true this MUST be set;
-                  omitting it fails the rollout closed (ADR-0020, §9.2.8). Supported forms: an
-                  https/oci ref, or an inline "bundle:<base64>" signature.
+                  model artifact. It is carried to the adapter in the model_update Command, and
+                  the Fleet Adapter verifies it against the trust roots before install; the
+                  ModelRollout control plane does not fetch or verify it at v0.4. When
+                  requireSignatureVerification is true (or the namespace has no SwarmadaConfig)
+                  the ModelRollout admission webhook refuses a create or update that leaves it
+                  empty (ADR-0020, RFC-0001 #modelrollout-schema).
                 type: string
               modelUri:
                 description: ModelURI is the OCI registry URI or HTTPS URL of the
@@ -138,7 +175,10 @@ spec:
                 description: |-
                   RequiredHardware lists hardware component TYPES (not names) that must be
                   present and Healthy for a robot to receive this model.
-                  Robots in targetSelector without the required hardware are silently skipped.
+                  Robots in targetSelector without the required hardware are never dispatched;
+                  at v0.4 they are counted in RobotsTotal and remain in RobotsPending, not in
+                  RobotsIneligible.
+                  Valid only when TargetKind is Robot (see the type-level CEL rules).
                 items:
                   description: |-
                     HardwareComponentType classifies a physical component in a hardware inventory.
@@ -156,6 +196,23 @@ spec:
                   - Custom
                   type: string
                 type: array
+              requiredNodeCapabilities:
+                description: |-
+                  RequiredNodeCapabilities is the EdgeNode eligibility axis: each name listed
+                  here MUST appear in EdgeNode.status.capabilities[] with status Active for the
+                  node to enter a batch. It replaces RequiredHardware for edge targets because
+                  an edge box's fitness to run a model is a capability question (does it offer
+                  inference on an accelerator this model needs) and not a robot-hardware-type
+                  question. A node matched by the selector that lacks one is counted in
+                  NodesIneligible, never in NodesFailed.
+
+                  MaxItems bounds CEL cost (see GrantsCapabilities below).
+                  Valid only when TargetKind is EdgeNode (see the type-level CEL rules).
+                items:
+                  type: string
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: set
               revokesCapabilities:
                 description: |-
                   RevokesCapabilities lists capabilities removed when this model replaces
@@ -193,7 +250,9 @@ spec:
                     type: integer
                   requireIdleState:
                     default: true
-                    description: 'RequireIdleState: only update robots in Idle phase.'
+                    description: |-
+                      RequireIdleState: only update robots in Idle phase. Set false to allow updating a
+                      robot that is executing an action; unset means true.
                     type: boolean
                 type: object
               strategy:
@@ -219,7 +278,7 @@ spec:
                           enters the batch while a failure stands, though in-flight updaters continue.
 
                           The operator resumes with `swarmctl rollout resume`, which is gated on the
-                          rollout-resume custom verb (§9.5.3) and writes the swarmada.io/rollout-resume
+                          rollout-resume custom verb (RFC-0001 #security-permission-matrix) and writes the swarmada.io/rollout-resume
                           annotation the controller consumes. Resume EXCLUDES the robots that failed from
                           further attempts by this rollout rather than retrying them (ADR-0041); a fixed
                           artifact needs a fresh rollout. Excluded robots are named in
@@ -238,9 +297,26 @@ spec:
                       is supported at v0.1.
                     type: string
                 type: object
+              targetKind:
+                default: Robot
+                description: |-
+                  TargetKind selects the kind of object TargetSelector is resolved against.
+                  Defaults to Robot, so an existing ModelRollout that omits it keeps exactly
+                  the behaviour it had before this field existed. EdgeNode targeting is specified but not implemented at this version:
+                  the ModelRollout controller refuses a rollout with targetKind EdgeNode (a
+                  TargetKindNotImplemented Warning event) and updates no node.
+                enum:
+                - Robot
+                - EdgeNode
+                type: string
               targetSelector:
-                description: TargetSelector selects which robots receive this model
-                  update.
+                description: |-
+                  TargetSelector selects which objects of TargetKind receive this model
+                  update: Robot labels by default, EdgeNode labels when TargetKind is
+                  EdgeNode. The selector itself is kind-neutral — only what it is matched
+                  against changes — so robot targeting is unchanged and no second selector
+                  field exists to keep in sync. It is re-resolved on every reconcile, so a
+                  robot relabelled mid-rollout joins or leaves the rollout.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -295,10 +371,34 @@ spec:
                 revokesCapabilities
               rule: '!has(self.grantsCapabilities) || !has(self.revokesCapabilities)
                 || !self.grantsCapabilities.exists(c, c in self.revokesCapabilities)'
+            - message: 'requiredHardware enumerates robot hardware types and is not
+                meaningful for targetKind: EdgeNode — use requiredNodeCapabilities'
+              rule: '!has(self.targetKind) || self.targetKind != ''EdgeNode'' || !has(self.requiredHardware)'
+            - message: 'requiredNodeCapabilities applies only to targetKind: EdgeNode
+                — use requiredHardware for robots'
+              rule: '!has(self.requiredNodeCapabilities) || (has(self.targetKind)
+                && self.targetKind == ''EdgeNode'')'
           status:
-            description: ModelRolloutStatus defines the observed state of a ModelRollout.
+            description: |-
+              ModelRolloutStatus defines the observed state of a ModelRollout.
+
+              The status carries two parallel progress families, one per RolloutTargetKind:
+              the robots* fields and the nodes* fields. A rollout targets exactly one kind, so
+              one family is populated and the other left at zero. At this version only the
+              robots* family is ever populated: EdgeNode targeting is not implemented. They
+              are parallel rather than renamed-and-shared because renaming robotsTotal would
+              change the meaning of a field readers already consume, which is a breaking change
+              (docs/api-principles.md, "Versioning and compatibility"); adding fields is not.
             properties:
               capabilitiesSuspendedOn:
+                format: int32
+                type: integer
+              capabilitiesSuspendedOnNodes:
+                description: |-
+                  CapabilitiesSuspendedOnNodes is specified as the number of EdgeNodes whose
+                  granted capabilities are suspended for this rollout (on a ZoneController, the
+                  zone-detection blast radius of the current batch). Always 0 at this version:
+                  edgeNode targeting is specified but not implemented at this version.
                 format: int32
                 type: integer
               completedAt:
@@ -365,7 +465,7 @@ spec:
                 x-kubernetes-list-type: map
               currentBatch:
                 description: |-
-                  CurrentBatch is the per-robot active update batch (§6.7); each entry carries
+                  CurrentBatch is the per-robot active update batch (RFC-0001 #modelrollout-schema); each entry carries
                   the robot's live updatePhase, sourced from adapter UpdateProgress.
                 items:
                   description: |-
@@ -387,8 +487,10 @@ spec:
                       description: Namespace is the robot's namespace.
                       type: string
                     previousVersion:
-                      description: PreviousVersion is the robot's firmware/model version
-                        before this update.
+                      description: |-
+                        PreviousVersion is the robot's firmware version before this update. Filled
+                        on a FirmwareRollout only; a ModelRollout leaves it empty at v0.4 and records
+                        the previous model version in status.rollbackVersions instead.
                       type: string
                     robotName:
                       description: RobotName is the robot currently in the active
@@ -412,6 +514,62 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              currentNodeBatch:
+                description: CurrentNodeBatch is the per-node active update batch.
+                items:
+                  description: |-
+                    RolloutBatchNode is a per-node entry in a ModelRollout's active update batch when
+                    spec.targetKind is EdgeNode. It mirrors RolloutBatchRobot field for field, keyed
+                    by nodeName rather than robotName.
+
+                    It is a separate type rather than an optional nodeName on RolloutBatchRobot
+                    because the existing field is named for robots and is required; widening it would
+                    leave every reader guessing which of two names carries the subject. Two lists,
+                    each with one meaning, is the additive change (see ModelRolloutStatus).
+                  properties:
+                    capabilitiesSuspendedAt:
+                      description: |-
+                        CapabilitiesSuspendedAt is when this node's affected capabilities were
+                        suspended for the update, stamped per attempt at batch entry. Only the
+                        capabilities in spec.grantsCapabilities are suspended; a node's zone-control
+                        and emergency-stop authority is never suspended by a rollout
+                        (EdgeNode.status.zoneControlAvailable).
+                      format: date-time
+                      type: string
+                    namespace:
+                      description: Namespace is the node's namespace.
+                      type: string
+                    nodeName:
+                      description: NodeName is the EdgeNode currently in the active
+                        update batch.
+                      type: string
+                    previousVersion:
+                      description: PreviousVersion is the node's model version before
+                        this update.
+                      type: string
+                    updatePhase:
+                      description: |-
+                        UpdatePhase is the node's current intra-update phase:
+                        Downloading / Verifying / Installing / HealthChecking. Advisory.
+                      type: string
+                    updateStartedAt:
+                      description: UpdateStartedAt is when the node entered the active
+                        update batch.
+                      format: date-time
+                      type: string
+                  required:
+                  - nodeName
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              excludedNodes:
+                description: |-
+                  ExcludedNodes names the EdgeNodes an operator resume removed from this
+                  rollout (ADR-0041), on the same terms as ExcludedRobots.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               excludedRobots:
                 description: |-
                   ExcludedRobots names the robots an operator resume removed from this rollout
@@ -423,6 +581,28 @@ spec:
                 items:
                   type: string
                 type: array
+              failedNodes:
+                description: FailedNodes records the failure outcome per EdgeNode.
+                items:
+                  description: RolloutNodeResult records the failure outcome for a
+                    single EdgeNode.
+                  properties:
+                    failedAt:
+                      format: date-time
+                      type: string
+                    namespace:
+                      type: string
+                    nodeName:
+                      type: string
+                    previousVersion:
+                      type: string
+                    reason:
+                      type: string
+                  required:
+                  - nodeName
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               failedRobots:
                 items:
                   description: RolloutRobotResult records the failure outcome for
@@ -443,6 +623,39 @@ spec:
                   - robotName
                   type: object
                 type: array
+              nodesFailed:
+                description: NodesFailed is the number whose update failed.
+                format: int32
+                type: integer
+              nodesIneligible:
+                description: |-
+                  NodesIneligible counts selector-matched nodes excluded from the rollout for
+                  lacking a required node capability.
+                format: int32
+                type: integer
+              nodesPending:
+                description: NodesPending is the number matched and eligible but not
+                  yet batched.
+                format: int32
+                type: integer
+              nodesRolledBack:
+                description: |-
+                  NodesRolledBack counts EdgeNodes this rollout auto-reverted to their previous
+                  model version (rollbackPolicy=Auto).
+                format: int32
+                type: integer
+              nodesTotal:
+                description: |-
+                  NodesTotal is specified as the number of EdgeNodes matched by the selector AND
+                  eligible (every name in spec.requiredNodeCapabilities Active). Always 0 at this
+                  version: edgeNode targeting is specified but not implemented at this version.
+                format: int32
+                type: integer
+              nodesUpdated:
+                description: NodesUpdated is the number running newVersion with capabilities
+                  restored.
+                format: int32
+                type: integer
               pausedAt:
                 format: date-time
                 type: string
@@ -460,8 +673,10 @@ spec:
                 type: integer
               robotsIneligible:
                 description: |-
-                  RobotsIneligible counts selector-matched robots excluded from the rollout
-                  (e.g. lacking a required hardware type).
+                  RobotsIneligible counts selector-matched robots excluded from the rollout.
+                  At v0.4 it counts only robots refused as a downgrade (already running a newer
+                  version of modelName); a robot lacking a required hardware type is not
+                  counted here.
                 format: int32
                 type: integer
               robotsPending:
@@ -489,7 +704,19 @@ spec:
                   captured at batch entry (before the robot leaves that version) and carried
                   forward across reconciles; it is the only place the previous version survives
                   once the robot reports newVersion.
+
+                  It is keyed by TARGET OBJECT NAME, so it serves both target kinds: a rollout
+                  resolves one kind, and no robot and EdgeNode contend for the same key within
+                  one rollout.
                 type: object
+              rolledBackNodes:
+                description: |-
+                  RolledBackNodes names the EdgeNodes this rollout has auto-reverted. They are
+                  excluded from further attempts by this rollout.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               rolledBackRobots:
                 description: |-
                   RolledBackRobots names the robots this rollout has auto-reverted. They are
@@ -499,8 +726,10 @@ spec:
                   type: string
                 type: array
               startedAt:
-                description: StartedAt/CompletedAt/PausedAt are top-level rollout
-                  timing stamps.
+                description: |-
+                  StartedAt/CompletedAt/PausedAt are top-level rollout timing stamps. At v0.4
+                  only PausedAt is written (on the transition into Paused, dropped on leaving
+                  it); StartedAt and CompletedAt are written by no controller and stay empty.
                 format: date-time
                 type: string
             type: object

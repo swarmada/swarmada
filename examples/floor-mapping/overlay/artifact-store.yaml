@@ -1,0 +1,56 @@
+# Where a robot's map lives: an ArtifactStore of kind VolumeClaim.
+#
+# The adapter saves each explore-floor segment at <namespace>/<action-name>/ in a
+# directory on its host, and reports map-ref=floor-maps/<namespace>/<action-name>
+# with the manifest's sha256 in its final status message. The cluster reads that
+# directory through this store: the ArtifactStore names the claim, the claim is
+# bound to a PersistentVolume over the same directory, and the zone-proposal worker
+# mounts the claim and refuses a map reference through any other store. The worker
+# also saves the adapter's keep-out mask here, at <namespace>/keepouts-<digest>/,
+# where the adapter reads it back as keepouts_ref.
+#
+# On a kind cluster the directory is on the kind node, at /var/lib/swarmada/floor-maps.
+# The in-cluster simulation adapter writes it directly; an adapter on the host machine
+# writes it through a kind extraMount of a host directory onto that path.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: swarmada-floor-maps
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: swarmada-floor-maps
+  hostPath:
+    path: /var/lib/swarmada/floor-maps
+    type: Directory
+  claimRef:
+    namespace: warehouse-a
+    name: floor-maps
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: floor-maps
+  namespace: warehouse-a
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: swarmada-floor-maps
+  volumeName: swarmada-floor-maps
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: swarmada.io/v1
+kind: ArtifactStore
+metadata:
+  name: floor-maps
+  namespace: warehouse-a
+spec:
+  kind: VolumeClaim
+  volumeClaim:
+    claimName: floor-maps
+    # A hostPath volume on one node: readable from that node only, which is where
+    # the worker runs on a single-node kind cluster.
+    accessMode: ReadWriteOnce

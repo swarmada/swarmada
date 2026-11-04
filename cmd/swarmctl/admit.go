@@ -19,11 +19,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -73,7 +71,7 @@ lacking the grant is denied even if it could otherwise create a Robot.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&a.zone, "zone", "", "Zone to assign the admitted robot to (required on first admission)")
-	f.StringVar(&a.robotClass, "class", "", "RobotClass template to merge into the robot (required with --force)")
+	f.StringVar(&a.robotClass, "class", "", "RobotClass template to merge into the robot (required with --force, and when the adapter lists servesRobotClasses)")
 	f.StringVar(&a.name, "name", "", "Name for the admitted Robot (defaults to the DiscoveredRobot name)")
 	f.StringVar(&a.adapter, "adapter", "", "FleetAdapter name (required unless --class supplies one)")
 	f.StringVar(&a.dock, "dock", "", "Charging dock to assign")
@@ -142,14 +140,17 @@ func (o *options) runAdmit(ctx context.Context, args []string, a *admitOptions) 
 // unusable parameter set is refused synchronously with the error the operator can act on
 // rather than surfacing later as a controller-side event.
 func (o *options) admit(ctx context.Context, c client.Client, cs kubernetes.Interface, ns, drName string, a *admitOptions) error {
-	// Custom-verb gate: authorize `admit` before doing anything, fail closed.
-	if err := cli.RequireVerb(ctx, cs, "admit", "discoveredrobots", ns, drName); err != nil {
-		return err
-	}
-
+	// Fetch, then authorise — the package rule in lifecycle.go. A DiscoveredRobot
+	// that is not there is reported as not there, rather than as a permission the
+	// caller lacks on an object that does not exist.
 	dr := &fleetv1.DiscoveredRobot{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: drName}, dr); err != nil {
 		return fmt.Errorf("getting discoveredrobot/%s: %w", drName, err)
+	}
+
+	// Custom-verb gate: fail closed, before any write.
+	if err := cli.RequireVerb(ctx, cs, "admit", "discoveredrobots", ns, drName); err != nil {
+		return err
 	}
 
 	var class *fleetv1.RobotClass
@@ -167,6 +168,25 @@ func (o *options) admit(ctx context.Context, c client.Client, cs kubernetes.Inte
 	robot, err := admission.BuildRobot(dr, params, class, ns)
 	if err != nil {
 		return err
+	}
+
+	// The adapter's class rule, checked here for the same reason the build is: the Robot
+	// admission gate applies it when the controller creates the Robot, and a refusal there
+	// arrives after this command has reported success. An adapter that is not installed yet is
+	// not a refusal — admission is level-triggered and completes once it is — so it is noted
+	// and the admission recorded.
+	fa := &fleetv1.FleetAdapter{}
+	switch err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: robot.Spec.Adapter.Name}, fa); {
+	case apierrors.IsNotFound(err):
+		_, _ = fmt.Fprintf(o.streams.Err,
+			"warning: fleetadapter.swarmada.io/%s not found; the robot is created once it is installed and serves its class\n",
+			robot.Spec.Adapter.Name)
+	case err != nil:
+		return fmt.Errorf("getting fleetadapter/%s: %w", robot.Spec.Adapter.Name, err)
+	default:
+		if err := admission.CheckAdapterServes(fa, robot.Spec.RobotClass); err != nil {
+			return err
+		}
 	}
 
 	encoded, err := params.Encode()
@@ -209,7 +229,16 @@ func (a *admitOptions) params() admission.Params {
 // Event. It is reached via `swarmctl delete robot <name>` when the name resolves
 // to a DiscoveredRobot — the `reject` custom verb, distinct from a plain delete.
 func (o *options) reject(ctx context.Context, c client.Client, cs kubernetes.Interface, ns, drName, reason string, yes bool) error {
-	// Custom-verb gate first, fail closed.
+	// Fetch, authorise, prompt, write — the package rule in lifecycle.go. Reached
+	// through `delete robot`, the fetch here repeats the routing read that got us
+	// here; called directly it is what stops a destructive prompt being shown, and
+	// a permission error being reported, for a DiscoveredRobot that is not there.
+	dr := &fleetv1.DiscoveredRobot{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: drName}, dr); err != nil {
+		return fmt.Errorf("getting discoveredrobot/%s: %w", drName, err)
+	}
+
+	// Custom-verb gate, fail closed, before any write.
 	if err := cli.RequireVerb(ctx, cs, "reject", "discoveredrobots", ns, drName); err != nil {
 		return err
 	}
@@ -224,14 +253,9 @@ func (o *options) reject(ctx context.Context, c client.Client, cs kubernetes.Int
 		return nil
 	}
 
-	dr := &fleetv1.DiscoveredRobot{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: drName}, dr); err != nil {
-		return fmt.Errorf("getting discoveredrobot/%s: %w", drName, err)
-	}
-
 	// MARK, then let the control plane delete. The CLI used to delete directly, which made
 	// an operator's rejection indistinguishable from a TTL sweep — both ended in the same
-	// disappearing object — so ROBOT_REJECTED (§9.6.5.1) could not be recorded without a
+	// disappearing object — so ROBOT_REJECTED (RFC-0001 #safety-required-events) could not be recorded without a
 	// sweep being able to masquerade as a refusal.
 	//
 	// The annotation is the discriminating signal, and the controller seals the audit entry
@@ -248,9 +272,10 @@ func (o *options) reject(ctx context.Context, c client.Client, cs kubernetes.Int
 		return fmt.Errorf("marking discoveredrobot/%s rejected: %w", drName, err)
 	}
 
-	// Record the rejection reason as a namespace Event too (§9.1.2.7). Best-effort: the
-	// mark is the authoritative action, so an events RBAC gap only costs the Event.
-	recordRejectionEvent(ctx, cs, ns, dr, reason, o.streams.Err)
+	// No Event is written here. The manager records the Rejected Event with the reason
+	// when it acts on the mark (RFC-0001 #discoveredrobot-state-machine), because
+	// no built-in human role holds `create` on events, and none should: RBAC cannot
+	// narrow that verb to one Event.
 
 	_, _ = fmt.Fprintf(o.streams.Out,
 		"discoveredrobot.swarmada.io/%s rejected; the control plane will record and remove it.\n", drName)
@@ -261,33 +286,3 @@ func (o *options) reject(ctx context.Context, c client.Client, cs kubernetes.Int
 // constant of the same name — the two are a contract between the CLI and the manager, and
 // changing one without the other silently turns a rejection back into an unexplained delete.
 const annRobotRejected = "swarmada.io/rejected"
-
-// recordRejectionEvent emits a namespace Event capturing the rejection reason.
-// It is best-effort: a failure (e.g. no RBAC for events) is warned, not fatal.
-func recordRejectionEvent(ctx context.Context, cs kubernetes.Interface, ns string, dr *fleetv1.DiscoveredRobot, reason string, warn io.Writer) {
-	msg := reason
-	if msg == "" {
-		msg = "DiscoveredRobot rejected by operator."
-	}
-	now := metav1.Now()
-	ev := &corev1.Event{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "dr-rejected-", Namespace: ns},
-		InvolvedObject: corev1.ObjectReference{
-			APIVersion: fleetv1.GroupVersion.String(),
-			Kind:       "DiscoveredRobot",
-			Namespace:  ns,
-			Name:       dr.Name,
-			UID:        dr.UID,
-		},
-		Reason:         "Rejected",
-		Message:        msg,
-		Type:           corev1.EventTypeNormal,
-		Source:         corev1.EventSource{Component: "swarmctl"},
-		FirstTimestamp: now,
-		LastTimestamp:  now,
-		Count:          1,
-	}
-	if _, err := cs.CoreV1().Events(ns).Create(ctx, ev, metav1.CreateOptions{}); err != nil {
-		_, _ = fmt.Fprintf(warn, "warning: could not record rejection Event: %v\n", err)
-	}
-}

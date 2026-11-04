@@ -4,7 +4,7 @@
 - **Date:** 2026-08-01
 - **Affects:** `api/v1` (`FleetActionSpec`, `SwarmadaConfigSpec.Scheduling`),
   `internal/scheduler`, `internal/controller/fleetaction_controller.go`,
-  RFC-0001 §control-plane rank phase.
+  RFC-0001 "Scheduler" (the rank phase).
 
 ## Context
 

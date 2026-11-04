@@ -12,7 +12,7 @@ spec:
     listKind: FleetAdapterList
     plural: fleetadapters
     shortNames:
-    - fa
+    - fadapt
     singular: fleetadapter
   scope: Namespaced
   versions:
@@ -64,8 +64,10 @@ spec:
               conformanceReport:
                 description: |-
                   ConformanceReport references the signed result proving this adapter passes
-                  the §5.3.7 conformance suite. The control plane will not move the adapter to
-                  Connected without a verified, passing report.
+                  the RFC-0001 #fleet-adapter-protocol conformance suite. Its verification sets
+                  status.conformance, which admission and dispatch require to be Passed. It does
+                  not gate status.phase at v0.4: an adapter with no report, or a failed one,
+                  still reaches Connected.
                 properties:
                   configMapRef:
                     description: ConfigMapRef names a ConfigMap in this namespace
@@ -92,9 +94,12 @@ spec:
               heartbeatIntervalSeconds:
                 default: 10
                 description: |-
-                  HeartbeatIntervalSeconds is how often the control plane probes adapter
-                  liveness. Missing this many consecutive probes moves the adapter to
-                  Disconnected.
+                  HeartbeatIntervalSeconds is the adapter's liveness staleness budget: an adapter
+                  silent for this long is Degraded, and silent for this long times the missed-probe
+                  threshold is Disconnected. The control plane pushes an adapter-scoped
+                  HeartbeatRequest at HALF this period so a live adapter is never judged on its own
+                  boundary (ADR-0054); it is the floor under ADR-0026's liveness projection, not
+                  only a timeout.
                 format: int32
                 minimum: 1
                 type: integer
@@ -102,8 +107,10 @@ spec:
                 default: fleet_adapter.v1
                 description: |-
                   ProtocolVersion is the Fleet Adapter protocol version this adapter
-                  implements. The control plane refuses to drive robots through an adapter
-                  whose version it does not support.
+                  implements. Not consulted by any controller at v0.4: the package check runs
+                  on the version the adapter advertises in AdapterHello, where an empty value
+                  or "fleet_adapter.v1" is accepted and any other value is refused and the
+                  stream closed, without moving this FleetAdapter to Rejected.
                 type: string
               servesRobotClasses:
                 description: |-
@@ -114,10 +121,26 @@ spec:
                 items:
                   type: string
                 type: array
+              simulated:
+                default: false
+                description: |-
+                  Simulated declares that this adapter drives simulated robots rather than
+                  physical hardware (ADR-0038). Purely informational: it never gates admission
+                  or dispatch, and RobotAdmissionGate treats a simulated adapter exactly as it
+                  treats a physical one. The Robot defaulting webhook reads it to stamp
+                  swarmada.io/robot-source onto each Robot bound to this adapter, so a
+                  conformance report earned against a simulated binding is distinguishable from
+                  one earned against hardware.
+
+                  false (the default) means physical: an adapter that does not declare itself is
+                  assumed physical, which is exactly what an undeclared adapter already means.
+                type: boolean
               tlsSecretRef:
                 description: |-
-                  TLSSecretRef names a Secret in this namespace holding the mTLS client
-                  material the control plane uses to authenticate to the adapter (§5.5.2).
+                  TLSSecretRef names a Secret in this namespace specified to pin the adapter's
+                  expected client-certificate identity. Read by no controller at v0.4: adapter
+                  identity is resolved from the client certificate's SAN alone, so this field
+                  pins nothing (RFC-0001 #fleetadapter-spec-fields).
                 type: string
               vendor:
                 description: Vendor is the robot manufacturer or adapter provider
@@ -280,10 +303,29 @@ spec:
                     actionType:
                       description: ActionType matches FleetAction.spec.type.
                       type: string
+                    customType:
+                      description: |-
+                        CustomType is the one Custom verb this entry declares, projected from
+                        fleet_adapter.v1 SupportedAction.custom_type, and matched against
+                        FleetAction.spec.customType. Set only on an entry whose actionType is
+                        Custom; the control plane drops it from any other entry, which then reads
+                        as the type-only entry it always was.
+
+                        EMPTY ON A CUSTOM ENTRY MEANS EVERY VERB NO KEYED ENTRY NAMES — the meaning
+                        every Custom entry had before this field. For a verb V a reader uses the
+                        entry keyed V when there is one, and the unkeyed Custom entry otherwise.
+
+                        No validation beyond the bound spec.customType carries: a rule that refused
+                        one malformed entry would refuse the whole status write, and cost the
+                        adapter every valid entry beside it. The control plane drops an entry whose
+                        verb exceeds the bound (no FleetAction can name it) before it writes.
+                      maxLength: 63
+                      type: string
                     description:
                       type: string
                     params:
-                      description: Params are coarse payload parameter descriptors.
+                      description: Params are coarse payload parameter descriptors
+                        — what the action TAKES.
                       items:
                         description: ActionParam is a coarse parameter descriptor
                           for a SupportedAction.
@@ -312,6 +354,47 @@ spec:
                         be eligible.
                       items:
                         type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    results:
+                      description: |-
+                        Results are coarse descriptors for what the action EMITS, projected from
+                        fleet_adapter.v1 SupportedAction.results.
+
+                        Params declares inputs; until Results, nothing declared outputs, so a
+                        binding feeding one step's output into a later step's input could be checked
+                        at the consuming end only — the producing end was not checkable at all,
+                        because no descriptor said what a robot action emits. The binding validator
+                        reads THIS field, not the proto, so the proto field alone would change
+                        nothing: this mirror is the half that makes a static parameter-binding check
+                        possible for a binding onto a robot action.
+
+                        ADDITIVE, and empty means UNKNOWN. An adapter that declares no results is
+                        making no statement about its outputs, which is what every adapter built
+                        before this field meant. A checker MUST NOT read empty as "produces
+                        nothing" — that would reject every binding onto every adapter predating the
+                        field.
+                      items:
+                        description: ActionParam is a coarse parameter descriptor
+                          for a SupportedAction.
+                        properties:
+                          allowed:
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          kind:
+                            description: Kind is one of number|string|bool|enum.
+                            type: string
+                          name:
+                            type: string
+                          required:
+                            type: boolean
+                          unit:
+                            type: string
+                        required:
+                        - name
+                        type: object
                       type: array
                       x-kubernetes-list-type: atomic
                   required:

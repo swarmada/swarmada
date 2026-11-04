@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package artifact fetches update-artifact material (detached signatures today)
 // referenced by a FirmwareRollout/ModelRollout so the control plane can verify it
-// against a trust root before dispatch (RFC-0001 §9.2.8).
+// against a trust root before dispatch (RFC-0001 #firmwarerollout).
 //
 // The fetcher is untrusted transport: what it returns is trusted ONLY after
 // [github.com/swarmada/swarmada/internal/signing].Verify succeeds against a
@@ -56,6 +56,9 @@ type Credential struct {
 	BearerToken string
 	Username    string
 	Password    string
+	// Registries lists the hosts (host[:port], lower-case) the credential may be
+	// presented to. Empty means none: see For.
+	Registries []string
 }
 
 func (c *Credential) apply(req *http.Request) {
@@ -97,6 +100,32 @@ func (f *HTTPFetcher) client() *http.Client {
 	return &http.Client{Timeout: defaultTimeout}
 }
 
+// maxRedirects is net/http's own limit, which a client with a CheckRedirect no longer applies.
+const maxRedirects = 10
+
+// credentialedClient returns a copy of hc that carries the credential across a redirect only
+// to a host the credential lists, over https (or to the loopback development registry). A
+// redirect anywhere else is followed without it, as the registry client does: artifact
+// stores commonly redirect to storage that needs no credential. net/http alone keeps the
+// Authorization header for a subdomain of the first host, so the header is removed here.
+func credentialedClient(hc *http.Client, hosts []string) *http.Client {
+	cp := *hc
+	prev := hc.CheckRedirect
+	cp.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if !CredentialTransport(req.URL.Scheme, req.URL.Hostname()) || !HostListed(hosts, req.URL.Host) {
+			req.Header.Del("Authorization")
+		}
+		if prev != nil {
+			return prev(req, via)
+		}
+		return nil
+	}
+	return &cp
+}
+
 func (f *HTTPFetcher) maxBytes() int64 {
 	if f.MaxBytes > 0 {
 		return f.MaxBytes
@@ -119,9 +148,15 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, ref string, cred *Credential) (
 	if err != nil {
 		return nil, fmt.Errorf("building request for %q: %w", ref, err)
 	}
+	// Only a host the credential lists receives it; any other fetch is anonymous.
+	cred = cred.For(u.Host)
 	cred.apply(req)
 
-	resp, err := f.client().Do(req)
+	hc := f.client()
+	if cred != nil {
+		hc = credentialedClient(hc, cred.Registries)
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching %q: %w", ref, err)
 	}

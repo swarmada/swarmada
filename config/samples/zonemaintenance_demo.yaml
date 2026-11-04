@@ -1,0 +1,171 @@
+# UC-1.2 — zone maintenance window (RFC-0001 #zonemaintenance).
+#
+# A queue of work for `warehouse-a`, plus two ZoneMaintenance windows that drain
+# it. The robots and the FleetZone come from the live fleet that
+# examples/demo-ab-live/run.sh stands up (config/samples/demo_a.yaml) — this file
+# adds only the resources UC-1.2 itself needs.
+#
+# Nothing here writes status. Every object is spec; the phases you watch
+# (`Robot.status.phase`, `FleetAction.status.phase`, `ZoneMaintenance.status.phase`)
+# are written by the controllers in response to this spec and to real adapter
+# traffic.
+#
+# What to watch, stage by stage: `queue` places three tasks on the fleet;
+# `window` opens an Immediate ZoneMaintenance over the zone, so robots in scope go
+# to Maintenance and an action in progress is stopped and requeued Pending rather
+# than allowed to finish
+# (Graceful is the mode that lets it finish); `new-task` is applied while the
+# window is Active and stays Pending with no assigned robot, showing that
+# maintenance blocks NEW work and not only work in flight; and `timed-window`
+# closes the loop with a window bounded by a schedule rather than held open until
+# an operator deletes it.
+#
+# The misreading to pre-empt: dispatch stops because the scheduler requires a
+# robot in phase Idle, not because any capability was paused.
+#
+# Objects are labelled by demo step so they can be applied in stages:
+#
+#   kubectl apply -f config/samples/zonemaintenance_demo.yaml -l swarmada.io/demo-step=queue
+#   kubectl apply -f config/samples/zonemaintenance_demo.yaml -l swarmada.io/demo-step=window
+#   kubectl apply -f config/samples/zonemaintenance_demo.yaml -l swarmada.io/demo-step=timed-window
+#
+# ── step "queue" ─────────────────────────────────────────────────────────────
+# Three nav-only tasks. Nav-only on purpose: every robot in the sample fleet has
+# `navigation`, so placement is not competing with a capability constraint and the
+# only thing that can stop dispatch is the maintenance window itself.
+---
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: restock-aisle-3
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo: uc-1-2
+    swarmada.io/demo-step: queue
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: Normal
+  requiredCapabilities:
+    - navigation
+  # The reference adapter reports SUCCEEDED on arrival; to the nominal 10 m target that is ~10 s,
+  # which ends the task before STEP 2 lands and leaves nothing in flight to requeue. (25, 20) is
+  # ~32 m from spawn. payload.raw is bytes, so base64: {"x":25.0,"y":20.0}
+  payload:
+    raw: eyJ4IjoyNS4wLCJ5IjoyMC4wfQ==
+---
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: restock-aisle-4
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo: uc-1-2
+    swarmada.io/demo-step: queue
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: Normal
+  requiredCapabilities:
+    - navigation
+  # The reference adapter reports SUCCEEDED on arrival; to the nominal 10 m target that is ~10 s,
+  # which ends the task before STEP 2 lands and leaves nothing in flight to requeue. (25, 20) is
+  # ~32 m from spawn. payload.raw is bytes, so base64: {"x":25.0,"y":20.0}
+  payload:
+    raw: eyJ4IjoyNS4wLCJ5IjoyMC4wfQ==
+---
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: sweep-floor-2
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo: uc-1-2
+    swarmada.io/demo-step: queue
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: Low
+  requiredCapabilities:
+    - navigation
+  # The reference adapter reports SUCCEEDED on arrival; to the nominal 10 m target that is ~10 s,
+  # which ends the task before STEP 2 lands and leaves nothing in flight to requeue. (25, 20) is
+  # ~32 m from spawn. payload.raw is bytes, so base64: {"x":25.0,"y":20.0}
+  payload:
+    raw: eyJ4IjoyNS4wLCJ5IjoyMC4wfQ==
+# ── step "new-task" ──────────────────────────────────────────────────────────
+# Applied while the window is Active, to show that maintenance blocks NEW work
+# and not just work already in flight. It stays Pending with no assigned robot
+# until the window closes.
+---
+apiVersion: swarmada.io/v1
+kind: FleetAction
+metadata:
+  name: night-shift-audit
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo: uc-1-2
+    swarmada.io/demo-step: new-task
+spec:
+  type: Navigate
+  zone: warehouse-a
+  priority: High
+  requiredCapabilities:
+    - navigation
+  # The same far target, so that when the window lifts this task is still driving while the
+  # Low one waits: the "four tasks, three robots" state lasts long enough to film.
+  payload:
+    raw: eyJ4IjoyNS4wLCJ5IjoyMC4wfQ==
+# ── step "window" ────────────────────────────────────────────────────────────
+# The immediate variant. Mode: Immediate means robots in scope go to Maintenance
+# now and any action in progress is stopped and requeued Pending rather than
+# allowed to finish (Graceful lets them finish first — see the runbook's variant
+# note). The window sends no pause command of its own: a robot not executing an
+# action is not told to stop (docs/known-limitations.md).
+#
+# autoResumeAfterMinutes: 0 — the window stays Active until an operator removes
+# it. Deleting the object is the resume path in step 4, and deletion-driven
+# resume is never gated by requireEstopClearBeforeResume.
+---
+apiVersion: swarmada.io/v1
+kind: ZoneMaintenance
+metadata:
+  name: zone-a-cleaning
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo: uc-1-2
+    swarmada.io/demo-step: window
+spec:
+  scope:
+    type: Zone
+    zoneName: warehouse-a
+  mode: Immediate
+  reason: "Floor cleaning and restock in aisles 3-4"
+  autoResumeAfterMinutes: 0
+# ── step "timed-window" (optional) ───────────────────────────────────────────
+# The self-closing variant, for the "let the window pass" ending instead of the
+# "delete the window" one. The controller flips status.phase to Completed and
+# resumes every paused robot ~1 minute after it activates; the object itself is
+# NOT garbage-collected — it stays on the cluster, terminal, until you delete it.
+#
+# 1 is the minimum the API allows (kubebuilder Minimum=0 with 0 meaning "manual",
+# Maximum=1440), so this ending costs a minute of wall-clock. Apply it INSTEAD of
+# `window`, never alongside: two Active windows covering the same robot make the
+# resume ambiguous (coveredByOtherActive holds the robot paused until both close),
+# which is correct behaviour and a confusing demo.
+---
+apiVersion: swarmada.io/v1
+kind: ZoneMaintenance
+metadata:
+  name: zone-a-cleaning-timed
+  namespace: warehouse-a
+  labels:
+    swarmada.io/demo: uc-1-2
+    swarmada.io/demo-step: timed-window
+spec:
+  scope:
+    type: Zone
+    zoneName: warehouse-a
+  mode: Immediate
+  reason: "Floor cleaning — self-closing window"
+  autoResumeAfterMinutes: 1

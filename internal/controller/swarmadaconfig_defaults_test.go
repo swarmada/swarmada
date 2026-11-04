@@ -179,7 +179,7 @@ func TestLeaseTimingsFromConfig(t *testing.T) {
 					gotDur, gotRenew, gotSkew, tc.wantDur, tc.wantRenew, tc.wantSkew)
 			}
 			// The renew interval is DERIVED, never configured: widening the horizon must
-			// always shorten the gap between renewals proportionally (§9.3.2).
+			// always shorten the gap between renewals proportionally (RFC-0001 #control-plane-scheduler).
 			if gotRenew != gotDur/3 {
 				t.Errorf("renew interval %v is not duration/3 (duration %v)", gotRenew, gotDur)
 			}

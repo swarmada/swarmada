@@ -49,7 +49,7 @@ func newModelPolicyResetCommand(o *options) *cobra.Command {
 		Use:   "reset <modelpolicy> --reason <text>",
 		Short: "Clear a FailedRepeatedly suspension on a ModelPolicy (custom verb: policy-reset)",
 		Long: `Clear a ModelPolicy's FailedRepeatedly suspension and resume evaluation
-(RFC-0001 §9.1.9.4).
+(RFC-0001 #modelpolicy-repeated-failure-handling).
 
 After spec.consecutiveRejectionLimit consecutive quality-gate rejections the
 controller suspends the policy: polling stops and further triggers are dropped.
@@ -62,7 +62,7 @@ evaluated on its merits. If the underlying quality problem persists, the policy
 will suspend again.
 
 Gated by a SelfSubjectAccessReview on the policy-reset custom verb, so the same
-RBAC that governs admit/reject governs this (§9.5.3).`,
+RBAC that governs admit/reject governs this (RFC-0001 #security-authorization-swarmada-rbac-roles).`,
 		Example: `  swarmctl modelpolicy reset nav-model-gate --reason "metrics regression fixed in v4.2" --yes`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,15 +84,21 @@ func (o *options) runModelPolicyReset(ctx context.Context, name, reason string, 
 
 // modelPolicyReset is the testable core of `swarmctl modelpolicy reset`.
 func (o *options) modelPolicyReset(ctx context.Context, c client.Client, cs kubernetes.Interface, ns, name, reason string, yes bool) error {
-	// Fail closed: no verb, no reset. Checked BEFORE reading the resource so a denied caller
-	// learns nothing about whether the policy exists or is suspended.
-	if err := cli.RequireVerb(ctx, cs, "policy-reset", "modelpolicies", ns, name); err != nil {
-		return err
-	}
-
+	// Fetch, then authorise — the package rule in lifecycle.go. This read used to
+	// come after the gate, to keep a denied caller from probing for existence; it
+	// never did that, because the Get is enforced server-side against the caller's
+	// read RBAC. A caller without read gets Forbidden and learns nothing; a caller
+	// with read could have run `swarmctl get modelpolicy` and learned the same
+	// thing. What gate-first did produce was an authorization error for a policy
+	// that is not there.
 	mp := &fleetv1.ModelPolicy{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, mp); err != nil {
 		return fmt.Errorf("getting modelpolicy/%s: %w", name, err)
+	}
+
+	// Fail closed: no verb, no reset. Before any write.
+	if err := cli.RequireVerb(ctx, cs, "policy-reset", "modelpolicies", ns, name); err != nil {
+		return err
 	}
 
 	ok, err := cli.Confirm(o.streams,

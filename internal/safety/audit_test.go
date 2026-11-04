@@ -29,7 +29,7 @@ import (
 	"github.com/swarmada/swarmada/internal/metrics"
 )
 
-// ESTOP_LATENCY_VIOLATION (§9.6.5.1) sealed into the tamper-evident chain, alongside the
+// ESTOP_LATENCY_VIOLATION (RFC-0001 #safety-required-events) sealed into the tamper-evident chain, alongside the
 // Kubernetes Event and the Prometheus counter that already existed.
 //
 // An Event is subject to namespace retention and sits outside the hash chain, so on its own
@@ -74,7 +74,7 @@ func slowAckDispatcher(t *testing.T, latency time.Duration) (*Dispatcher, *audit
 func TestAuditEstop_LatencyViolationIsSealed(t *testing.T) {
 	d, spy := slowAckDispatcher(t, 600*time.Millisecond)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || !res.LatencyViolation {
 		t.Fatalf("res=%+v err=%v; want a latency violation", res, err)
 	}
@@ -108,7 +108,7 @@ func TestAuditEstop_WithinSLASealsNothing(t *testing.T) {
 	// stop itself. An entry per estop would drown the violations it exists to surface.
 	d, spy := slowAckDispatcher(t, 100*time.Millisecond)
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || res.LatencyViolation {
 		t.Fatalf("res=%+v err=%v; want no violation", res, err)
 	}
@@ -123,7 +123,7 @@ func TestAuditEstop_SinkFailureDoesNotAffectTheStop(t *testing.T) {
 	d, spy := slowAckDispatcher(t, 600*time.Millisecond)
 	spy.err = errors.New("sink unavailable")
 
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil {
 		t.Fatalf("a failing audit sink must not fail the estop: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestAuditEstop_SinkFailureDoesNotAffectTheStop(t *testing.T) {
 func TestAuditEstop_NilRecorderIsSafe(t *testing.T) {
 	d, _ := slowAckDispatcher(t, 600*time.Millisecond)
 	d.Audit = nil
-	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot)
+	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || !res.Confirmed {
 		t.Fatalf("nil Audit must not change behaviour: res=%+v err=%v", res, err)
 	}

@@ -3,8 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-07-09
 - **Deciders:** API Designer, Kubernetes Expert, Distributed Systems Reviewer, Security Reviewer
-- **Related:** RFC-0001 §9.1.2 (two-phase provisioning), §9.1.11 (SwarmadaConfig
-  provisioning), ADR-0012/0013 (config-sourced behavior), the RA-1 discipline
+- **Related:** RFC-0001 "DiscoveredRobot" (two-phase provisioning), "SwarmadaConfig"
+  (provisioning), ADR-0012/0013 (config-sourced behavior), the RA-1 discipline
 
 ## Context
 
@@ -37,8 +37,8 @@ gated on a full class+zone match.**
    `SwarmadaProvisioningConfig.AutoAdmitZone string`. Auto-admit is enabled only
    when **both** `autoAdmitRobotClass` and `autoAdmitZone` are set; a class without
    a zone is inert (auto-admit cannot build a schedulable Robot) and the controller
-   logs a warning rather than guessing a zone. (A namespace Event is a future nicety
-   once the controller gains an EventRecorder.)
+   logs a warning rather than guessing a zone. (No Event is emitted for this case;
+   it is a log line only.)
 2. **Trigger.** In the DiscoveredRobot controller (which already reconciles
    DiscoveredRobots for TTL), before the TTL sweep: if the namespace config enables
    auto-admit and `dr.status.suggestedRobotClass == autoAdmitRobotClass` and the
@@ -68,8 +68,8 @@ gated on a full class+zone match.**
 - **Extract `buildRobotFromDiscovered` into a shared package now.** Deferred: the
   controller's auto-admit only needs the class path (no operator-override flags), so
   it uses a focused local builder. Consolidating the two builders into
-  `internal/admission` is a worthwhile follow-up but is not required here and would
-  churn `swarmctl` and its tests.
+  `internal/admission` was not required here and was left out of this decision; the
+  controller and `swarmctl` both call `admission.BuildRobot`.
 
 ## Consequences
 
@@ -88,7 +88,7 @@ gated on a full class+zone match.**
 - **Obligation — tests.** Match→admit (Robot created, DR deleted); class set but zone
   unset ⇒ inert + event; suggestion mismatch ⇒ no admit; missing RobotClass/zone ⇒
   no admit, DR retained.
-- **Drawback accepted / seam.** A second Robot builder exists briefly (controller vs
-  swarmctl); consolidating into `internal/admission` is filed as follow-up. Auto-admit
+- **Drawback accepted / seam.** This decision added a second Robot builder (controller vs
+  swarmctl); both paths use `admission.BuildRobot` in `internal/admission`. Auto-admit
   also assigns every matching robot to a single `autoAdmitZone`; multi-zone auto-admit
   would need a richer policy and is out of scope.
