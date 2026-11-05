@@ -202,7 +202,7 @@ func TestTriggerEstop_LatencyViolation(t *testing.T) {
 	sender := &scriptedSender{d: d, reply: func(id string) []*fav1.EstopAck {
 		return []*fav1.EstopAck{ackState(id, fav1.EstopState_ESTOP_STATE_STOPPED)}
 	}}
-	d.RegisterStream(identity("acme"), sender)
+	registerAfterPass(t, d, sender) // the pass reads no clock: calls counts the trigger's reads only
 
 	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil || !res.LatencyViolation || res.Latency != 600*time.Millisecond {
