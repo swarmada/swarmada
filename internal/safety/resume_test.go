@@ -137,7 +137,7 @@ func activeCap(name string) fleetv1.CapabilityStatusEntry {
 // operator's confirmation, which telemetry arriving AFTER the clear did not refuse.
 func TestResume_StoppedToResumingToNormal(t *testing.T) {
 	d, c, _ := newDispatcher(t, "acme")
-	d.RegisterStream(identity("acme"), stoppedSender(d))
+	registerAfterPass(t, d, stoppedSender(d))
 	ctx := context.Background()
 	clearedAt := time.Now()
 

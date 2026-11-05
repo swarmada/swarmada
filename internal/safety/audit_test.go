@@ -19,6 +19,8 @@ package safety
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,17 +38,36 @@ import (
 // it cannot evidence that an adapter missed the 500 ms guarantee. That mattered because the
 // breach is a durable conformance fact about a specific adapter build, not a transient blip.
 
+// auditSpy is an audit.Recorder that keeps what it is given. The dispatcher records from goroutines
+// of its own (a re-sent held stop's answer), so every field is guarded by mu.
 type auditSpy struct {
+	mu      sync.Mutex
 	entries []audit.Entry
 	err     error
 }
 
 func (a *auditSpy) Record(e audit.Entry) (audit.Entry, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.err != nil {
 		return audit.Entry{}, a.err
 	}
 	a.entries = append(a.entries, e)
 	return e, nil
+}
+
+// recorded is a copy of the entries recorded so far.
+func (a *auditSpy) recorded() []audit.Entry {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.entries)
+}
+
+// failWith makes every later Record fail with err.
+func (a *auditSpy) failWith(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.err = err
 }
 
 // slowAckDispatcher wires a dispatcher whose ack arrives `latency` after the send.
@@ -67,7 +88,9 @@ func slowAckDispatcher(t *testing.T, latency time.Duration) (*Dispatcher, *audit
 	sender := &scriptedSender{d: d, reply: func(id string) []*fav1.EstopAck {
 		return []*fav1.EstopAck{ackState(id, fav1.EstopState_ESTOP_STATE_STOPPED)}
 	}}
-	d.RegisterStream(identity("acme"), sender)
+	// The stream's opening pass has read the robot, Normal, before any trigger: it sends nothing,
+	// so it neither reads the clock above nor records an entry.
+	registerAfterPass(t, d, sender)
 	return d, spy
 }
 
@@ -78,10 +101,11 @@ func TestAuditEstop_LatencyViolationIsSealed(t *testing.T) {
 	if err != nil || !res.LatencyViolation {
 		t.Fatalf("res=%+v err=%v; want a latency violation", res, err)
 	}
-	if len(spy.entries) != 1 {
-		t.Fatalf("want exactly one chain entry, got %d", len(spy.entries))
+	entries := spy.recorded()
+	if len(entries) != 1 {
+		t.Fatalf("want exactly one chain entry, got %d", len(entries))
 	}
-	e := spy.entries[0]
+	e := entries[0]
 	if e.EventType != audit.EventEstopLatencyViolation {
 		t.Fatalf("event type = %q", e.EventType)
 	}
@@ -112,8 +136,8 @@ func TestAuditEstop_WithinSLASealsNothing(t *testing.T) {
 	if err != nil || res.LatencyViolation {
 		t.Fatalf("res=%+v err=%v; want no violation", res, err)
 	}
-	if len(spy.entries) != 0 {
-		t.Fatalf("an in-SLA estop must seal no violation entry, got %d", len(spy.entries))
+	if n := len(spy.recorded()); n != 0 {
+		t.Fatalf("an in-SLA estop must seal no violation entry, got %d", n)
 	}
 }
 
@@ -121,7 +145,7 @@ func TestAuditEstop_SinkFailureDoesNotAffectTheStop(t *testing.T) {
 	// THE SAFETY-CRITICAL DIRECTION. The seal runs after the acknowledgement, so the robot
 	// is already stopping; a failing sink must not change the result the caller sees.
 	d, spy := slowAckDispatcher(t, 600*time.Millisecond)
-	spy.err = errors.New("sink unavailable")
+	spy.failWith(errors.New("sink unavailable"))
 
 	res, err := d.TriggerEstop(context.Background(), ns, "amr-1", "test", "operator", metrics.ScopeRobot, Carrier{})
 	if err != nil {

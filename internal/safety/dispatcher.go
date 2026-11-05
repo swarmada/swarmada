@@ -724,10 +724,11 @@ const heldStopIssuer = "swarmada-control-plane"
 // unanswered re-send is not sent again until another stream opens.
 //
 // Each stop goes under the ID it was recorded with, one Estop per recorded stop with no
-// clearedAt. A robot in a stop state with no such record (an upgraded cluster, or a record lost)
-// is sent a stop of its own as row S1 does: a fresh stop ID, recorded as a Robot-scope stop whose
-// carrier is the robot, so its next clear names it. A zone's or the namespace's stop in force on it
-// with no record is sent by that carrier's next pass, under its own ID.
+// clearedAt, or that this process sent and has not recorded yet (heldUnrecorded). A robot in a
+// stop state with neither (an upgraded cluster, or a record lost) is sent a stop of its own as
+// row S1 does: a fresh stop ID, recorded as a Robot-scope stop whose carrier is the robot, so its
+// next clear names it. A zone's or the namespace's stop in force on it with no record is sent by
+// that carrier's next pass, under its own ID.
 // Every robot of the adapter is also sent again the EstopClear of each recorded stop that awaits
 // its EstopClearAck (resendClears); no Estop and no fence go for those.
 //
@@ -769,14 +770,57 @@ func (d *Dispatcher) resendHeld(identity controlstream.TLSIdentity, sender contr
 				}
 			}
 			if len(ids) == 0 {
-				id, rec := d.unrecordedStop(robot)
-				go d.resendHeldTo(identity, sender, robot.DeepCopy(), id, rec)
+				var mint bool
+				robot, ids, mint = d.heldUnrecorded(ctx, reader, robot)
+				if mint {
+					id, rec := d.unrecordedStop(robot)
+					go d.resendHeldTo(identity, sender, robot.DeepCopy(), id, rec)
+				}
 			}
 			for _, id := range ids {
 				go d.resendHeldTo(identity, sender, robot.DeepCopy(), id, nil)
 			}
 		}
 	}
+}
+
+// heldUnrecorded is what resendHeld sends robot, listed in a stop state with no stop in force on its
+// record. That state need not come from a stop with no record: a trigger writes its outcome as soon
+// as the adapter answers, and its stop's record lands later, in a goroutine of its own (row S1). A
+// stop this process sent and has not recorded is in its own state (RFC-0001
+// #safety-robot-stop-table), and goes again under its own ID, as a recorded one does. With none in
+// flight the robot is read again, after this process's state was: a record that landed after the
+// list, and left that state before it was read, is on it. Only a robot still in a stop state with
+// still no stop in force is sent a stop of its own (unrecordedStop), and a robot cleared since the
+// list is sent none. A read that fails mints the stop: an extra stop is safe. It returns the robot
+// as last read, the stop IDs to send, and whether to mint one.
+func (d *Dispatcher) heldUnrecorded(ctx context.Context, reader client.Reader, robot *fleetv1.Robot) (
+	*fleetv1.Robot, []string, bool) {
+	var ids []string
+	for _, r := range d.inflightOf(robotEstopKey(robot.Namespace, robot.Name)) {
+		if !d.settledByClear(r) {
+			ids = append(ids, r.entry.ID)
+		}
+	}
+	if len(ids) > 0 {
+		sort.Strings(ids)
+		return robot, ids, false
+	}
+	fresh := &fleetv1.Robot{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(robot), fresh); err != nil {
+		return robot, nil, true
+	}
+	switch fresh.Status.EstopState {
+	case fleetv1.RobotEstopStopping, fleetv1.RobotEstopStopped, fleetv1.RobotEstopFailed:
+	default:
+		return fresh, nil, false
+	}
+	for _, st := range fresh.Status.Stops {
+		if st.ClearedAt == nil {
+			ids = append(ids, st.ID)
+		}
+	}
+	return fresh, ids, len(ids) == 0
 }
 
 // unrecordedStop mints a stop ID for a robot in a stop state that records no stop in force, and
