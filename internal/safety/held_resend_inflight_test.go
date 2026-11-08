@@ -70,16 +70,19 @@ func (s *estopTap) nextEstop(t *testing.T) string {
 
 // heldRecordRig is a dispatcher whose robot is Failed by a robot-scope trigger sent with no
 // SafetyStream open, and whose stop's record is held at the client: a status patch that carries a
-// stop waits until release is called. onList, when set, runs after each Robot list returns and
-// before the caller sees it. It returns the trigger's stop ID.
+// stop waits until release is called. It returns the trigger's stop ID once the record's write is
+// waiting at the gate, so the record's goroutine has read d.Client and a test may replace it.
 func heldRecordRig(t *testing.T) (d *Dispatcher, c client.Client, h *hookClient, release func(), triggerID string) {
 	t.Helper()
 	d, c, _ = newDispatcher(t, "acme")
 	gate := make(chan struct{})
 	release = sync.OnceFunc(func() { close(gate) })
 	t.Cleanup(release)
+	held := make(chan struct{})
+	holding := sync.OnceFunc(func() { close(held) })
 	h = &hookClient{Client: c, mu: &sync.Mutex{}, log: &[]string{}, before: func(_ int, obj client.Object) error {
 		if r, ok := obj.(*fleetv1.Robot); ok && len(r.Status.Stops) > 0 {
+			holding()
 			<-gate
 		}
 		return nil
@@ -96,6 +99,11 @@ func heldRecordRig(t *testing.T) (d *Dispatcher, c client.Client, h *hookClient,
 	recs := d.inflightOf(robotEstopKey(ns, "amr-1"))
 	if len(recs) != 1 {
 		t.Fatalf("setup: %d stops in flight; want the trigger's", len(recs))
+	}
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("setup: the trigger's record never reached the gate")
 	}
 	return d, c, h, release, recs[0].entry.ID
 }
