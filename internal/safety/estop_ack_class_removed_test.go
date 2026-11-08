@@ -17,7 +17,6 @@ limitations under the License.
 package safety
 
 import (
-	"context"
 	"testing"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,13 +32,9 @@ import (
 func TestEstopAck_ClassRemovedFromItsAdapterStillConfirms(t *testing.T) {
 	f := newAckFixture(t)
 	fa := &fleetv1.FleetAdapter{}
-	if err := f.c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: "adapter-a"}, fa); err != nil {
-		t.Fatalf("get adapter-a: %v", err)
-	}
-	fa.Spec.ServesRobotClasses = []string{"forklift"}
-	if err := f.c.Update(context.Background(), fa); err != nil {
-		t.Fatalf("drop amr from adapter-a: %v", err)
-	}
+	f.update(t, client.ObjectKey{Namespace: ns, Name: "adapter-a"}, fa, func() {
+		fa.Spec.ServesRobotClasses = []string{"forklift"}
+	})
 
 	res := f.triggerAndAck(t, "adapter-a", "amr-1")
 	if !res.Confirmed || res.State != fleetv1.RobotEstopStopped {

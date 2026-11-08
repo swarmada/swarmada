@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -103,7 +104,10 @@ func (ca *ackCA) leaf(t *testing.T, san string, eku x509.ExtKeyUsage) tls.Certif
 }
 
 type ackFixture struct {
-	d   *Dispatcher
+	d *Dispatcher
+	// c is the dispatcher's own client: every write takes the lock the dispatcher's writes take
+	// (atomicFake). It is the only client a test gets. Write through update, which retries a
+	// conflict from a fresh read.
 	c   client.Client
 	ca  *ackCA
 	cli map[string]fav1.FleetAdapterServiceClient // adapter name → client presenting its cert
@@ -128,10 +132,14 @@ func newAckFixture(t *testing.T) *ackFixture {
 			Spec:       fleetv1.FleetAdapterSpec{ServesRobotClasses: []string{"amr"}},
 		}
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
+	// The fake applies an update by a read and a store that are not one step, so a test's write
+	// beside the dispatcher's own (the stop's record, written in the background after the send) can
+	// be undone by it, where an API server would refuse the stale one. The test's writes take the
+	// dispatcher's lock, and update retries the refused one.
+	c := atomicFake(fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(robot("amr-1", "adapter-a"), robot("amr-b", "adapter-b"), adapter("adapter-a"), adapter("adapter-b")).
-		WithStatusSubresource(&fleetv1.Robot{}).Build()
-	d := New(atomicFake(c), record.NewFakeRecorder(16))
+		WithStatusSubresource(&fleetv1.Robot{}).Build())
+	d := New(c, record.NewFakeRecorder(16))
 	d.deliveryTimeout = 750 * time.Millisecond
 	d.confirmTimeout = 750 * time.Millisecond
 
@@ -200,6 +208,22 @@ func (f *ackFixture) openSafety(t *testing.T, adapter string) fav1.FleetAdapterS
 			t.Fatalf("%s SafetyStream never registered with the dispatcher", adapter)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// update applies change to the object at key, read fresh into obj, and writes it. A write that
+// conflicts with one of the dispatcher's is retried from a new read, as a client of an API server
+// does.
+func (f *ackFixture) update(t *testing.T, key client.ObjectKey, obj client.Object, change func()) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := f.c.Get(context.Background(), key, obj); err != nil {
+			return err
+		}
+		change()
+		return f.c.Update(context.Background(), obj)
+	}); err != nil {
+		t.Fatalf("update %s: %v", key.Name, err)
 	}
 }
 

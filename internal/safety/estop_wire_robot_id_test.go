@@ -44,13 +44,9 @@ import (
 func (f *ackFixture) setWireID(t *testing.T, robotID string) {
 	t.Helper()
 	var r fleetv1.Robot
-	if err := f.c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: "amr-1"}, &r); err != nil {
-		t.Fatalf("get amr-1: %v", err)
-	}
-	r.Annotations = map[string]string{fleetv1.RobotIDAnnotation: robotID}
-	if err := f.c.Update(context.Background(), &r); err != nil {
-		t.Fatalf("annotate amr-1: %v", err)
-	}
+	f.update(t, client.ObjectKey{Namespace: ns, Name: "amr-1"}, &r, func() {
+		r.Annotations = map[string]string{fleetv1.RobotIDAnnotation: robotID}
+	})
 }
 
 // estopAndAnswer estops amr-1 and waits for adapter-a to receive it. Before the ack it runs
