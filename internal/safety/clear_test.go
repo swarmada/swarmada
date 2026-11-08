@@ -93,7 +93,9 @@ func (w *wire) estops() int {
 }
 
 // hookClient records each status patch's estopState in log, and runs before (when set) ahead of
-// the patch, once per patch.
+// the patch, once per patch. A patch is stored and logged under mu in one step, so the log is in
+// the order the patches landed: an entry logged after its patch returned could follow a reader
+// that saw the patch and reset the log, as clearRigAt does once the stop's record has landed.
 type hookClient struct {
 	client.Client
 	mu     *sync.Mutex
@@ -134,11 +136,11 @@ func (s *hookStatus) Patch(ctx context.Context, obj client.Object, p client.Patc
 			return err
 		}
 	}
+	s.h.mu.Lock()
+	defer s.h.mu.Unlock()
 	err := s.h.Client.Status().Patch(ctx, obj, p, opts...)
 	if r, ok := obj.(*fleetv1.Robot); ok && err == nil {
-		s.h.mu.Lock()
 		*s.h.log = append(*s.h.log, "patch:"+string(r.Status.EstopState))
-		s.h.mu.Unlock()
 	}
 	return err
 }
