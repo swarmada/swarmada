@@ -1,0 +1,63 @@
+# hello-world-task.yaml: a first task for the simulated robot and ROS 2.
+#
+# Four legs, each a plain Navigate to an x/y point, ending at the base:
+#   1 drive-to-a      base -> A
+#   2 drive-to-b      A -> B
+#   3 drive-to-c      B -> C
+#   4 drive-to-base   C -> base
+# Each leg names the one before it (dependsOn) and starts only once that leg has Succeeded.
+#
+# Navigate with x and y is served by the in-tree simulation adapter and by the ROS 2 reference
+# adapter. So the same file runs on the simulated robot and on your own ROS 2 robot. Change two
+# things for yours:
+#   - robotSelector: your robot's name (sim-robot-001 is the one `make first-run` admits);
+#   - the four points: for the simulated robot these numbers are fine; for a real robot pick them
+#     on your own map: free floor, clear of walls and of anything the robot must not touch.
+#
+# Finishing early, and going to the base: failurePolicy is Compensate, and leg 1 carries an undo
+# that drives to the base. So
+#     bin/swarmctl cancel task hello-world -n warehouse-a
+# stops the leg that is running, then runs leg 1's undo, and the task ends Compensated with the robot
+# at the base. A leg that fails ends the same way. Leg 1's undo runs only once leg 1 has Succeeded;
+# cancelled during leg 1, the robot stays where it stopped: apply go-to-base-task.yaml.
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: hello-world
+  namespace: warehouse-a
+spec:
+  failurePolicy: Compensate        # a cancel or a failed leg runs leg 1's undo: back to the base
+  actions:
+  - name: drive-to-a               # leg 1: no dependsOn, so it starts at once
+    action:
+      type: Navigate
+      robotSelector: sim-robot-001 # your robot's name
+      onFailure: Alert             # a failed leg stays failed and tells a person
+      payload: {x: 2.0, "y": 0.0}  # quoted key: YAML reads a bare y as true
+    compensation:                  # leg 1's undo: drive to the base
+      type: Navigate
+      robotSelector: sim-robot-001
+      onFailure: Alert
+      payload: {x: 0.0, "y": 0.0}
+  - name: drive-to-b
+    dependsOn: [drive-to-a]
+    startCondition: Succeeded      # the default, shown here to say it
+    action:
+      type: Navigate
+      robotSelector: sim-robot-001
+      onFailure: Alert
+      payload: {x: 2.0, "y": 2.0}
+  - name: drive-to-c
+    dependsOn: [drive-to-b]
+    action:
+      type: Navigate
+      robotSelector: sim-robot-001
+      onFailure: Alert
+      payload: {x: 0.0, "y": 2.0}
+  - name: drive-to-base
+    dependsOn: [drive-to-c]
+    action:
+      type: Navigate
+      robotSelector: sim-robot-001
+      onFailure: Alert
+      payload: {x: 0.0, "y": 0.0}

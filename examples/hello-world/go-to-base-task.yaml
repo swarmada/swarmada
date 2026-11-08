@@ -1,0 +1,17 @@
+# go-to-base-task.yaml. One leg: Navigate to the base.
+# Use it when the robot is idle away from the base, for example after cancelling hello-world
+# during its first leg (leg 1 had not succeeded, so there was nothing to undo).
+# Apply it only once no other task holds the robot: kubectl get fleetaction -n warehouse-a
+apiVersion: swarmada.io/v1
+kind: FleetTask
+metadata:
+  name: go-to-base
+  namespace: warehouse-a
+spec:
+  actions:
+  - name: drive-to-base
+    action:
+      type: Navigate
+      robotSelector: sim-robot-001 # your robot's name
+      onFailure: Alert
+      payload: {x: 0.0, "y": 0.0}  # the base
