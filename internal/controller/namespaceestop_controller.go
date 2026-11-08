@@ -70,6 +70,8 @@ type NamespaceEstopReconciler struct {
 	// records and the clear's robot list (see ZoneEstopReconciler.APIReader). Nil falls
 	// back to Client.
 	APIReader client.Reader
+	// markers is the processed marker this process last wrote on the namespace's config.
+	markers writtenMarkers
 }
 
 // reader is the uncached reader when one is wired, else the client.
@@ -98,6 +100,15 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	trigger, firing := cfg.Annotations[annEstopTriggered]
 	processed, wasProcessed := cfg.Annotations[annEstopProcessed]
+	if firing && (!wasProcessed || processed != trigger) && r.markers.has(req.NamespacedName, trigger) {
+		// As in the zone controller: the cache is behind a marker this process wrote.
+		fresh := &fleetv1.SwarmadaConfig{}
+		if err := r.reader().Get(ctx, req.NamespacedName, fresh); err == nil {
+			cfg = fresh
+			trigger, firing = cfg.Annotations[annEstopTriggered]
+			processed, wasProcessed = cfg.Annotations[annEstopProcessed]
+		}
+	}
 
 	// The stop finalizer: held from the trigger until the clear has been applied, so a config
 	// deleted while no replica serves the delete check stays until the stop is applied and
@@ -114,6 +125,7 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// covers are re-evaluated on a timer as well as on events.
 		return ctrl.Result{RequeueAfter: stopInForceResync}, r.holdLateArrivals(ctx, req.Namespace, cfg, trigger)
 	case !firing && wasProcessed:
+		r.markers.forget(req.NamespacedName)
 		return r.clearNamespaceEstop(ctx, req.Namespace, cfg)
 	case !firing:
 		return ctrl.Result{}, nil // no estop active
@@ -205,6 +217,7 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.Patch(ctx, cfg, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("recording namespace estop processed: %w", err)
 	}
+	r.markers.wrote(req.NamespacedName, trigger)
 	return ctrl.Result{}, nil
 }
 

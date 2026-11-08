@@ -103,6 +103,8 @@ type ZoneEstopReconciler struct {
 	// records are read and written through it, and the clear lists the robots through it,
 	// so a record written moments before is not missed. Nil falls back to Client.
 	APIReader client.Reader
+	// markers is the processed marker this process last wrote on each zone.
+	markers writtenMarkers
 }
 
 // reader is the uncached reader when one is wired, else the client.
@@ -130,6 +132,16 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	trigger, firing := zone.Annotations[annEstopTriggered]
 	processed, wasProcessed := zone.Annotations[annEstopProcessed]
+	if firing && (!wasProcessed || processed != trigger) && r.markers.has(req.NamespacedName, trigger) {
+		// This process wrote this trigger's marker and the cache does not show it. The API
+		// server says which is right. A failed read leaves the cached copy: the stop goes.
+		fresh := &fleetv1.FleetZone{}
+		if err := r.reader().Get(ctx, req.NamespacedName, fresh); err == nil {
+			zone = fresh
+			trigger, firing = zone.Annotations[annEstopTriggered]
+			processed, wasProcessed = zone.Annotations[annEstopProcessed]
+		}
+	}
 
 	// The stop finalizer: held from the trigger until the clear has been applied, so a zone
 	// deleted while no replica serves the delete check stays until the stop is applied and
@@ -154,6 +166,7 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	case !firing && wasProcessed:
 		// The estop-trigger annotation was removed (the operator-authorized
 		// estop-clear verb): resume the robots and drop the processed marker.
+		r.markers.forget(req.NamespacedName)
 		return r.clearZoneEstop(ctx, req.Namespace, zone)
 	case !firing:
 		return ctrl.Result{}, r.projectEstopStatus(ctx, req.Namespace, zone, nil, nil) // no estop active here
@@ -284,6 +297,7 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Patch(ctx, zone, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("recording estop processed: %w", err)
 	}
+	r.markers.wrote(req.NamespacedName, trigger)
 
 	// Reflect the active estop in the status of every zone it reaches (RFC-0001
 	// #fleetzone-schema-root-zone).
