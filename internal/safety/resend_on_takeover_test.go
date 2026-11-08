@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +78,31 @@ func nothingPushed(t *testing.T, s *recordingSender, what string, within time.Du
 		t.Fatalf("%s: estop %q was pushed", what, m.GetEstop().GetEstopId())
 	case <-time.After(within):
 	}
+}
+
+// passGate counts the Robot lists that have returned and, once armed, holds the next until release
+// is closed: a SafetyStream's opening pass (resendHeld) reads the adapter's robots once.
+type passGate struct {
+	client.Client
+	armed   atomic.Bool
+	release chan struct{}
+	lists   atomic.Int32
+}
+
+func (g *passGate) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	_, robots := list.(*fleetv1.RobotList)
+	if robots && g.armed.Load() {
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	err := g.Client.List(ctx, list, opts...)
+	if robots {
+		g.lists.Add(1)
+	}
+	return err
 }
 
 func outcome(t *testing.T, done <-chan triggerOutcome) triggerOutcome {
@@ -247,23 +273,63 @@ func TestResend_OnlyAnEstopStillWantedIsResent(t *testing.T) {
 		}
 	})
 
+	// A confirmed estop is not moved to the new stream: it awaits nothing. Its stop still holds the
+	// robot, so the new stream's opening pass sends it again, once, under its ID (RFC-0001
+	// #safety-robot-stop-table, Sending a stop again).
 	t.Run("resolved before the takeover", func(t *testing.T) {
 		d, c, _ := newDispatcher(t, "acme")
 		d.deliveryTimeout = 2 * time.Second
+		g := &passGate{Client: d.Client, release: make(chan struct{})}
+		d.Client = g
 		old, fresh := newRecordingSender(), newRecordingSender()
 		d.RegisterStream(identity("acme"), old)
+		// The first stream's opening pass reads the robot in a goroutine of its own. Read after the
+		// stop below, it would send the stop down the first stream; it reads first, as clearRigAt's.
+		for end := time.Now().Add(2 * time.Second); g.lists.Load() < 1; time.Sleep(time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatal("setup: the first stream's opening pass did not read the robots")
+			}
+		}
 		done := triggerAsync(d, "test")
 		sent := nextEstop(t, old, "the estop on the first stream")
+		id := sent.GetEstop().GetEstopId()
 		if err := d.RouteAck(identity("acme"), old, "amr-1",
-			ackState(sent.GetEstop().GetEstopId(), fav1.EstopState_ESTOP_STATE_STOPPED)); err != nil {
+			ackState(id, fav1.EstopState_ESTOP_STATE_STOPPED)); err != nil {
 			t.Fatal(err)
 		}
-		// Taken over before the waiter has necessarily run: the resolving ack alone
-		// settles the estop.
+		// Taken over before the waiter has necessarily run: the resolving ack alone settles the
+		// estop, so it is not moved. A move is pushed before RegisterStream returns; the new
+		// stream's opening pass is held until after that, so what is pushed by then is a move.
+		g.armed.Store(true)
 		d.RegisterStream(identity("acme"), fresh)
-		nothingPushed(t, fresh, "an estop already confirmed", 200*time.Millisecond)
+		select {
+		case m := <-fresh.sent:
+			t.Fatalf("the confirmed estop %q was moved to the new stream", m.GetEstop().GetEstopId())
+		default:
+		}
+		// The pass reads the robot once Stopped and the stop's record have landed. Read before the
+		// record, the robot would be a stopped robot that records no stop, and the pass would send it
+		// a stop of its own (resendHeld).
+		for end := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+			r := stored(t, c)
+			if r.Status.EstopState == fleetv1.RobotEstopStopped && len(r.Status.Stops) == 1 && r.Status.Stops[0].ID == id {
+				break
+			}
+			if time.Now().After(end) {
+				t.Fatalf("setup: stored %s %+v; want Stopped and the stop %s recorded", r.Status.EstopState, r.Status.Stops, id)
+			}
+		}
+		close(g.release)
+		again := nextEstop(t, fresh, "the stop sent again on the new stream")
+		if got := again.GetEstop().GetEstopId(); got != id {
+			t.Fatalf("sent again under estop_id %q, want the stop's own ID %q", got, id)
+		}
+		nothingPushed(t, fresh, "a second send of the stop", 200*time.Millisecond)
 		if o := outcome(t, done); !o.res.Confirmed || estopState(t, c) != fleetv1.RobotEstopStopped {
 			t.Fatalf("res=%+v state=%s; want confirmed Stopped on the first stream", o.res, estopState(t, c))
+		}
+		if stops := waitRecorded(t, c, 1); stops[0].ID != id {
+			t.Fatalf("status.stops = %+v; want only the stop %s", stops, id)
 		}
 	})
 
