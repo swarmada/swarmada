@@ -78,6 +78,8 @@ type RobotEstopReconciler struct {
 	// so a claim whose drop failed, or that a stale cached read still shows, is not reported
 	// as a request left unanswered.
 	answered sync.Map
+	// markers is the processed marker this process last wrote on each robot.
+	markers writtenMarkers
 }
 
 // ResumeConfirmer releases a robot from the post-clear estop window on an operator's
@@ -110,6 +112,15 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if r.Estopper != nil {
 		trigger, firing := robot.Annotations[annEstopTriggered]
 		processed, wasProcessed := robot.Annotations[annEstopProcessed]
+		if firing && (!wasProcessed || processed != trigger) && r.markers.has(req.NamespacedName, trigger) {
+			// As in the zone controller: the cache is behind a marker this process wrote.
+			fresh := &fleetv1.Robot{}
+			if err := r.reader().Get(ctx, req.NamespacedName, fresh); err == nil {
+				robot = fresh
+				trigger, firing = robot.Annotations[annEstopTriggered]
+				processed, wasProcessed = robot.Annotations[annEstopProcessed]
+			}
+		}
 		// The stop finalizer on the robot: held from its own trigger until the clear has been
 		// applied, and while the robot holds a record of work a stop holds, so the record
 		// survives any delete path (estopscope.StopFinalizer, robotKeepsStopFinalizer).
@@ -126,6 +137,7 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			// reads as "", and an empty trigger is a stop like any other.
 			return r.issueRobotEstop(ctx, robot, trigger)
 		case !firing && wasProcessed:
+			r.markers.forget(req.NamespacedName)
 			return r.clearRobotEstop(ctx, robot)
 		}
 	}
@@ -216,6 +228,7 @@ func (r *RobotEstopReconciler) issueRobotEstop(ctx context.Context, robot *fleet
 	if err := r.Patch(ctx, robot, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("recording robot estop processed: %w", err)
 	}
+	r.markers.wrote(client.ObjectKeyFromObject(robot), trigger)
 	return ctrl.Result{}, nil
 }
 
