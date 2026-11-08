@@ -292,9 +292,10 @@ func adapterKey(namespace, adapter string) string { return namespace + "/" + ada
 // leaves the newer registration in place.
 //
 // An estop still awaiting its ack on the replaced stream could never be confirmed: that
-// stream is about to close, and an ack on this one names an estop that did not go down it.
-// So each such estop is re-sent down this stream before this call returns, under a new
-// estop_id bound to this stream (resendOnto).
+// stream is about to close, and an ack on this one is refused while the estop is bound to the
+// stream it went down (RouteAck). So each such estop is re-sent down this stream before this
+// call returns, under its own estop_id, and bound to this stream from then on (rebindLocked,
+// resendOnto): an ack with that ID on the replaced stream confirms nothing.
 //
 // A stop that is no longer awaited is re-sent too: every robot of the adapter whose
 // status.estopState is Stopping, Stopped or Failed is sent its stop once down this stream
@@ -388,9 +389,12 @@ func (d *Dispatcher) RouteAck(identity controlstream.TLSIdentity, from controlst
 // robotID is the Robot's object name. The estop goes out under the robot's wire robot_id
 // (robotid.Wire), resolved once here from the Robot just read, and the estop is awaited
 // under that id for its whole life, re-sends included. If the annotation is re-pointed
-// while the estop is in flight, an ack under the new id matches nothing, and one under the
-// old id names a robot_id no Robot carries any more, which the SafetyStream authorizer
-// refuses; the estop then resolves Failed at the end of its window, never Stopped.
+// while the estop is in flight, an ack under the new id matches nothing. An ack under the
+// old id is the answer of the robot the estop was delivered to, and confirms the stop that
+// was delivered whenever the SafetyStream authorizer still finds a Robot under that id: the
+// manager's authorizer reads its cache, which can hold the old id for a while after the
+// re-point. Once the authorizer finds no Robot under the old id, it refuses that ack, and the
+// estop resolves Failed at the end of its window, never Stopped.
 //
 // The stop is sent before anything is written (row S1): its stop ID is minted, the waiter
 // registered and the Estop sent, and only then is the stop recorded in Robot.status.stops,
