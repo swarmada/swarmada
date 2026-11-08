@@ -367,6 +367,9 @@ _NEEDS_SERVED_ACTION = {
          "MUST"),
         ("C6.4", "Echo the assigned fencing_token in ActionStatusUpdate", "MUST"),
     ],
+    "_check_latch_holds_work": [
+        ("C5.8", "A stop holds the robot's work until its EstopClear lifts it", "MUST"),
+    ],
 }
 
 
