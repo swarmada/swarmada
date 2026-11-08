@@ -33,3 +33,4 @@ and the observable result that means it worked — concrete enough to assert on.
 | [edge-node](edge-node/) | The Zone Controller edge node (`cmd/edge`) issuing a headless, confirmed-only emergency stop, with no hardware and no control plane. |
 | [demo-ab-live](demo-ab-live/) | `run.sh` only, no README: the sample fleet with every robot driven by its own `sim_adapter.py` process over mTLS, and no status written by the script. |
 | [event-bridge](event-bridge/) | Signed webhooks from outside systems become SemanticEvents, and TaskTriggers turn them into drafts a person clears; `run.sh` shows the refusals (unknown caller, bad signature, replay) and one event delivered twice making one draft. |
+| [hello-world](hello-world/) | A four-leg `FleetTask` on the simulated robot `make first-run` admits, finishing early with `swarmctl cancel task`, and a one-leg task back to the base. |
