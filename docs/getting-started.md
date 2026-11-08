@@ -141,8 +141,8 @@ sequence is the one in tier 2, with your adapter in place of the simulation adap
   re-qualification](adapters.md#contract-versions-and-re-qualification).
 - **The ROS 2 reference adapter.** It lives in its own repository;
   `scripts/fetch-reference-adapters.sh` clones it into `adapters/external/`. Its
-  registry row records contract `1.0.0`, outside the window, so this control plane
-  refuses its robots ([adapter registry](../adapters/REGISTRY.md)). Its real binding
+  registry row records contract `1.3.0`, inside the window
+  ([adapter registry](../adapters/REGISTRY.md)). Its real binding
   needs a sourced ROS 2 and Nav2 workspace; without one it runs a simulated binding.
 - **Writing your own.** [Writing a Fleet Adapter](adapter-authoring.md) starts from
   the template, which wires the confirmed emergency stop, fencing-token ordering and

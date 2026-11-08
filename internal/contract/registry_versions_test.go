@@ -74,9 +74,8 @@ type evictedRow struct {
 // REMOVE AN ENTRY WHEN THE VENDOR PR LANDS AND THE ROW MOVES. The test fails if an entry is
 // left behind, so the removal is not a courtesy.
 var knownEvictions = []evictedRow{
-	{"fleet-adapter-ros2", "declares 1.0.0; needs a vendor PR raising CONTRACT_VERSION into the current range, then an ADR-0007 registry PR. No code change: every 1.1.0 and 1.2.0 change was additive."},
-	{"fleet-adapter-vda5050", "declares 1.0.0; same one-line declaration change and registry PR as ros2."},
-	{"fleet-adapter-mavlink", "declares 1.0.0; same one-line declaration change and registry PR as ros2."},
+	{"fleet-adapter-vda5050", "declares 1.0.0; needs a vendor PR raising CONTRACT_VERSION into the current range, then an ADR-0007 registry PR."},
+	{"fleet-adapter-mavlink", "declares 1.0.0; needs a vendor PR raising CONTRACT_VERSION into the current range, then an ADR-0007 registry PR."},
 }
 
 // registryRow is one parsed row of the adapter registry table.

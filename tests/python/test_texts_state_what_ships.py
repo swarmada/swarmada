@@ -130,8 +130,8 @@ def test_the_rejection_table_names_every_assign_action_rejection():
 
 def test_the_external_registry_rows_say_they_are_not_qualified():
     rows = [ln for ln in _read("adapters/REGISTRY.md").splitlines()
-            if re.match(r"\| `fleet-adapter-(?:ros2|vda5050|mavlink)` \|", ln)]
-    assert len(rows) == 3, f"found {len(rows)} external adapter rows"
+            if re.match(r"\| `fleet-adapter-(?:vda5050|mavlink)` \|", ln)]
+    assert len(rows) == 2, f"found {len(rows)} external adapter rows at contract 1.0.0"
     for row in rows:
         cell = row.strip().strip("|").split("|")[5].strip()
         assert cell.startswith("**Not qualified at the current contract — pending "
