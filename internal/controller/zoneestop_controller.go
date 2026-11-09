@@ -152,8 +152,12 @@ func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Reques
 	// The stop finalizer: held from the trigger until the clear has been applied, so a zone
 	// deleted while no replica serves the delete check stays until the stop is applied and
 	// cleared (estopscope.StopFinalizer). A namespace being torn down releases it.
-	if done, err := r.holdCarrier(ctx, zone, firing || wasProcessed); done || err != nil {
+	zone, again, done, err := holdStopFinalizer(ctx, r.Client, r.reader(), zone, carrierHoldsStop[*fleetv1.FleetZone])
+	if done || err != nil {
 		return ctrl.Result{}, err
+	}
+	if again {
+		return r.reconcileZone(ctx, req, zone)
 	}
 
 	switch {
@@ -590,45 +594,84 @@ func (r *ZoneEstopReconciler) robotsInEstopScope(ctx context.Context, namespace,
 	return out, nil
 }
 
-// holdCarrier holds the stop finalizer on a carrier while it carries a stop (hold), and
-// releases it when it does not, or when the namespace is being torn down. It reports done
-// when the caller should return: the carrier is going with its namespace.
-func (r *ZoneEstopReconciler) holdCarrier(ctx context.Context, zone *fleetv1.FleetZone, hold bool) (bool, error) {
-	return holdStopFinalizer(ctx, r.Client, r.reader(), zone, hold)
+// carrierHoldsStop is a zone's or a namespace's hold on its stop finalizer: the carrier carries a
+// stop, its trigger or the processed marker of a stop whose clear has not been applied.
+func carrierHoldsStop[PT client.Object](obj PT) (bool, error) {
+	_, firing := obj.GetAnnotations()[annEstopTriggered]
+	_, processed := obj.GetAnnotations()[annEstopProcessed]
+	return firing || processed, nil
 }
 
-// holdStopFinalizer is holdCarrier for any carrier.
-func holdStopFinalizer(ctx context.Context, c client.Client, reader client.Reader, obj client.Object, hold bool) (bool, error) {
-	has := controllerutil.ContainsFinalizer(obj, estopscope.StopFinalizer)
-	if obj.GetDeletionTimestamp() != nil && has {
-		terminating, err := namespaceBeingDeleted(ctx, reader, obj.GetNamespace())
-		if err != nil {
-			return false, err
-		}
-		if terminating {
-			base := obj.DeepCopyObject().(client.Object)
-			controllerutil.RemoveFinalizer(obj, estopscope.StopFinalizer)
-			if err := c.Patch(ctx, obj, client.MergeFrom(base)); err != nil {
-				return false, fmt.Errorf("releasing the stop finalizer of %s in a namespace being deleted: %w", obj.GetName(), err)
+// holdStopFinalizer holds the stop finalizer on a carrier while holds says it must, and releases
+// it when it need not, or when the namespace is being torn down. obj is the carrier as the pass
+// read it. done reports that the caller should return: the carrier is going with its namespace,
+// or is gone.
+//
+// The release is locked to the version obj was read at. A merge patch replaces the finalizer list
+// whenever it changes, so without the lock a trigger admitted after the read, with the stop
+// finalizer the webhooks add to it, would lose that finalizer to a patch computed from a copy that
+// never had the trigger. On a conflict the carrier is read again from the API server and holds
+// decides again on that copy; again is then true, and the caller runs its pass on cur, the
+// carrier as last read or written. After clearMarkerAttempts conflicts in a row the conflict is
+// returned and the pass is retried.
+func holdStopFinalizer[T any, PT interface {
+	*T
+	client.Object
+}](ctx context.Context, c client.Client, reader client.Reader, obj PT,
+	holds func(PT) (bool, error)) (cur PT, again, done bool, err error) {
+	cur = obj
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			fresh := PT(new(T))
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(obj), fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return cur, false, true, nil
+				}
+				return cur, again, false, err
 			}
-			return true, nil
+			cur, again = fresh, true
 		}
+		has := controllerutil.ContainsFinalizer(cur, estopscope.StopFinalizer)
+		if cur.GetDeletionTimestamp() != nil && has {
+			terminating, err := namespaceBeingDeleted(ctx, reader, cur.GetNamespace())
+			if err != nil {
+				return cur, again, false, err
+			}
+			if terminating {
+				base := cur.DeepCopyObject().(client.Object)
+				controllerutil.RemoveFinalizer(cur, estopscope.StopFinalizer)
+				if err := c.Patch(ctx, cur, client.MergeFrom(base)); err != nil {
+					return cur, again, false, fmt.Errorf("releasing the stop finalizer of %s in a namespace being deleted: %w", cur.GetName(), err)
+				}
+				return cur, again, true, nil
+			}
+		}
+		hold, err := holds(cur)
+		if err != nil {
+			return cur, again, false, err
+		}
+		switch {
+		case hold && !has:
+			base := cur.DeepCopyObject().(client.Object)
+			controllerutil.AddFinalizer(cur, estopscope.StopFinalizer)
+			if err := c.Patch(ctx, cur, client.MergeFrom(base)); err != nil {
+				return cur, again, false, fmt.Errorf("holding the stop finalizer on %s: %w", cur.GetName(), err)
+			}
+		case !hold && has:
+			base := cur.DeepCopyObject().(client.Object)
+			controllerutil.RemoveFinalizer(cur, estopscope.StopFinalizer)
+			err := c.Patch(ctx, cur, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+			switch {
+			case apierrors.IsNotFound(err):
+				return cur, false, true, nil
+			case apierrors.IsConflict(err) && attempt+1 < clearMarkerAttempts:
+				continue
+			case err != nil:
+				return cur, again, false, fmt.Errorf("releasing the stop finalizer of %s: %w", cur.GetName(), err)
+			}
+		}
+		return cur, again, false, nil
 	}
-	switch {
-	case hold && !has:
-		base := obj.DeepCopyObject().(client.Object)
-		controllerutil.AddFinalizer(obj, estopscope.StopFinalizer)
-		if err := c.Patch(ctx, obj, client.MergeFrom(base)); err != nil {
-			return false, fmt.Errorf("holding the stop finalizer on %s: %w", obj.GetName(), err)
-		}
-	case !hold && has:
-		base := obj.DeepCopyObject().(client.Object)
-		controllerutil.RemoveFinalizer(obj, estopscope.StopFinalizer)
-		if err := c.Patch(ctx, obj, client.MergeFrom(base)); err != nil {
-			return false, fmt.Errorf("releasing the stop finalizer of %s: %w", obj.GetName(), err)
-		}
-	}
-	return false, nil
 }
 
 // namespaceBeingDeleted reports whether the namespace carries a deletion timestamp.

@@ -128,12 +128,16 @@ func (r *RobotEstopReconciler) reconcileRobot(ctx context.Context, req ctrl.Requ
 		// The stop finalizer on the robot: held from its own trigger until the clear has been
 		// applied, and while the robot holds a record of work a stop holds, so the record
 		// survives any delete path (estopscope.StopFinalizer, robotKeepsStopFinalizer).
-		keep, err := robotKeepsStopFinalizer(ctx, r.reader(), robot)
-		if err != nil {
+		var again, done bool
+		var err error
+		robot, again, done, err = holdStopFinalizer(ctx, r.Client, r.reader(), robot, func(rb *fleetv1.Robot) (bool, error) {
+			return robotKeepsStopFinalizer(ctx, r.reader(), rb)
+		})
+		if done || err != nil {
 			return ctrl.Result{}, err
 		}
-		if done, err := holdStopFinalizer(ctx, r.Client, r.reader(), robot, keep); done || err != nil {
-			return ctrl.Result{}, err
+		if again {
+			return r.reconcileRobot(ctx, req, robot)
 		}
 		switch {
 		case firing && (!wasProcessed || processed != trigger):
