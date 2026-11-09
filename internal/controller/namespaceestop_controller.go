@@ -116,8 +116,12 @@ func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req c
 	// The stop finalizer: held from the trigger until the clear has been applied, so a config
 	// deleted while no replica serves the delete check stays until the stop is applied and
 	// cleared (estopscope.StopFinalizer). A namespace being torn down releases it.
-	if done, err := holdStopFinalizer(ctx, r.Client, r.reader(), cfg, firing || wasProcessed); done || err != nil {
+	cfg, again, done, err := holdStopFinalizer(ctx, r.Client, r.reader(), cfg, carrierHoldsStop[*fleetv1.SwarmadaConfig])
+	if done || err != nil {
 		return ctrl.Result{}, err
+	}
+	if again {
+		return r.reconcileNamespace(ctx, req, cfg)
 	}
 
 	switch {
