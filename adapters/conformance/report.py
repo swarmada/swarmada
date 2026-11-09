@@ -172,7 +172,7 @@ CONTRACT_VERSION = "1.4.0"
 # declares its class and its pinned check set. Written into every report so a result can say which
 # suite produced it (ADR-0032 Amendment 1). tests/python/test_report_names_its_suite_revision.py
 # fails when the two differ, so a revision bump moves both.
-SUITE_REVISION = "2026.10.22.2"
+SUITE_REVISION = "2026.11.09"
 
 
 @dataclass
