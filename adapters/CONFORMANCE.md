@@ -116,11 +116,19 @@ own prefix instead of a catalog id.
   `discover` for an already-admitted robot answered in band with
   `DiscoverAck{accepted: false, rejection: ALREADY_EXISTS}`.
 
-  The harness plays a control plane that HOLDS a `Robot` for the robot under
-  test: a `discover` as the first lifecycle message is answered `ALREADY_EXISTS`
-  and FAILS this check. The earlier wording ("never the reverse") stated the
-  property without the discriminator that makes it falsifiable, and the harness
-  recorded PASS for either message.
+  The harness plays first contact with a robot that has no `Robot` yet (RFC-0001,
+  *Re-Connection Flow: RegisterRobot*). The first `register` is refused
+  `NOT_ADMITTED`, and the check passes when a `discover` announcing the robot
+  follows it. The register of the provisioning loop's next iteration is accepted
+  as the robot's admission, and the run goes on with the robot admitted. The
+  harness's `DiscoverAck` carries `ttl_seconds`, but the loop schedules that next
+  iteration when the register is refused, before the TTL arrives, so the harness
+  waits up to 75 s for it: 60 s is the loop's interval with no TTL. The check
+  fails when no `discover` follows the refusal, when another `register` answers
+  it, or when a `discover` is the first lifecycle message. Before suite
+  `2026.11.09` the harness played a control plane that already held the `Robot`,
+  so this check passed an adapter that never announces a robot and so cannot
+  join a control plane.
 - **C2.2 (MUST)** On `RegisterAck`, adopt `authoritative_action_state` as the
   source of truth and reconcile local state to it (detecting divergence after a
   connectivity gap).

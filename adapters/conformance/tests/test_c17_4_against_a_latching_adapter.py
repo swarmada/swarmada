@@ -53,7 +53,7 @@ def _run(tmp_path: Path, *fake_args: str) -> tuple[dict, dict, subprocess.Comple
     witness = tmp_path / "witness"
     adapter_cmd = " ".join(shlex.quote(a) for a in (
         sys.executable, str(FAKE), "--endpoint", "localhost:{port}",
-        "--witness-file", str(witness), *fake_args))
+        "--witness-file", str(witness), "--provisioning-interval", "1", *fake_args))
     run = subprocess.run(
         [sys.executable, "-m", "adapters.conformance", "--stub-path", "proto",
          "--adapter-name", "latching-fake", "--port", str(_free_port()),

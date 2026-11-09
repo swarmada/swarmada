@@ -197,6 +197,9 @@ def main() -> None:
                     help="write the plant model's true speed here, for C5.7")
     ap.add_argument("--honour", action="append", default=[], metavar="SUBJECT",
                     help="honour this operating subject and declare it (repeatable)")
+    ap.add_argument("--provisioning-interval", type=float, default=None,
+                    help="the provisioning loop's interval in seconds (default: the RFC's rule), "
+                         "so a run need not wait 60 s for the register that admits the robot")
     args = ap.parse_args()
     if args.plant != "declares-unhonoured":
         # The simulation adapter judges an assignment's operating rules against this module
@@ -217,7 +220,8 @@ def main() -> None:
 
     sim = make_simulator("kinematic", args.witness_file)
     adapter = LatchingSimAdapter(pb, pb_grpc, sim, args.robot_id, "warehouse-a", "simulation",
-                                 engine, plant=args.plant, honoured=args.honour)
+                                 engine, plant=args.plant, honoured=args.honour,
+                                 provisioning_interval_s=args.provisioning_interval)
 
     def _handle_signal(_signum, _frame):
         adapter.shutdown()

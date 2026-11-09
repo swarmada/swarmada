@@ -146,7 +146,9 @@ def main() -> int:
                              "written by something other than the adapter's confirmation path "
                              "(the simulation adapter's plant model writes one with its own "
                              "--witness-file). Without it C5.7 is not testable in the run")
-    parser.add_argument("--run-timeout", type=float, default=60.0,
+    # 180 s: C2.1 waits up to 75 s for the provisioning loop's register that admits the robot
+    # (60 s is the loop's interval while the adapter has no TTL), and the run continues after it.
+    parser.add_argument("--run-timeout", type=float, default=180.0,
                         help="seconds to allow the whole run before giving up")
     args = parser.parse_args()
     if refuses_default_name(args.adapter_name, args.json):

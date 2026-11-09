@@ -23,6 +23,8 @@ reconnect half as its own MUST NOT.
 
 from __future__ import annotations
 
+import pytest
+
 from adapters.conformance.report import CheckStatus
 
 
@@ -39,46 +41,131 @@ def _adapter_msg(pb, **kwargs):
 
 
 # ── C2.1 — register is the FIRST lifecycle message ───────────────────────────
+#
+# The harness plays first contact with a robot that has no Robot yet: the first register is
+# refused NOT_ADMITTED, the adapter MUST announce the robot with a discover, and the register of
+# its provisioning loop's next iteration is accepted as the admission.
 
 
-def test_c21_fails_discover_before_register(pb, driver, sent):
-    """``DiscoverRobot`` MUST NOT be attempted before ``register``.
+@pytest.fixture
+def quick_c21(harness_mod, monkeypatch):
+    monkeypatch.setattr(harness_mod, "_DISCOVER_WAIT", 0.2, raising=False)
+    monkeypatch.setattr(harness_mod, "_ADMISSION_WAIT", 0.2, raising=False)
 
-    The harness plays a control plane holding a Robot CRD for this id: it acks a
-    RegisterRobot, advertises edge endpoints, and dispatches work to it for the
-    rest of the run. A ``discover`` for that robot is the reverse ordering the
-    catalog forbids, and the control plane answers it in band with
-    ``ALREADY_EXISTS`` rather than pretending the robot was unknown.
-    """
+
+def _register(pb):
+    return _adapter_msg(pb, register=pb.RegisterRobot(robot_id="robot-conformance-1",
+                                                      adapter_version="1.0.0"))
+
+
+def _discover(pb):
+    return _adapter_msg(pb, discover=pb.DiscoverRobot(robot_id="robot-conformance-1",
+                                                      manufacturer="acme", model="test"))
+
+
+def _kinds(out):
+    return [m.WhichOneof("payload") for m in out]
+
+
+def test_c21_passes_register_then_discover_on_not_admitted(pb, driver, sent, quick_c21):
+    """Register first; refused NOT_ADMITTED, the adapter announces; its next register is
+    accepted as the admission, and advertises the edge node."""
     drv, session, report = driver
-    session.control_in.put(_adapter_msg(pb, discover=pb.DiscoverRobot(
-        robot_id="robot-conformance-1", manufacturer="acme", model="test")))
+    for m in (_register(pb), _discover(pb), _register(pb)):
+        session.control_in.put(m)
 
-    drv._maybe_handle_registration()
+    assert drv._maybe_handle_registration() is True
+
+    row = _status(report, "C2.1")
+    assert row.status is CheckStatus.PASS, row.detail
+    out = sent(session.control_out)
+    assert _kinds(out) == ["register_ack", "discover_ack", "register_ack"]
+    refused, staged, admitted = out[0].register_ack, out[1].discover_ack, out[2].register_ack
+    assert refused.accepted is False
+    assert refused.rejection == pb.REGISTRATION_REJECTION_NOT_ADMITTED
+    assert staged.accepted is True and staged.ttl_seconds > 0
+    assert admitted.accepted is True and len(admitted.edge_endpoints) == 1
+
+
+def test_c21_fails_when_not_admitted_draws_no_discover(pb, driver, sent, quick_c21):
+    """A NOT_ADMITTED refusal answered by nothing: the adapter never announces the robot."""
+    drv, session, report = driver
+    session.control_in.put(_register(pb))
+
+    assert drv._maybe_handle_registration() is False
 
     row = _status(report, "C2.1")
     assert row.status is CheckStatus.FAIL, row.detail
-
-    out = sent(session.control_out)
-    assert [m.WhichOneof("payload") for m in out] == ["discover_ack"]
-    ack = out[0].discover_ack
-    assert ack.accepted is False
-    assert ack.rejection == pb.REGISTRATION_REJECTION_ALREADY_EXISTS
+    assert "no discover" in row.detail
+    assert _kinds(sent(session.control_out)) == ["register_ack"]
 
 
-def test_c21_passes_register_first(pb, driver, sent):
-    """The conformant ordering still passes, and still advertises the edge node."""
+def test_c21_fails_when_not_admitted_draws_a_register(pb, driver, sent, quick_c21):
+    """A NOT_ADMITTED refusal answered by another register: no announce. The second register
+    is accepted, so the run goes on with the robot admitted."""
     drv, session, report = driver
-    session.control_in.put(_adapter_msg(pb, register=pb.RegisterRobot(
-        robot_id="robot-conformance-1", adapter_version="1.0.0")))
+    session.control_in.put(_register(pb))
+    session.control_in.put(_register(pb))
 
-    advertised = drv._maybe_handle_registration()
+    assert drv._maybe_handle_registration() is True
 
-    assert advertised is True
-    assert _status(report, "C2.1").status is CheckStatus.PASS
+    assert _status(report, "C2.1").status is CheckStatus.FAIL
     out = sent(session.control_out)
-    assert [m.WhichOneof("payload") for m in out] == ["register_ack"]
-    assert len(out[0].register_ack.edge_endpoints) == 1
+    assert _kinds(out) == ["register_ack", "register_ack"]
+    assert out[0].register_ack.rejection == pb.REGISTRATION_REJECTION_NOT_ADMITTED
+    assert out[1].register_ack.accepted is True
+
+
+def test_c21_fails_discover_before_register(pb, driver, sent, quick_c21):
+    """``DiscoverRobot`` MUST NOT be attempted before ``register``. The robot has no Robot, so
+    the announce is staged; the next register is accepted."""
+    drv, session, report = driver
+    session.control_in.put(_discover(pb))
+    session.control_in.put(_register(pb))
+
+    assert drv._maybe_handle_registration() is True
+
+    row = _status(report, "C2.1")
+    assert row.status is CheckStatus.FAIL, row.detail
+    out = sent(session.control_out)
+    assert _kinds(out) == ["discover_ack", "register_ack"]
+    assert out[0].discover_ack.accepted is True
+    assert out[1].register_ack.accepted is True
+
+
+def test_c21_passes_when_no_register_follows_the_announce(pb, driver, sent, quick_c21):
+    """The order is right; with no later register the run goes on with the robot not admitted."""
+    drv, session, report = driver
+    session.control_in.put(_register(pb))
+    session.control_in.put(_discover(pb))
+
+    assert drv._maybe_handle_registration() is False
+
+    row = _status(report, "C2.1")
+    assert row.status is CheckStatus.PASS, row.detail
+    assert "not admitted" in row.detail
+
+
+def test_c21_returns_other_messages_to_the_stream(pb, driver, sent, quick_c21):
+    """Telemetry read while C2.1 waits goes back on the stream, in order, for later checks."""
+    drv, session, report = driver
+    beat = _adapter_msg(pb, telemetry=pb.TelemetryPayload(robot_id="robot-conformance-1"))
+    for m in (_register(pb), beat, _discover(pb), _register(pb)):
+        session.control_in.put(m)
+
+    assert drv._maybe_handle_registration() is True
+
+    assert [m.WhichOneof("payload") for m in drv._pushback] == ["telemetry"]
+
+
+def test_c21_skips_when_the_adapter_registers_nothing(pb, driver, harness_mod, monkeypatch):
+    """A minimal template registers nothing: the row is a skip, not a failure."""
+    monkeypatch.setattr(harness_mod, "_REGISTER_WAIT", 0.1)
+    drv, _session, report = driver
+
+    assert drv._maybe_handle_registration() is False
+
+    assert _status(report, "C2.1").status is CheckStatus.SKIP
 
 
 # ── C2.4 — the redial re-registers; it never re-discovers ────────────────────
