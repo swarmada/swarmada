@@ -29,7 +29,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,7 +37,6 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/audit"
-	"github.com/swarmada/swarmada/internal/estopscope"
 	"github.com/swarmada/swarmada/internal/metrics"
 )
 
@@ -89,12 +87,17 @@ func (r *NamespaceEstopReconciler) reader() client.Reader {
 // is (newly) present on the SwarmadaConfig, and clears it when the annotation is
 // removed.
 func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues("swarmadaconfig", req.NamespacedName)
-
 	cfg := &fleetv1.SwarmadaConfig{}
 	if err := r.Get(ctx, req.NamespacedName, cfg); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	return r.reconcileNamespace(ctx, req, cfg)
+}
+
+// reconcileNamespace is the pass on cfg as it was read: from the cache, or from the API server
+// when a clear finds a trigger written while it ran.
+func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req ctrl.Request, cfg *fleetv1.SwarmadaConfig) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("swarmadaconfig", req.NamespacedName)
 	if r.Estopper == nil {
 		return ctrl.Result{}, nil
 	}
@@ -126,7 +129,7 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: stopInForceResync}, r.holdLateArrivals(ctx, req.Namespace, cfg, trigger)
 	case !firing && wasProcessed:
 		r.markers.forget(req.NamespacedName)
-		return r.clearNamespaceEstop(ctx, req.Namespace, cfg)
+		return r.clearNamespaceEstop(ctx, req, cfg)
 	case !firing:
 		return ctrl.Result{}, nil // no estop active
 	}
@@ -228,9 +231,11 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // zone's stop that holds it. A clear of one scope is not the clear of another (RFC-0001
 // #safety-estop-scopes); the clear of that stop releases it. Each robot's record of the
 // namespace's stop is removed, and the marker is dropped only once every write has landed;
-// a failed write leaves it, and the clear is retried.
-func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, namespace string, cfg *fleetv1.SwarmadaConfig) (ctrl.Result, error) {
+// a failed write leaves it, and the clear is retried. A trigger written while the clear ran is
+// kept, and the pass runs again on it as a new stop (dropClearedMarker).
+func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, req ctrl.Request, cfg *fleetv1.SwarmadaConfig) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	namespace := req.Namespace
 	actor := estopActor(cfg.Annotations, "namespace-estop:"+namespace)
 	clearedBy := actor.Identity
 
@@ -268,15 +273,17 @@ func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, name
 		return ctrl.Result{}, fmt.Errorf("namespace %s estop clear: %w", namespace, cerr)
 	}
 
-	base := cfg.DeepCopy()
 	removedMarker := cfg.Annotations[annEstopProcessed]
-	delete(cfg.Annotations, annEstopProcessed)
-	consumeEstopActor(cfg.Annotations)
-	controllerutil.RemoveFinalizer(cfg, estopscope.StopFinalizer)
-	if err := r.Patch(ctx, cfg, client.MergeFrom(base)); err != nil {
+	cfg, again, err := dropClearedMarker(ctx, r.Client, r.reader(), cfg,
+		func(*fleetv1.SwarmadaConfig) (bool, error) { return true, nil })
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing namespace estop processed marker: %w", err)
 	}
 	r.markers.removed(client.ObjectKeyFromObject(cfg), removedMarker)
+	if again {
+		// A trigger written while this clear ran: its stop is issued now.
+		return r.reconcileNamespace(ctx, req, cfg)
+	}
 	return ctrl.Result{}, nil
 }
 

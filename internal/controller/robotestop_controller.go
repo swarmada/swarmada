@@ -30,7 +30,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
@@ -105,7 +104,12 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, robot); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	return r.reconcileRobot(ctx, req, robot)
+}
 
+// reconcileRobot is the pass on robot as it was read: from the cache, or from the API server when
+// a clear finds a trigger written while it ran.
+func (r *RobotEstopReconciler) reconcileRobot(ctx context.Context, req ctrl.Request, robot *fleetv1.Robot) (ctrl.Result, error) {
 	// A new stop, or a clear, comes before any resume request: a request whose handling
 	// cannot be written must never stand in the way of a stop (RFC-0001
 	// #safety-emergency-stop-protocol). A request is then answered against the stop.
@@ -138,7 +142,7 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return r.issueRobotEstop(ctx, robot, trigger)
 		case !firing && wasProcessed:
 			r.markers.forget(req.NamespacedName)
-			return r.clearRobotEstop(ctx, robot)
+			return r.clearRobotEstop(ctx, req, robot)
 		}
 	}
 
@@ -241,8 +245,9 @@ func (r *RobotEstopReconciler) issueRobotEstop(ctx context.Context, robot *fleet
 // it is until the clear of the stop that holds it, which then reaches it (RFC-0001
 // #safety-estop-scopes). A recorded stop whose carrier no longer exists cannot be cleared
 // by its own clear; this clear releases it (estopscope.OrphanedRelease), and the audit entry
-// names it.
-func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, robot *fleetv1.Robot) (ctrl.Result, error) {
+// names it. A trigger written while the clear ran is kept, and the pass runs again on it as a new
+// stop (dropClearedMarker).
+func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, req ctrl.Request, robot *fleetv1.Robot) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	actor := estopActor(robot.Annotations, "robot-estop:"+robot.Name)
 	clearedBy := actor.Identity
@@ -301,21 +306,19 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, robot *fleet
 		}
 	}
 
-	base := robot.DeepCopy()
 	removedMarker := robot.Annotations[annEstopProcessed]
-	delete(robot.Annotations, annEstopProcessed)
-	consumeEstopActor(robot.Annotations)
-	keepFinalizer, ferr := robotKeepsStopFinalizer(ctx, r.reader(), robot)
-	if ferr != nil {
-		return ctrl.Result{}, ferr
-	}
-	if !keepFinalizer {
-		controllerutil.RemoveFinalizer(robot, estopscope.StopFinalizer)
-	}
-	if err := r.Patch(ctx, robot, client.MergeFrom(base)); err != nil {
+	robot, again, err := dropClearedMarker(ctx, r.Client, r.reader(), robot, func(rb *fleetv1.Robot) (bool, error) {
+		keep, err := robotKeepsStopFinalizer(ctx, r.reader(), rb)
+		return !keep, err
+	})
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing robot estop processed marker: %w", err)
 	}
 	r.markers.removed(client.ObjectKeyFromObject(robot), removedMarker)
+	if again {
+		// A trigger written while this clear ran: its stop is issued now.
+		return r.reconcileRobot(ctx, req, robot)
+	}
 	return ctrl.Result{}, nil
 }
 

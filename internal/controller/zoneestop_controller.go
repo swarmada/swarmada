@@ -120,12 +120,17 @@ func (r *ZoneEstopReconciler) reader() client.Reader {
 
 // Reconcile fans out a zone estop when the trigger annotation is (newly) present.
 func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues("fleetzone", req.NamespacedName)
-
 	zone := &fleetv1.FleetZone{}
 	if err := r.Get(ctx, req.NamespacedName, zone); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	return r.reconcileZone(ctx, req, zone)
+}
+
+// reconcileZone is the pass on zone as it was read: from the cache, or from the API server when a
+// clear finds a trigger written while it ran.
+func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Request, zone *fleetv1.FleetZone) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("fleetzone", req.NamespacedName)
 
 	if r.Estopper == nil {
 		return ctrl.Result{}, nil
@@ -168,7 +173,7 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// The estop-trigger annotation was removed (the operator-authorized
 		// estop-clear verb): resume the robots and drop the processed marker.
 		r.markers.forget(req.NamespacedName)
-		return r.clearZoneEstop(ctx, req.Namespace, zone)
+		return r.clearZoneEstop(ctx, req, zone)
 	case !firing:
 		return ctrl.Result{}, r.projectEstopStatus(ctx, req.Namespace, zone, nil, nil) // no estop active here
 	}
@@ -316,8 +321,11 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // #safety-estop-scopes); the clear of that stop releases it. Each robot's record of this
 // zone's stop is removed. Only once every write has landed does it drop the processed marker,
 // so a fresh trigger fires cleanly; a failed write leaves the marker and the clear is retried.
-func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, namespace string, zone *fleetv1.FleetZone) (ctrl.Result, error) {
+// A trigger written while the clear ran is kept, and the pass runs again on it as a new stop
+// (dropClearedMarker).
+func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, req ctrl.Request, zone *fleetv1.FleetZone) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	namespace := req.Namespace
 	toChildren := true // scope must match the trigger's default
 	if p := zone.Spec.EstopPolicy; p != nil {
 		toChildren = p.PropagatesToChildren()
@@ -365,15 +373,17 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, namespace stri
 		return ctrl.Result{}, fmt.Errorf("zone %s estop clear: %w", zone.Name, cerr)
 	}
 
-	base := zone.DeepCopy()
 	removedMarker := zone.Annotations[annEstopProcessed]
-	delete(zone.Annotations, annEstopProcessed)
-	consumeEstopActor(zone.Annotations)
-	controllerutil.RemoveFinalizer(zone, estopscope.StopFinalizer)
-	if err := r.Patch(ctx, zone, client.MergeFrom(base)); err != nil {
+	zone, again, err := dropClearedMarker(ctx, r.Client, r.reader(), zone,
+		func(*fleetv1.FleetZone) (bool, error) { return true, nil })
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing estop processed marker: %w", err)
 	}
 	r.markers.removed(client.ObjectKeyFromObject(zone), removedMarker)
+	if again {
+		// A trigger written while this clear ran: its stop is issued now.
+		return r.reconcileZone(ctx, req, zone)
+	}
 
 	// Re-derive the tree: this zone, the descendants its estop reached and the parent it
 	// notified return to Clear unless another estop still reaches them.
