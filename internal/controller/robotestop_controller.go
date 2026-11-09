@@ -78,7 +78,7 @@ type RobotEstopReconciler struct {
 	// so a claim whose drop failed, or that a stale cached read still shows, is not reported
 	// as a request left unanswered.
 	answered sync.Map
-	// markers is the processed marker this process last wrote on each robot.
+	// markers is the processed marker this process last wrote or removed on each robot.
 	markers writtenMarkers
 }
 
@@ -112,8 +112,8 @@ func (r *RobotEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if r.Estopper != nil {
 		trigger, firing := robot.Annotations[annEstopTriggered]
 		processed, wasProcessed := robot.Annotations[annEstopProcessed]
-		if firing && (!wasProcessed || processed != trigger) && r.markers.has(req.NamespacedName, trigger) {
-			// As in the zone controller: the cache is behind a marker this process wrote.
+		if r.markers.behind(req.NamespacedName, trigger, firing, processed, wasProcessed) {
+			// As in the zone controller: the cache is behind a marker this process wrote or removed.
 			fresh := &fleetv1.Robot{}
 			if err := r.reader().Get(ctx, req.NamespacedName, fresh); err == nil {
 				robot = fresh
@@ -302,6 +302,7 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, robot *fleet
 	}
 
 	base := robot.DeepCopy()
+	removedMarker := robot.Annotations[annEstopProcessed]
 	delete(robot.Annotations, annEstopProcessed)
 	consumeEstopActor(robot.Annotations)
 	keepFinalizer, ferr := robotKeepsStopFinalizer(ctx, r.reader(), robot)
@@ -314,6 +315,7 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, robot *fleet
 	if err := r.Patch(ctx, robot, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing robot estop processed marker: %w", err)
 	}
+	r.markers.removed(client.ObjectKeyFromObject(robot), removedMarker)
 	return ctrl.Result{}, nil
 }
 

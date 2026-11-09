@@ -22,30 +22,60 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// writtenMarkers is the trigger whose processed marker this process last wrote, per carrier.
-// The manager's cache can read a carrier one write behind its own marker, and a pass that reads
-// that copy would issue the stop again (row S1 fires once for a trigger). A hit never decides
-// anything: it only sends the pass to the API server, which holds the answer, so what is
-// remembered cannot withhold a stop. A miss adds no read, so a first stop waits on nothing new.
+// writtenMarkers is the processed marker this process last wrote or removed, per carrier. The
+// manager's cache can read a carrier one write behind its own marker write. A pass that reads the
+// copy from before the marker was written would issue the stop again (row S1 fires once for a
+// trigger). A pass that reads the copy from before the marker was removed would clear the stop
+// again and write a second ESTOP_CLEARED entry for one clear. A hit never decides anything: it only
+// sends the pass to the API server, which holds the answer, so what is remembered cannot withhold
+// a stop or a clear. A miss adds no read, so a first stop and a first clear wait on nothing new.
 type writtenMarkers struct {
 	mu   sync.Mutex
-	last map[types.NamespacedName]string
+	last map[types.NamespacedName]markerWrite
 }
 
-func (w *writtenMarkers) wrote(key types.NamespacedName, trigger string) {
+// markerWrite is one carrier's last marker write: the value written, or the value removed.
+type markerWrite struct {
+	value   string
+	removed bool
+}
+
+func (w *writtenMarkers) set(key types.NamespacedName, m markerWrite) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.last == nil {
-		w.last = map[types.NamespacedName]string{}
+		w.last = map[types.NamespacedName]markerWrite{}
 	}
-	w.last[key] = trigger
+	w.last[key] = m
 }
 
-func (w *writtenMarkers) has(key types.NamespacedName, trigger string) bool {
+// wrote records that this process wrote the marker of trigger on the carrier.
+func (w *writtenMarkers) wrote(key types.NamespacedName, trigger string) {
+	w.set(key, markerWrite{value: trigger})
+}
+
+// removed records that this process removed the marker, of value processed, from the carrier.
+func (w *writtenMarkers) removed(key types.NamespacedName, processed string) {
+	w.set(key, markerWrite{value: processed, removed: true})
+}
+
+// behind reports whether a pass's copy of the carrier may be one write behind this process's
+// last marker write: the trigger is there without the marker this process wrote for it, or the
+// trigger is gone and the marker this process removed is still there.
+func (w *writtenMarkers) behind(key types.NamespacedName, trigger string, firing bool, processed string, marked bool) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	got, ok := w.last[key]
-	return ok && got == trigger
+	m, ok := w.last[key]
+	if !ok {
+		return false
+	}
+	switch {
+	case firing && (!marked || processed != trigger):
+		return !m.removed && m.value == trigger
+	case !firing && marked:
+		return m.removed && m.value == processed
+	}
+	return false
 }
 
 func (w *writtenMarkers) forget(key types.NamespacedName) {
