@@ -160,6 +160,16 @@ _STREAM_POLL = 0.1
 _SERVER_STOP_GRACE = 1.0
 _STREAM_TIMEOUT = 10.0  # seconds to wait for the adapter to open both streams
 _REGISTER_WAIT = 1.5  # seconds to wait for an adapter-initiated registration
+# C2.1 plays first contact: the first register is refused NOT_ADMITTED. Seconds to wait for the
+# announce (discover) that MUST follow it, and then for the register of the provisioning loop's
+# next iteration, which the harness accepts as the robot's admission. The loop's interval is
+# 60 s while the adapter has no TTL from a DiscoverAck
+# (RFC-0001 #fleet-adapter-protocol-connection-lifecycle), and an adapter schedules that
+# iteration when it is refused, before the DiscoverAck arrives, so the wait covers 60 s. The
+# DiscoverAck's ttl_seconds sets the interval of every later iteration to min(ttl_seconds/2, 300).
+_DISCOVER_WAIT = 5.0
+_ADMISSION_WAIT = 75.0
+_DISCOVER_TTL_S = 2
 # Seconds to wait, after the scan reply, for the CapabilitiesSnapshot an adapter pushes at
 # registration (C12.2) when none has arrived yet.
 _PUSH_WAIT = 3.0
@@ -2534,70 +2544,124 @@ class _Driver:
                              "output, and is graded on the ControlPlane surface as CP8.1. "
                              "Telemetry was observed, so the projection path is live."))
 
-    def _maybe_handle_registration(self) -> bool:
-        # C2.1 — peek for an adapter-initiated Register/Discover. If one arrives,
-        # ack it and advertise an edge endpoint (so an edge-capable adapter reaches
-        # C8). A minimal template registers nothing → C2.1 skip; anything else read
-        # here is pushed back so the fencing checks still see it.
-        try:
-            msg = self.s.control_in.get(timeout=_REGISTER_WAIT)
-        except queue.Empty:
-            self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
-                       CheckStatus.SKIP, detail=(
-                           SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
-                           + ": adapter initiated no registration in this run "
-                           "(expected for a minimal/template adapter)"))
-            return False
-        if msg is _SENTINEL:
-            self._pushback.append(_SENTINEL)
-            self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
-                       CheckStatus.SKIP,
-                       detail=f"{SkipCause.ADAPTER_DID_NOT_REACH_STATE.value}: control stream "
-                              "closed before registration")
-            return False
+    def _next_lifecycle_message(self, timeout: float, held: list):
+        """The next ``register`` or ``discover`` the adapter sends within timeout, or None, or
+        _SENTINEL when the stream closes. Every other message read meanwhile goes on held, in
+        order, for the caller to return to the stream."""
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            try:
+                msg = self.s.control_in.get(timeout=left)
+            except queue.Empty:
+                return None
+            if msg is _SENTINEL:
+                return _SENTINEL
+            if msg.WhichOneof("payload") in ("register", "discover"):
+                return msg
+            held.append(msg)
 
-        kind = msg.WhichOneof("payload")
+    def _accept_register(self, msg) -> None:
+        """Accept a register: the robot is admitted. The ack advertises an edge endpoint, so an
+        edge-capable adapter reaches C8, and a 1 s telemetry interval, which C2.3 measures."""
+        self._registered_robot = msg.register.robot_id
         edge = pb.EdgeEndpoint(zone="zone-conformance", address=f"localhost:{self.port}")
-        if kind == "register":
-            self._registered_robot = msg.register.robot_id
+        self.s.control_out.put(pb.ControlPlaneMessage(register_ack=pb.RegisterAck(
+            accepted=True, telemetry_interval_seconds=1, edge_endpoints=[edge])))
+
+    def _maybe_handle_registration(self) -> bool:
+        # C2.1 plays first contact with a robot that is not admitted yet (RFC-0001
+        # #discoveredrobot-re-connection-flow-registerrobot): the first register is refused
+        # NOT_ADMITTED, and the adapter MUST then announce it with a discover and keep retrying
+        # register each provisioning-loop interval. The register of the next iteration is
+        # accepted: that is the robot's admission, and the run goes on with it admitted. A
+        # minimal template registers nothing, so C2.1 skips. Every other message read here is
+        # returned to the stream for the checks that follow.
+        title = "DiscoverRobot vs RegisterRobot used correctly"
+        held: list = []
+        try:
+            first = self._next_lifecycle_message(_REGISTER_WAIT, held)
+            if first is None:
+                self.r.add("C2.1", title, CheckStatus.SKIP, detail=(
+                    SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                    + ": adapter initiated no registration in this run "
+                    "(expected for a minimal/template adapter)"))
+                return False
+            if first is _SENTINEL:
+                held.append(_SENTINEL)
+                self.r.add("C2.1", title, CheckStatus.SKIP,
+                           detail=f"{SkipCause.ADAPTER_DID_NOT_REACH_STATE.value}: control stream "
+                                  "closed before registration")
+                return False
+            if first.WhichOneof("payload") == "discover":
+                # DiscoverRobot MUST NOT be attempted before register. The robot has no Robot
+                # yet, so the announce is staged, as a control plane stages it; the row fails on
+                # the order, and the run goes on once the adapter registers.
+                self._ack_discover()
+                self.r.add("C2.1", title, CheckStatus.FAIL,
+                           detail="the first lifecycle message was discover, not register; "
+                                  "DiscoverRobot MUST NOT be attempted before register")
+                return self._admit_next_register(held)
             self.s.control_out.put(pb.ControlPlaneMessage(register_ack=pb.RegisterAck(
-                accepted=True, telemetry_interval_seconds=1, edge_endpoints=[edge])))  # 1s: the
-                # suite now MEASURES adoption of this value (C2.3), and a 10s cadence
-                # would starve every downstream check that waits on telemetry.
-            self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
-                       CheckStatus.PASS,
-                       detail="RegisterRobot for an admitted robot is acked")
+                accepted=False, rejection=pb.REGISTRATION_REJECTION_NOT_ADMITTED,
+                message="no Robot exists for this robot_id yet; announce it with discover")))
+            nxt = self._next_lifecycle_message(_DISCOVER_WAIT, held)
+            if nxt is None or nxt is _SENTINEL:
+                if nxt is _SENTINEL:
+                    held.append(_SENTINEL)
+                self.r.add("C2.1", title, CheckStatus.FAIL,
+                           detail=("register came first and was refused NOT_ADMITTED, and no "
+                                   f"discover followed within {_DISCOVER_WAIT:g}s"
+                                   + ("; the control stream closed" if nxt is _SENTINEL else "")
+                                   + ". A NOT_ADMITTED refusal MUST be answered by announcing "
+                                     "the robot (discover)"))
+                return False
+            if nxt.WhichOneof("payload") == "register":
+                self._accept_register(nxt)
+                self.r.add("C2.1", title, CheckStatus.FAIL,
+                           detail="register came first and was refused NOT_ADMITTED, and the "
+                                  "adapter registered again without announcing the robot; a "
+                                  "NOT_ADMITTED refusal MUST be answered by discover. The second "
+                                  "register was accepted, so the run goes on with the robot "
+                                  "admitted")
+                return True
+            self._ack_discover()
+            admitted = self._admit_next_register(held)
+            self.r.add("C2.1", title, CheckStatus.PASS, detail=(
+                "register came first; refused NOT_ADMITTED, the adapter announced the robot "
+                "(discover)"
+                + ("; the provisioning loop's next register was accepted as the admission"
+                   if admitted else
+                   f"; no register followed within {_ADMISSION_WAIT:g}s, so the run goes on "
+                   "with the robot not admitted")))
+            return admitted
+        finally:
+            self._pushback.extend(held)
+
+    def _ack_discover(self) -> None:
+        """Stage an announce, as a control plane stages one for a robot with no Robot."""
+        self.s.control_out.put(pb.ControlPlaneMessage(discover_ack=pb.DiscoverAck(
+            accepted=True, ttl_seconds=_DISCOVER_TTL_S,
+            message="staged for admission; the next register is accepted")))
+
+    def _admit_next_register(self, held: list) -> bool:
+        """Wait for the provisioning loop's next register and accept it, answering any
+        re-announce meanwhile. False when none comes within _ADMISSION_WAIT."""
+        deadline = time.monotonic() + _ADMISSION_WAIT
+        while True:
+            msg = self._next_lifecycle_message(max(0.0, deadline - time.monotonic()), held)
+            if msg is None:
+                return False
+            if msg is _SENTINEL:
+                held.append(_SENTINEL)
+                return False
+            if msg.WhichOneof("payload") == "discover":
+                self._ack_discover()
+                continue
+            self._accept_register(msg)
             return True
-        if kind == "discover":
-            # fleet-adapter-protocol.md "Required messages": RegisterRobot MUST be the
-            # FIRST attempt for every managed robot on connect and reconnect, and
-            # DiscoverRobot MUST NOT be attempted before it — a NOT_ADMITTED rejection is
-            # what routes an adapter into the discovery loop. This harness plays a control
-            # plane that HOLDS a Robot CRD for this id: it acks a register, advertises edge
-            # endpoints, and dispatches work for the rest of the run. A discover for it is
-            # the reverse ordering the catalog forbids.
-            #
-            # Answered in band with ALREADY_EXISTS, the enum a real control plane returns
-            # here, rather than by closing the stream: the in-band error model reserves
-            # gRPC status codes for connection-level faults, and an adapter that corrects
-            # itself deserves to be told what was wrong.
-            self.s.control_out.put(pb.ControlPlaneMessage(discover_ack=pb.DiscoverAck(
-                accepted=False, rejection=pb.REGISTRATION_REJECTION_ALREADY_EXISTS,
-                message="a Robot already exists for this id; send register")))
-            self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
-                       CheckStatus.FAIL,
-                       detail="the first lifecycle message for an ADMITTED robot was "
-                              "discover, not register; DiscoverRobot MUST NOT be attempted "
-                              "before register, and the control plane answered "
-                              "ALREADY_EXISTS")
-            return False
-        # Not a registration — return it to the stream for the fencing checks.
-        self._pushback.append(msg)
-        self.r.add("C2.1", "DiscoverRobot vs RegisterRobot used correctly",
-                   CheckStatus.SKIP,
-                   detail=f"{SkipCause.ADAPTER_DID_NOT_REACH_STATE.value}: adapter initiated "
-                          "no registration")
-        return False
 
     def _check_optional_decline(self) -> None:
         # C7.1 — an optional command the adapter does not implement MUST be declined

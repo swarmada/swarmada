@@ -236,7 +236,7 @@ def keyed_run(tmp_path_factory):
     witness = tmp / "witness"
     adapter_cmd = " ".join(shlex.quote(a) for a in (
         sys.executable, str(FAKE), "--endpoint", "localhost:{port}",
-        "--witness-file", str(witness), "--plant", "keyed-custom"))
+        "--witness-file", str(witness), "--provisioning-interval", "1", "--plant", "keyed-custom"))
     run = subprocess.run(
         [sys.executable, "-m", "adapters.conformance", "--stub-path", "proto",
          "--adapter-name", "latching-fake-keyed-custom", "--port", str(_free_port()),
