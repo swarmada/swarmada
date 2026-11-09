@@ -44,6 +44,16 @@ from swarmada_sdk.safety import (  # noqa: E402
 from {{cookiecutter.python_package}}.robot import SimulatedRobot  # noqa: E402
 
 _TELEMETRY_INTERVAL = 0.2  # until a RegisterAck advertises one (C2.3)
+# The provisioning loop (C2.1; RFC-0001 #fleet-adapter-protocol-connection-lifecycle). A register
+# refused NOT_ADMITTED is answered by announcing the robot (discover), and register is sent again
+# every interval I until it is accepted. The DiscoverAck's ttl_seconds sets I = min(ttl/2, 300);
+# with no TTL, I is 60 s. The loop waits this long for the DiscoverAck before it picks I.
+_PROVISIONING_INTERVAL_S = 60.0
+_DISCOVER_ACK_WAIT_S = 5.0
+
+
+def _provisioning_interval(ttl_seconds: int) -> float:
+    return min(ttl_seconds / 2.0, 300.0) if ttl_seconds > 0 else _PROVISIONING_INTERVAL_S
 _TICK_DT = 0.2
 
 # C1.5: reconnect with bounded exponential backoff. The first redial comes within
@@ -215,6 +225,10 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         # True only between an ACCEPTED RegisterAck and the end of that session. Work
         # arriving on a session whose registration was refused is declined (C13.2).
         self._registered = False
+        # The provisioning loop: the latest DiscoverAck's ttl_seconds, and an event set when a
+        # DiscoverAck arrives, which the loop waits on before it picks its interval.
+        self._discover_ttl = 0
+        self._discover_acked = threading.Event()
         # True once this session's HelloAck accepted it. Telemetry waits for it, so a
         # redialled stream carries RegisterRobot before any TelemetryPayload.
         self._session_ready = False
@@ -310,6 +324,23 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 threading.Thread(target=self._telemetry_loop, args=(stub,), daemon=True).start()
         elif kind == "register_ack":
             ack = cp.register_ack
+            if not ack.accepted and ack.rejection == pb.REGISTRATION_REJECTION_NOT_ADMITTED:
+                # No Robot exists for this robot yet: announce it for an operator to admit, and
+                # keep registering every interval until the admission is picked up (C2.1). No
+                # work is accepted meanwhile.
+                print(f"NOT_ADMITTED robot={self._robot_id}; announced for admission",
+                      file=sys.stderr)
+                # The Stop Latch, A refused register: work held for the robot is interrupted
+                # work, NOT_ADMITTED included.
+                with self._latch_lock:
+                    self._interrupt_work()
+                self._discover_acked.clear()
+                self._outbox.put(pb.AdapterMessage(discover=pb.DiscoverRobot(
+                    robot_id=self._robot_id, hardware=self._reported_hardware())))
+                outbox = self._outbox
+                threading.Thread(target=self._provisioning_iteration, args=(outbox,),
+                                 daemon=True).start()
+                return
             if not ack.accepted:
                 # Refused (for example VERSION_MISMATCH): the robot is not under management
                 # on this session, so no work is accepted on it (C13.2). Telemetry and the
@@ -333,11 +364,30 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
             # which keeps working while the control plane is unreachable.
             for e in ack.edge_endpoints:
                 self._dial_edge(e.address)
+        elif kind == "discover_ack":
+            # Announced. The robot is not under management until a register is accepted.
+            self._discover_ttl = cp.discover_ack.ttl_seconds
+            self._discover_acked.set()
         elif kind == "heartbeat":
             self._outbox.put(pb.AdapterMessage(
                 heartbeat=pb.HeartbeatResponse(robot_id=cp.heartbeat.robot_id)))
         elif kind == "command":
             self._handle_command(cp.command)
+
+    def _provisioning_iteration(self, outbox) -> None:
+        """Register again after the provisioning interval, on the session that was refused.
+
+        The interval is the DiscoverAck's (min(ttl/2, 300)), or 60 s when none arrives with a
+        TTL. A session that has been replaced, or a robot admitted meanwhile, ends the loop: the
+        new session registers on its own.
+        """
+        self._discover_acked.wait(_DISCOVER_ACK_WAIT_S)
+        if self._shutdown.wait(_provisioning_interval(self._discover_ttl)):
+            return
+        if self._registered or outbox is not self._outbox:
+            return
+        outbox.put(self._pb.AdapterMessage(register=self._pb.RegisterRobot(
+            robot_id=self._robot_id, reported_hardware=self._reported_hardware())))
 
     def _reconcile(self, ack) -> None:
         """Adopt the control plane's authoritative state on (re-)registration.
