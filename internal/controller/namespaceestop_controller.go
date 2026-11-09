@@ -70,7 +70,7 @@ type NamespaceEstopReconciler struct {
 	// records and the clear's robot list (see ZoneEstopReconciler.APIReader). Nil falls
 	// back to Client.
 	APIReader client.Reader
-	// markers is the processed marker this process last wrote on the namespace's config.
+	// markers is the processed marker this process last wrote or removed on the namespace's config.
 	markers writtenMarkers
 }
 
@@ -100,8 +100,8 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	trigger, firing := cfg.Annotations[annEstopTriggered]
 	processed, wasProcessed := cfg.Annotations[annEstopProcessed]
-	if firing && (!wasProcessed || processed != trigger) && r.markers.has(req.NamespacedName, trigger) {
-		// As in the zone controller: the cache is behind a marker this process wrote.
+	if r.markers.behind(req.NamespacedName, trigger, firing, processed, wasProcessed) {
+		// As in the zone controller: the cache is behind a marker this process wrote or removed.
 		fresh := &fleetv1.SwarmadaConfig{}
 		if err := r.reader().Get(ctx, req.NamespacedName, fresh); err == nil {
 			cfg = fresh
@@ -269,12 +269,14 @@ func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, name
 	}
 
 	base := cfg.DeepCopy()
+	removedMarker := cfg.Annotations[annEstopProcessed]
 	delete(cfg.Annotations, annEstopProcessed)
 	consumeEstopActor(cfg.Annotations)
 	controllerutil.RemoveFinalizer(cfg, estopscope.StopFinalizer)
 	if err := r.Patch(ctx, cfg, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing namespace estop processed marker: %w", err)
 	}
+	r.markers.removed(client.ObjectKeyFromObject(cfg), removedMarker)
 	return ctrl.Result{}, nil
 }
 

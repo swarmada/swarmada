@@ -103,7 +103,7 @@ type ZoneEstopReconciler struct {
 	// records are read and written through it, and the clear lists the robots through it,
 	// so a record written moments before is not missed. Nil falls back to Client.
 	APIReader client.Reader
-	// markers is the processed marker this process last wrote on each zone.
+	// markers is the processed marker this process last wrote or removed on each zone.
 	markers writtenMarkers
 }
 
@@ -132,9 +132,10 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	trigger, firing := zone.Annotations[annEstopTriggered]
 	processed, wasProcessed := zone.Annotations[annEstopProcessed]
-	if firing && (!wasProcessed || processed != trigger) && r.markers.has(req.NamespacedName, trigger) {
-		// This process wrote this trigger's marker and the cache does not show it. The API
-		// server says which is right. A failed read leaves the cached copy: the stop goes.
+	if r.markers.behind(req.NamespacedName, trigger, firing, processed, wasProcessed) {
+		// The cache does not show this process's last marker write: the marker it wrote for this
+		// trigger, or the removal of the marker of a trigger it cleared. The API server says
+		// which is right. A failed read leaves the cached copy: the stop, or the clear, goes.
 		fresh := &fleetv1.FleetZone{}
 		if err := r.reader().Get(ctx, req.NamespacedName, fresh); err == nil {
 			zone = fresh
@@ -365,12 +366,14 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, namespace stri
 	}
 
 	base := zone.DeepCopy()
+	removedMarker := zone.Annotations[annEstopProcessed]
 	delete(zone.Annotations, annEstopProcessed)
 	consumeEstopActor(zone.Annotations)
 	controllerutil.RemoveFinalizer(zone, estopscope.StopFinalizer)
 	if err := r.Patch(ctx, zone, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("clearing estop processed marker: %w", err)
 	}
+	r.markers.removed(client.ObjectKeyFromObject(zone), removedMarker)
 
 	// Re-derive the tree: this zone, the descendants its estop reached and the parent it
 	// notified return to Clear unless another estop still reaches them.
