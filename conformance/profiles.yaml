@@ -1419,17 +1419,23 @@ surfaces:
       - name: safety
         precondition: >-
           at least one motion channel independent of the command path that can confirm rest
-        core:     [C5.1, C5.2, C5.3, C5.4, C5.5, C5.6, C5.7, C5.8, C14.1, C14.2]
+        core:     [C5.1, C5.2, C5.3, C5.4, C5.5, C5.6, C5.7, C14.1, C14.2]
       - name: discovery
         core:     [C12.1, C12.2]
       - name: traffic
         core:     [C11.1]
+      # C5.8 (a stop holds the robot's work until its EstopClear lifts it) is graded in
+      # `dispatch`: the work it holds exists only on an accepted assignment. In `safety`, which
+      # every tier requires, it kept an adapter that declares no action, as a Read Only or
+      # Traffic Light adapter may, from every tier: `adapter-declares-no-action` leaves the row
+      # unestablished. RFC-0001's profile and support-level tables still list C5.8 in `safety`,
+      # and are owed the same move.
       - name: dispatch
         # C3.9 is Core: it grades a MUST at every contract version, like C3.1-C3.7. RFC-0001's
         # profile table still lists C3.1-C3.7 as the Core fencing rows, and is owed the same
         # addition.
-        core:     [C3.1, C3.2, C3.3, C3.4, C3.5, C3.6, C3.7, C3.9, C6.4, C16.1, C19.1, C19.2, C19.3,
-                   C19.4, C19.5]
+        core:     [C3.1, C3.2, C3.3, C3.4, C3.5, C3.6, C3.7, C3.9, C5.8, C6.4, C16.1, C19.1, C19.2,
+                   C19.3, C19.4, C19.5]
         # C3.8 is EXTENDED, not core, and for the same reason C13.2 is: it grades MUST only
         # at the contract version this suite attests, and advisory at N-1 (ADR-0032 sets the
         # supported range at N and N-1 minor and states a minor release never invalidates an
