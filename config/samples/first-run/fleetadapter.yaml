@@ -21,4 +21,4 @@ spec:
   conformanceReport:
     suiteVersion: "C0-C19"
     configMapRef: sim-fleet-adapter-conformance
-    digest: "sha256:8a60e567d34ddb8668f4e45798e38df604e4bb691aa5e98bc9b574d5e86a2144"
+    digest: "sha256:6012874d3cabd497cfaf1050033a1f06de0059b80f295fce186b77bf8f5e1b26"

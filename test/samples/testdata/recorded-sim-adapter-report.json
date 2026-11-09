@@ -2,12 +2,12 @@
   "adapter": "simulation",
   "protocol_version": "fleet_adapter.v1",
   "contract_version": "1.4.0",
-  "suite_revision": "2026.10.22.2",
+  "suite_revision": "2026.11.09",
   "honoured_operating_constraints": [],
   "measurements": {
     "stream_lease_seconds": 2.0,
     "stream_held_across_renewals_seconds": 3.0,
-    "stream_unrenewed_before_probe_seconds": 3.002
+    "stream_unrenewed_before_probe_seconds": 3.005
   },
   "measurement_checks": {
     "stream_lease_seconds": "C18.3",
@@ -54,7 +54,7 @@
       "title": "DiscoverRobot vs RegisterRobot used correctly",
       "status": "pass",
       "level": "MUST",
-      "detail": "RegisterRobot for an admitted robot is acked"
+      "detail": "register came first; refused NOT_ADMITTED, the adapter announced the robot (discover); the provisioning loop's next register was accepted as the admission"
     },
     {
       "check_id": "C12.1",
@@ -68,7 +68,7 @@
       "title": "A CapabilitiesSnapshot is pushed at registration, carrying the scan reply's catalog",
       "status": "pass",
       "level": "MUST",
-      "detail": "1 snapshot(s) pushed for 'robot-conformance-1'; the latest declares ['Navigate', 'PickUp', 'DropOff', 'Patrol', 'Charge', 'Custom', 'Custom'], identical to the scan reply (types, required capabilities, parameters)"
+      "detail": "2 snapshot(s) pushed for 'robot-conformance-1'; the latest declares ['Navigate', 'PickUp', 'DropOff', 'Patrol', 'Charge', 'Custom', 'Custom'], identical to the scan reply (types, required capabilities, parameters)"
     },
     {
       "check_id": "C19.1",
@@ -201,7 +201,7 @@
       "title": "EstopAck within the 500 ms SafetyStream budget",
       "status": "pass",
       "level": "MUST",
-      "detail": "measured 270 ms to the first EstopAck naming 'e1' (budget 500 ms, harness transport included); passed over ['local_stop'] to reach it"
+      "detail": "measured 271 ms to the first EstopAck naming 'e1' (budget 500 ms, harness transport included); passed over ['local_stop'] to reach it"
     },
     {
       "check_id": "C5.1",
@@ -236,7 +236,7 @@
       "title": "An early STOPPED fails: STOPPED is not sent before the witnessed moment of rest",
       "status": "pass",
       "level": "MUST NOT",
-      "detail": "robot moving at 1.000 m/s when the estop was sent; witnessed rest at +0.270s, STOPPED at +0.269s. witness: simulation adapter plant model (KinematicSim), simulated plant only; rest noise 0.0 m/s, hold 0.2 s, resolution 0.2 s; STOPPED timed by confirmed_at_ms; sample gap at the rest 0.055 s, so the tolerance is 0.200 s"
+      "detail": "robot moving at 1.000 m/s when the estop was sent; witnessed rest at +0.270s, STOPPED at +0.270s. witness: simulation adapter plant model (KinematicSim), simulated plant only; rest noise 0.0 m/s, hold 0.2 s, resolution 0.2 s; STOPPED timed by confirmed_at_ms; sample gap at the rest 0.052 s, so the tolerance is 0.200 s"
     },
     {
       "check_id": "C5.4",
@@ -355,7 +355,7 @@
       "title": "No sensor-stream bytes on the control plane while a stream runs",
       "status": "pass",
       "level": "MUST NOT",
-      "detail": "ControlStream 76 B/s idle vs 38 B/s with 'front-rgb' active. LIMIT: this detects RELAYING \u2014 a stream's worth of traffic on a control-plane channel \u2014 and not steganography; an adapter dribbling frames through an existing field below this rate would pass"
+      "detail": "ControlStream 38 B/s idle vs 76 B/s with 'front-rgb' active. LIMIT: this detects RELAYING \u2014 a stream's worth of traffic on a control-plane channel \u2014 and not steganography; an adapter dribbling frames through an existing field below this rate would pass"
     },
     {
       "check_id": "C18.4",
@@ -439,7 +439,7 @@
       "title": "Honour telemetry_interval_seconds from RegisterAck",
       "status": "pass",
       "level": "MUST",
-      "detail": "inter-payload gaps [1.02, 1.01]s against an advertised 1s"
+      "detail": "inter-payload gaps [1.01, 1.01]s against an advertised 1s"
     },
     {
       "check_id": "C5.8",
