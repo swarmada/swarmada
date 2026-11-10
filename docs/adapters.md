@@ -199,12 +199,15 @@ make conformance-sim
 
 # Any other adapter, in its default (simulated-binding) mode:
 make conformance ADAPTER='python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py --endpoint localhost:{port}'
-make conformance ADAPTER='python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py --endpoint localhost:{port} --comms simulated'
+make conformance ADAPTER='python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py --endpoint localhost:{port} --comms simulated --insecure'
 make conformance ADAPTER='python3 adapters/external/fleet-adapter-mavlink/fleet_adapter_mavlink/adapter.py --endpoint localhost:{port} --link simulated'
 ```
 
 `{port}` is substituted with the harness's `--port` (`CONFORMANCE_PORT`, default
-`9090`). Add `CONFORMANCE_ARGS='--json report.json'` to also write a machine-readable
+`9090`). The harness serves plaintext, and the VDA5050 adapter refuses to start
+without TLS unless it is given `--insecure`, which is for local tests such as this
+one; a checkout of the adapter from before that flag rejects it as an unrecognized
+argument. Add `CONFORMANCE_ARGS='--json report.json'` to also write a machine-readable
 report; `--json` given to `make` directly is a `make` option and fails. A conforming
 adapter has no failed MUST/MUST NOT among the checks that ran; a `skip` is
 not a pass — it means the harness could not observe that behavior in this
