@@ -2395,9 +2395,7 @@ func (r *FleetActionReconciler) requeueOvertakenByEstop(ctx context.Context, act
 		return requeueRuns, requeuingMessage, nil
 	}
 	reason := action.Annotations[annRequeueRequested]
-	base := action.DeepCopy()
-	delete(action.Annotations, annRequeueRequested)
-	if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+	if err := r.removeActionAnnotation(ctx, action, annRequeueRequested); err != nil {
 		return requeueRuns, "", fmt.Errorf("dropping a requeue request the estop overtook: %w", err)
 	}
 	log.FromContext(ctx).Info("requeue request dropped: an emergency stop on the robot overtook it; pausing",
@@ -2887,9 +2885,7 @@ func (r *FleetActionReconciler) finalizeRequeue(ctx context.Context, action *fle
 	r.releaseReservation(ctx, action.Namespace, action.Spec.Zone, action.Name)
 
 	// Clear the requeue annotation so the re-scheduled action is not requeued again.
-	base := action.DeepCopy()
-	delete(action.Annotations, annRequeueRequested)
-	if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+	if err := r.removeActionAnnotation(ctx, action, annRequeueRequested); err != nil {
 		return fmt.Errorf("clearing requeue annotation: %w", err)
 	}
 	return nil
@@ -2912,9 +2908,7 @@ func (r *FleetActionReconciler) finalizeCapabilityLossFailure(ctx context.Contex
 		return fmt.Errorf("finalising capability-loss failure: %w", err)
 	}
 
-	base := action.DeepCopy()
-	delete(action.Annotations, annRequeueRequested)
-	if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+	if err := r.removeActionAnnotation(ctx, action, annRequeueRequested); err != nil {
 		return fmt.Errorf("clearing requeue annotation: %w", err)
 	}
 	if r.Recorder != nil {
@@ -2944,9 +2938,7 @@ func (r *FleetActionReconciler) finalizeStopUnconfirmed(ctx context.Context, act
 	if err := r.patchActionStatus(ctx, action, original); err != nil {
 		return fmt.Errorf("failing task on an unconfirmed stop: %w", err)
 	}
-	base := action.DeepCopy()
-	delete(action.Annotations, annRequeueRequested)
-	if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+	if err := r.removeActionAnnotation(ctx, action, annRequeueRequested); err != nil {
 		return fmt.Errorf("clearing requeue annotation: %w", err)
 	}
 	if r.Recorder != nil {
@@ -2966,9 +2958,7 @@ func (r *FleetActionReconciler) clearRequeueAnnotation(ctx context.Context, acti
 	if _, ok := action.Annotations[annRequeueRequested]; !ok {
 		return nil
 	}
-	base := action.DeepCopy()
-	delete(action.Annotations, annRequeueRequested)
-	if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+	if err := r.removeActionAnnotation(ctx, action, annRequeueRequested); err != nil {
 		return fmt.Errorf("clearing requeue annotation: %w", err)
 	}
 	log.FromContext(ctx).Info("capability-loss cancel: robot completed the task; no reassignment", "task", action.Name)
@@ -3292,9 +3282,7 @@ func (r *FleetActionReconciler) requeueFailedAction(ctx context.Context, action 
 	}
 
 	if _, alerted := action.Annotations[annFailureAlerted]; alerted {
-		base := action.DeepCopy()
-		delete(action.Annotations, annFailureAlerted)
-		if err := r.Patch(ctx, action, client.MergeFrom(base)); err != nil {
+		if err := r.removeActionAnnotation(ctx, action, annFailureAlerted); err != nil {
 			return ctrl.Result{}, fmt.Errorf("clearing failure-alerted annotation: %w", err)
 		}
 	}
