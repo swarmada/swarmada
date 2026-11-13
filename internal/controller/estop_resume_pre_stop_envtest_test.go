@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
@@ -90,12 +91,16 @@ func (f *preStopFixture) report(t *testing.T, lidar fleetv1.HardwareStatus) {
 	}
 }
 
-// rederive writes status.capabilities as the Robot reconciler derives them.
+// rederive writes status.capabilities as the Robot reconciler derives them. The stop's
+// record is written in a goroutine of its own and gates nothing (recordStop), so it can land
+// between the read and the write: a conflict reads again and writes again.
 func (f *preStopFixture) rederive(t *testing.T) {
 	t.Helper()
-	robot := getEnvRobot(t, f.ns, "amr-1")
-	robot.Status.Capabilities = DeriveCapabilities(robot)
-	if err := envK8s.Status().Update(context.Background(), robot); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		robot := getEnvRobot(t, f.ns, "amr-1")
+		robot.Status.Capabilities = DeriveCapabilities(robot)
+		return envK8s.Status().Update(context.Background(), robot)
+	}); err != nil {
 		t.Fatalf("write derived capabilities: %v", err)
 	}
 }
@@ -296,9 +301,15 @@ func newEnvWindow(t *testing.T, ns string) *ZoneMaintenanceReconciler {
 	return &ZoneMaintenanceReconciler{Client: envK8s, Scheme: envScheme}
 }
 
+// reconcileEnvWindow runs one pass of the window's reconcile. A conflict is retried, as the
+// manager's requeue would: the stop's record is written in a goroutine of its own (recordStop)
+// and can land between the pass's read of the robot and its write of the robot's phase.
 func reconcileEnvWindow(t *testing.T, r *ZoneMaintenanceReconciler, ns string) {
 	t.Helper()
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "m"}}); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "m"}})
+		return err
+	}); err != nil {
 		t.Fatalf("reconcile window: %v", err)
 	}
 }
