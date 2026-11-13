@@ -126,6 +126,9 @@ type Dispatcher struct {
 	slaThreshold    time.Duration
 	confirmTimeout  time.Duration
 	deliveryTimeout time.Duration
+	// removalWait bounds how long a report waits for a removal in progress (removed.go); zero is
+	// defaultConfirmTimeout.
+	removalWait time.Duration
 
 	mu        sync.Mutex
 	streams   map[string]controlstream.SafetySender // adapterKey → live sender
@@ -141,6 +144,10 @@ type Dispatcher struct {
 	// (rememberedKey → oldest first), so a later report of one is answered as a cleared stop
 	// (removed.go).
 	removed map[string][]removedStop
+	// removing is, per robot (rememberedKey) and stop ID, the IDs a clear on a connection below
+	// 1.4.0 is removing by a write not yet ended, each with the channel that clear closes once its
+	// attempts end (removed.go).
+	removing map[string]map[string]chan struct{}
 	// issued is the stop IDs this process issued: a recorded stop among them is this process's own,
 	// never a predecessor's to run out (takeover.go).
 	issued map[string]struct{}
@@ -353,12 +360,17 @@ func (d *Dispatcher) RouteAck(identity controlstream.TLSIdentity, from controlst
 	p := d.pending[pk]
 	if p == nil {
 		// Not awaited. An ID whose entry was removed and is remembered for the robot is a report
-		// of a cleared stop, answered with its fence and its EstopClear (removed.go). Any other is
-		// dropped: a reported stop is the end-state work.
+		// of a cleared stop, answered with its fence and its EstopClear (removed.go). One a clear
+		// is removing now waits for that clear, and is answered only if its write landed. Any
+		// other is dropped: a reported stop is the end-state work.
 		rm, remembered := d.rememberedLocked(identity.Namespace, robotID, ack.GetEstopId())
+		removing := d.removingLocked(identity.Namespace, robotID, ack.GetEstopId())
 		d.mu.Unlock()
-		if remembered {
+		switch {
+		case remembered:
 			go d.answerRemoved(identity, from, robotID, rm)
+		case removing != nil:
+			go d.answerOnceRemoved(identity, from, robotID, ack.GetEstopId(), removing)
 		}
 		return nil
 	}
