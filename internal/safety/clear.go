@@ -520,7 +520,8 @@ func (d *Dispatcher) sendAwaitingClears(identity controlstream.TLSIdentity) {
 }
 
 // removeCleared removes from robot's status.stops each entry with a clearedAt that match selects,
-// and remembers each ID it removed (removed.go).
+// and remembers each ID it removed (removed.go). Each is remembered before the write that removes
+// it, as RouteClearAck does, and forgotten if that write does not land.
 func (d *Dispatcher) removeCleared(robot *fleetv1.Robot, match func(fleetv1.RobotStop) bool) {
 	var gone []fleetv1.RobotStop
 	var on *fleetv1.Robot
@@ -537,11 +538,12 @@ func (d *Dispatcher) removeCleared(robot *fleetv1.Robot, match func(fleetv1.Robo
 		if len(keep) == len(r.Status.Stops) {
 			return false, false
 		}
+		d.rememberRemoved(r, gone)
 		r.Status.Stops = keep
 		return true, false
 	})
-	if landed && on != nil {
-		d.rememberRemoved(on, gone)
+	if !landed && on != nil {
+		d.forgetRemoved(on, gone)
 	}
 }
 
@@ -596,16 +598,22 @@ func (d *Dispatcher) RouteClearAck(identity controlstream.TLSIdentity, from cont
 					return false, false
 				}
 				found, gone, on = true, st, r
+				// Remembered before the write that removes it, so no report of the ID finds the entry
+				// gone and the ID not yet remembered (removed.go).
+				d.rememberRemoved(r, []fleetv1.RobotStop{st})
 				r.Status.Stops = append(r.Status.Stops[:i:i], r.Status.Stops[i+1:]...)
 				return true, false
 			}
 			return false, false
 		})
+		if found && !landed {
+			// The entry stays on the robot, with its clearedAt.
+			d.forgetRemoved(on, []fleetv1.RobotStop{gone})
+		}
 		if !found || !landed {
 			logger.Info("EstopClearAck names no cleared stop of the robot; it changes nothing")
 			return
 		}
-		d.rememberRemoved(on, []fleetv1.RobotStop{gone})
 		logger.Info("recorded stop removed: the adapter lifted it")
 	}()
 	return nil
