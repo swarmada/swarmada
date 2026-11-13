@@ -35,7 +35,9 @@ import (
 // stop IDs and local-latch reports).
 //
 // The control plane keeps, for each robot, the ID of every entry it removes from status.stops: on a
-// connection below 1.4.0 at the clear, and otherwise on the adapter's EstopClearAck. A later report
+// connection below 1.4.0 at the clear, and otherwise on the adapter's EstopClearAck. An entry that
+// already has its clearedAt is remembered before the write that removes it, and forgotten if that
+// write does not land, so no report finds the entry gone and its ID not yet remembered. A later report
 // naming such an ID, for that robot, is answered as a cleared stop: with the stop's fence on the
 // ControlStream and its EstopClear on the SafetyStream. It is how an ID an adapter latched while its
 // connection was at 1.3.x, which is sent no EstopClear, is lifted on a later 1.4.0 connection
@@ -104,6 +106,34 @@ func (d *Dispatcher) rememberRemoved(robot *fleetv1.Robot, stops []fleetv1.Robot
 		list = append([]removedStop(nil), list[over:]...)
 	}
 	d.removed[key] = list
+}
+
+// forgetRemoved undoes rememberRemoved for robot's entries stops, whose removal did not land: an
+// entry that stays on the robot is not a removed one. Only entries with a clearedAt are remembered
+// ahead of their removal: their EstopClear is already due, and is sent again on each SafetyStream
+// that opens while they stand (resendClears), so a report answered in between was answered rightly.
+func (d *Dispatcher) forgetRemoved(robot *fleetv1.Robot, stops []fleetv1.RobotStop) {
+	if len(stops) == 0 {
+		return
+	}
+	key := rememberedKey(robot.Namespace, robotid.Wire(robot))
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	gone := make(map[string]bool, len(stops))
+	for _, st := range stops {
+		gone[st.ID] = true
+	}
+	var kept []removedStop
+	for _, r := range d.removed[key] {
+		if !gone[r.id] || r.uid != robot.UID {
+			kept = append(kept, r)
+		}
+	}
+	if len(kept) == 0 {
+		delete(d.removed, key)
+		return
+	}
+	d.removed[key] = kept
 }
 
 // rememberedLocked is the remembered removed entry id of the robot with wire robot_id wireID in
