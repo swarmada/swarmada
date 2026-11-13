@@ -175,8 +175,13 @@ func (d *Dispatcher) ClearEstop(ctx context.Context, namespace, robotID, cleared
 	o := d.orderFor(key)
 	var out clearResult
 	var err error
+	// The IDs a 1.3.x clear removes are marked from before its first write until its attempts end,
+	// and remembered then if one write landed (removed.go). The deferred call is a safety net, so
+	// no path out, a panic included, leaves a mark behind; after the call below it does nothing.
+	rmv := &pendingRemoval{}
+	defer d.endRemoval(rmv)
 	for attempt := 0; ; attempt++ {
-		out, err = d.clearOnce(ctx, o, namespace, robotID, ends, epoch)
+		out, err = d.clearOnce(ctx, o, namespace, robotID, ends, epoch, rmv)
 		if err == nil || !apierrors.IsConflict(err) || attempt == 9 {
 			break
 		}
@@ -184,6 +189,7 @@ func (d *Dispatcher) ClearEstop(ctx context.Context, namespace, robotID, cleared
 		// the guard again.
 		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 	}
+	d.endRemoval(rmv)
 	if err != nil {
 		return out.state, fmt.Errorf("estop-clear: robot %q: %w", robotID, err)
 	}
@@ -223,9 +229,10 @@ type clearResult struct {
 }
 
 // clearOnce is one read, guard and patch of ClearEstop; the guard and the patch run under the
-// robot's write lock.
+// robot's write lock. On a 1.3.x connection it marks in rmv the IDs it removes before its write,
+// and records in rmv what that write removed once it has landed.
 func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, robotID string, ends Ends,
-	epoch uint64) (clearResult, error) {
+	epoch uint64, rmv *pendingRemoval) (clearResult, error) {
 	logger := log.FromContext(ctx).WithValues("robot", robotID, "namespace", namespace, "epoch", epoch)
 	var reader client.Reader = d.Client
 	if d.APIReader != nil {
@@ -322,6 +329,11 @@ func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, ro
 		r.clearing = make(chan struct{})
 	}
 	d.mu.Unlock()
+	if legacy {
+		// A report of an ID this write removes waits for it, rather than finding the entry gone and
+		// the ID not yet remembered (removed.go).
+		d.markRemoving(rmv, stored, res.ended)
+	}
 	err := d.Client.Status().Patch(ctx, stored, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	d.mu.Lock()
 	for _, r := range unrecorded {
@@ -343,7 +355,8 @@ func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, ro
 	o.stoppedBy = 0
 	if legacy {
 		// The 1.3.x path removed the entries it ended, and an unrecorded stop it ended is never
-		// recorded: each ID is remembered, so a later report of it is answered (removed.go).
+		// recorded: each ID is remembered, so a later report of it is answered (removed.go). It is
+		// remembered once ClearEstop's attempts end (endRemoval), which wakes the reports waiting for it.
 		gone := removedEntries(base.Status.Stops, stops)
 		for _, r := range unrecorded {
 			gone = append(gone, r.entry)
@@ -351,7 +364,7 @@ func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, ro
 		for i := range gone {
 			gone[i].ClearedAt = &at
 		}
-		d.rememberRemoved(stored, gone)
+		rmv.landed(stored, gone)
 	}
 	d.mu.Lock()
 	// The robot's stops in force end for its AssignActions now, unless a trigger was issued since

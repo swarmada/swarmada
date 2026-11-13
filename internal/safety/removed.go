@@ -77,12 +77,17 @@ type ClearedFenceSender interface {
 // rememberRemoved records that robot's entries ids were removed, with the clearedAt each carried
 // (or now, for one with none).
 func (d *Dispatcher) rememberRemoved(robot *fleetv1.Robot, stops []fleetv1.RobotStop) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.rememberRemovedLocked(robot, stops)
+}
+
+// rememberRemovedLocked is rememberRemoved; the caller holds d.mu.
+func (d *Dispatcher) rememberRemovedLocked(robot *fleetv1.Robot, stops []fleetv1.RobotStop) {
 	if len(stops) == 0 {
 		return
 	}
 	key := rememberedKey(robot.Namespace, robotid.Wire(robot))
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.removed == nil {
 		d.removed = map[string][]removedStop{}
 	}
@@ -134,6 +139,128 @@ func (d *Dispatcher) forgetRemoved(robot *fleetv1.Robot, stops []fleetv1.RobotSt
 		return
 	}
 	d.removed[key] = kept
+}
+
+// pendingRemoval is the IDs one clear on a connection below 1.4.0 removes from a robot, marked from
+// before its first write until its attempts end (ClearEstop), and what its write removed once it
+// has landed. Its entries carry no clearedAt and are in force until that write lands, so they are
+// remembered only then: remembering them before would answer a report with an EstopClear for a
+// clear that may never be written. A report that finds one of them marked waits for the clear
+// instead (answerOnceRemoved).
+type pendingRemoval struct {
+	key   string
+	done  chan struct{}
+	ids   []string
+	robot *fleetv1.Robot
+	gone  []fleetv1.RobotStop
+	ended bool
+}
+
+// markRemoving marks ids, which a write about to be made removes from robot, in p and in d.removing.
+func (d *Dispatcher) markRemoving(p *pendingRemoval, robot *fleetv1.Robot, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if p.done == nil {
+		p.key, p.done = rememberedKey(robot.Namespace, robotid.Wire(robot)), make(chan struct{})
+	}
+	if d.removing == nil {
+		d.removing = map[string]map[string]chan struct{}{}
+	}
+	if d.removing[p.key] == nil {
+		d.removing[p.key] = map[string]chan struct{}{}
+	}
+	for _, id := range ids {
+		if d.removing[p.key][id] != p.done { // a retry marks the same IDs again
+			d.removing[p.key][id] = p.done
+			p.ids = append(p.ids, id)
+		}
+	}
+}
+
+// landed records that the write removed stops from robot. Only the clear's own goroutine uses p.
+func (p *pendingRemoval) landed(robot *fleetv1.Robot, stops []fleetv1.RobotStop) {
+	p.robot, p.gone = robot, stops
+}
+
+// endRemoval ends p: it remembers what p's write removed, if one landed, then clears p's marks
+// and wakes the reports waiting for it, under one hold of d.mu, so a woken report finds each ID
+// remembered or not removed. A second call does nothing (ClearEstop also defers one). Only the
+// clear's own goroutine calls it.
+func (d *Dispatcher) endRemoval(p *pendingRemoval) {
+	if p.ended {
+		return
+	}
+	p.ended = true
+	if p.done == nil {
+		if p.robot != nil {
+			d.rememberRemoved(p.robot, p.gone)
+		}
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if p.robot != nil {
+		d.rememberRemovedLocked(p.robot, p.gone)
+	}
+	for _, id := range p.ids {
+		if d.removing[p.key][id] == p.done {
+			delete(d.removing[p.key], id)
+		}
+	}
+	if len(d.removing[p.key]) == 0 {
+		delete(d.removing, p.key)
+	}
+	close(p.done)
+}
+
+// removingLocked is the channel of the clear removing id from the robot with wire robot_id wireID
+// in namespace now, or nil. The caller holds d.mu.
+func (d *Dispatcher) removingLocked(namespace, wireID, id string) chan struct{} {
+	return d.removing[rememberedKey(namespace, wireID)][id]
+}
+
+// answerOnceRemoved answers a report, on from, of id, which a clear is removing from the robot
+// with wire robot_id wireID, once that clear's attempts end: as a removed stop (answerRemoved) if
+// its write landed, and with nothing if not, for the stop was not cleared. It waits at most
+// removalWait in all; a report still waiting then is not answered, and the adapter reports the ID
+// again on its next SafetyStream. It runs in a goroutine of its own, off the SafetyStream receive
+// loop.
+func (d *Dispatcher) answerOnceRemoved(identity controlstream.TLSIdentity, from controlstream.SafetySender, wireID,
+	id string, done chan struct{}) {
+	logger := log.Log.WithName("estop-dispatcher").WithValues("robot", wireID, "namespace", identity.Namespace,
+		"stopID", id)
+	wait := d.removalWait
+	if wait <= 0 {
+		wait = defaultConfirmTimeout
+	}
+	timeout := time.NewTimer(wait)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-done:
+		case <-timeout.C:
+			logger.Info("report of a stop whose removal had not ended in time; not answered, and answered when the "+
+				"adapter reports it again on its next SafetyStream", "waited", wait.String())
+			return
+		}
+		d.mu.Lock()
+		rm, remembered := d.rememberedLocked(identity.Namespace, wireID, id)
+		next := d.removingLocked(identity.Namespace, wireID, id)
+		d.mu.Unlock()
+		switch {
+		case remembered:
+			d.answerRemoved(identity, from, wireID, rm)
+			return
+		case next == nil:
+			logger.Info("report of a stop whose clear was not written; not answered")
+			return
+		}
+		// Another clear is removing it now.
+		done = next
+	}
 }
 
 // rememberedLocked is the remembered removed entry id of the robot with wire robot_id wireID in
