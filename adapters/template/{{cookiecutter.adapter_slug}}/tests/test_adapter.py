@@ -25,10 +25,32 @@ def test_default_robot_confirms_a_real_stop() -> None:
 
 
 class _NeverStops:
+    tick_keeps_state_current = True  # a stand-in simulator: no state_seq warning
+
     def command_stop(self, robot_id: str) -> None: ...
     def tick(self, dt: float) -> None: ...
     def is_stopped(self, robot_id: str) -> bool:
         return False
+
+
+def test_default_robot_counts_its_state_reports(caplog) -> None:
+    # The default binding has state_seq, as a real robot's binding must, so the SDK
+    # confirms a stop only from a state counted after it, and logs no warning.
+    robot = SimulatedRobot()
+    robot.spawn("r1")
+    before = robot.state_seq("r1")
+    robot.tick(0.05)
+    assert robot.state_seq("r1") == before + 1
+    with caplog.at_level("WARNING", logger="swarmada_sdk.safety"):
+        assert confirm_estop(robot, "r1") == ESTOP_STOPPED
+    assert not caplog.records
+
+
+def test_a_robot_never_spawned_is_not_confirmed_at_rest() -> None:
+    robot = SimulatedRobot()
+    robot.spawn("r1")
+    assert not robot.is_stopped("ghost")
+    assert confirm_estop(robot, "ghost", tick_dt=0.01, max_ticks=5) == ESTOP_FAILED
 
 
 def test_unconfirmed_stop_is_failed_never_stopped() -> None:

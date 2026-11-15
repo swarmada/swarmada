@@ -91,6 +91,10 @@ class KinematicSim:
     to rest. It witnesses a simulated plant only, and says so in its first line.
     """
 
+    #: tick() advances the physics, so is_stopped() is always current: estop confirmation
+    #: needs no state_seq (swarmada_sdk.safety.await_estop_confirmation).
+    tick_keeps_state_current = True
+
     #: cruise speed in m/s and deceleration in m/s^2.
     SPEED = 1.0
     DECEL = 4.0

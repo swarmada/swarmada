@@ -30,14 +30,17 @@ whatever fleet API sits behind it.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 
 __all__ = [
     "FenceDecision",
     "FenceGuard",
     "LeaseMonitor",
+    "EstopToken",
     "command_estop",
     "await_estop_confirmation",
     "confirm_estop",
@@ -185,6 +188,31 @@ class LeaseMonitor:
 ESTOP_STOPPED = "STOPPED"
 ESTOP_FAILED = "FAILED"
 
+@dataclass(frozen=True)
+class EstopToken:
+    """What :func:`command_estop` hands to :func:`await_estop_confirmation`: the robot it
+    stopped, the binding's ``state_seq`` for that robot once the stop was commanded, and
+    which binding object the stop went through (its ``id()``).
+
+    Only a report counted after ``seq`` confirms the stop. The token names its robot and
+    its binding, so a token from another robot's stop, or from another binding's, is
+    refused (FAILED) instead of confirming this stop from a count that is not its own.
+
+    It does NOT tell two stops of the same robot on the same binding apart: a token kept
+    from an earlier stop carries a lower count, and passed to a later stop's wait it lets
+    a report from between the two stops confirm the later one. Pass the token of the stop
+    you have commanded, never a kept one.
+    """
+
+    robot: str
+    seq: int
+    binding: int
+
+
+_log = logging.getLogger(__name__)
+#: Binding classes already warned that they have no ``state_seq``: one warning per class.
+_warned_without_state_seq: set[type] = set()
+
 
 def confirm_estop(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40,
                   sleep: Callable[[float], None] = time.sleep) -> str:
@@ -196,8 +224,9 @@ def confirm_estop(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40,
     a timeout or from silence.
 
     ``sim`` is any object exposing ``command_stop(robot)``, ``tick(dt)`` and
-    ``is_stopped(robot)``. Two shapes must both work, and the difference is where
-    time comes from:
+    ``is_stopped(robot)``, and, for a real robot, ``state_seq(robot)`` (see
+    :func:`await_estop_confirmation`). Two shapes must both work, and the difference is
+    where time comes from:
 
     * **Synchronous** (a simulator): ``tick(dt)`` advances the world, so the loop
       itself produces the elapsed time.
@@ -214,12 +243,19 @@ def confirm_estop(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40,
     ``max_ticks * tick_dt`` is therefore a **wall-clock budget for a confirmed
     stop**, not a loop count. Treat it as a safety parameter.
     """
-    command_estop(sim, robot)
-    return await_estop_confirmation(sim, robot, tick_dt, max_ticks, sleep)
+    since = command_estop(sim, robot)
+    return await_estop_confirmation(sim, robot, tick_dt, max_ticks, sleep, since=since)
 
 
-def command_estop(sim, robot: str) -> None:
+def command_estop(sim, robot: str) -> EstopToken | None:
     """Issue the hardware stop and return IMMEDIATELY, without confirming rest.
+
+    Returns an :class:`EstopToken` holding the robot and the binding's ``state_seq(robot)``
+    read once ``command_stop`` has returned, or ``None`` for a binding without
+    ``state_seq``. Pass it to :func:`await_estop_confirmation` as ``since``: only a state
+    report received after the stop was commanded can confirm it. The count is read after
+    the command, not before, so a report received while ``command_stop`` runs, which the
+    robot sent before the stop, does not count.
 
     Split out of :func:`confirm_estop` so an adapter can acknowledge an estop the moment
     the command is issued (``ESTOP_STATE_STOPPING``) and confirm rest afterwards.
@@ -234,20 +270,123 @@ def command_estop(sim, robot: str) -> None:
     acknowledgement moves earlier.
     """
     sim.command_stop(robot)
+    try:
+        seq = _state_seq(sim, robot)
+    except Exception:  # the stop is sent; the wait reads the count on entry, stricter
+        _log.exception("state_seq(%r) raised after the stop was commanded", robot)
+        return None
+    return None if seq is None else EstopToken(robot, seq, id(sim))
 
 
 def await_estop_confirmation(sim, robot: str, tick_dt: float = 0.05, max_ticks: int = 40,
-                             sleep: Callable[[float], None] = time.sleep) -> str:
+                             sleep: Callable[[float], None] = time.sleep, *,
+                             since: EstopToken | None = None) -> str:
     """Wait for CONFIRMED rest after :func:`command_estop`.
 
     Returns ``ESTOP_STOPPED`` only once ``sim.is_stopped(robot)`` is true, and
     ``ESTOP_FAILED`` if rest cannot be confirmed within ``max_ticks * tick_dt``. It NEVER
     infers rest from a timeout or from silence -- see :func:`confirm_estop` for why
     ``sleep`` is injected rather than assumed.
+
+    **Only a report newer than the stop confirms it.** A real robot's ``tick()`` does
+    nothing, so ``is_stopped()`` answers from the last state report the binding received,
+    which may predate the stop: a robot that was at rest a moment before the stop and is
+    moving now would be confirmed STOPPED at once. A binding to a real robot therefore
+    exposes ``state_seq(robot) -> int``, a count of the state reports it has received from
+    that robot. The binding contract:
+
+    * ``state_seq(robot)`` is a method that returns a Python ``int`` and only ever goes up
+      for that robot;
+    * it is raised only by a NEW state report from that robot: not by another robot's
+      report, and not by a duplicate or redelivered message (an MQTT QoS 1 redelivery, a
+      retained message);
+    * the binding stores the state ``is_stopped`` reads BEFORE it raises ``state_seq``
+      (or does both under one lock), so a raised count never pairs with an older state.
+
+    With ``state_seq``, STOPPED needs ``state_seq(robot) > since.seq`` (strictly) and then
+    ``is_stopped(robot)``. ``since`` is the :class:`EstopToken` :func:`command_estop`
+    returned for this stop; a token for another robot or another binding, or anything that
+    is not a token, answers FAILED. A token kept from an earlier stop of the same robot is
+    NOT caught (see :class:`EstopToken`). Without a token, the count is read on entry,
+    which is after the stop, so it is stricter, never looser. A caller that polls with
+    ``max_ticks=1`` should pass ``since``: read anew on every call, the count is passed
+    only if a report lands within that one look, so the answer is almost always FAILED
+    (safe, but slow to confirm).
+    A count that is not a Python ``int`` (a float, a bool, ``None``, a NumPy integer)
+    answers FAILED, and so does a ``state_seq`` that is not a method.
+
+    It proves only that the report was RECEIVED after the stop was commanded. A report
+    the robot sent before the stop reached it can still count; where the robot's
+    protocol acknowledges the stop itself, the binding's ``is_stopped`` should require
+    that acknowledgement too. And ``max_ticks * tick_dt`` must exceed the robot's longest
+    gap between state reports, or a robot at rest is reported FAILED.
+
+    A binding without ``state_seq`` keeps the plain ``is_stopped`` check, correct only
+    when ``tick()`` keeps the state current (a simulator). Such a binding is warned about
+    once per class; a simulated binding declares ``tick_keeps_state_current = True`` to
+    say so and silence it.
     """
+    seq_attr = getattr(sim, "state_seq", None)
+    if seq_attr is not None and not callable(seq_attr):
+        _log.error("%s.state_seq is %r, not a method state_seq(robot): estop for %r not "
+                   "confirmed", type(sim).__qualname__, seq_attr, robot)
+        return ESTOP_FAILED
+    has_seq = seq_attr is not None
+    if not has_seq:
+        _warn_without_state_seq(sim)
+        after = None
+    elif since is None:
+        after = sim.state_seq(robot)
+    elif not isinstance(since, EstopToken):
+        _log.error("estop for %r: since is %r, not the EstopToken command_estop returned; "
+                   "estop not confirmed", robot, since)
+        return ESTOP_FAILED
+    elif since.robot != robot:
+        _log.error("estop for %r: since is the token of robot %r's stop; estop not "
+                   "confirmed", robot, since.robot)
+        return ESTOP_FAILED
+    elif since.binding != id(sim):
+        _log.error("estop for %r: since is a token from another binding object; estop not "
+                   "confirmed", robot)
+        return ESTOP_FAILED
+    else:
+        after = since.seq
+    if has_seq and not _is_count(after):
+        _log.error("state_seq(%r) gave %r, not an int: estop not confirmed", robot, after)
+        return ESTOP_FAILED
     for _ in range(max_ticks):
         sim.tick(tick_dt)
-        if sim.is_stopped(robot):
-            return ESTOP_STOPPED
+        if not has_seq:
+            if sim.is_stopped(robot):
+                return ESTOP_STOPPED
+        else:
+            # The count first, then the state: by the binding contract, a state read after
+            # a raised count is at least as new as the report that raised it.
+            seen = sim.state_seq(robot)
+            if not _is_count(seen):
+                _log.error("state_seq(%r) gave %r, not an int: estop not confirmed", robot, seen)
+                return ESTOP_FAILED
+            if seen > after and sim.is_stopped(robot):
+                return ESTOP_STOPPED
         sleep(tick_dt)
     return ESTOP_FAILED
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _state_seq(sim, robot: str) -> int | None:
+    fn = getattr(sim, "state_seq", None)
+    return fn(robot) if callable(fn) else None
+
+
+def _warn_without_state_seq(sim) -> None:
+    cls = type(sim)
+    if getattr(cls, "tick_keeps_state_current", False) or cls in _warned_without_state_seq:
+        return
+    _warned_without_state_seq.add(cls)
+    _log.warning("%s has no state_seq(robot): estop confirmation relies on tick() keeping "
+                 "is_stopped() current, so a state report older than the stop could "
+                 "confirm it. Give a real robot's binding state_seq; a simulated binding "
+                 "sets tick_keeps_state_current = True.", cls.__qualname__)
