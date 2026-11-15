@@ -54,6 +54,38 @@ The adapter is simulator-agnostic — it drives a small `Simulator` interface
   simulator follows). It lazily imports the Isaac runtime and errors clearly if it
   is absent; it never fakes physics.
 
+## Several robots on one connection
+
+One `ControlStream` carries every robot an adapter manages, and each message names
+its robot (RFC-0001, *The ControlStream service*). Give `--robot-id` more than once
+and this adapter serves every robot named, on one `ControlStream` and one
+`SafetyStream`, in one simulated world:
+
+```bash
+PYTHONPATH=proto python3 adapters/simulation/sim_adapter.py --endpoint localhost:9090 \
+  --robot-id amr-1 --robot-id amr-2 --robot-id amr-3
+```
+
+With one `--robot-id`, or none (`robot-conformance-1`), the adapter runs exactly as it
+always has; `tests/python/test_sim_adapter_golden_transcript.py` pins its traffic.
+With two or more, `SimFleet` in [`sim_adapter.py`](sim_adapter.py) holds the
+connection, and each robot keeps its own fencing token, lease, stop latch and action:
+
+- a command, a stop or a clear acts on the robot whose `robot_id` it names and on no
+  other. One naming a robot the adapter does not serve reaches no robot: the
+  robot-acting commands are refused, as the single-robot adapter refuses them, and an
+  `Estop` or a fence for it is answered `ESTOP_STATE_FAILED`, since nothing was
+  stopped;
+- a stop is commanded the moment it arrives and its rest is confirmed in that robot's
+  own lane, so a stop for every robot is commanded for each before any one robot's rest
+  is awaited, and no robot's stop waits on another's;
+- a `RegisterAck` names no robot, so each is paired with the register it answers, in
+  the order the registers went out;
+- an edge-issued `Estop` stops every robot whose `RegisterAck` listed that edge node,
+  with one ack, `STOPPED` only once all of them are at rest.
+
+Every robot runs the same `--scenario`, and all of them start at the origin.
+
 ## Run
 
 ```bash
