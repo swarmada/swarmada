@@ -23,10 +23,14 @@ package kubeclientmetrics
 import (
 	"context"
 	"net/url"
+	"reflect"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/prometheus/client_golang/prometheus"
 	clientgometrics "k8s.io/client-go/tools/metrics"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RateLimiterDuration is the time a request waited on its client-side rate limiter, by verb
@@ -58,12 +62,84 @@ var RateLimiterDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Buckets: []float64{0.01, 0.1, 0.5, 1, 4, 15, 60},
 }, []string{"verb", "path"})
 
-// Install registers RateLimiterDuration in r and points client-go's rate-limiter hook at it.
+// UncachedReadDuration is how long each uncached read of the manager took, by the part of the
+// manager that made it: the wait on the client-side rate limiter plus the request itself. Its
+// count is the number of reads. rest_client_rate_limiter_wait_seconds says how long a resource
+// kind's limiter made requests wait; this says whose reads they were, so a measurement can tell
+// what each caller costs and what a change to one caller saved. Only reads made through Reader
+// are counted.
+var UncachedReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name: "swarmada_manager_uncached_read_duration_seconds",
+	Help: "Time an uncached read of the Kubernetes API by the manager took, rate-limiter wait " +
+		"included, by the caller that made it, the verb (get, list), the object's Go type and the " +
+		"result (ok, notfound, error). A read its deadline refused at the rate limiter is an error " +
+		"of about 0 s.",
+	Buckets: []float64{0.01, 0.1, 0.5, 1, 4, 15, 60},
+}, []string{"caller", "verb", "resource", "result"})
+
+// Reader returns r with each Get and List recorded in UncachedReadDuration under caller. caller
+// is a fixed name for a part of the manager (a constant, never a value from a request), so the
+// label set stays bounded. A nil r gives nil, so a component's "no uncached reader" stays nil.
+func Reader(r client.Reader, caller string) client.Reader {
+	if r == nil {
+		return nil
+	}
+	return observedReader{r: r, caller: caller}
+}
+
+type observedReader struct {
+	r      client.Reader
+	caller string
+}
+
+// Get reads through the wrapped reader and records the read under the caller.
+func (o observedReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	start := time.Now()
+	err := o.r.Get(ctx, key, obj, opts...)
+	UncachedReadDuration.WithLabelValues(o.caller, "get", typeName(obj), result(err)).Observe(time.Since(start).Seconds())
+	return err
+}
+
+// List reads through the wrapped reader and records the read under the caller.
+func (o observedReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	start := time.Now()
+	err := o.r.List(ctx, list, opts...)
+	UncachedReadDuration.WithLabelValues(o.caller, "list", typeName(list), result(err)).Observe(time.Since(start).Seconds())
+	return err
+}
+
+// result names a read's outcome: a deadline the rate limiter refused is an error, so a measurement
+// can tell it from a fast success.
+func result(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case apierrors.IsNotFound(err):
+		return "notfound"
+	default:
+		return "error"
+	}
+}
+
+// typeName is the object's Go type without its package, Robot or FleetZoneList: bounded by the
+// types the scheme knows.
+func typeName(obj any) string {
+	t := reflect.TypeOf(obj)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil {
+		return ""
+	}
+	return t.Name()
+}
+
+// Install registers RateLimiterDuration and UncachedReadDuration in r and points client-go's rate-limiter hook at it.
 // client-go's metrics.Register runs once per process, and controller-runtime's metrics package
 // has already called it from its init, so the hook is set directly. Call Install once, before
 // the manager builds its clients. It panics on a duplicate registration in r.
 func Install(r prometheus.Registerer) {
-	r.MustRegister(RateLimiterDuration)
+	r.MustRegister(RateLimiterDuration, UncachedReadDuration)
 	clientgometrics.RateLimiterLatency = latency{RateLimiterDuration}
 }
 
