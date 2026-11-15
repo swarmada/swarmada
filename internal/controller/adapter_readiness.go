@@ -207,7 +207,7 @@ type dispatchExclusion struct {
 func (r *FleetActionReconciler) filterDispatchEligible(
 	ctx context.Context, action *fleetv1.FleetAction, robots []fleetv1.Robot,
 ) ([]fleetv1.Robot, []dispatchExclusion, []string, *zoneRestrictionVerdict) {
-	st, degraded, restrictions := r.newDispatchFilterState(ctx, action)
+	j, degraded, restrictions := r.newDispatchJudge(ctx, action)
 	if len(robots) == 0 {
 		// The zone reads happen even with no candidates, because FILTER 11 IS
 		// ACTION-SCOPED: whether the operator has forbidden this work does not depend on
@@ -216,130 +216,157 @@ func (r *FleetActionReconciler) filterDispatchEligible(
 		// confusion ADR-0058 §5 says the terminal refusal exists to prevent.
 		return robots, nil, degraded, restrictions
 	}
-	holds := r.newDispatchHolds(ctx, action.Namespace)
-	ready := make(map[string]bool, 4) // adapter name → dispatch-ready
-	reason := make(map[string]string, 4)
-	served := make(map[string][]string, 4) // adapter name → spec.servesRobotClasses, once ready
+	out, excluded := j.filter(ctx, robots)
+	return out, excluded, degraded, restrictions
+}
 
+// dispatchJudge is what one dispatch pass has read to judge its candidates: the filter state
+// (newDispatchFilterState), the holds (newDispatchHolds, listed when the first robot is judged)
+// and the adapters read so far. filterDispatchEligible judges the pass's candidate list with
+// it, and currentCandidate judges the live copy of the robot selection chose with the same one,
+// so that copy is judged against the state the rest of the pass was judged against, at the cost
+// of no further list.
+type dispatchJudge struct {
+	r      *FleetActionReconciler
+	action *fleetv1.FleetAction
+	st     *dispatchFilterState
+	holds  *dispatchHolds
+	ready  map[string]bool     // adapter name → dispatch-ready
+	reason map[string]string   // adapter name → why it is not
+	served map[string][]string // adapter name → spec.servesRobotClasses, once ready
+}
+
+// newDispatchJudge builds a pass's judge, with what newDispatchFilterState also returns: the
+// filters it could not apply, and filter 11's verdict.
+func (r *FleetActionReconciler) newDispatchJudge(
+	ctx context.Context, action *fleetv1.FleetAction,
+) (*dispatchJudge, []string, *zoneRestrictionVerdict) {
+	st, degraded, restrictions := r.newDispatchFilterState(ctx, action)
+	return &dispatchJudge{r: r, action: action, st: st,
+		ready: make(map[string]bool, 4), reason: make(map[string]string, 4), served: make(map[string][]string, 4),
+	}, degraded, restrictions
+}
+
+// filter splits robots into the eligible, in input order, and the withheld.
+func (j *dispatchJudge) filter(ctx context.Context, robots []fleetv1.Robot) ([]fleetv1.Robot, []dispatchExclusion) {
 	out := make([]fleetv1.Robot, 0, len(robots))
 	var excluded []dispatchExclusion
-
 	for i := range robots {
-		robot := robots[i]
-
-		// A Robot being deleted takes no new work, whatever it holds (see
-		// scheduler.ExcludedAsTerminating). Here as well as in the scheduler's own check
-		// because this is the choke point the preemption search shares.
-		if ex := scheduler.ExcludedAsTerminating(&robot); ex != nil {
-			excluded = append(excluded, dispatchExclusion{robot.Name, ex.Filter, ex.Reason})
+		if ex := j.judge(ctx, &robots[i]); ex != nil {
+			excluded = append(excluded, *ex)
 			continue
 		}
-
-		// One robot per wire robot-id, and no work in a stopped zone or a stopped namespace
-		// (dispatch_holds.go). Each stands for a stop the robot's own estopState may not
-		// show, so all three come before filter 10.
-		if why := holds.robotIDConflict(&robot); why != "" {
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterRobotIDConflict, why})
-			continue
-		}
-		if why := holds.namespaceStop(&robot); why != "" {
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterEstop, why})
-			continue
-		}
-		if why := holds.zoneStop(&robot); why != "" {
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterEstop, why})
-			continue
-		}
-
-		// Filter 10 — an estopped robot is not a candidate. Dispatching to one produces an
-		// immediate Paused transition and no useful work, and the robot may not be at rest.
-		// Checked before the adapter read because it is free and it is the safety-relevant one.
-		if robotUnderEstop(&robot) {
-			why := fmt.Sprintf("robot is under an active emergency stop (estopState %s)", robot.Status.EstopState)
-			if by, held := estopscope.HeldOnRecord(&robot); held {
-				why = fmt.Sprintf("robot is under an active emergency stop (estopState %s; held by %s)",
-					stateOrNormal(robot.Status.EstopState), by)
-			}
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterEstop, why})
-			continue
-		}
-
-		// The post-clear supervised window. This is NOT filter 10 — filter 10 is
-		// exactly Stopping, Stopped and Failed (RFC-0001 #control-plane-scheduler),
-		// and Resuming is not an active estop: robotUnderEstop also drives the
-		// estop-pause of an in-flight action and preemption-victim selection, and a
-		// robot whose stop has been cleared belongs in neither.
-		//
-		// It is withheld here because withholding is the property the state exists
-		// for. RFC-0001 #safety-estop-state-machine defines Resuming as the interval
-		// in which the Fleet Adapter is re-enabling motion and capabilities are
-		// restoring, left only when an operator confirms the robot's release.
-		// Dispatching into that interval hands work to a robot nobody has confirmed can
-		// do it, which is the hazard the state was specified to close; a Resuming robot
-		// that were dispatchable would make the state decorative.
-		//
-		// The exit is operator-confirmed, never automatic and never timed
-		// (internal/safety.Dispatcher.ConfirmResume), so a robot nobody releases stays
-		// here rather than ageing into dispatch.
-		if robot.Status.EstopState == fleetv1.RobotEstopResuming {
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterResumeWindow,
-				fmt.Sprintf("robot is in the post-clear estop resume window (estopState %s); "+
-					"it becomes a candidate once an operator releases it (swarmctl estop resume)",
-					robot.Status.EstopState)})
-			continue
-		}
-
-		// Filters 4, 7, 8 and 2 — the remaining cross-object gates, over state this
-		// call has already listed. Placed before the adapter Get so a robot that is
-		// flat, mid-update or drained costs no API read to reject.
-		if ex := st.excludedBy(&robot, action); ex != nil {
-			excluded = append(excluded, dispatchExclusion{robot.Name, ex.Filter, ex.Reason})
-			continue
-		}
-
-		name := robot.Spec.Adapter.Name
-		if name == "" {
-			// Admission requires a named adapter (spec.adapter is a required field); a robot that
-			// somehow carries none has no authorized adapter, so it cannot be dispatched to.
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterAdapterReady,
-				"robot has no spec.adapter.name"})
-			continue
-		}
-		if _, seen := ready[name]; !seen {
-			var a fleetv1.FleetAdapter
-			err := r.Get(ctx, client.ObjectKey{Namespace: robot.Namespace, Name: name}, &a)
-			switch {
-			case apierrors.IsNotFound(err):
-				ready[name], reason[name] = false, fmt.Sprintf("FleetAdapter %q not found", name)
-			case err != nil:
-				// Fail closed on an unproven read; the action requeues.
-				ready[name], reason[name] = false, fmt.Sprintf("reading FleetAdapter %q: %v", name, err)
-			default:
-				fit, why := adapterDispatchReadiness(&a)
-				if fit && r.RequireLatchContract {
-					fit, why = adapterLatchContract(&a)
-				}
-				if !fit {
-					ready[name], reason[name] = false, fmt.Sprintf(
-						"FleetAdapter %q is not fit for dispatch: %s", name, why)
-				} else {
-					ready[name] = true
-					served[name] = a.Spec.ServesRobotClasses
-				}
-			}
-		}
-		if ready[name] && !adapterListsClass(served[name], robot.Spec.RobotClass) {
-			excluded = append(excluded, dispatchExclusion{robot.Name, filterAdapterReady, fmt.Sprintf(
-				"FleetAdapter %q does not serve robot class %q (spec.servesRobotClasses)", name, robot.Spec.RobotClass)})
-			continue
-		}
-		if ready[name] {
-			out = append(out, robot)
-			continue
-		}
-		excluded = append(excluded, dispatchExclusion{robot.Name, filterAdapterReady, reason[name]})
+		out = append(out, robots[i])
 	}
-	return out, excluded, degraded, restrictions
+	return out, excluded
+}
+
+// judge returns the gate that withholds robot from this pass's action, or nil.
+func (j *dispatchJudge) judge(ctx context.Context, robot *fleetv1.Robot) *dispatchExclusion {
+	if j.holds == nil {
+		j.holds = j.r.newDispatchHolds(ctx, j.action.Namespace)
+	}
+
+	// A Robot being deleted takes no new work, whatever it holds (see
+	// scheduler.ExcludedAsTerminating). Here as well as in the scheduler's own check
+	// because this is the choke point the preemption search shares.
+	if ex := scheduler.ExcludedAsTerminating(robot); ex != nil {
+		return &dispatchExclusion{robot.Name, ex.Filter, ex.Reason}
+	}
+
+	// One robot per wire robot-id, and no work in a stopped zone or a stopped namespace
+	// (dispatch_holds.go). Each stands for a stop the robot's own estopState may not
+	// show, so all three come before filter 10.
+	if why := j.holds.robotIDConflict(robot); why != "" {
+		return &dispatchExclusion{robot.Name, filterRobotIDConflict, why}
+	}
+	if why := j.holds.namespaceStop(robot); why != "" {
+		return &dispatchExclusion{robot.Name, filterEstop, why}
+	}
+	if why := j.holds.zoneStop(robot); why != "" {
+		return &dispatchExclusion{robot.Name, filterEstop, why}
+	}
+
+	// Filter 10 — an estopped robot is not a candidate. Dispatching to one produces an
+	// immediate Paused transition and no useful work, and the robot may not be at rest.
+	// Checked before the adapter read because it is free and it is the safety-relevant one.
+	if robotUnderEstop(robot) {
+		why := fmt.Sprintf("robot is under an active emergency stop (estopState %s)", robot.Status.EstopState)
+		if by, held := estopscope.HeldOnRecord(robot); held {
+			why = fmt.Sprintf("robot is under an active emergency stop (estopState %s; held by %s)",
+				stateOrNormal(robot.Status.EstopState), by)
+		}
+		return &dispatchExclusion{robot.Name, filterEstop, why}
+	}
+
+	// The post-clear supervised window. This is NOT filter 10 — filter 10 is
+	// exactly Stopping, Stopped and Failed (RFC-0001 #control-plane-scheduler),
+	// and Resuming is not an active estop: robotUnderEstop also drives the
+	// estop-pause of an in-flight action and preemption-victim selection, and a
+	// robot whose stop has been cleared belongs in neither.
+	//
+	// It is withheld here because withholding is the property the state exists
+	// for. RFC-0001 #safety-estop-state-machine defines Resuming as the interval
+	// in which the Fleet Adapter is re-enabling motion and capabilities are
+	// restoring, left only when an operator confirms the robot's release.
+	// Dispatching into that interval hands work to a robot nobody has confirmed can
+	// do it, which is the hazard the state was specified to close; a Resuming robot
+	// that were dispatchable would make the state decorative.
+	//
+	// The exit is operator-confirmed, never automatic and never timed
+	// (internal/safety.Dispatcher.ConfirmResume), so a robot nobody releases stays
+	// here rather than ageing into dispatch.
+	if robot.Status.EstopState == fleetv1.RobotEstopResuming {
+		return &dispatchExclusion{robot.Name, filterResumeWindow,
+			fmt.Sprintf("robot is in the post-clear estop resume window (estopState %s); "+
+				"it becomes a candidate once an operator releases it (swarmctl estop resume)",
+				robot.Status.EstopState)}
+	}
+
+	// Filters 4, 7, 8 and 2 — the remaining cross-object gates, over state this
+	// call has already listed. Placed before the adapter Get so a robot that is
+	// flat, mid-update or drained costs no API read to reject.
+	if ex := j.st.excludedBy(robot, j.action); ex != nil {
+		return &dispatchExclusion{robot.Name, ex.Filter, ex.Reason}
+	}
+
+	name := robot.Spec.Adapter.Name
+	if name == "" {
+		// Admission requires a named adapter (spec.adapter is a required field); a robot that
+		// somehow carries none has no authorized adapter, so it cannot be dispatched to.
+		return &dispatchExclusion{robot.Name, filterAdapterReady, "robot has no spec.adapter.name"}
+	}
+	if _, seen := j.ready[name]; !seen {
+		var a fleetv1.FleetAdapter
+		err := j.r.Get(ctx, client.ObjectKey{Namespace: robot.Namespace, Name: name}, &a)
+		switch {
+		case apierrors.IsNotFound(err):
+			j.ready[name], j.reason[name] = false, fmt.Sprintf("FleetAdapter %q not found", name)
+		case err != nil:
+			// Fail closed on an unproven read; the action requeues.
+			j.ready[name], j.reason[name] = false, fmt.Sprintf("reading FleetAdapter %q: %v", name, err)
+		default:
+			fit, why := adapterDispatchReadiness(&a)
+			if fit && j.r.RequireLatchContract {
+				fit, why = adapterLatchContract(&a)
+			}
+			if !fit {
+				j.ready[name], j.reason[name] = false, fmt.Sprintf(
+					"FleetAdapter %q is not fit for dispatch: %s", name, why)
+			} else {
+				j.ready[name] = true
+				j.served[name] = a.Spec.ServesRobotClasses
+			}
+		}
+	}
+	if j.ready[name] && !adapterListsClass(j.served[name], robot.Spec.RobotClass) {
+		return &dispatchExclusion{robot.Name, filterAdapterReady, fmt.Sprintf(
+			"FleetAdapter %q does not serve robot class %q (spec.servesRobotClasses)", name, robot.Spec.RobotClass)}
+	}
+	if j.ready[name] {
+		return nil
+	}
+	return &dispatchExclusion{robot.Name, filterAdapterReady, j.reason[name]}
 }
 
 // logDispatchExclusions records why candidates were withheld. An operator debugging "why is my task
