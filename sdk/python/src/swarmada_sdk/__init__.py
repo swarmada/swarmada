@@ -25,6 +25,7 @@ depends on this package.
 from swarmada_sdk.safety import (
     ESTOP_FAILED,
     ESTOP_STOPPED,
+    EstopToken,
     FenceDecision,
     FenceGuard,
     LeaseMonitor,
@@ -37,6 +38,7 @@ __all__ = [
     "FenceGuard",
     "LeaseMonitor",
     "confirm_estop",
+    "EstopToken",
     "ESTOP_STOPPED",
     "ESTOP_FAILED",
 ]

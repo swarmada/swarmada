@@ -77,8 +77,9 @@ confirm the robot **actually** stopped from its own ground truth — never infer
 ```python
 from swarmada_sdk import confirm_estop, ESTOP_STOPPED
 
-# `binding` exposes command_stop(robot), tick(dt) and is_stopped(robot),
-# bound to the robot's real confirmed-halt signal (or a simulator in tests).
+# `binding` exposes command_stop(robot), tick(dt), is_stopped(robot) and, for a
+# real robot, state_seq(robot), bound to the robot's real confirmed-halt signal
+# (or a simulator in tests).
 result = confirm_estop(binding, "robot-1")
 if result == ESTOP_STOPPED:
     ...        # confirmed at rest
@@ -88,6 +89,31 @@ else:          # ESTOP_FAILED
 
 This prevents the worst adapter bug: reporting "stopped" only because the stop
 *command* was sent while the robot kept moving.
+
+A real robot's binding also exposes `state_seq(robot)`: the count of new state
+reports it has received from that robot, as a Python int. The count only ever goes up; only
+a new report from that robot raises it, not another robot's and not a duplicate or a
+redelivered message; and the binding raises it only after storing the state
+`is_stopped` reads. With it, `confirm_estop` and `await_estop_confirmation` confirm
+only from a report *received* after the stop was commanded. Without it, a report from
+shortly before the stop, taken while the robot was briefly at rest, could confirm a robot
+that is moving again.
+
+That is a guarantee about when a report was received, not when it was sent: a report
+the robot sent shortly before the stop reached it can still count. If your robot's
+protocol acknowledges a stop, have `is_stopped` require that acknowledgement too. Keep
+the confirmation budget (`max_ticks * tick_dt`, 2 s by default) longer than the
+robot's longest gap between state reports, or a robot at rest is reported FAILED.
+
+A simulator, whose `tick(dt)` keeps the state current, may set the class attribute
+`tick_keeps_state_current = True` instead. A binding with neither gets one warning.
+
+If you call `command_estop` and `await_estop_confirmation` separately, pass the
+`EstopToken` that `command_estop` returns as `since`, and always do so when you poll
+with `max_ticks=1`. A token from another robot's stop or another binding's, or a bare
+count, answers FAILED. A token kept from an earlier stop of the same robot is not
+caught: it would let a report from between the two stops confirm the later one, so
+always pass the token of the stop you have commanded.
 
 ## Why a shared package
 

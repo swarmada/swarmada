@@ -49,6 +49,17 @@ class RobotBinding(Protocol):
         """CONFIRMED at rest — the ground truth the adapter waits on before it
         reports STOPPED. MUST reflect the real robot, never a timeout."""
 
+    def state_seq(self, robot_id: str) -> int:
+        """The count of NEW state reports received from this robot.
+
+        An estop is confirmed only from a report counted after the stop was commanded
+        (``swarmada_sdk.safety.await_estop_confirmation``), so a report from just before
+        it cannot confirm a robot that is moving again. The count only ever goes up; only
+        a new report from this robot raises it (not another robot's, not a duplicate or a
+        redelivered message); and it is raised only after the state `is_stopped` reads is
+        stored. Return an int.
+        """
+
     def pose(self, robot_id: str) -> tuple[float, float, int]:
         """(x, y, floor) in the zone frame."""
 
@@ -85,10 +96,11 @@ class SimulatedRobot:
 
     TODO(vendor): delete this and implement `RobotBinding` against your fleet API.
     Keep the confirmed-stop contract — return `is_stopped=True` only when the robot
-    has actually halted.
+    has actually halted — and count your robot's state reports in `state_seq`.
     """
 
     def __init__(self) -> None:
+        self._ticks = 0
         self._moving: dict[str, bool] = {}
         self._pos: dict[str, tuple[float, float]] = {}
         self._target: dict[str, tuple[float, float] | None] = {}
@@ -103,6 +115,8 @@ class SimulatedRobot:
         self._target[robot_id] = (x, y)
 
     def command_stop(self, robot_id: str) -> None:
+        if robot_id not in self._moving:
+            return  # never spawned: nothing to stop, and nothing confirms it at rest
         self._moving[robot_id] = False  # a real robot confirms this via is_stopped
         self._target[robot_id] = None  # a stopped move is abandoned, never arrived
 
@@ -121,9 +135,19 @@ class SimulatedRobot:
             else:
                 self._pos[robot_id] = (x + (target[0] - x) * step / dist,
                                        y + (target[1] - y) * step / dist)
+        # Each tick is this simulation's state report, for every robot at once, so the
+        # count rises after the state is stored, as state_seq's contract asks. A real
+        # binding counts each robot's reports as they arrive instead: its tick() does
+        # nothing, so a count kept here would never rise and every estop would answer
+        # FAILED.
+        self._ticks += 1
 
     def is_stopped(self, robot_id: str) -> bool:
-        return not self._moving.get(robot_id, False)
+        # A robot this binding never spawned has no state to confirm rest from.
+        return robot_id in self._moving and not self._moving[robot_id]
+
+    def state_seq(self, robot_id: str) -> int:
+        return self._ticks
 
     def arrived(self, robot_id: str) -> bool:
         target = self._target.get(robot_id)

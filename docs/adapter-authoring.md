@@ -41,7 +41,9 @@ certify it; it publishes a template and a test suite, and you self-attest.
    (turn a `FleetAction` delivered by `assign_action` into your robot's native command
    and echo the fencing token in status; a `FleetTask` never crosses the adapter
    boundary, only its actions do), and the confirmed-stop path (report `is_stopped` only from real robot
-   state, never inferred). Decline anything optional you don't support with
+   state, never inferred, and give your binding `state_seq` so a stop is confirmed only
+   from a report received after it was commanded; see the
+   [SDK README](../sdk/python/README.md#c5--confirmed-emergency-stop-confirm_estop)). Decline anything optional you don't support with
    `unsupported = true`.
 3. **Prove it with the conformance suite.** Run the neutral
    [conformance harness](../adapters/CONFORMANCE.md) against your adapter (a simulated
