@@ -47,6 +47,21 @@ manager:
   metricsPort: 8080
   healthPort: 8081
 
+  # The client-side rate limit on the manager's Kubernetes API requests (--kube-api-qps,
+  # --kube-api-burst). It applies to each client and each resource kind separately, not to
+  # the manager as a whole: the manager's client and its uncached reader each have one
+  # limiter for Robots, one for FleetZones, and so on (see the README for the few shared
+  # ones). The defaults are controller-runtime's.
+  # qps must be at least 5, and the chart and the manager refuse less. Leader election has a
+  # limiter of its own of this size. Each renewal is a Get and an Update of its Lease, and
+  # both must be admitted within the renew deadline (3s here), so renewals start to fail
+  # below about 0.7 requests per second; the manager then loses leadership and exits. 5
+  # leaves a wide margin. burst is the most requests a limiter admits at once.
+  # rest_client_rate_limiter_wait_seconds on /metrics shows the waits, by resource kind.
+  kubeAPI:
+    qps: 20
+    burst: 30
+
   # Extra pod annotations. Set these for the RAW prometheus.io/* scrape fallback on
   # clusters WITHOUT the Prometheus Operator (no ServiceMonitor). Example:
   #   podAnnotations:
