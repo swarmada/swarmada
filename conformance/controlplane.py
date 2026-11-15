@@ -384,6 +384,20 @@ def run(rs: ResultSet, *, deployment: str) -> dict[str, bool]:
             "controller; the shipped RBAC grants robots/status for transitions and cannot "
             "tell the two apart", level="MUST NOT")
 
+    # ── CP9 — registration order ────────────────────────────────────────────
+    # A RegisterAck names no robot, so an adapter serving several robots on one ControlStream
+    # pairs each ack with its register by order alone. RFC-0001 §9.2.7 does not state the order
+    # in words, so the row is a SHOULD until an erratum states it. Whether a plane
+    # answers every register, in order, refusals included, is a property of the running
+    # stream server, not of a shipped artefact. The reference server's half is asserted in
+    # internal/controlstream/server_register_order_test.go.
+    rs.skip("CP9.1", "One RegisterAck for each RegisterRobot, in the order they arrived",
+            SkipCause.NEEDS_LIVE_CLUSTER,
+            "the order of RegisterAcks is a property of a running ControlStream server; the "
+            "reference server's is asserted in "
+            "internal/controlstream/server_register_order_test.go",
+            level="SHOULD")
+
     trigger_consumer = (CRD_DIR / "swarmada.io_tasktriggers.yaml").exists()
     return {"cluster-compute": cluster_compute,
             "reactive-dispatch": reactive_dispatch,

@@ -60,6 +60,18 @@ Or, equivalently, via Make:
 make conformance ADAPTER='python adapters/example-noop/noop_adapter.py --endpoint localhost:{port}'
 ```
 
+### An adapter that serves several robots
+
+Name each robot with `--robot-id`, once per robot. With two or more the harness runs in
+multi-robot mode: it plays each robot through registration, runs each robot-scoped row
+once per robot and records the worst result, with each robot's in the detail, and grades
+C20 (robots kept apart). Each robot after the first is sent its own action and stop IDs,
+ending in `-r2`, `-r3` and so on, as a control plane never gives two robots the same ID.
+The default run timeout grows by 150 s for each robot after the first.
+[`../CONFORMANCE.md`](../CONFORMANCE.md), C20, *Multi-robot mode*, states what runs per
+robot and what runs once. `make conformance-sim-multi` runs it against the simulation
+adapter serving `CONFORMANCE_ROBOTS` (default `amr-1 amr-2`).
+
 ## Interpreting the report
 
 - **pass** — the adapter satisfied the check.
@@ -83,5 +95,5 @@ and certificate identity is asserted in the control plane's own `ControlStream` 
 | File | Purpose |
 | :--- | :------ |
 | `report.py` | The result model (`CheckResult`, `Report`) and JSON/text rendering. |
-| `harness.py` | The control-plane test server and the C0–C19 scenario driver. |
+| `harness.py` | The control-plane test server and the C0–C20 scenario driver. |
 | `__main__.py` | CLI: start server, launch the adapter, run, report, exit. |

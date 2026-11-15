@@ -213,7 +213,10 @@ def test_c5_8_below_1_4_0_sends_nothing_and_records_why(pb, driver, quick):
 def test_c5_8_runs_after_the_accepting_reconnect_and_before_the_refused_session(
         pb, driver, monkeypatch):
     """Tokens 24 and 25 are above the cadence drive's 23 and below the refused session's 99,
-    and no stop of its own is left latched for the refused session's checks."""
+    and no stop of its own is left latched for the refused session's checks.
+
+    C5.9 (token 26) follows it, and C20 (tokens 30-60) follows C5.9; the refused session comes
+    after both, so every stop they issue is cleared while a clear may still be sent."""
     drv, session, _report = driver
     calls = []
     for name in [n for n in dir(drv) if n.startswith("_check_")] + [
@@ -227,4 +230,6 @@ def test_c5_8_runs_after_the_accepting_reconnect_and_before_the_refused_session(
     assert "_check_latch_holds_work" in calls, calls
     i = calls.index("_check_latch_holds_work")
     assert calls[i - 1] == "_check_accepting_reconnect", calls
-    assert calls[i + 1] == "_check_negotiation_refusal", calls
+    assert calls[i + 1] == "_check_fresh_reading", calls
+    assert calls[i + 2:i + 6] == ["_check_robots_kept_apart", "_check_unserved_command",
+                                  "_check_unserved_stop", "_check_negotiation_refusal"], calls

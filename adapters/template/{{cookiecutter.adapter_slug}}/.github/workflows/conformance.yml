@@ -18,7 +18,7 @@ jobs:
         run: pip install ./swarmada/sdk/python -e '.[dev]' pyyaml
       - name: Safety-wiring tests
         run: make test
-      - name: Conformance harness (C0-C19)
+      - name: Conformance harness (C0-C20)
         run: make conformance SWARMADA=swarmada
       - uses: actions/upload-artifact@v4
         if: always()

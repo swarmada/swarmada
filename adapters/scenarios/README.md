@@ -118,8 +118,8 @@ warning and runs in pure safety/telemetry mode, so the conformance gate stays gr
 ## Running under conformance
 
 ```
-make conformance-sim         # C0–C19, healthy-fleet (default)
-make conformance-sim-fault   # C0–C19 while exercising the hardware-fault path
+make conformance-sim         # C0–C20, healthy-fleet (default)
+make conformance-sim-fault   # C0–C20 while exercising the hardware-fault path
 ```
 
 `conformance-sim-fault` uses fast timers (`FAULT_AT=2 RECOVER_AT=4`, overridable).

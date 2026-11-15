@@ -114,6 +114,11 @@ class SkipCause(str, enum.Enum):  # noqa: UP042 -- StrEnum changes str()/format(
     #: declaration removed the antecedent: an adapter that serves no Custom verb has none to
     #: accept.
     ADAPTER_DECLARES_NO_CUSTOM_VERB = "adapter-declares-no-custom-verb"
+    #: The run names one robot (one --robot-id), so a row that grades what one robot's traffic
+    #: does to another robot's has no second robot (C20.1, C20.2, C20.5, C20.6, C20.7). Not
+    #: applicable: an adapter that serves one robot has no other robot to keep apart from it,
+    #: and a run of an adapter that serves several names them all.
+    ADAPTER_SERVES_ONE_ROBOT = "adapter-serves-one-robot"
 
 
 class CheckStatus(str, enum.Enum):  # noqa: UP042 -- StrEnum changes str()/format()
@@ -172,7 +177,7 @@ CONTRACT_VERSION = "1.4.0"
 # declares its class and its pinned check set. Written into every report so a result can say which
 # suite produced it (ADR-0032 Amendment 1). tests/python/test_report_names_its_suite_revision.py
 # fails when the two differ, so a revision bump moves both.
-SUITE_REVISION = "2026.11.09"
+SUITE_REVISION = "2026.11.14"
 
 
 @dataclass

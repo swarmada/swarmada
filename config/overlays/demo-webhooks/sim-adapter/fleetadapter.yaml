@@ -63,6 +63,6 @@ spec:
     - amr-standard
   heartbeatIntervalSeconds: 10
   conformanceReport:
-    suiteVersion: "C0-C19"
+    suiteVersion: "C0-C20"
     configMapRef: sim-fleet-adapter-conformance
-    digest: "sha256:6012874d3cabd497cfaf1050033a1f06de0059b80f295fce186b77bf8f5e1b26"
+    digest: "sha256:f32232dcde4353f154b8624f9feb9a90e94d1a1699ed0bb2e9d3b2faac8ac902"

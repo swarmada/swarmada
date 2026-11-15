@@ -337,7 +337,7 @@ Swarmada is pre-release and evolving. Public claims track the code:
 - **Adapters:** three reference adapters — ROS 2/Nav2, VDA5050, and MAVLink/PX4 —
   plus the in-tree simulation adapter run against the executable conformance
   harness (`adapters/conformance/`, run via `make conformance`). The harness
-  covers checks C0–C19. The reference adapters are exercised against it through
+  covers checks C0–C20. The reference adapters are exercised against it through
   simulated bindings only; none has been run against a live runtime, and
   `adapters/REGISTRY.md` — the authoritative per-adapter record — grades all
   three `partial` as of this revision. No controller reads that grade.

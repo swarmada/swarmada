@@ -121,6 +121,7 @@ is ADR-0048's `NOT_APPLICABLE_CAUSES`, unchanged.
 | `adapter-declares-no-enum-param` | `not-supported-by-platform` | yes |
 | `adapter-declares-no-custom-verb` | `not-supported-by-platform` | yes |
 | `contract-predates-obligation` | `not-supported-by-platform` | yes |
+| `adapter-serves-one-robot` | `not-supported-by-platform` | yes |
 | `no-motion-witness` | `not-testable-here` | |
 | `no-independent-motion-channel` | `not-supported-by-platform` | |
 

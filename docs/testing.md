@@ -79,7 +79,7 @@ demo in this repository runs against Isaac Sim.
 4. **Fleet Adapter conformance.** Every adapter must pass the conformance suite
    before it is considered Swarmada-compatible. The suite exercises the protocol
    contract, not any specific vendor. An executable harness lives in
-   `adapters/conformance/` (`make conformance`) and covers checks C0–C19,
+   `adapters/conformance/` (`make conformance`) and covers checks C0–C20,
    including the optional-command (C7), edge (C8) and contract-version (C13–C15)
    checks. A `skip` is not a pass: every skip records an enumerated cause
    (`adapters/conformance/report.py`, `SkipCause`) naming why the check could not
@@ -101,7 +101,7 @@ demo in this repository runs against Isaac Sim.
 - `make test-py` — Python (`pytest`).
 - `make test` — both, after `helm-verify-sync`, `check-error-strings` and
   `docs-cli-check`.
-- `make conformance` — the Fleet Adapter conformance suite (C0–C19).
+- `make conformance` — the Fleet Adapter conformance suite (C0–C20).
 - `make demo-test` — headless end-to-end gate on `kind` (requires Docker; not run by CI).
 - `make quickstart-test` — the quickstart end-to-end on `kind` (requires Docker).
 

@@ -125,6 +125,12 @@ def line_buffer_stdout() -> None:
         reconfigure(line_buffering=True)
 
 
+def harness_default_robot() -> str:
+    """The robot a run names when no --robot-id is given (harness.ROBOT)."""
+    from .harness import ROBOT
+    return ROBOT
+
+
 def main() -> int:
     line_buffer_stdout()
     parser = argparse.ArgumentParser(description="Fleet Adapter conformance harness")
@@ -146,11 +152,24 @@ def main() -> int:
                              "written by something other than the adapter's confirmation path "
                              "(the simulation adapter's plant model writes one with its own "
                              "--witness-file). Without it C5.7 is not testable in the run")
+    parser.add_argument("--robot-id", action="append", default=None, metavar="ID",
+                        help="a robot the adapter serves; repeat it for an adapter that serves "
+                             "several robots on one connection (multi-robot mode: each "
+                             "robot-scoped row runs per robot, and C20 grades the robots kept "
+                             "apart). Default: one robot, robot-conformance-1")
     # 180 s: C2.1 waits up to 75 s for the provisioning loop's register that admits the robot
     # (60 s is the loop's interval while the adapter has no TTL), and the run continues after it.
-    parser.add_argument("--run-timeout", type=float, default=180.0,
-                        help="seconds to allow the whole run before giving up")
+    # Multi-robot mode runs the robot-scoped rows once per robot, so it needs more.
+    parser.add_argument("--run-timeout", type=float, default=None,
+                        help="seconds to allow the whole run before giving up (default 180, "
+                             "and 150 more for each robot after the first)")
     args = parser.parse_args()
+    robots = args.robot_id or [harness_default_robot()]
+    if len(set(robots)) != len(robots):
+        print(f"harness: --robot-id names a robot twice: {robots}", file=sys.stderr, flush=True)
+        return 2
+    if args.run_timeout is None:
+        args.run_timeout = 180.0 + 150.0 * (len(robots) - 1)
     if refuses_default_name(args.adapter_name, args.json):
         print(f"harness: refused: --json {args.json} writes into conformance-reports/ and "
               f"--adapter-name was not given, so the report would name "
@@ -182,7 +201,7 @@ def main() -> int:
     def _run() -> None:
         box["report"] = harness.run_conformance(args.adapter_name, args.port, ready,
                                                 witness_path=args.witness_file,
-                                                handle=handle)
+                                                handle=handle, robots=robots)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

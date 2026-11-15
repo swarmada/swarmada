@@ -2,7 +2,7 @@
   "adapter": "simulation",
   "protocol_version": "fleet_adapter.v1",
   "contract_version": "1.4.0",
-  "suite_revision": "2026.11.09",
+  "suite_revision": "2026.11.14",
   "honoured_operating_constraints": [],
   "measurements": {
     "stream_lease_seconds": 2.0,
@@ -16,9 +16,9 @@
   },
   "conformant": true,
   "counts": {
-    "pass": 61,
+    "pass": 64,
     "fail": 1,
-    "skip": 9
+    "skip": 14
   },
   "results": [
     {
@@ -201,14 +201,14 @@
       "title": "EstopAck within the 500 ms SafetyStream budget",
       "status": "pass",
       "level": "MUST",
-      "detail": "measured 271 ms to the first EstopAck naming 'e1' (budget 500 ms, harness transport included); passed over ['local_stop'] to reach it"
+      "detail": "measured 265 ms to the first EstopAck naming 'e1' (budget 500 ms, harness transport included)"
     },
     {
       "check_id": "C5.1",
       "title": "Accept Estop on SafetyStream and act on it",
       "status": "pass",
       "level": "MUST",
-      "detail": "EstopAck for estop_id 'e1' returned on SafetyStream; passed over ['local_stop'] to reach it"
+      "detail": "EstopAck for estop_id 'e1' returned on SafetyStream"
     },
     {
       "check_id": "C5.2",
@@ -236,7 +236,7 @@
       "title": "An early STOPPED fails: STOPPED is not sent before the witnessed moment of rest",
       "status": "pass",
       "level": "MUST NOT",
-      "detail": "robot moving at 1.000 m/s when the estop was sent; witnessed rest at +0.270s, STOPPED at +0.270s. witness: simulation adapter plant model (KinematicSim), simulated plant only; rest noise 0.0 m/s, hold 0.2 s, resolution 0.2 s; STOPPED timed by confirmed_at_ms; sample gap at the rest 0.052 s, so the tolerance is 0.200 s"
+      "detail": "robot moving at 1.000 m/s when the estop was sent; witnessed rest at +0.265s, STOPPED at +0.265s. witness: simulation adapter plant model (KinematicSim), simulated plant only; rest noise 0.0 m/s, hold 0.2 s, resolution 0.2 s; STOPPED timed by confirmed_at_ms; sample gap at the rest 0.054 s, so the tolerance is 0.200 s"
     },
     {
       "check_id": "C5.4",
@@ -355,7 +355,7 @@
       "title": "No sensor-stream bytes on the control plane while a stream runs",
       "status": "pass",
       "level": "MUST NOT",
-      "detail": "ControlStream 38 B/s idle vs 76 B/s with 'front-rgb' active. LIMIT: this detects RELAYING \u2014 a stream's worth of traffic on a control-plane channel \u2014 and not steganography; an adapter dribbling frames through an existing field below this rate would pass"
+      "detail": "ControlStream 38 B/s idle vs 77 B/s with 'front-rgb' active. LIMIT: this detects RELAYING \u2014 a stream's worth of traffic on a control-plane channel \u2014 and not steganography; an adapter dribbling frames through an existing field below this rate would pass"
     },
     {
       "check_id": "C18.4",
@@ -439,7 +439,7 @@
       "title": "Honour telemetry_interval_seconds from RegisterAck",
       "status": "pass",
       "level": "MUST",
-      "detail": "inter-payload gaps [1.01, 1.01]s against an advertised 1s"
+      "detail": "inter-payload gaps [1.02, 1.01]s against an advertised 1s"
     },
     {
       "check_id": "C5.8",
@@ -447,6 +447,62 @@
       "status": "pass",
       "level": "MUST",
       "detail": "the adapter acknowledged stop 'e-latch' (ESTOP_STATE_STOPPED); work at token 24 was refused ROBOT_UNAVAILABLE while it was latched; the clear (fence, then EstopClear at leader term 1) drew its EstopClearAck; work at token 25 was then accepted"
+    },
+    {
+      "check_id": "C5.9",
+      "title": "Rest is confirmed only from a reading taken after the stop",
+      "status": "pass",
+      "level": "SHOULD",
+      "detail": "robot moving at 1.000 m/s when the estop was sent; witnessed rest at +0.269s, STOPPED at +0.269s. witness: simulation adapter plant model (KinematicSim), simulated plant only; rest noise 0.0 m/s, hold 0.2 s, resolution 0.2 s; STOPPED timed by confirmed_at_ms; sample gap at the rest 0.054 s, so the tolerance is 0.200 s"
+    },
+    {
+      "check_id": "C20.1",
+      "title": "A stop or work for one robot leaves the others alone",
+      "status": "skip",
+      "level": "SHOULD",
+      "detail": "adapter-serves-one-robot: the run names one robot ('robot-conformance-1'), so there is no second robot for its traffic to reach"
+    },
+    {
+      "check_id": "C20.2",
+      "title": "A command acts only on the robot it names",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-serves-one-robot: the run names one robot ('robot-conformance-1'), so there is no second robot for its traffic to reach"
+    },
+    {
+      "check_id": "C20.5",
+      "title": "Each robot keeps its own fencing-token mark",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-serves-one-robot: the run names one robot ('robot-conformance-1'), so there is no second robot for its traffic to reach"
+    },
+    {
+      "check_id": "C20.6",
+      "title": "Each robot keeps its own lease",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-serves-one-robot: the run names one robot ('robot-conformance-1'), so there is no second robot for its traffic to reach"
+    },
+    {
+      "check_id": "C20.7",
+      "title": "A stop latches only its own robot, and its clear lifts only that robot",
+      "status": "skip",
+      "level": "MUST",
+      "detail": "adapter-serves-one-robot: the run names one robot ('robot-conformance-1'), so there is no second robot for its traffic to reach"
+    },
+    {
+      "check_id": "C20.3",
+      "title": "A command for a robot the adapter does not serve is refused, and moves no robot",
+      "status": "pass",
+      "level": "SHOULD",
+      "detail": "an AssignAction for 'robot-not-served' was refused ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE, and no robot reported or ran it (by telemetry and the witness)"
+    },
+    {
+      "check_id": "C20.4",
+      "title": "A stop for a robot the adapter does not serve is never confirmed",
+      "status": "pass",
+      "level": "SHOULD",
+      "detail": "stops for 'robot-not-served' were answered {'before registration': ['ESTOP_STATE_FAILED'], 'after': ['ESTOP_STATE_FAILED']}, never STOPPED; 'robot-conformance-1' kept moving"
     },
     {
       "check_id": "C14.2",
@@ -516,7 +572,7 @@
       "title": "Skip reasons are consistent with the run",
       "status": "pass",
       "level": "MUST",
-      "detail": "0 of 9 recorded skip cause(s) are of a kind this run can contradict, and none was contradicted (telemetry observed; declined arms none). The other 9 are recorded, not checked: ['adapter-declares-no-operating-subject', 'adapter-declares-no-required-param', 'adapter-did-not-reach-state', 'deployment-property', 'legal-alternative-path', 'needs-adapter-restart', 'needs-extended-run', 'not-observable-on-wire']"
+      "detail": "0 of 14 recorded skip cause(s) are of a kind this run can contradict, and none was contradicted (telemetry observed; declined arms ['estop']). The other 14 are recorded, not checked: ['adapter-declares-no-operating-subject', 'adapter-declares-no-required-param', 'adapter-did-not-reach-state', 'adapter-serves-one-robot', 'deployment-property', 'legal-alternative-path', 'needs-adapter-restart', 'needs-extended-run', 'not-observable-on-wire']"
     }
   ]
 }

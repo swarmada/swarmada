@@ -12,7 +12,7 @@ the checks below.
 
 > **Status:** This document is the conformance *specification*. An executable
 > harness that drives an adapter under test against these checks lives in
-> [`conformance/`](conformance/) and drives **C0 through C19**: C0 (report
+> [`conformance/`](conformance/) and drives **C0 through C20**: C0 (report
 > self-checks), C1 (handshake), C2 (registration and reconnect reconciliation),
 > C3 (fencing-token ordering and durability), C4 (assignment leases, including the
 > self-stop), C5 (confirmed estop), C6 (telemetry discipline and explicit
@@ -25,8 +25,12 @@ the checks below.
 > version-invariance, version-bound conformance), C16 (task status reporting) and **C17**
 > (zone operating constraints: the honoured-subject declaration is well formed, and an
 > assignment carrying a rule the adapter cannot honour is DECLINED naming the subject
-> rather than accepted and ignored), C18 (sensor streams and the duty cycle) and **C19**
-> (an assignment the adapter's own catalog does not cover is refused). Every assignment the
+> rather than accepted and ignored), C18 (sensor streams and the duty cycle), **C19**
+> (an assignment the adapter's own catalog does not cover is refused) and **C20** (robots
+> served on one connection are kept apart, and a command or a stop for a robot the adapter
+> does not serve is refused). Given two or more robots (`--robot-id`, repeated), the harness
+> runs in multi-robot mode: each robot-scoped row runs once per robot (*Multi-robot mode*,
+> under C20). Every assignment the
 > harness sends carries an action type the adapter declared on its `scan` reply, with the
 > parameters that type declares required, so a refusal can only be about the thing a row
 > probes.
@@ -432,6 +436,18 @@ own prefix instead of a catalog id.
   **Not graded here.** A fence alone as a stop, the leader term (`C3.10`, `C3.11`), the reports,
   a clear that arrives before its fence, the local latch and interrupted work. *Adapter
   obligations with no C-row* lists them.
+- **C5.9 (SHOULD, advisory)** Confirm rest only from a reading received after the stop was
+  commanded, as *What may confirm rest* below states. An adapter that confirms from the last
+  reading it holds confirms a robot that was at rest when it last reported and is moving now.
+  **What it observes.** With a motion witness, after C5.8, the harness waits for the witness
+  to show the robot at rest, assigns it work at token 26, and sends the stop, with its fence
+  on a `1.4.0` connection, at the first witness sample that shows the robot moving. It grades
+  the terminal `STOPPED` against the witnessed rest after the stop, as C5.7 does. The witness's
+  resolution bounds the time from the start of motion to the stop. Without a witness
+  the row records `no-motion-witness`.
+  **Advisory.** RFC-0001's *What may confirm rest* requires a channel that "shows the robot
+  at rest", and does not state in words that the reading must be one taken after the stop.
+  The row is graded `SHOULD` until it does; an erratum is drafted for it.
 
 ### What may confirm rest (C5.2, C5.3)
 
@@ -468,6 +484,12 @@ motion is not independent, whatever its topic name, message type or label.
 To **confirm** rest a channel must also be able to observe motion at constant
 velocity. An IMU observes acceleration and rotation rate; a robot translating at
 constant velocity produces neither, so an IMU can refute rest and cannot confirm it.
+
+**Only a fresh reading confirms.** Only a reading the adapter received after it
+commanded the stop may confirm rest; the last reading from before the stop, however
+recent, may not. A robot at rest when it last reported may have started moving since,
+and a reading from before the stop says nothing about the stop. `C5.9` grades this rule,
+as advisory.
 
 **Precondition.** An adapter MAY report `ESTOP_STATE_STOPPED` only when at least one
 motion channel that is independent of the command path, and able to confirm rest,
@@ -610,15 +632,20 @@ the rest its plant reports, not that the platform can report rest.
   and hold an `EdgeService` stream with the same mTLS and reconnect discipline
   as `ControlStream`.
 - **C8.2 (MUST)** Tee a `PositionFrame` per managed robot per telemetry tick to
-  every connected edge node, fire-and-forget.
+  every connected edge node, fire-and-forget. The harness checks that a frame arrives
+  for each robot the run names, not that one arrives per telemetry tick.
 - **C8.3 (MUST)** Act on an edge-issued `Estop` by stopping every robot the
   adapter serves through that edge node (the `Estop` names no robot), and return
-  one confirmed `EstopAck`, as on `SafetyStream`. Scope: the harness drives a
-  single-robot adapter, so it does not exercise an adapter that serves several
-  robots through one edge node. That includes C5.2's two-phase
+  one confirmed `EstopAck`, as on `SafetyStream`. That includes C5.2's two-phase
   answer: a `STOPPING` receipt followed by the terminal `STOPPED` within C5.6's
   budget passes. Suites before `2026.09.28` graded the first ack only and failed
-  that answer.
+  that answer. In multi-robot mode, on a `1.4.0` connection, the row also needs a
+  `LocalStopReport` with `latched` set for each robot the run names: the edge stop sets
+  each robot's local latch, and the adapter reports a latch when it is set (fleet adapter
+  protocol, *The Stop Latch*, *Report*). The harness's `RegisterAck` lists its edge
+  endpoint on every acceptance, the reconnect's included: before suite `2026.11.14` the
+  reconnect's listed none, which tells an adapter to stop serving its robots through the
+  node.
 - **C8.4 (MUST NOT, EDGE NODE — not an adapter obligation)** Interpret the
   absence of position frames as a boundary breach or a reason to stop. The party
   that observes silence on the tee is the Zone Controller edge node, which
@@ -1364,3 +1391,93 @@ nothing the harness can ask it to do, and every row that needs an accepted assig
 recorded `adapter-declares-no-action`: an adapter that serves nothing cannot hold the
 `dispatch` profile.
 
+## C20 — Several robots on one connection
+
+One `ControlStream` and one `SafetyStream` carry the traffic of every robot an adapter
+serves, and `Command.robot_id` "selects the managed robot" (`fleet_adapter.proto`,
+`Command`). C20 grades what one robot's traffic does to another's, and what the adapter does
+with a command or a stop for a robot it does not serve.
+
+### Multi-robot mode
+
+Given two or more `--robot-id` (`make conformance-sim-multi`), the harness plays the control
+plane for an adapter that serves all of them on one connection:
+
+- **Registration.** Each robot is played through first contact as C2.1 states. Each
+  `RegisterAck` answers one `RegisterRobot`, in the order the registers arrive, refusals
+  included. The ack names no robot, so this order is what lets an adapter match an ack to
+  its robot.
+- **Robot-scoped rows.** Each row that grades one robot runs once per robot, the next
+  robot's after the last row of the one before: C2.1, C3.2 to C3.6 and C3.9, C4, C5, C6, C7,
+  C9 to C12 and C16 to C19, and, after the reconnect, C2.2, C2.3, C2.4, C3.8 and C6.1 for
+  each robot that re-registers, then C5.8 and C5.9. A row's result is the worst across the robots: it passes only when
+  it passed for every robot, a failure outranks a skip, and a skip keeps the worst robot's
+  enumerated cause. Its detail gives each robot's result. The report keeps its schema: one
+  row per check.
+- **IDs.** A control plane never gives two robots the same action ID or stop ID: an action
+  ID is a `FleetAction`'s name, unique in the adapter's namespace. The rows above name their
+  actions and stops with fixed IDs, so each robot after the first gets its own: every action
+  ID and stop ID the harness sends it ends in `-r2`, `-r3` and so on. An `ActionStatusUpdate`
+  names no robot, and the harness reads it as the robot's whose ID it names.
+- **Connection-scoped rows** run once: C0, C1, C13 to C15, C3.1 and C3.7 on the refused
+  session (whose `RegisterRobot`s are each refused), and C8, where C8.2 needs a frame for each
+  robot and C8.3 a `LocalStopReport` for each.
+
+### The rows
+
+- **C20.1 (SHOULD, advisory)** Leave every other robot alone when one robot is given work or
+  stopped. **What it observes.** Robot B runs an action. The harness assigns robot A work,
+  then stops A (the `Estop`, and its fence on a `1.4.0` connection). B's action reports no
+  stop or end other than `SUCCEEDED`, and the witness, when the run has one, does not show B
+  brought to rest. On a `1.4.0` connection B then takes new work while A is latched.
+  **Advisory.** RFC-0001 does not state in words that a stop for one robot leaves another
+  moving. Stopping more robots than named fails safe; a stop that reaches the wrong robot
+  instead of the named one is C20.2's failure.
+- **C20.2 (MUST)** Act on a command only for the robot it names. **What it observes.** An
+  `AssignAction` for B is accepted and runs on B: B's telemetry names it as its
+  `current_action`, or the witness shows B set moving. No other robot's telemetry names it,
+  and the witness shows no other robot set moving. A run in which neither telemetry nor a
+  witness can show which robot ran it records `not-observable-on-wire`.
+- **C20.3 (SHOULD, advisory)** Refuse a command for a robot the adapter does not serve, and
+  move no robot. **What it observes.** An `AssignAction` for `robot-not-served`, a robot no
+  `--robot-id` names, is refused by any refusal. No `ActionStatusUpdate` names its action, no
+  robot's telemetry reports it, and the witness shows no robot at rest set moving. It runs in
+  every run, with one robot or several.
+- **C20.4 (SHOULD, advisory)** Never confirm a stop for a robot the adapter does not serve.
+  For an `Estop` whose `robot_id` names a robot the adapter has not registered, every
+  `EstopAck` the adapter sends for that stop ID on the `SafetyStream` is
+  `ESTOP_STATE_FAILED`, and none is `ESTOP_STATE_STOPPED`. More than one `FAILED` for the stop
+  ID (the `Estop` and its fence) is accepted. A `CommandResult` for the fence is not graded:
+  the fence's receipt on the `ControlStream` is permitted, not required. No robot the adapter
+  serves is stopped by it. **With no registration accepted**, the adapter serves no robot, so
+  it may stop every robot it drives, failing safe. The ack is graded all the same: `FAILED`,
+  never `STOPPED`. **What it observes.** The harness sends the stop twice: once right after
+  the `HelloAck`, before any `RegisterAck`, and once after C20.3, with a served robot moving.
+  Only the second grades "no served robot is stopped". It runs in every run.
+- **C20.5 (MUST)** Keep each robot's fencing-token mark its own. A token is compared with the
+  mark of the robot the command names (`RobotActionState.fencing_token` is that robot's).
+  **What it observes.** A at token 40 is accepted; B at 35, below A's mark and above its own,
+  is accepted; A at 37, above B's mark and below its own, is refused
+  `STALE_FENCING_TOKEN`; B at 38 is accepted.
+- **C20.6 (MUST)** Keep each robot's lease its own. A renewal renews only the lease of the
+  action it names (`fleet_adapter.proto`, `RenewActionLease`). **What it observes.** A and B
+  each run an action under a 1.5 s lease. The harness renews B's alone for 4 s: A's action
+  reports a stop or an end, and B's reports neither and is renewed `running`. It then does
+  the same the other way round.
+- **C20.7 (MUST at contract `1.4.0`)** Latch a stop for its own robot only, and lift it only
+  for the stop its clear names (*The Stop Latch*; `fleet_adapter.proto`, `EstopClear`).
+  **What it observes.** The harness stops A and B. A is refused work
+  `ROBOT_UNAVAILABLE`; A's clear draws its `EstopClearAck` and A then takes work; B is still
+  refused `ROBOT_UNAVAILABLE`, until its own clear, and then takes work. A `1.3.x` adapter
+  records `contract-predates-obligation`.
+
+**One robot.** C20.1, C20.2 and C20.5 to C20.7 need a second robot. A run that names one
+records them `adapter-serves-one-robot`, which is never an obligation, so an adapter that
+serves one robot is not held short of the `multi-robot` profile. C20.3 and C20.4 apply to
+every adapter.
+
+**Tokens.** C20 runs after C5.9 and before the refused session, at tokens 30 to 60, above
+every robot's mark (C5.9's 26) and below the refused session's 99.
+
+**Advisory rows.** C20.1, C20.3 and C20.4 are graded `SHOULD` because RFC-0001 states no
+adapter rule for them in words. They stay advisory until it does.

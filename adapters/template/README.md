@@ -105,7 +105,7 @@ cookiecutter path/to/swarmada/adapters/template
 cd fleet-adapter-<you>
 pip install path/to/swarmada/sdk/python -e '.[dev]'
 make test                                    # the safety-wiring tests
-make conformance SWARMADA=path/to/swarmada   # the harness, C0–C19
+make conformance SWARMADA=path/to/swarmada   # the harness, C0–C20
 make profile SWARMADA=path/to/swarmada       # the profiled verdict
 ```
 

@@ -256,6 +256,21 @@ condition of conformance would make every conforming deployment hold it.
   telemetry and observed for status writes; this suite's control-plane driver
   reads shipped artefacts only, so the row records that it was not exercised.
 
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+## CP9 — Registration order
+
+- **CP9.1 (SHOULD)** Answer every `RegisterRobot` on a `ControlStream` with one
+  `RegisterAck`, in the order the registers arrived, refusals included. A
+  `RegisterAck` names no robot, so an adapter that serves several robots on one
+  stream can tell which robot an ack answers only by this order. An ack left out
+  for a refusal, or sent out of order, gives one robot another robot's answer: an
+  admission it was not given, or another robot's authoritative action state and
+  fencing token. RFC-0001 §9.2.7 does not state the order in words, so the row is
+  an Extended feature (`registration-order.ack-order`), which no level and no
+  verdict counts. Establishing it needs a running control plane, so the static run
+  records the row as not exercised. The reference server's half is asserted in
+  `internal/controlstream/server_register_order_test.go`.
+
 ## Control-plane obligations with no CP-row
 
 RFC-0001 states these control-plane obligations, and this catalog has no check for any of

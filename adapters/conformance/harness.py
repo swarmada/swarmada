@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The control-plane-side test server and the C0–C19 scenario driver.
+"""The control-plane-side test server and the C0–C20 scenario driver.
 
 Topology mirrors production (RFC-0001 #fleet-adapter-protocol): the adapter-under-test is the gRPC
 *client* and dials in; this harness is the *server*. The harness accepts the
@@ -20,7 +20,7 @@ adapter's ``ControlStream`` and ``SafetyStream``, then a driver thread sends
 crafted control-plane messages and asserts the adapter's replies against
 ``adapters/CONFORMANCE.md``.
 
-Scope: every id the file records, C0.1 through C19.4 — C0 (report integrity and
+Scope: every id the file records, C0.1 through C20.7 — C0 (report integrity and
 harness context), C1 (handshake), C2 (registration and the redial, when the
 adapter registers), C3 (fencing-token ordering), C4 (assignment leases), C5
 (confirmed estop), C6 (telemetry discipline), C7 (optional-command decline via
@@ -41,8 +41,10 @@ carrying a rule the adapter cannot honour is DECLINED naming the subject rather
 than accepted and ignored — FA-R5 and FA-R6) and C18 (sensor streams: the
 declaration is well formed, no stream bytes on the control plane, a stream stops
 on lease expiry, clip windows are bounded, and ``DeactivateStream`` stops a live
-stream) and C19 (an assignment outside the adapter's declared action catalog is
-declined INVALID_ACTION). C9–C12 are
+stream), C19 (an assignment outside the adapter's declared action catalog is
+declined INVALID_ACTION) and C20 (robots served on one connection are kept apart, and a
+command or a stop for a robot the adapter does not serve is refused; given two or more
+--robot-id the run is in multi-robot mode, and each robot-scoped row runs per robot). C9–C12 are
 MAY-level — a decline is conformant. C4 (lease self-stop, a timer-driven
 on-robot behaviour) and C6 (telemetry) are recorded ``skip`` when the adapter
 does not exercise them — as are C2/C8 for a minimal adapter that registers no
@@ -56,6 +58,7 @@ families are out of scope when they are not.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import queue
@@ -231,6 +234,44 @@ _FENCE_PROBE_ID = "e-control-probe"
 _LATCH_PROBE_ID = "e-latch"
 _LATCH_HELD_TOKEN = 24
 _LATCH_LIFTED_TOKEN = 25
+# C5.9: a stop sent the moment the witness first shows the robot moving, at the token after
+# C5.8's.
+_FRESH_PROBE_ID = "e-fresh"
+_FRESH_TOKEN = 26
+# How long C5.9 waits for the witness to show the robot set moving by its assignment.
+_FRESH_MOTION_WAIT = 3.0
+
+# ── C20 — robots kept apart, and robots the adapter does not serve ──────────────
+#
+# The robot no --robot-id names: commands and stops for it test the adapter's refusal
+# (C20.3, C20.4). It is never registered, and no adapter under test serves it.
+_UNSERVED_ROBOT = "robot-not-served"
+# C20.4's two stops: one before any RegisterAck accepts a robot, one after, with a served
+# robot moving.
+_UNSERVED_STOP_BEFORE_ID = "e-unserved-before-registration"
+_UNSERVED_STOP_ID = "e-unserved"
+# How long C20.4 waits for the first EstopAck naming its stop, and then for any further one
+# (the fence's): a stop is answered within 500 ms (C5.5).
+_UNSERVED_ACK_WAIT = 2.0
+_UNSERVED_ACK_TAIL = 1.0
+# How long a C20 row watches for the effect a command must not have (another robot stopping,
+# a robot moving) before it grades its absence.
+_C20_WATCH = 1.5
+# Tokens. Every robot's mark is at most C5.9's (26) when C20 runs, and the refused session
+# probes at 6 and 99, so C20 takes 30-60.
+_C20_ROUTE_TOKEN = 30
+_C20_ISOLATION_TOKEN = 31
+_C20_FENCE_HIGH = 40       # robot A, accepted
+_C20_FENCE_BELOW_A = 35    # robot B: below A's mark, above B's own: accepted
+_C20_FENCE_STALE_A = 37    # robot A: above B's mark, below A's own: refused STALE
+_C20_FENCE_B_AGAIN = 38    # robot B: above B's mark, below A's: accepted
+_C20_LEASE_TOKENS = (45, 46)
+_C20_LEASE_MS = 3000
+_C20_LEASE_WAIT = 5.5
+_C20_LATCH_HELD = 50
+_C20_LATCH_LIFTED = 51
+_C20_UNSERVED_TOKEN = 60        # C20.3, for the robot not served
+_C20_UNSERVED_STOP_TOKEN = 61   # C20.4's served robot, moving
 # Spec budget for the first TelemetryPayload after reconnect; must not be tighter.
 _POST_RECONNECT_TELEMETRY_WAIT = 11.0
 _EDGE_WAIT = 3.0  # seconds to wait for the adapter to dial the advertised edge node
@@ -379,6 +420,9 @@ _NEEDS_SERVED_ACTION = {
     ],
     "_check_latch_holds_work": [
         ("C5.8", "A stop holds the robot's work until its EstopClear lifts it", "MUST"),
+    ],
+    "_check_fresh_reading": [
+        ("C5.9", "Rest is confirmed only from a reading taken after the stop", "SHOULD"),
     ],
 }
 
@@ -813,11 +857,295 @@ def _cause_is_checkable(cid: str, cause: str) -> bool:
     return False
 
 
+# ── Multi-robot mode ─────────────────────────────────────────────────────────────
+#
+# Given two or more --robot-id, the harness plays the control plane for an adapter that serves
+# all of them on one ControlStream and one SafetyStream. Each robot-scoped row then runs once
+# per robot, through a _RobotLens: one robot's view of the shared streams, in which the robot's
+# messages are the only ones it reads and the harness's messages name the robot. A row's result
+# is the worst across the robots (_merge_robot_rows).
+#
+# The checks were written for one robot, and they name their actions and stops with fixed IDs
+# ("t1", "e1", ...). A control plane never gives two robots the same ID: an action ID is a
+# FleetAction's name, unique in the adapter's namespace (fleet_adapter.proto, AssignAction), and
+# a stop ID is minted for each stop. So the lens gives each robot after the first its own IDs:
+# every action ID and stop ID it sends carries a suffix naming the robot, and every one it
+# receives with that suffix has it removed before a check reads it. The first robot's IDs are
+# sent as they are, as in a single-robot run. An ActionStatusUpdate names no robot, and is
+# routed by the suffix of the action it names.
+
+#: Fields that carry an action ID or a stop ID, at any depth of a message.
+_ID_FIELDS = frozenset({"action_id", "current_action", "superseding_action_id", "estop_id"})
+
+
+def _is_repeated(fd) -> bool:
+    """Whether ``fd`` is a repeated field, across the protobuf releases the repo allows.
+
+    protobuf 7 has no FieldDescriptor.label; releases before FieldDescriptor.is_repeated have
+    only the label.
+    """
+    is_repeated = getattr(fd, "is_repeated", None)
+    if is_repeated is not None:
+        return bool(is_repeated() if callable(is_repeated) else is_repeated)
+    return fd.label == fd.LABEL_REPEATED
+
+
+def _rewrite_ids(msg, fn) -> None:
+    """Replace every non-empty ID field (``_ID_FIELDS``) of ``msg`` with ``fn(value)``, in place."""
+    for fd, value in msg.ListFields():
+        if fd.message_type is not None:
+            if _is_repeated(fd):
+                if fd.message_type.GetOptions().map_entry:
+                    continue
+                for item in value:
+                    _rewrite_ids(item, fn)
+            else:
+                _rewrite_ids(value, fn)
+        elif fd.name in _ID_FIELDS and isinstance(value, str) and value:
+            setattr(msg, fd.name, fn(value))
+
+
+def _ids_in(msg) -> list[str]:
+    """Every non-empty ID field (``_ID_FIELDS``) of ``msg``."""
+    found: list[str] = []
+
+    def keep(value: str) -> str:
+        found.append(value)
+        return value
+
+    _rewrite_ids(msg, keep)
+    return found
+
+
+class _Demux:
+    """Splits one session's inbound streams by robot, and gives each robot its own IDs.
+
+    Messages are read from the session's queues only when a lens asks for one. A message for
+    another robot is held for that robot's lens, so nothing a robot sends is lost while the
+    run reads another robot's view. A message naming a robot this run does not serve is
+    dropped: no lens is that robot's.
+    """
+
+    def __init__(self, session: _Session, robots: list[str]) -> None:
+        self.session = session
+        self.robots = list(robots)
+        self._suffix = {r: ("" if i == 0 else f"-r{i + 1}") for i, r in enumerate(self.robots)}
+        # Longest suffix first, so "-r12" is never read as "-r2"'s.
+        self._by_suffix = sorted(((s, r) for r, s in self._suffix.items() if s),
+                                 key=lambda p: -len(p[0]))
+        self._held: dict[tuple[str, str], collections.deque] = {
+            (r, k): collections.deque() for r in self.robots for k in ("control", "safety")}
+        self._command_owner: dict[int, str] = {}
+        self._lock = threading.Lock()
+
+    def suffix(self, robot: str) -> str:
+        return self._suffix[robot]
+
+    def to_robot(self, robot: str, msg):
+        """A copy of harness message ``msg`` as robot ``robot``'s lens sends it."""
+        out = type(msg)()
+        out.CopyFrom(msg)
+        sfx = self._suffix[robot]
+        if sfx:
+            _rewrite_ids(out, lambda v: v + sfx)
+        if out.WhichOneof("payload") == "command":
+            self._command_owner[out.command.command_id] = robot
+        return out
+
+    def owner(self, msg) -> str | None:
+        """The robot an adapter message belongs to; None for a robot this run does not serve."""
+        arm = msg.WhichOneof("payload")
+        body = getattr(msg, arm) if arm else None
+        if arm == "command_result" and body.command_id in self._command_owner:
+            return self._command_owner[body.command_id]
+        named = ""
+        for holder in (msg, body):
+            if holder is not None and "robot_id" in holder.DESCRIPTOR.fields_by_name:
+                named = named or holder.robot_id
+        if named:
+            return named if named in self._suffix else None
+        ids = _ids_in(msg)
+        for sfx, robot in self._by_suffix:
+            if any(v.endswith(sfx) for v in ids):
+                return robot
+        return self.robots[0]
+
+    def from_robot(self, robot: str, msg):
+        """A copy of adapter message ``msg`` as robot ``robot``'s lens reads it."""
+        sfx = self._suffix[robot]
+        if not sfx:
+            return msg
+        out = type(msg)()
+        out.CopyFrom(msg)
+        _rewrite_ids(out, lambda v: v[:-len(sfx)] if v.endswith(sfx) else v)
+        return out
+
+    def hold(self, kind: str, item) -> None:
+        """File an adapter message read from the session for the lens of the robot it names."""
+        if item is _SENTINEL:
+            return
+        robot = self.owner(item)
+        if robot is not None:
+            with self._lock:
+                self._held[(robot, kind)].append(self.from_robot(robot, item))
+
+    def take(self, robot: str, kind: str):
+        with self._lock:
+            held = self._held[(robot, kind)]
+            return held.popleft() if held else _ABSENT
+
+    def discard(self, robot: str, kind: str, arm: str | None = None) -> None:
+        """Drop what is held for ``robot``: every message, or only those of payload ``arm``."""
+        with self._lock:
+            held = self._held[(robot, kind)]
+            kept = [m for m in held if arm is not None and m.WhichOneof("payload") != arm]
+            held.clear()
+            held.extend(kept)
+
+    def discard_all(self) -> None:
+        for robot in self.robots:
+            for kind in ("control", "safety"):
+                self.discard(robot, kind)
+
+
+_ABSENT = object()
+
+
+class _LensQueue:
+    """One robot's inbound queue: its held messages first, then the session's queue."""
+
+    def __init__(self, demux: _Demux, robot: str, kind: str, raw: queue.Queue) -> None:
+        self._d, self._robot, self._kind, self._raw = demux, robot, kind, raw
+
+    def get(self, block: bool = True, timeout: float | None = None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            held = self._d.take(self._robot, self._kind)
+            if held is not _ABSENT:
+                return held
+            if not block:
+                item = self._raw.get_nowait()
+            else:
+                left = None if deadline is None else deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    raise queue.Empty
+                item = self._raw.get(timeout=left)
+            if item is _SENTINEL:
+                return item
+            robot = self._d.owner(item)
+            if robot == self._robot:
+                return self._d.from_robot(robot, item)
+            self._d.hold(self._kind, item)
+
+    def get_nowait(self):
+        return self.get(block=False)
+
+    def put(self, item) -> None:
+        self._raw.put(item)
+
+
+class _LensOut:
+    """One robot's outbound queue: every harness message gets the robot's IDs."""
+
+    def __init__(self, demux: _Demux, robot: str, raw: queue.Queue) -> None:
+        self._d, self._robot, self._raw = demux, robot, raw
+
+    def put(self, item) -> None:
+        self._raw.put(item if not hasattr(item, "WhichOneof")
+                      else self._d.to_robot(self._robot, item))
+
+
+class _RobotLens:
+    """One robot's view of a multi-robot session. Everything but the four queues is shared."""
+
+    def __init__(self, session: _Session, demux: _Demux, robot: str) -> None:
+        self._session = session
+        self.control_in = _LensQueue(demux, robot, "control", session.control_in)
+        self.safety_in = _LensQueue(demux, robot, "safety", session.safety_in)
+        self.control_out = _LensOut(demux, robot, session.control_out)
+        self.safety_out = _LensOut(demux, robot, session.safety_out)
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+
+#: Driver attributes that hold one robot's state, kept per robot in multi-robot mode.
+_PER_ROBOT_FIELDS = ("robot", "s", "r", "_pushback", "_catalog", "_served", "_registered_robot",
+                     "_hardware_baseline", "_goals", "_scan_components", "_honoured_subjects",
+                     "_sensor_streams", "_terminal_status", "_fences", "_unlifted")
+
+_STATUS_RANK = {CheckStatus.PASS: 0, CheckStatus.SKIP: 1, CheckStatus.FAIL: 2}
+
+
+def _merge_robot_rows(robots: list[str], reports: dict) -> list:
+    """One row per check id from each robot's rows: the worst status, every robot's detail.
+
+    A row passes only when it passed for every robot that ran it. A failure outranks a skip,
+    and a skip outranks a pass: a row one robot could not reach is not established for the
+    run. A skip keeps the enumerated cause of the worst robot's skip at the head of its detail,
+    so C0.1 can read it.
+    """
+    from .report import CheckResult
+
+    order: list[str] = []
+    for robot in robots:
+        for row in reports[robot].results:
+            if row.check_id not in order:
+                order.append(row.check_id)
+    merged = []
+    for cid in order:
+        per = [(robot, row) for robot in robots for row in reports[robot].results
+               if row.check_id == cid]
+        worst = max(per, key=lambda p: (_STATUS_RANK[p[1].status], p[1].is_blocking_failure))[1]
+        body = " | ".join(f"{robot}: {row.status.value}"
+                          + (f" ({row.level})" if row.status is CheckStatus.FAIL else "")
+                          + (f", {row.detail}" if row.detail else "") for robot, row in per)
+        ran = len(per)
+        missing = [r for r in robots if r not in {robot for robot, _ in per}]
+        scope = (f"worst of {ran} robots" if not missing else
+                 f"not recorded for {', '.join(missing)}")
+        status = worst.status
+        if missing and status is CheckStatus.PASS:
+            # A row passes only when it passed for every robot. One a robot never recorded is
+            # not established for that robot.
+            status = CheckStatus.SKIP
+            merged.append(CheckResult(
+                cid, worst.title, status, worst.level,
+                f"{SkipCause.ADAPTER_DID_NOT_REACH_STATE.value}: {scope}. "
+                + " | ".join(f"{robot}: {row.status.value}" + (f", {row.detail}"
+                                                                if row.detail else "")
+                             for robot, row in per)))
+            continue
+        if worst.status is CheckStatus.SKIP:
+            cause = next(c.value for c in SkipCause if worst.detail.startswith(c.value))
+            detail = f"{cause}: {scope}. {body}"
+        else:
+            detail = f"{scope}. {body}"
+        merged.append(CheckResult(cid, worst.title, worst.status, worst.level, detail))
+    return merged
+
+
 class _Driver:
     """Runs the checks and records results, given an established session."""
 
     def __init__(self, session: _Session, report: Report, port: int,
-                 witness_path: str | None = None) -> None:
+                 witness_path: str | None = None, robots: list[str] | None = None) -> None:
+        # The robots the adapter serves, as --robot-id names them. With one, the run is the
+        # single-robot run. With two or more it is in multi-robot mode: each robot-scoped row
+        # runs once per robot, through that robot's lens (_RobotLens), and C20 grades what
+        # one robot's traffic does to another's.
+        self.robots = list(robots) if robots else [ROBOT]
+        if len(set(self.robots)) != len(self.robots):
+            raise ValueError(f"--robot-id names a robot twice: {self.robots}")
+        self.robot = self.robots[0]
+        self.multi = len(self.robots) > 1
+        self._demux = _Demux(session, self.robots) if self.multi else None
+        # Per robot, in multi-robot mode: the values of _PER_ROBOT_FIELDS while another
+        # robot's (or the connection's) are in use. See _use().
+        self._ctxs: dict[str, dict] = {}
+        self._active: str | None = None
+        self._main_report = report
+        self._session = session
         # The motion witness for C5.7: a file of the robot's actual speed over time, written
         # by something other than the adapter's own confirmation path -- a simulator's plant
         # model, or an external reference on hardware. None when the run has none.
@@ -876,6 +1204,86 @@ class _Driver:
         # Set by _check_edge when the EdgeStream is up and C8.1/C8.2 are graded: C8.3 is then
         # owed, and runs last (_check_edge_stop).
         self._edge_ready = False
+        if self.multi:
+            from .report import Report as _Report
+            fresh = {f: getattr(self, f) for f in _PER_ROBOT_FIELDS}
+            for robot in self.robots:
+                ctx = dict(fresh)
+                ctx.update(robot=robot, s=_RobotLens(session, self._demux, robot),
+                           r=_Report(adapter=report.adapter), _pushback=[], _fences={},
+                           _unlifted=[], _goals=_FixtureGoals())
+                self._ctxs[robot] = ctx
+
+    # -- multi-robot mode --------------------------------------------------------
+
+    def _use(self, robot: str | None) -> None:
+        """Make ``robot``'s state the driver's, or, with None, the connection's.
+
+        The connection's state is the first robot's, read through the session itself and
+        recorded on the run's report: a connection-scoped row (the handshake, the refused
+        session, the edge stop, C20) reads every robot's traffic and is recorded once. The
+        harness reads one robot's view at a time, on one thread. The connection starts each
+        turn with an empty pushback list and drops it on leaving: no connection-scoped row
+        pushes a message back for a later one.
+        """
+        if not self.multi:
+            return
+        if self._active is not None:
+            saved = {f: getattr(self, f) for f in _PER_ROBOT_FIELDS}
+            if self._active == "":
+                keep = self._ctxs[self.robots[0]]
+                for f in _PER_ROBOT_FIELDS:
+                    if f not in ("s", "r", "_pushback"):
+                        keep[f] = saved[f]
+            else:
+                self._ctxs[self._active] = saved
+        if robot is None:
+            ctx = dict(self._ctxs[self.robots[0]])
+            ctx.update(s=self._session, r=self._main_report, _pushback=[])
+            self._active = ""
+        else:
+            ctx = self._ctxs[robot]
+            self._active = robot
+        for f in _PER_ROBOT_FIELDS:
+            setattr(self, f, ctx[f])
+
+    def _each_robot(self, check, *, clear: bool = False) -> None:
+        """Run ``check`` once per robot, each through its own lens; once, in a single-robot run.
+
+        ``clear`` drops what was held for a robot before its turn: traffic it sent while
+        another robot's rows ran, which no row of its own is waiting for.
+        """
+        if not self.multi:
+            check()
+            return
+        for robot in self.robots:
+            if clear:
+                self._demux.discard(robot, "control")
+                self._demux.discard(robot, "safety")
+            self._use(robot)
+            check()
+        self._use(None)
+
+    def _merge_robot_reports(self) -> None:
+        """Record each robot-scoped row once, as the worst across the robots."""
+        if not self.multi:
+            return
+        self._use(None)
+        reports = {robot: self._ctxs[robot]["r"] for robot in self.robots}
+        # The run's report, by name: each merged row is one the robots' reports recorded,
+        # through the literal calls tests/python/test_harness_check_set_pinned.py reads.
+        for row in _merge_robot_rows(self.robots, reports):
+            self._main_report.add(row.check_id, row.title, row.status, level=row.level,
+                                  detail=row.detail)
+        first = reports[self.robots[0]]
+        if first.honoured_operating_constraints is not None:
+            self.r.honoured_operating_constraints = first.honoured_operating_constraints
+        for robot in self.robots:
+            for key, value in reports[robot].measurements.items():
+                name = key if robot == self.robots[0] else f"{key}[{robot}]"
+                self.r.measurements[name] = value
+                if key in reports[robot].measurement_checks:
+                    self.r.measurement_checks[name] = reports[robot].measurement_checks[key]
 
     # -- small helpers ---------------------------------------------------------
 
@@ -1051,14 +1459,14 @@ class _Driver:
                   f"#fleet-adapter-protocol-package-and-versioning), so this row, which needs "
                   f"{needs}, does not bind it")
 
-    def _fence(self, estop_id: str, reason: str) -> int:
+    def _fence(self, estop_id: str, reason: str, robot_id: str | None = None) -> int:
         """Send a stop's fence: the same Estop, as Command.estop on ControlStream."""
-        cid = self._send_command(estop=pb.Estop(estop_id=estop_id, reason=reason,
-                                                issued_by="harness"))
+        cid = self._send_command(robot_id=robot_id, estop=pb.Estop(
+            estop_id=estop_id, reason=reason, issued_by="harness"))
         self._fences[estop_id] = cid
         return cid
 
-    def _clear_stop(self, estop_id: str) -> bool:
+    def _clear_stop(self, estop_id: str, robot_id: str | None = None) -> bool:
         """Clear a stop the harness issued, and wait for the adapter to say it is lifted.
 
         What a 1.4.0 control plane does (RFC-0001 #fleet-adapter-protocol-the-stop-latch,
@@ -1077,9 +1485,10 @@ class _Driver:
         if not self._latch_binds():
             return False
         if estop_id not in self._fences:
-            self._fence(estop_id, "conformance: the fence of a stop the harness clears")
+            self._fence(estop_id, "conformance: the fence of a stop the harness clears",
+                        robot_id)
         self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
-            robot_id=ROBOT, estop_clear=pb.EstopClear(
+            robot_id=self.robot if robot_id is None else robot_id, estop_clear=pb.EstopClear(
                 estop_id=estop_id, cleared_by="harness",
                 cleared_at_ms=int(time.time() * 1000), leader_term=_LEADER_TERM)))
         deadline = time.monotonic() + _CLEAR_WAIT
@@ -1108,11 +1517,16 @@ class _Driver:
                 f"received no EstopClearAck, so the robot may still be latched; a 1.4.0 adapter "
                 f"lifts a cleared stop and acknowledges it (RFC-0001 The Stop Latch, The clear)")
 
-    def _send_command(self, **command_kwargs):
+    def _send_command(self, robot_id: str | None = None, **command_kwargs):
+        """Send a Command for ``robot_id`` (the robot in use when None); return its id.
+
+        Command ids are the run's, never a robot's: a control plane never reuses one across
+        a stream (fleet_adapter.proto, Command).
+        """
         cid = self._next_command_id
         self._next_command_id += 1
-        cmd = pb.Command(command_id=cid, robot_id=ROBOT, leader_term=_LEADER_TERM,
-                         **command_kwargs)
+        cmd = pb.Command(command_id=cid, robot_id=self.robot if robot_id is None else robot_id,
+                         leader_term=_LEADER_TERM, **command_kwargs)
         self._sent_arms[cid] = cmd.WhichOneof("command")
         self.s.control_out.put(pb.ControlPlaneMessage(command=cmd))
         return cid
@@ -1244,8 +1658,46 @@ class _Driver:
 
         # C2 — Robot lifecycle: adapter-initiated. If the adapter registers, the
         # harness advertises an edge endpoint in the RegisterAck (feeds C8).
-        advertised_edge = self._maybe_handle_registration()
+        # C20.4, first probe: a stop for a robot the adapter does not serve, sent before any
+        # RegisterAck has accepted a robot. Graded with the second probe, after C5.8.
+        self._probe_unserved_stop_before_registration()
 
+        # C2 — Robot lifecycle: adapter-initiated. If the adapter registers, the
+        # harness advertises an edge endpoint in the RegisterAck (feeds C8). In multi-robot
+        # mode every robot is played through first contact, each its own C2.1.
+        advertised_edge = (self._handle_registrations() if self.multi
+                           else self._maybe_handle_registration())
+
+        # Every robot-scoped row, once per robot in multi-robot mode. C8.1 and C8.2 are the
+        # connection's: one EdgeStream serves every robot, so they are graded once, after.
+        self._each_robot(lambda: self._robot_scoped_checks(advertised_edge), clear=True)
+        if self.multi:
+            self._check_edge(advertised_edge)  # C8.1, C8.2; C8.3 runs last
+        self._check_version_bound()    # C15 (no adapter traffic; safe before the drop)
+        # An ACCEPTING reconnect, before the refusing one below. C6.1 and C2.2 are both
+        # about what happens on a SUCCESSFUL re-registration, which the version-refusal
+        # path cannot exercise because it refuses by design.
+        self._check_accepting_reconnect()  # C6.1 + C2.2
+        # C5.8 after the reconnect: its tokens sit above the cadence drive's, and it lifts its
+        # own stop before the refused session, where no clear may be sent. C5.9 after it, at
+        # the next token.
+        self._each_robot(self._after_reconnect_checks)
+        # C20 — what one robot's traffic does to another's (two or more robots), and the
+        # commands and the stop for a robot the adapter does not serve (every run). Their
+        # tokens sit above C5.9's and below the refused session's.
+        self._check_robots_kept_apart()  # C20.1, C20.2, C20.5, C20.6, C20.7
+        self._check_unserved_command()   # C20.3
+        self._check_unserved_stop()      # C20.4
+        # C13.2/C14.1 drop the ControlStream, so nothing that needs it may follow.
+        self._check_negotiation_refusal()  # C3.1 + C13.2 + C14.1
+        # LAST — C8.3's edge stop sets the robot's local latch, which no harness message lifts
+        # (RFC-0001 #fleet-adapter-protocol-the-stop-latch). It needs only the EdgeStream.
+        self._check_edge_stop()        # C8.3
+        self._merge_robot_reports()    # one row per robot-scoped check, the worst of the robots
+        self._record_unverified()      # documented-but-unexercised IDs, stated explicitly
+
+    def _robot_scoped_checks(self, advertised_edge: bool) -> None:
+        """The rows that grade one robot, from C12 to C7.3, in the order a run gives them."""
         # C12 first: every assignment below carries an action type the adapter DECLARED, with
         # the parameters its catalog marks required, so the catalog is read before any is sent.
         self._check_scan()             # C12.1
@@ -1260,7 +1712,8 @@ class _Driver:
         self._check_estop()            # C5
         self._check_telemetry()        # C6
         self._check_optional_decline() # C7
-        self._check_edge(advertised_edge)  # C8.1, C8.2; C8.3 runs last
+        if not self.multi:
+            self._check_edge(advertised_edge)  # C8.1, C8.2; C8.3 runs last
         self._check_verify_metrics()   # C9
         self._check_update_progress()  # C10
         self._check_pause_resume()     # C11
@@ -1271,20 +1724,11 @@ class _Driver:
         self._check_zone_restrictions()  # C17 — MUST run after C12 (reads the declaration)
         self._check_sensor_streams()   # C18 — MUST run after C12 (reads the declaration)
         self._check_artifact_verification()  # C7.2 (model) + C7.3 (firmware body)
-        self._check_version_bound()    # C15 (no adapter traffic; safe before the drop)
-        # An ACCEPTING reconnect, before the refusing one below. C6.1 and C2.2 are both
-        # about what happens on a SUCCESSFUL re-registration, which the version-refusal
-        # path cannot exercise because it refuses by design.
-        self._check_accepting_reconnect()  # C6.1 + C2.2
-        # C5.8 after the reconnect: its tokens sit above the cadence drive's, and it lifts its
-        # own stop before the refused session, where no clear may be sent.
+
+    def _after_reconnect_checks(self) -> None:
+        """The rows that grade one robot after the accepting reconnect: C5.8, then C5.9."""
         self._when_served(self._check_latch_holds_work)  # C5.8
-        # C13.2/C14.1 drop the ControlStream, so nothing that needs it may follow.
-        self._check_negotiation_refusal()  # C3.1 + C13.2 + C14.1
-        # LAST — C8.3's edge stop sets the robot's local latch, which no harness message lifts
-        # (RFC-0001 #fleet-adapter-protocol-the-stop-latch). It needs only the EdgeStream.
-        self._check_edge_stop()        # C8.3
-        self._record_unverified()      # documented-but-unexercised IDs, stated explicitly
+        self._when_served(self._check_fresh_reading)     # C5.9
 
     # -- the served action ------------------------------------------------------
 
@@ -1346,8 +1790,9 @@ class _Driver:
             fields["payload_json"] = self._payload_for(self._served, needs_seconds)
         return pb.AssignAction(**fields)
 
-    def _cancel(self, action_id: str, token: int, reason: str) -> None:
-        cid = self._send_command(cancel_action=pb.CancelAction(
+    def _cancel(self, action_id: str, token: int, reason: str,
+                robot_id: str | None = None) -> None:
+        cid = self._send_command(robot_id=robot_id, cancel_action=pb.CancelAction(
             action_id=action_id, reason=reason, fencing_token=token))
         try:
             self._await_result(cid)
@@ -2157,7 +2602,7 @@ class _Driver:
         _estop_sent_at = time.monotonic()
         _estop_sent_epoch = time.time()  # the witness samples on the host's epoch clock
         self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
-            robot_id=ROBOT,
+            robot_id=self.robot,
             estop=pb.Estop(estop_id="e1", reason="conformance", issued_by="harness")))
         # Row S1 of RFC-0001's robot stop table: the control plane sends every stop on both
         # streams at once, and on a 1.4.0 connection the fence is what the clear waits for.
@@ -2377,7 +2822,13 @@ class _Driver:
         return False
 
     def _grade_early_stopped(self, term, received_epoch, sent_epoch: float) -> None:
-        """C5.7 (MUST NOT) — a STOPPED is not sent before the witnessed moment of rest.
+        """C5.7 (MUST NOT) — a STOPPED is not sent before the witnessed moment of rest."""
+        status, detail = self._early_stopped_verdict(term, received_epoch, sent_epoch)
+        self.r.add("C5.7", "An early STOPPED fails: STOPPED is not sent before the witnessed "
+                           "moment of rest", status, level="MUST NOT", detail=detail)
+
+    def _early_stopped_verdict(self, term, received_epoch, sent_epoch: float):
+        """(status, detail): a STOPPED timed against the witnessed moment of rest (C5.7, C5.9).
 
         C5.3 concedes that whether an adapter inferred rest is not decidable from the wire.
         It is decidable against a witness: something other than the adapter's own confirmation
@@ -2397,30 +2848,25 @@ class _Driver:
         rest by more than the larger of the witness's declared resolution and that gap fails,
         so a STOPPED fails only when it precedes a sample that still showed the robot moving.
         """
-        title = "An early STOPPED fails: STOPPED is not sent before the witnessed moment of rest"
-        level = "MUST NOT"
         if self._witness_path is None:
-            self.r.add("C5.7", title, CheckStatus.SKIP, level=level,
-                       detail=(SkipCause.NO_MOTION_WITNESS.value
-                               + ": the run was given no motion witness (--witness-file), so the "
-                                 "time of STOPPED could not be compared with the robot's rest"))
-            return
+            return (CheckStatus.SKIP,
+                    (SkipCause.NO_MOTION_WITNESS.value
+                     + ": the run was given no motion witness (--witness-file), so the "
+                     "time of STOPPED could not be compared with the robot's rest"))
         if term is None or term.state != pb.ESTOP_STATE_STOPPED:
-            self.r.add("C5.7", title, CheckStatus.SKIP, level=level,
-                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
-                               + ": no terminal STOPPED was received, so there is no STOPPED "
-                                 "to time against the witness"))
-            return
+            return (CheckStatus.SKIP,
+                    (SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                     + ": no terminal STOPPED was received, so there is no STOPPED "
+                     "to time against the witness"))
         meta, samples = _read_witness(self._witness_path)
         robot = self._registered_robot
         samples = sorted((s for s in samples if not robot or s.get("robot") in (robot, None)),
                          key=lambda s: s["t"])
         if meta is None or not samples:
-            self.r.add("C5.7", title, CheckStatus.SKIP, level=level,
-                       detail=(SkipCause.NO_MOTION_WITNESS.value
-                               + f": the witness file {self._witness_path} held no samples"
-                                 + (f" for {robot!r}" if robot else "")))
-            return
+            return (CheckStatus.SKIP,
+                    (SkipCause.NO_MOTION_WITNESS.value
+                     + f": the witness file {self._witness_path} held no samples"
+                     + (f" for {robot!r}" if robot else "")))
         noise = float(meta.get("rest_noise_mps", 0.0))
         hold = float(meta.get("hold_s", 0.0))
         resolution = float(meta.get("resolution_s", 0.0))
@@ -2433,12 +2879,11 @@ class _Driver:
             held = (f"; the connection negotiated contract {agreed}, which is sent no "
                     f"AssignAction, so nothing put the robot in motion"
                     if self._held_below_latch() else "")
-            self.r.add("C5.7", title, CheckStatus.SKIP, level=level,
-                       detail=(SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
-                               + f": the witness ({source}) shows the robot at rest when the "
-                                 f"estop was sent (speed {speed} m/s), so an early STOPPED "
-                                 f"cannot be told from a timely one{held}"))
-            return
+            return (CheckStatus.SKIP,
+                    (SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                     + f": the witness ({source}) shows the robot at rest when the "
+                     f"estop was sent (speed {speed} m/s), so an early STOPPED "
+                     f"cannot be told from a timely one{held}"))
         # The witness is still being written: a rest that has begun is confirmed only by a
         # sample later than its hold time, which may not exist yet when STOPPED arrives. Read
         # it again until the rest is confirmed or the wait runs out; deciding on a partial
@@ -2461,11 +2906,10 @@ class _Driver:
         bounds = (f"witness: {source}; rest noise {noise} m/s, hold {hold} s, resolution "
                   f"{resolution} s; STOPPED timed by {basis}")
         if rest_at is None:
-            self.r.add("C5.7", title, CheckStatus.FAIL, level=level,
-                       detail=f"STOPPED at +{stopped_at - sent_epoch:.3f}s after the estop, and "
-                              f"the witness shows no rest in the samples that follow it "
-                              f"(speed at the estop {speed_at_estop:.3f} m/s). {bounds}")
-            return
+            return (CheckStatus.FAIL,
+                    f"STOPPED at +{stopped_at - sent_epoch:.3f}s after the estop, and "
+                    f"the witness shows no rest in the samples that follow it "
+                    f"(speed at the estop {speed_at_estop:.3f} m/s). {bounds}")
         prior = [s["t"] for s in samples if s["t"] < rest_at]
         gap = rest_at - prior[-1] if prior else 0.0
         tolerance = max(resolution, gap)
@@ -2473,16 +2917,15 @@ class _Driver:
                    f"{tolerance:.3f} s")
         early = rest_at - stopped_at
         if early > tolerance:
-            self.r.add("C5.7", title, CheckStatus.FAIL, level=level,
-                       detail=f"STOPPED at +{stopped_at - sent_epoch:.3f}s, the witnessed rest at "
-                              f"+{rest_at - sent_epoch:.3f}s: {early:.3f}s EARLY, beyond the "
-                              f"witness's resolution and its sample gap. The adapter reported "
-                              f"rest the robot had not reached. {bounds}")
-            return
-        self.r.add("C5.7", title, CheckStatus.PASS, level=level,
-                   detail=f"robot moving at {speed_at_estop:.3f} m/s when the estop was sent; "
-                          f"witnessed rest at +{rest_at - sent_epoch:.3f}s, STOPPED at "
-                          f"+{stopped_at - sent_epoch:.3f}s. {bounds}")
+            return (CheckStatus.FAIL,
+                    f"STOPPED at +{stopped_at - sent_epoch:.3f}s, the witnessed rest at "
+                    f"+{rest_at - sent_epoch:.3f}s: {early:.3f}s EARLY, beyond the "
+                    f"witness's resolution and its sample gap. The adapter reported "
+                    f"rest the robot had not reached. {bounds}")
+        return (CheckStatus.PASS,
+                f"robot moving at {speed_at_estop:.3f} m/s when the estop was sent; "
+                f"witnessed rest at +{rest_at - sent_epoch:.3f}s, STOPPED at "
+                f"+{stopped_at - sent_epoch:.3f}s. {bounds}")
 
     def _check_telemetry(self) -> None:
         payload = self._await_telemetry()
@@ -2567,9 +3010,17 @@ class _Driver:
         """Accept a register: the robot is admitted. The ack advertises an edge endpoint, so an
         edge-capable adapter reaches C8, and a 1 s telemetry interval, which C2.3 measures."""
         self._registered_robot = msg.register.robot_id
-        edge = pb.EdgeEndpoint(zone="zone-conformance", address=f"localhost:{self.port}")
         self.s.control_out.put(pb.ControlPlaneMessage(register_ack=pb.RegisterAck(
-            accepted=True, telemetry_interval_seconds=1, edge_endpoints=[edge])))
+            accepted=True, telemetry_interval_seconds=1, edge_endpoints=self._edge_endpoints())))
+
+    def _edge_endpoints(self) -> list:
+        """The edge node the robot's zone chain declares: the harness's own EdgeService.
+
+        Listed on every accepted RegisterAck, the reconnect's included: edge_endpoints are the
+        robot's zone chain, which a reconnect does not change, and an adapter serves a robot
+        through exactly the nodes its latest RegisterAck lists.
+        """
+        return [pb.EdgeEndpoint(zone="zone-conformance", address=f"localhost:{self.port}")]
 
     def _maybe_handle_registration(self) -> bool:
         # C2.1 plays first contact with a robot that is not admitted yet (RFC-0001
@@ -2639,6 +3090,121 @@ class _Driver:
             return admitted
         finally:
             self._pushback.extend(held)
+
+    def _handle_registrations(self) -> bool:
+        """C2.1 for every robot of a multi-robot run: first contact, each robot on its own.
+
+        Each robot is played as `_maybe_handle_registration` plays the one robot of a
+        single-robot run: its first register is refused NOT_ADMITTED, its discover is staged,
+        and its next register is accepted. Each RegisterAck answers one register, in the order
+        the registers arrive, which is what lets an adapter serving several robots match an
+        ack to its robot (the ack names none). A register for a robot no --robot-id names is
+        refused with no rejection code, which says the robot is not the adapter's. Every other
+        message read meanwhile is held for its robot's lens. Returns whether any robot was
+        admitted, which advertises the edge endpoint (C8).
+        """
+        title = "DiscoverRobot vs RegisterRobot used correctly"
+        state = {robot: "new" for robot in self.robots}
+        refused_at: dict[str, float] = {}
+        started = time.monotonic()
+        # The last lifecycle message from any robot. An adapter may register its robots one
+        # at a time, each after the one before is admitted, so a robot not heard from yet is
+        # given up on only when no other robot is mid-way through first contact and the
+        # adapter has been quiet for _REGISTER_WAIT.
+        last_heard = started
+
+        def record(robot, status, detail):
+            self._ctxs[robot]["r"].add("C2.1", title, status, detail=detail)
+
+        def settled() -> bool:
+            return all(s in ("admitted", "done", "unheard") for s in state.values())
+
+        while not settled():
+            now = time.monotonic()
+            busy = any(s in ("refused", "announced", "announced-late") for s in state.values())
+            for robot, s in state.items():
+                if s == "new" and not busy and now - last_heard > _REGISTER_WAIT:
+                    state[robot] = "unheard"
+                elif s == "refused" and now - refused_at[robot] > _DISCOVER_WAIT:
+                    state[robot] = "done"
+                    record(robot, CheckStatus.FAIL,
+                           f"register came first and was refused NOT_ADMITTED, and no discover "
+                           f"followed within {_DISCOVER_WAIT:g}s. A NOT_ADMITTED refusal MUST "
+                           f"be answered by announcing the robot (discover)")
+            if settled() or now - started > _ADMISSION_WAIT:
+                break
+            try:
+                msg = self.s.control_in.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                break
+            kind = msg.WhichOneof("payload")
+            if kind not in ("register", "discover"):
+                self._demux.hold("control", msg)
+                continue
+            last_heard = time.monotonic()
+            robot = getattr(msg, kind).robot_id
+            if robot not in state:
+                print(f"harness: {kind} for {robot!r}, which no --robot-id names; refused as "
+                      f"not this adapter's", file=sys.stderr, flush=True)
+                refusal = dict(accepted=False, message=f"{robot!r} is not this adapter's robot")
+                self.s.control_out.put(
+                    pb.ControlPlaneMessage(register_ack=pb.RegisterAck(**refusal))
+                    if kind == "register" else
+                    pb.ControlPlaneMessage(discover_ack=pb.DiscoverAck(**refusal)))
+                continue
+            s = state[robot]
+            if kind == "discover":
+                self._ack_discover()
+                if s in ("new", "unheard"):
+                    record(robot, CheckStatus.FAIL,
+                           "the first lifecycle message was discover, not register; "
+                           "DiscoverRobot MUST NOT be attempted before register")
+                    state[robot] = "announced-late"
+                elif s == "refused":
+                    state[robot] = "announced"
+                continue
+            if s in ("new", "unheard"):
+                self.s.control_out.put(pb.ControlPlaneMessage(register_ack=pb.RegisterAck(
+                    accepted=False, rejection=pb.REGISTRATION_REJECTION_NOT_ADMITTED,
+                    message="no Robot exists for this robot_id yet; announce it with discover")))
+                state[robot] = "refused"
+                refused_at[robot] = time.monotonic()
+                continue
+            # A register after the first: the admission, whatever came before it. A robot
+            # already admitted is answered again, as a control plane answers every register.
+            self._accept_register(msg)
+            self._ctxs[robot]["_registered_robot"] = robot
+            if s == "refused":
+                record(robot, CheckStatus.FAIL,
+                       "register came first and was refused NOT_ADMITTED, and the adapter "
+                       "registered again without announcing the robot; a NOT_ADMITTED refusal "
+                       "MUST be answered by discover. The second register was accepted, so the "
+                       "run goes on with the robot admitted")
+            elif s == "announced":
+                record(robot, CheckStatus.PASS,
+                       "register came first; refused NOT_ADMITTED, the adapter announced the "
+                       "robot (discover); the provisioning loop's next register was accepted "
+                       "as the admission")
+            state[robot] = "admitted"
+        for robot, s in state.items():
+            if s in ("refused", "announced", "announced-late", "new", "unheard"):
+                if s == "announced":
+                    record(robot, CheckStatus.PASS,
+                           "register came first; refused NOT_ADMITTED, the adapter announced "
+                           f"the robot (discover); no register followed within "
+                           f"{_ADMISSION_WAIT:g}s, so the run goes on with the robot not "
+                           f"admitted")
+                elif s == "refused":
+                    record(robot, CheckStatus.FAIL,
+                           "register came first and was refused NOT_ADMITTED, and no discover "
+                           "followed before the run went on")
+                elif s in ("new", "unheard"):
+                    record(robot, CheckStatus.SKIP, SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                           + f": adapter initiated no registration for {robot!r} in this run")
+        self._registered_robot = self._ctxs[self.robots[0]]["_registered_robot"]
+        return any(s == "admitted" for s in state.values())
 
     def _ack_discover(self) -> None:
         """Stage an announce, as a control plane stages one for a robot with no Robot."""
@@ -2788,7 +3354,7 @@ class _Driver:
         holds the same adapter to it.
         """
         title = "push_firmware may emit UpdateProgress"
-        emitted = [p for p in firmware["progress"] if p.robot_id == ROBOT and p.phase]
+        emitted = [p for p in firmware["progress"] if p.robot_id == self.robot and p.phase]
         if emitted:
             self.r.add("C10.1", title, CheckStatus.PASS, level="MAY",
                        detail=f"phases: {[p.phase for p in emitted]}")
@@ -2860,7 +3426,7 @@ class _Driver:
         silent, reported = [], []
         for inst in answered:
             terminal = [p for p in inst["progress"]
-                        if p.robot_id == ROBOT
+                        if p.robot_id == self.robot
                         and p.outcome != pb.INSTALL_OUTCOME_UNSPECIFIED]
             if not terminal:
                 silent.append(inst["arm"])
@@ -3298,25 +3864,40 @@ class _Driver:
                    detail=(f"EdgeStream established within {_EDGE_WAIT}s of the RegisterAck "
                            f"that advertised edge_endpoints"))
 
-        # C8.2 — the adapter tees PositionFrames up the EdgeStream, fire-and-forget.
+        # C8.2 — the adapter tees PositionFrames up the EdgeStream, fire-and-forget. In
+        # multi-robot mode one EdgeStream serves every robot, and a frame is owed for each.
         deadline = time.monotonic() + _GET_TIMEOUT
         saw_position = False
-        while time.monotonic() < deadline and not saw_position:
+        framed: set[str] = set()
+        owed = set(self.robots) if self.multi else set()
+        while time.monotonic() < deadline and not (saw_position and owed <= framed):
             try:
                 msg = self.s.edge_in.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 break
             if msg is _SENTINEL:
                 break
-            saw_position = msg.WhichOneof("msg") == "position"
+            if msg.WhichOneof("msg") == "position":
+                saw_position = True
+                framed.add(msg.position.robot_id)
 
         # Exactly one C8.2 row per run that reached the EdgeStream: PASS when frames were
         # seen, FAIL when none were. Omitting the row on absence made a missing tee
         # invisible in the report rather than a failure.
+        missing = sorted(owed - framed)
+        if self.multi:
+            ok = saw_position and not missing
+            detail = (f"a PositionFrame for each of {self.robots} on the one EdgeStream" if ok
+                      else "EdgeStream established but no PositionFrame was teed to it"
+                      if not saw_position else
+                      f"no PositionFrame for {missing} on the EdgeStream within "
+                      f"{_GET_TIMEOUT:.0f}s (frames came for {sorted(framed)})")
+        else:
+            ok = saw_position
+            detail = ("PositionFrame observed on the EdgeStream" if saw_position else
+                      "EdgeStream established but no PositionFrame was teed to it")
         self.r.add("C8.2", "Tee a PositionFrame per robot to the edge node",
-                   CheckStatus.PASS if saw_position else CheckStatus.FAIL,
-                   detail=("PositionFrame observed on the EdgeStream" if saw_position else
-                           "EdgeStream established but no PositionFrame was teed to it"))
+                   CheckStatus.PASS if ok else CheckStatus.FAIL, detail=detail)
         self._edge_ready = True
 
     def _check_edge_stop(self) -> None:
@@ -3367,11 +3948,44 @@ class _Driver:
                                "no confirmed EstopAck on the EdgeStream"))
             return
         ok = ack.state == pb.ESTOP_STATE_STOPPED
+        every = ""
+        if ok and self.multi and self._latch_binds():
+            # An edge stop names no robot: it stops every robot the adapter serves through the
+            # edge node, and sets each one's local latch, which the adapter reports for each
+            # robot as a LocalStopReport when it is set (RFC-0001 The Stop Latch, Report).
+            latched = self._await_local_latches(set(self.robots))
+            missing = sorted(set(self.robots) - latched)
+            if missing:
+                ok = False
+                every = (f"; no LocalStopReport (latched) came for {missing} within "
+                         f"{_GET_TIMEOUT:.0f}s: the stop reached {sorted(latched) or 'none'} "
+                         f"of the robots it must stop")
+            else:
+                every = f", and a LocalStopReport (latched) came for each of {self.robots}"
         self.r.add("C8.3", "Confirmed EstopAck for an edge-issued estop",
                    CheckStatus.PASS if ok else CheckStatus.FAIL,
                    detail=(("EstopAck state STOPPED on the EdgeStream"
-                            + (" after a STOPPING ack" if saw_stopping else "")) if ok else
+                            + (" after a STOPPING ack" if saw_stopping else "")
+                            + every) if ack.state == pb.ESTOP_STATE_STOPPED else
                            f"state={ack.state} (not STOPPED)"))
+
+    def _await_local_latches(self, robots: set[str]) -> set[str]:
+        """The robots of ``robots`` a LocalStopReport says are latched, within _GET_TIMEOUT."""
+        latched: set[str] = set()
+        deadline = time.monotonic() + _GET_TIMEOUT
+        while latched < robots:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                msg = self.s.safety_in.get(timeout=min(left, 0.1))
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                break
+            if msg.WhichOneof("payload") == "local_stop" and msg.local_stop.latched:
+                latched.add(msg.robot_id)
+        return latched & robots
 
 
     # The signature reference the probes carry. A well-formed URI that resolves nowhere:
@@ -3422,7 +4036,7 @@ class _Driver:
         measurement rather than a self-report.
         """
         kwargs = dict(
-            robot_id=ROBOT, stream_id=stream_id, rate_hz=rate_hz,
+            robot_id=self.robot, stream_id=stream_id, rate_hz=rate_hz,
             sinks=[pb.StreamSink(address=a) for a in sinks],
             fencing_token=token,
             lease_expires_ms=int((time.time() + lease_s) * 1000))
@@ -3452,7 +4066,7 @@ class _Driver:
         around silently.
         """
         cid = self._send_command(deactivate_stream=pb.DeactivateStream(
-            robot_id=ROBOT, stream_id=stream_id))
+            robot_id=self.robot, stream_id=stream_id))
         res = self._await_result(cid)
         if res.unsupported:
             return False
@@ -3647,7 +4261,7 @@ class _Driver:
                    f"ActivateStreamResult carries no window echo, so the consumer cannot "
                    f"discover it received less pre-roll than it asked for"))
             self._send_command(deactivate_stream=pb.DeactivateStream(
-                robot_id=ROBOT, stream_id=clipful.stream_id))
+                robot_id=self.robot, stream_id=clipful.stream_id))
             if not said:
                 self.r.add("C18.4", "Clip windows are refused or bounded, per the declaration",
                            CheckStatus.FAIL, detail="; ".join(findings))
@@ -3776,7 +4390,7 @@ class _Driver:
                        + ": could not activate a stream to deactivate")
             return
         cid = self._send_command(deactivate_stream=pb.DeactivateStream(
-            robot_id=ROBOT, stream_id=stream_id))
+            robot_id=self.robot, stream_id=stream_id))
         dres = self._await_result(cid)
         if dres.unsupported:
             self.r.add("C18.5", "DeactivateStream stops a live stream", CheckStatus.FAIL,
@@ -3936,25 +4550,39 @@ class _Driver:
         while time.monotonic() < deadline and self.s.control_opens <= opens_before:
             time.sleep(0.1)
         if self.s.control_opens <= opens_before:
-            for cid, title in (("C2.4", "Re-register on reconnect; never re-discover"),
-                               ("C6.1",
-                                "First TelemetryPayload after reconnect is a full snapshot"),
-                               ("C2.2", "Adopt authoritative_action_state from RegisterAck")):
-                self.r.add(cid, title, CheckStatus.SKIP,
-                           level="MUST NOT" if cid == "C2.4" else "MUST",
-                           detail=SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
-                                  + ": adapter did not redial within "
-                                  + f"{_RECONNECT_WAIT}s")
-            self._record_reconnect_unreached(f"adapter did not redial within {_RECONNECT_WAIT}s")
+            why = f"adapter did not redial within {_RECONNECT_WAIT}s"
+
+            def unreached() -> None:
+                for cid, title in (("C2.4", "Re-register on reconnect; never re-discover"),
+                                   ("C6.1",
+                                    "First TelemetryPayload after reconnect is a full snapshot"),
+                                   ("C2.2", "Adopt authoritative_action_state from RegisterAck")):
+                    self.r.add(cid, title, CheckStatus.SKIP,
+                               level="MUST NOT" if cid == "C2.4" else "MUST",
+                               detail=SkipCause.ADAPTER_DID_NOT_REACH_STATE.value + ": " + why)
+                self._record_reconnect_unreached(why)
+
+            # Every robot's rows: the redial is the connection's, and no robot re-registered.
+            self._each_robot(unreached)
             return
 
         # Re-handshake: accept the hello, then accept the registration and hand back an
-        # authoritative state saying the task the robot last held was CANCELLED.
-        ghost = "t-status"   # the action the adapter accepted earlier in this run
-        accepted_register = False
-        redialled_with_discover = False
+        # authoritative state saying the task the robot last held was CANCELLED. In
+        # multi-robot mode every robot re-registers, and each RegisterAck names that robot's
+        # task, under that robot's ID (_Demux). What the session carried before the drop is
+        # no part of the reconnect, and what arrives during it is held for its robot's lens.
+        if self.multi:
+            self._demux.discard_all()
+            for robot in self.robots:
+                self._ctxs[robot]["_pushback"].clear()
+        accepted = {robot: False for robot in self.robots}
+        discovered = {robot: False for robot in self.robots}
+        # What the queue holds before the new stream's hello was sent on the old stream: it is
+        # no part of the reconnect, and a robot's lens must not read it as the first telemetry
+        # or the reconciliation after it (C6.1, C2.2).
+        new_stream = False
         deadline = time.monotonic() + _ACCEPTING_HANDSHAKE_WAIT
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not all(accepted.values()):
             try:
                 msg = self.s.control_in.get(timeout=0.5)
             except queue.Empty:
@@ -3965,6 +4593,7 @@ class _Driver:
                 continue
             kind = msg.WhichOneof("payload")
             if kind == "hello":
+                new_stream = True
                 # Agreed for this connection, as the first one was.
                 self.s.control_out.put(pb.ControlPlaneMessage(
                     hello_ack=self._hello_ack(msg.hello.contract_version)))
@@ -3977,11 +4606,19 @@ class _Driver:
                 # The refusal is in band (ALREADY_EXISTS), and the loop keeps waiting for
                 # the register that MUST follow, so an adapter that corrects itself still
                 # reaches the reconnect checks.
-                redialled_with_discover = True
+                robot = msg.discover.robot_id if self.multi else self.robot
+                if robot in discovered:
+                    discovered[robot] = True
                 self.s.control_out.put(pb.ControlPlaneMessage(discover_ack=pb.DiscoverAck(
                     accepted=False, rejection=pb.REGISTRATION_REJECTION_ALREADY_EXISTS,
                     message="a Robot already exists for this id; re-register on reconnect")))
             elif kind == "register":
+                robot = msg.register.robot_id if self.multi else self.robot
+                if robot not in accepted:
+                    self.s.control_out.put(pb.ControlPlaneMessage(register_ack=pb.RegisterAck(
+                        accepted=False, message=f"{robot!r} is not this adapter's robot")))
+                    continue
+                ghost = "t-status" + (self._demux.suffix(robot) if self.multi else "")
                 # fencing_token=22 is STRICTLY ABOVE the run's high-water mark (19, set by
                 # C17.4's probe). It used to be 14 — equal to the mark — and that is why
                 # the adoption gap stayed invisible for a whole draft: with the authoritative token
@@ -3991,11 +4628,24 @@ class _Driver:
                 # create. C3.8 below is the check this value exists to make possible.
                 self.s.control_out.put(pb.ControlPlaneMessage(register_ack=pb.RegisterAck(
                     accepted=True, telemetry_interval_seconds=1,
+                    edge_endpoints=self._edge_endpoints(),
                     authoritative_action_state=pb.RobotActionState(
                         phase=pb.ROBOT_ACTION_PHASE_CANCELLED, action_id=ghost,
                         fencing_token=_AUTHORITATIVE_TOKEN, lease_generation=0))))
-                accepted_register = True
-                break
+                accepted[robot] = True
+            elif self.multi and new_stream:
+                self._demux.hold("control", msg)
+        if not self.multi:
+            self._grade_reconnect(accepted[self.robot], discovered[self.robot])
+            return
+        for robot in self.robots:
+            self._use(robot)
+            self._grade_reconnect(accepted[robot], discovered[robot])
+        self._use(None)
+
+    def _grade_reconnect(self, accepted_register: bool, redialled_with_discover: bool) -> None:
+        """C2.4, C6.1, C2.2, C3.8 and C2.3 for the robot in use, after the redial's handshake."""
+        ghost = "t-status"   # the action the adapter accepted earlier in this run
         if redialled_with_discover:
             self.r.add("C2.4", "Re-register on reconnect; never re-discover",
                        CheckStatus.FAIL, level="MUST NOT",
@@ -4203,6 +4853,12 @@ class _Driver:
     def _measure_cadence(self) -> None:
         """C2.3: drive the robot when the connection may be given work, then time the payloads."""
         in_motion = self._drive_for_cadence()
+        if self.multi:
+            # Telemetry held while another robot's rows ran arrived then, not now: timed as it
+            # is read, it would measure no gap at all.
+            self._demux.discard(self.robot, "control", "telemetry")
+            self._pushback = [m for m in self._pushback if m is _SENTINEL
+                              or m.WhichOneof("payload") != "telemetry"]
         stamps = []
         for _ in range(3):
             t0 = time.monotonic()
@@ -4263,7 +4919,7 @@ class _Driver:
         self._cancel("t-cadence", _CADENCE_TOKEN, "harness: C5.8 needs the robot idle")
         stop_id = _LATCH_PROBE_ID
         self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
-            robot_id=ROBOT,
+            robot_id=self.robot,
             estop=pb.Estop(estop_id=stop_id, reason="conformance: C5.8", issued_by="harness")))
         self._fence(stop_id, "conformance: C5.8")
         try:
@@ -4334,6 +4990,742 @@ class _Driver:
             return self._await_result(cid).assign_action
         except (EOFError, queue.Empty):
             return None
+
+    def _check_fresh_reading(self) -> None:
+        """C5.9 (SHOULD) — rest is confirmed only from a reading taken after the stop.
+
+        CONFORMANCE.md, *What may confirm rest*: only a reading the adapter received after it
+        commanded the stop may confirm rest; the last reading from before the stop, however
+        recent, may not. An adapter that confirms from the last report it holds confirms a
+        robot that was at rest when it last reported and is moving now. The probe makes that
+        case: it gives a robot at rest work, sends the stop the moment the witness first shows
+        the robot moving, and grades the STOPPED against the witnessed rest as C5.7 does.
+        Advisory: RFC-0001 does not state the rule in these words (CONFORMANCE.md, C5.9).
+        """
+        title = "Rest is confirmed only from a reading taken after the stop"
+        if self._witness_path is None:
+            self.r.add("C5.9", title, CheckStatus.SKIP, level="SHOULD", detail=(
+                SkipCause.NO_MOTION_WITNESS.value
+                + ": the run was given no motion witness (--witness-file), so the moment the "
+                  "robot starts moving, when the probe stops it, cannot be seen"))
+            return
+        robot = self._registered_robot or self.robot
+        if not self._await_witness_rest(robot, _FRESH_MOTION_WAIT):
+            self.r.add("C5.9", title, CheckStatus.SKIP, level="SHOULD", detail=(
+                SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                + f": the witness does not show {robot!r} at rest before the probe, so a stop "
+                  f"at the start of its motion could not be made"))
+            return
+        assigned = time.time()
+        cid_assign = self._send_command(assign_action=self._assign(
+            action_id="t-fresh", assignment_id="a-fresh", fencing_token=_FRESH_TOKEN,
+            needs_seconds=6.0))
+        try:
+            res = self._await_result(cid_assign).assign_action
+        except (EOFError, queue.Empty):
+            res = None
+        if res is None or not res.accepted:
+            self.r.add("C5.9", title, CheckStatus.SKIP, level="SHOULD", detail=(
+                SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                + f": the assignment at token {_FRESH_TOKEN} was "
+                + ("not answered" if res is None else "refused")
+                + ", so no robot was set moving to stop"))
+            return
+        if not self._await_witness_start(robot, assigned, _FRESH_MOTION_WAIT):
+            self._cancel("t-fresh", _FRESH_TOKEN, "harness: C5.9 cleanup")
+            self.r.add("C5.9", title, CheckStatus.SKIP, level="SHOULD", detail=(
+                SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                + f": the witness did not show {robot!r} moving within "
+                  f"{_FRESH_MOTION_WAIT:g}s of an accepted assignment"))
+            return
+        sent_epoch = time.time()
+        self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
+            robot_id=self.robot,
+            estop=pb.Estop(estop_id=_FRESH_PROBE_ID, reason="conformance: C5.9",
+                           issued_by="harness")))
+        if self._latch_binds():
+            self._fence(_FRESH_PROBE_ID, "conformance: C5.9")
+        try:
+            ack, _passed = self._recv_estop_ack(_FRESH_PROBE_ID)
+        except EOFError:
+            ack = None
+        if ack is not None and ack.state == pb.ESTOP_STATE_STOPPING:
+            ack, _saw, _waited = self._recv_terminal_estop_ack(_FRESH_PROBE_ID)
+        received_epoch = time.time()
+        status, detail = self._early_stopped_verdict(ack, received_epoch, sent_epoch)
+        self.r.add("C5.9", "Rest is confirmed only from a reading taken after the stop", status,
+                   level="SHOULD", detail=detail)
+        self._clear_stop(_FRESH_PROBE_ID)
+        self._cancel("t-fresh", _FRESH_TOKEN, "harness: C5.9 cleanup")
+
+    # -- the witness, per robot ---------------------------------------------------
+
+    def _witness_for(self, robot: str):
+        """(rest noise, this robot's samples in time order), or (None, []) with no witness."""
+        if self._witness_path is None:
+            return None, []
+        meta, samples = _read_witness(self._witness_path)
+        if meta is None:
+            return None, []
+        mine = sorted((x for x in samples if x.get("robot") in (robot, None)),
+                      key=lambda x: x["t"])
+        return float(meta.get("rest_noise_mps", 0.0)), mine
+
+    def _witness_at_rest(self, robot: str) -> bool:
+        noise, mine = self._witness_for(robot)
+        return noise is not None and bool(mine) and mine[-1]["speed"] <= noise
+
+    def _await_witness_rest(self, robot: str, timeout: float) -> bool:
+        """Wait for the witness's latest sample of ``robot`` to show it at rest."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._witness_at_rest(robot):
+                return True
+            time.sleep(0.05)
+        return self._witness_at_rest(robot)
+
+    def _await_witness_start(self, robot: str, since: float, timeout: float) -> bool:
+        """Wait for the first sample after ``since`` that shows ``robot`` moving."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            noise, mine = self._witness_for(robot)
+            if noise is not None and any(x["t"] >= since and x["speed"] > noise for x in mine):
+                return True
+            time.sleep(0.02)
+        return False
+
+    def _witness_change(self, robot: str, since: float) -> str | None:
+        """'started' or 'stopped' when the witness shows ``robot`` change after ``since``.
+
+        None when it shows no change, or the run has no witness.
+        """
+        noise, mine = self._witness_for(robot)
+        if noise is None:
+            return None
+        before = [x for x in mine if x["t"] <= since]
+        after = [x for x in mine if x["t"] > since]
+        if not before or not after:
+            return None
+        moving_then = before[-1]["speed"] > noise
+        if moving_then and after[-1]["speed"] <= noise:
+            return "stopped"
+        if not moving_then and any(x["speed"] > noise for x in after):
+            return "started"
+        return None
+
+    # -- C20 — robots kept apart, and robots the adapter does not serve ------------
+
+    def _c20_reset(self) -> None:
+        self._c20_results: dict[int, object] = {}
+        self._c20_states: dict[str, list] = {}
+        self._c20_current: dict[str, list] = {}
+        self._c20_position: dict[str, tuple] = {}
+
+    def _c20_pump(self, seconds: float, until=None) -> None:
+        """Read the connection's ControlStream for ``seconds``, or until ``until()`` holds,
+        keeping what C20 grades: each command's result, each action's states, and the action
+        each robot's telemetry reports."""
+        deadline = time.monotonic() + seconds
+        while until is None or not until():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            try:
+                msg = self.s.control_in.get(timeout=min(left, 0.1))
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                return
+            arm = msg.WhichOneof("payload")
+            now = time.time()
+            if arm == "command_result":
+                self._note_decline(msg.command_result)
+                self._c20_results[msg.command_result.command_id] = msg.command_result
+            elif arm == "action_status":
+                self._c20_states.setdefault(msg.action_status.action_id, []).append(
+                    (now, msg.action_status.state))
+            elif arm == "telemetry":
+                self.telemetry_seen = True
+                self._c20_current.setdefault(msg.telemetry.robot_id, []).append(
+                    (now, msg.telemetry.current_action))
+                if msg.telemetry.HasField("position"):
+                    self._c20_position[msg.telemetry.robot_id] = (
+                        msg.telemetry.position.x, msg.telemetry.position.y)
+
+    def _c20_result(self, cid: int):
+        """The CommandResult for ``cid``, or None when none came within _GET_TIMEOUT."""
+        self._c20_pump(_GET_TIMEOUT, until=lambda: cid in self._c20_results)
+        return self._c20_results.get(cid)
+
+    def _c20_assign(self, robot: str, action_id: str, token: int, *,
+                    needs_seconds: float = 8.0, **fields):
+        """Assign the served action to ``robot``; its CommandResult, or None.
+
+        The goal is drawn from ``robot``'s own fixture goals, which follow where that robot
+        was last sent, so it is far from where the robot stands.
+        """
+        goals = self._goals
+        if self.multi and robot in self._ctxs:
+            self._goals = self._ctxs[robot]["_goals"]
+        if robot in getattr(self, "_c20_position", {}):
+            # Where the robot last reported itself, not where it was last sent: a cancelled
+            # action leaves it short of its target, and the pose farthest from the target can
+            # then be a few metres from the robot.
+            self._goals._last = self._c20_position[robot]
+        try:
+            assign = self._assign(action_id=action_id, assignment_id=f"a-{action_id}",
+                                  fencing_token=token, needs_seconds=needs_seconds, **fields)
+        finally:
+            self._goals = goals
+        cid = self._send_command(robot_id=robot, assign_action=assign)
+        return self._c20_result(cid)
+
+    def _c20_unlifted(self) -> str:
+        """A detail suffix while a stop the harness cleared is not lifted (C20.1 left one)."""
+        if not self._unlifted:
+            return ""
+        return (f" The harness cleared stop(s) {self._unlifted} (fence, then EstopClear) and "
+                f"received no EstopClearAck, so a refusal ROBOT_UNAVAILABLE here may be that "
+                f"stop's, not this row's failure")
+
+    @staticmethod
+    def _accepted(result) -> bool:
+        return (result is not None and result.WhichOneof("result") == "assign_action"
+                and result.assign_action.accepted)
+
+    def _c20_answer(self, result) -> str:
+        if result is None:
+            return f"no CommandResult within {_GET_TIMEOUT:.0f}s"
+        if result.unsupported:
+            return "declined unsupported=true"
+        if result.WhichOneof("result") != "assign_action":
+            return f"answered with {result.WhichOneof('result')!r}"
+        res = result.assign_action
+        if res.accepted:
+            return "accepted"
+        return ("refused " + pb.AssignActionRejection.Name(res.rejection)
+                if res.rejection else "refused with no rejection code")
+
+    def _c20_ended(self, action_id: str, since: float) -> str | None:
+        """The first stop or end other than SUCCEEDED an action reported after ``since``.
+
+        By name, or None. An action that reaches its goal ends SUCCEEDED, and nothing stopped
+        it: that is not what a row asks about.
+        """
+        ends = (set(_RFC_TERMINAL_ACTION_STATES()) | {pb.ACTION_STATE_STOPPED}) - {
+            pb.ACTION_STATE_SUCCEEDED}
+        for t, state in self._c20_states.get(action_id, []):
+            if t >= since and state in ends:
+                return pb.ActionState.Name(state)
+        return None
+
+    def _c20_succeeded(self, action_id: str, since: float) -> bool:
+        return any(t >= since and state == pb.ACTION_STATE_SUCCEEDED
+                   for t, state in self._c20_states.get(action_id, []))
+
+    def _c20_rested(self, robot: str, action_id: str, since: float) -> bool:
+        """Whether the witness shows ``robot`` brought to rest after ``since``, its action not
+        having reached its goal."""
+        return (self._witness_change(robot, since) == "stopped"
+                and not self._c20_succeeded(action_id, since))
+
+    def _c20_reports(self, robot: str, action_id: str, since: float) -> bool:
+        """Whether ``robot``'s telemetry named ``action_id`` as its current action after
+        ``since``."""
+        return any(t >= since and current == action_id
+                   for t, current in self._c20_current.get(robot, []))
+
+    def _c20_cancel(self, robot: str, action_id: str, token: int) -> None:
+        cid = self._send_command(robot_id=robot, cancel_action=pb.CancelAction(
+            action_id=action_id, reason="harness: C20 cleanup", fencing_token=token))
+        self._c20_result(cid)
+
+    def _c20_stop(self, robot: str, stop_id: str):
+        """Stop ``robot`` as row S1 does; the terminal EstopAck naming the stop, or the first."""
+        self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
+            robot_id=robot,
+            estop=pb.Estop(estop_id=stop_id, reason="conformance: C20", issued_by="harness")))
+        if self._latch_binds():
+            self._fence(stop_id, "conformance: C20", robot)
+        try:
+            ack, _passed = self._recv_estop_ack(stop_id)
+        except EOFError:
+            return None
+        if ack is not None and ack.state == pb.ESTOP_STATE_STOPPING:
+            term, _saw, _waited = self._recv_terminal_estop_ack(stop_id)
+            return term or ack
+        return ack
+
+    _C20_KEPT_APART = (
+        ("C20.1", "A stop or work for one robot leaves the others alone", "SHOULD"),
+        ("C20.2", "A command acts only on the robot it names", "MUST"),
+        ("C20.5", "Each robot keeps its own fencing-token mark", "MUST"),
+        ("C20.6", "Each robot keeps its own lease", "MUST"),
+        ("C20.7", "A stop latches only its own robot, and its clear lifts only that robot",
+         "MUST"),
+    )
+
+    def _check_robots_kept_apart(self) -> None:
+        """C20.1, C20.2, C20.5, C20.6 and C20.7: what one robot's traffic does to another's.
+
+        Graded on the first two robots the run names (A and B), through the session itself:
+        each row reads both robots' traffic. Every row is not applicable to a run that names
+        one robot (`adapter-serves-one-robot`, never an obligation).
+        """
+        if not self.multi:
+            for cid, title, level in self._C20_KEPT_APART:
+                self.r.add(cid, title, CheckStatus.SKIP, level=level, detail=(
+                    SkipCause.ADAPTER_SERVES_ONE_ROBOT.value
+                    + f": the run names one robot ({self.robot!r}), so there is no second "
+                      f"robot for its traffic to reach"))
+            return
+        if self._held_below_latch() or self._served is None:
+            why = (self._held_detail() if self._held_below_latch() else
+                   f"{SkipCause.ADAPTER_DECLARES_NO_ACTION.value}: the adapter declared no "
+                   f"SupportedAction, so no assignment could carry a type it claims to serve")
+            for cid, title, level in self._C20_KEPT_APART:
+                self.r.add(cid, title, CheckStatus.SKIP, level=level, detail=why)
+            return
+        a, b = self.robots[0], self.robots[1]
+        self._c20_reset()
+        # A telemetry interval's worth of traffic first, so each robot's goal is drawn from
+        # where it reports itself (_c20_assign).
+        self._c20_pump(1.2)
+        self._c20_routing_and_isolation(a, b)
+        self._c20_fencing(a, b)
+        self._c20_leases(a, b)
+        self._c20_latch(a, b)
+
+    def _c20_routing_and_isolation(self, a: str, b: str) -> None:
+        """C20.2, then C20.1 with B still running the action C20.2 gave it."""
+        route = "c20-route"
+        started = time.time()
+        res = self._c20_assign(b, route, _C20_ROUTE_TOKEN)
+        if not self._accepted(res):
+            why = (SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                   + f": {b!r} {self._c20_answer(res)} the assignment at token "
+                     f"{_C20_ROUTE_TOKEN}, so no robot ran an action to keep apart")
+            self.r.add("C20.2", "A command acts only on the robot it names", CheckStatus.SKIP,
+                       detail=why)
+            self.r.add("C20.1", "A stop or work for one robot leaves the others alone",
+                       CheckStatus.SKIP, level="SHOULD", detail=why)
+            return
+        self._c20_pump(_C20_WATCH)
+        others = [r for r in self.robots if r != b]
+        on_b = (self._c20_reports(b, route, started)
+                or self._witness_change(b, started) == "started")
+        wrong = [r for r in others if self._c20_reports(r, route, started)]
+        moved = [r for r in others if self._witness_change(r, started) == "started"]
+        title = "A command acts only on the robot it names"
+        if wrong or moved:
+            self.r.add("C20.2", title, CheckStatus.FAIL, detail=(
+                f"an AssignAction for {b!r} was accepted, and "
+                + "; ".join(([f"the telemetry of {wrong} named its action"] if wrong else [])
+                            + ([f"the witness shows {moved} set moving"] if moved else []))
+                + ". Command.robot_id selects the managed robot (fleet_adapter.proto)"))
+        elif not on_b:
+            self.r.add("C20.2", title, CheckStatus.SKIP, detail=(
+                SkipCause.NOT_OBSERVABLE_ON_WIRE.value
+                + f": the assignment for {b!r} was accepted, but no telemetry of {b!r} named "
+                  f"its action (TelemetryPayload.current_action) and no witness shows {b!r} "
+                  f"moving, so which robot runs it cannot be seen"))
+        else:
+            self.r.add("C20.2", title, CheckStatus.PASS, detail=(
+                f"an AssignAction for {b!r} ran on {b!r}, and no other robot "
+                f"({', '.join(others)}) reported it"
+                + (" or moved, by the witness" if self._witness_path else "")))
+
+        # C20.1 — work, then a stop, for A, while B runs `route`.
+        problems: list[str] = []
+        t_work = time.time()
+        iso_a = "c20-isolation-a"
+        res_a = self._c20_assign(a, iso_a, _C20_ISOLATION_TOKEN)
+        self._c20_pump(_C20_WATCH)
+        ended = self._c20_ended(route, t_work)
+        if ended:
+            problems.append(f"an assignment for {a!r} ({self._c20_answer(res_a)}) was followed "
+                            f"by {ended} for {b}'s action")
+        title = "A stop or work for one robot leaves the others alone"
+        if not problems and self._c20_succeeded(route, started):
+            # B reached its goal: a stop for A could not show whether it leaves B moving.
+            if self._accepted(res_a):
+                self._c20_cancel(a, iso_a, _C20_ISOLATION_TOKEN)
+            self.r.add("C20.1", title, CheckStatus.SKIP, level="SHOULD", detail=(
+                SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                + f": {b}'s action reached its goal before the stop for {a!r} was sent, so "
+                  f"the stop could not show whether it leaves {b!r} moving"))
+            return
+        stop_id = "e-c20-isolation"
+        t_stop = time.time()
+        ack = self._c20_stop(a, stop_id)
+        self._c20_pump(_C20_WATCH)
+        ended = self._c20_ended(route, t_stop)
+        if ended:
+            problems.append(f"a stop for {a!r} was followed by {ended} for {b}'s action")
+        if self._c20_rested(b, route, t_stop):
+            problems.append(f"the witness shows {b!r} brought to rest after a stop for {a!r}")
+        held = None
+        if self._latch_binds():
+            held = self._c20_assign(b, "c20-isolation-b", _C20_ISOLATION_TOKEN)
+            if not self._accepted(held):
+                problems.append(f"while {a!r} was latched, an assignment for {b!r} was "
+                                f"{self._c20_answer(held)}")
+        self._clear_stop(stop_id, a)
+        if self._accepted(held):
+            self._c20_cancel(b, "c20-isolation-b", _C20_ISOLATION_TOKEN)
+        else:
+            self._c20_cancel(b, route, _C20_ROUTE_TOKEN)
+        if self._accepted(res_a):
+            self._c20_cancel(a, iso_a, _C20_ISOLATION_TOKEN)
+        stopped = ("no EstopAck" if ack is None else pb.EstopState.Name(ack.state))
+        if problems:
+            self.r.add("C20.1", title, CheckStatus.FAIL, level="SHOULD", detail=(
+                "; ".join(problems) + f" (the stop for {a!r} was answered {stopped}). "
+                "ADVISORY: RFC-0001 does not state in words that a stop or work for one robot "
+                "leaves another alone (CONFORMANCE.md, C20)"))
+        else:
+            self.r.add("C20.1", title, CheckStatus.PASS, level="SHOULD", detail=(
+                f"{b}'s action kept running through an assignment for {a!r} and a stop for "
+                f"{a!r} (answered {stopped})"
+                + (f", and {b!r} took new work while {a!r} was latched" if held is not None
+                   else "")))
+
+    def _c20_fencing(self, a: str, b: str) -> None:
+        """C20.5 — a fencing token is compared with its own robot's mark, both ways."""
+        title = "Each robot keeps its own fencing-token mark"
+        steps = (
+            (a, "c20-fence-a1", _C20_FENCE_HIGH, True),
+            (b, "c20-fence-b1", _C20_FENCE_BELOW_A, True),
+            (a, "c20-fence-a2", _C20_FENCE_STALE_A, False),
+            (b, "c20-fence-b2", _C20_FENCE_B_AGAIN, True),
+        )
+        seen, problems = [], []
+        for robot, action_id, token, expect in steps:
+            res = self._c20_assign(robot, action_id, token)
+            answer = self._c20_answer(res)
+            seen.append(f"{robot}@{token} {answer}")
+            if res is None:
+                problems.append(f"{robot!r} at token {token}: {answer}")
+                continue
+            if expect and not self._accepted(res):
+                problems.append(f"{robot!r} at token {token}, above its own mark, was {answer}")
+            if not expect and not (res.WhichOneof("result") == "assign_action"
+                                   and not res.assign_action.accepted
+                                   and res.assign_action.rejection
+                                   == pb.ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN):
+                problems.append(f"{robot!r} at token {token}, below its own mark of "
+                                f"{_C20_FENCE_HIGH}, was {answer}, not refused STALE")
+        self._c20_cancel(a, "c20-fence-a1", _C20_FENCE_HIGH)
+        self._c20_cancel(b, "c20-fence-b2", _C20_FENCE_B_AGAIN)
+        if problems:
+            self.r.add("C20.5", title, CheckStatus.FAIL, detail=(
+                "; ".join(problems) + f". Sequence: {seen}. The fencing token is compared with "
+                "the mark of the robot the command names (RobotActionState.fencing_token, "
+                "per robot)." + self._c20_unlifted()))
+        else:
+            self.r.add("C20.5", title, CheckStatus.PASS, detail=(
+                f"{seen}: {b!r} took tokens below {a}'s mark, and {a!r} refused one above "
+                f"{b}'s"))
+
+    def _c20_leases(self, a: str, b: str) -> None:
+        """C20.6 — renewing one robot's lease renews no other's, both ways."""
+        title = "Each robot keeps its own lease"
+        problems, seen = [], []
+        for (renewed, lapsed), token in zip(((b, a), (a, b)), _C20_LEASE_TOKENS):
+            kept, lost = f"c20-lease-{token}-kept", f"c20-lease-{token}-lapsed"
+            lease = dict(lease_generation=1, lease_duration_ms=_C20_LEASE_MS)
+            # From before the first assignment: a lease may lapse, and its end be reported,
+            # while the second assignment is still being answered.
+            started = time.time()
+            res_lost = self._c20_assign(lapsed, lost, token, needs_seconds=15.0, **lease)
+            res_kept = self._c20_assign(renewed, kept, token, needs_seconds=15.0, **lease)
+            if not (self._accepted(res_lost) and self._accepted(res_kept)):
+                why = (SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                       + f": the lease-bearing assignments at token {token} were "
+                         f"{self._c20_answer(res_lost)} ({lapsed!r}) and "
+                         f"{self._c20_answer(res_kept)} ({renewed!r})")
+                self.r.add("C20.6", title, CheckStatus.SKIP, detail=why)
+                for robot, action_id, res in ((lapsed, lost, res_lost),
+                                              (renewed, kept, res_kept)):
+                    if self._accepted(res):
+                        self._c20_cancel(robot, action_id, token)
+                return
+            renewals_held = True
+            deadline = time.monotonic() + _C20_LEASE_WAIT
+            while time.monotonic() < deadline:
+                rc = self._send_command(robot_id=renewed, renew_lease=pb.RenewActionLease(
+                    action_id=kept, lease_generation=1, lease_duration_ms=_C20_LEASE_MS))
+                rr = self._c20_result(rc)
+                if (rr is None or not (rr.renew_lease.renewed and rr.renew_lease.running)) \
+                        and not self._c20_succeeded(kept, started):
+                    renewals_held = False
+                self._c20_pump(0.4)
+            ended_lost = self._c20_ended(lost, started)
+            ended_kept = self._c20_ended(kept, started)
+            seen.append(f"renewing {renewed!r} only: {lapsed!r} "
+                        f"{ended_lost or 'did not stop'}, {renewed!r} "
+                        f"{ended_kept or 'kept running'}")
+            if not ended_lost:
+                problems.append(f"{lapsed}'s lease was not renewed and its action reported no "
+                                f"stop or end within {_C20_LEASE_WAIT:g}s while {renewed}'s "
+                                f"lease was renewed")
+            if ended_kept or not renewals_held:
+                problems.append(f"{renewed}'s lease was renewed and its action "
+                                + (f"reported {ended_kept}" if ended_kept else
+                                   "was reported not running on a renewal"))
+            self._c20_cancel(renewed, kept, token)
+        if problems:
+            self.r.add("C20.6", title, CheckStatus.FAIL, detail=(
+                "; ".join(problems) + ". A lease is the assignment's, renewed only by a "
+                "RenewActionLease naming its action, for the robot the Command names."
+                + self._c20_unlifted()))
+        else:
+            self.r.add("C20.6", title, CheckStatus.PASS, detail="; ".join(seen))
+
+    def _c20_latch(self, a: str, b: str) -> None:
+        """C20.7 — each robot's latch holds its own work, and a clear lifts only its own."""
+        title = "A stop latches only its own robot, and its clear lifts only that robot"
+        if not self._latch_binds():
+            self.r.add("C20.7", title, CheckStatus.SKIP, detail=(
+                SkipCause.CONTRACT_PREDATES_OBLIGATION.value
+                + f": the adapter reported contract {self._reported_contract}; the stop latch "
+                  f"binds a connection at 1.4.0"))
+            return
+        stops = {a: "e-c20-latch-a", b: "e-c20-latch-b"}
+        acks = {robot: self._c20_stop(robot, stop_id) for robot, stop_id in stops.items()}
+        if any(ack is None for ack in acks.values()):
+            for robot, stop_id in stops.items():
+                self._clear_stop(stop_id, robot)
+            self.r.add("C20.7", title, CheckStatus.SKIP, detail=(
+                SkipCause.ADAPTER_DID_NOT_REACH_STATE.value
+                + f": no EstopAck named the stop of "
+                  f"{[r for r, ack in acks.items() if ack is None]}, so no stop was "
+                  f"acknowledged to latch against"))
+            return
+        problems, accepted = [], []
+        unavailable = pb.ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE
+
+        def held(res) -> bool:
+            return (res is not None and res.WhichOneof("result") == "assign_action"
+                    and not res.assign_action.accepted
+                    and res.assign_action.rejection == unavailable)
+
+        a_held = self._c20_assign(a, "c20-latch-a1", _C20_LATCH_HELD)
+        if not held(a_held):
+            problems.append(f"{a!r}, latched, was {self._c20_answer(a_held)} (not "
+                            f"ROBOT_UNAVAILABLE)")
+        if self._accepted(a_held):
+            accepted.append((a, "c20-latch-a1", _C20_LATCH_HELD))
+        lifted_a = self._clear_stop(stops[a], a)
+        if not lifted_a:
+            problems.append(f"the clear of {a}'s stop drew no EstopClearAck")
+        a_after = self._c20_assign(a, "c20-latch-a2", _C20_LATCH_LIFTED)
+        if self._accepted(a_after):
+            accepted.append((a, "c20-latch-a2", _C20_LATCH_LIFTED))
+        elif lifted_a:
+            problems.append(f"{a!r}, its stop cleared, was {self._c20_answer(a_after)}")
+        b_held = self._c20_assign(b, "c20-latch-b1", _C20_LATCH_HELD)
+        if self._accepted(b_held):
+            accepted.append((b, "c20-latch-b1", _C20_LATCH_HELD))
+        if not held(b_held):
+            problems.append(f"after {a}'s clear, {b!r}, still latched, was "
+                            f"{self._c20_answer(b_held)} (not ROBOT_UNAVAILABLE): the clear "
+                            f"named {a}'s stop only")
+        lifted_b = self._clear_stop(stops[b], b)
+        b_after = self._c20_assign(b, "c20-latch-b2", _C20_LATCH_LIFTED)
+        if self._accepted(b_after):
+            accepted.append((b, "c20-latch-b2", _C20_LATCH_LIFTED))
+        elif lifted_b:
+            problems.append(f"{b!r}, its stop cleared, was {self._c20_answer(b_after)}")
+        for robot, action_id, token in accepted:
+            self._c20_cancel(robot, action_id, token)
+        if problems:
+            self.r.add("C20.7", title, CheckStatus.FAIL, detail=(
+                "; ".join(problems) + ". A clear lifts the latch only for the stop it names "
+                "(fleet_adapter.proto, EstopClear; RFC-0001 The Stop Latch)."
+                + self._c20_unlifted()))
+        else:
+            self.r.add("C20.7", title, CheckStatus.PASS, detail=(
+                f"both robots stopped and latched; {a!r} refused work ROBOT_UNAVAILABLE, its "
+                f"clear was acknowledged and it took work; {b!r} still refused work "
+                f"ROBOT_UNAVAILABLE until its own clear, and then took work"))
+
+    def _check_unserved_command(self) -> None:
+        """C20.3 (SHOULD) — a command for a robot the adapter does not serve is refused.
+
+        An AssignAction names a robot no --robot-id names. It is refused, by any refusal, and
+        no robot the adapter serves runs it: no ActionStatusUpdate names its action, no
+        robot's telemetry reports it, and the witness, when there is one, shows no robot at
+        rest set moving. Advisory: RFC-0001 states no adapter rule for a command addressed to a
+        robot it does not serve (CONFORMANCE.md, C20).
+        """
+        title = "A command for a robot the adapter does not serve is refused, and moves no robot"
+        level = "SHOULD"
+        if self._held_below_latch():
+            self.r.add("C20.3", title, CheckStatus.SKIP, level=level, detail=self._held_detail())
+            return
+        if self._served is None:
+            self.r.add("C20.3", title, CheckStatus.SKIP, level=level, detail=(
+                SkipCause.ADAPTER_DECLARES_NO_ACTION.value
+                + ": no declared action type to carry the probe"))
+            return
+        self._c20_reset()
+        action_id = "t-unserved"
+        started = time.time()
+        res = self._c20_assign(_UNSERVED_ROBOT, action_id, _C20_UNSERVED_TOKEN)
+        self._c20_pump(_C20_WATCH)
+        problems = []
+        if res is None:
+            problems.append(f"no CommandResult within {_GET_TIMEOUT:.0f}s")
+        elif self._accepted(res):
+            problems.append("it was accepted")
+        if self._c20_states.get(action_id):
+            problems.append("an ActionStatusUpdate named its action ("
+                            + ", ".join(pb.ActionState.Name(s)
+                                        for _t, s in self._c20_states[action_id]) + ")")
+        reported = [r for r in self.robots if self._c20_reports(r, action_id, started)]
+        if reported:
+            problems.append(f"the telemetry of {reported} named its action")
+        moved = [r for r in self.robots if self._witness_change(r, started) == "started"]
+        if moved:
+            problems.append(f"the witness shows {moved} set moving")
+        if self._accepted(res):
+            self._c20_cancel(_UNSERVED_ROBOT, action_id, _C20_UNSERVED_TOKEN)
+        if problems:
+            self.r.add("C20.3", title, CheckStatus.FAIL, level=level, detail=(
+                f"an AssignAction for {_UNSERVED_ROBOT!r}, which the adapter does not serve: "
+                + "; ".join(problems)
+                + ". ADVISORY: RFC-0001 states no adapter rule for such a command in words "
+                  "(CONFORMANCE.md, C20)"))
+        else:
+            self.r.add("C20.3", title, CheckStatus.PASS, level=level, detail=(
+                f"an AssignAction for {_UNSERVED_ROBOT!r} was {self._c20_answer(res)}, and no "
+                f"robot reported or ran it"
+                + (" (by telemetry and the witness)" if self._witness_path else
+                   " (by telemetry; the run has no witness)")))
+
+    def _unserved_stop_acks(self, stop_id: str) -> list:
+        """Stop a robot the adapter does not serve, as row S1 does; every EstopAck naming it."""
+        self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
+            robot_id=_UNSERVED_ROBOT,
+            estop=pb.Estop(estop_id=stop_id, reason="conformance: C20.4", issued_by="harness")))
+        if self._latch_binds():
+            self._send_command(robot_id=_UNSERVED_ROBOT, estop=pb.Estop(
+                estop_id=stop_id, reason="conformance: C20.4", issued_by="harness"))
+        acks = []
+        deadline = time.monotonic() + _UNSERVED_ACK_WAIT
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return acks
+            try:
+                msg = self.s.safety_in.get(timeout=min(left, 0.1))
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                return acks
+            if msg.WhichOneof("payload") == "estop_ack" and msg.estop_ack.estop_id == stop_id:
+                acks.append(msg.estop_ack)
+                deadline = time.monotonic() + _UNSERVED_ACK_TAIL
+
+    def _clear_unserved_stop(self, stop_id: str) -> None:
+        """Clear a C20.4 probe's stop, as a control plane clears any stop it issued.
+
+        Its fence was sent, so on a 1.4.0 connection the EstopClear can take effect. An adapter
+        that serves no robot may stop and latch every robot it drives for such a stop (C20.4),
+        and one that reads no robot_id latches its robot on it; left latched, the robot would
+        refuse every assignment after the probe, and rows that grade other rules would fail
+        for it. An adapter that latched nothing has nothing to lift and may send no
+        EstopClearAck, so none is waited for beyond a moment, and none is graded.
+        """
+        if not self._latch_binds():
+            return
+        self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
+            robot_id=_UNSERVED_ROBOT, estop_clear=pb.EstopClear(
+                estop_id=stop_id, cleared_by="harness", cleared_at_ms=int(time.time() * 1000),
+                leader_term=_LEADER_TERM)))
+        deadline = time.monotonic() + _UNSERVED_ACK_TAIL
+        while time.monotonic() < deadline:
+            try:
+                msg = self.s.safety_in.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                return
+            if (msg.WhichOneof("payload") == "estop_clear_ack"
+                    and msg.estop_clear_ack.estop_id == stop_id):
+                return
+
+    @staticmethod
+    def _unserved_ack_problem(acks) -> str | None:
+        if not acks:
+            return (f"no EstopAck named the stop within {_UNSERVED_ACK_WAIT:g}s (every Estop is "
+                    f"answered within 500 ms, C5.5)")
+        states = [pb.EstopState.Name(ack.state) for ack in acks]
+        if any(ack.state != pb.ESTOP_STATE_FAILED for ack in acks):
+            return f"answered {states}; every answer for a robot not served is FAILED"
+        return None
+
+    def _probe_unserved_stop_before_registration(self) -> None:
+        """C20.4's first probe: a stop for a robot not served, before any registration."""
+        self._unserved_before = self._unserved_stop_acks(_UNSERVED_STOP_BEFORE_ID)
+        self._clear_unserved_stop(_UNSERVED_STOP_BEFORE_ID)
+
+    def _check_unserved_stop(self) -> None:
+        """C20.4 (SHOULD) — a stop for a robot the adapter does not serve is never confirmed.
+
+        Two probes, each an Estop on SafetyStream and, on a 1.4.0 connection, its fence on
+        ControlStream, for a robot no --robot-id names. The first was sent before any
+        RegisterAck accepted a robot; the second is sent now, with a served robot moving.
+        Every EstopAck naming either stop is FAILED, and none is STOPPED; more than one FAILED
+        for a stop (the Estop and its fence) is accepted. A CommandResult for the fence is not
+        graded. Only the second probe grades "no served robot is stopped by it": before any
+        registration the adapter serves no robot, and may stop every robot it drives.
+        Advisory: RFC-0001 states no adapter rule for such a stop in words (CONFORMANCE.md,
+        C20).
+        """
+        title = "A stop for a robot the adapter does not serve is never confirmed"
+        level = "SHOULD"
+        self._c20_reset()
+        action_id, moving, started = "t-unserved-stop", None, False
+        if self._served is not None and not self._held_below_latch():
+            moving = self.robot
+            res = self._c20_assign(moving, action_id, _C20_UNSERVED_STOP_TOKEN)
+            started = self._accepted(res)
+            if started:
+                self._await_witnessed_motion()
+        sent = time.time()
+        after = self._unserved_stop_acks(_UNSERVED_STOP_ID)
+        self._clear_unserved_stop(_UNSERVED_STOP_ID)
+        problems = []
+        before = getattr(self, "_unserved_before", [])
+        for when, acks in (("before any registration", before), ("after registration", after)):
+            problem = self._unserved_ack_problem(acks)
+            if problem:
+                problems.append(f"{when}: {problem}")
+        if started:
+            self._c20_pump(_C20_WATCH)
+            ended = self._c20_ended(action_id, sent)
+            if ended:
+                problems.append(f"after registration, {moving}'s action reported {ended}")
+            if self._c20_rested(moving, action_id, sent):
+                problems.append(f"after registration, the witness shows {moving!r} brought to "
+                                f"rest")
+            self._c20_cancel(moving, action_id, _C20_UNSERVED_STOP_TOKEN)
+        states = {when: [pb.EstopState.Name(a.state) for a in acks]
+                  for when, acks in (("before registration", before), ("after", after))}
+        served = (f"{moving!r} kept moving" if started else
+                  "no served robot was moving, so 'no served robot is stopped' was not probed")
+        if problems:
+            self.r.add("C20.4", title, CheckStatus.FAIL, level=level, detail=(
+                f"stops for {_UNSERVED_ROBOT!r}, which the adapter does not serve: "
+                + "; ".join(problems)
+                + ". ADVISORY: RFC-0001 states no adapter rule for such a stop in words "
+                  "(CONFORMANCE.md, C20)"))
+        else:
+            self.r.add("C20.4", title, CheckStatus.PASS, level=level, detail=(
+                f"stops for {_UNSERVED_ROBOT!r} were answered {states}, never STOPPED; "
+                f"{served}"))
 
     def _drive_for_cadence(self) -> bool:
         """Put the robot in motion for the C2.3 cadence window. True if it accepted.
@@ -4588,7 +5980,14 @@ class _Driver:
                              "passing report attests NOTHING about durability across a restart"))
 
     def _refuse_registration_version_mismatch(self) -> bool:
-        """Refuse a Register/Discover on the reconnected session. Returns whether one arrived."""
+        """Refuse a Register/Discover on the reconnected session. Returns whether one arrived.
+
+        In multi-robot mode every robot's is refused, as a control plane answers each
+        register: the first refusal is what C13.2 grades, and the rest keep the adapter's
+        register acks in step with its registers.
+        """
+        if self.multi:
+            return self._refuse_every_registration()
         deadline = time.monotonic() + _REGISTER_WAIT
         while time.monotonic() < deadline:
             try:
@@ -4614,6 +6013,31 @@ class _Driver:
             # keep reading past it rather than treating it as the registration.
         return False
 
+    def _refuse_every_registration(self) -> bool:
+        """Multi-robot mode: refuse VERSION_MISMATCH every robot's register or discover."""
+        refused: set[str] = set()
+        deadline = time.monotonic() + _REGISTER_WAIT
+        while time.monotonic() < deadline and not set(self.robots) <= refused:
+            try:
+                msg = self.s.control_in.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if msg is _SENTINEL:
+                break
+            kind = msg.WhichOneof("payload")
+            if kind not in ("register", "discover"):
+                continue
+            ack = dict(accepted=False, rejection=pb.REGISTRATION_REJECTION_VERSION_MISMATCH,
+                       message="VERSION_MISMATCH: contract version not supported")
+            self.s.control_out.put(pb.ControlPlaneMessage(
+                register_ack=pb.RegisterAck(**ack)) if kind == "register" else
+                pb.ControlPlaneMessage(discover_ack=pb.DiscoverAck(**ack)))
+            refused.add(getattr(msg, kind).robot_id)
+            # Give the other robots' registers the rest of the wait, and no longer. A register
+            # from a robot not in the run is refused as well, and does not end the wait.
+            deadline = max(deadline, time.monotonic() + 0.5)
+        return bool(refused)
+
     def _check_estop_after_refusal(self) -> None:
         """C14.1 — an estop is honoured on the session whose registration was refused.
 
@@ -4622,7 +6046,7 @@ class _Driver:
         #fleet-adapter-protocol-the-stop-latch, *Report*).
         """
         self.s.safety_out.put(pb.ControlPlaneSafetyMessage(
-            robot_id=ROBOT,
+            robot_id=self.robot,
             estop=pb.Estop(estop_id="e-refused", reason="version-gate invariance",
                            issued_by="harness")))
         try:
@@ -4759,7 +6183,8 @@ class RunHandle:
 
 def run_conformance(adapter_name: str, port: int, ready: threading.Event,
                     witness_path: str | None = None,
-                    handle: RunHandle | None = None) -> Report:
+                    handle: RunHandle | None = None,
+                    robots: list[str] | None = None) -> Report:
     """Start the server, signal readiness, run the driver, return the report.
 
     The caller starts the adapter-under-test (pointing it at ``port``) after
@@ -4794,7 +6219,7 @@ def run_conformance(adapter_name: str, port: int, ready: threading.Event,
     handle._serving(session, server, pool)
     ready.set()
     try:
-        _Driver(session, report, port, witness_path=witness_path).run()
+        _Driver(session, report, port, witness_path=witness_path, robots=robots).run()
     except (EOFError, queue.Empty) as exc:
         report.add("run", "Harness completed the scenario", CheckStatus.FAIL,
                    detail=f"aborted: {exc}")

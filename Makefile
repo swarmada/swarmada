@@ -526,7 +526,7 @@ test-sdk:       ##! Run the SDK's own test suite (swarmada-sdk, separate distrib
 
 # ── Conformance ───────────────────────────────────────────────────────────────
 
-.PHONY: conformance conformance-sim conformance-sim-fault
+.PHONY: conformance conformance-sim conformance-sim-fault conformance-sim-multi
 
 # Run the Fleet Adapter conformance harness against an adapter. Override ADAPTER
 # with the command that launches the adapter-under-test ('{port}' is substituted).
@@ -587,6 +587,18 @@ conformance-sim-fault:           ##! Conformance harness against the hardware-fa
 	  --port $(CONFORMANCE_PORT) --witness-file '$(SIM_WITNESS)' \
 	  --adapter-cmd '$(PYTHON) adapters/simulation/sim_adapter.py --endpoint localhost:{port} --latch --witness-file $(SIM_WITNESS) \
 	    --scenario hardware-fault --fault-at $(FAULT_AT) --recover-at $(RECOVER_AT)' $(CONFORMANCE_ARGS)
+
+# The same gate in multi-robot mode: one simulation adapter serves every robot in
+# CONFORMANCE_ROBOTS on one ControlStream, and the harness is told each one (--robot-id,
+# repeated). Each robot-scoped row runs once per robot and records the worst result, and C20
+# grades what one robot's traffic does to another's. The witness is the one plant, with each
+# sample naming its robot.
+CONFORMANCE_ROBOTS ?= amr-1 amr-2
+conformance-sim-multi:           ##! Conformance harness, multi-robot mode, against one sim adapter serving CONFORMANCE_ROBOTS
+	$(PYTHON) -m adapters.conformance --stub-path $(STUB_PATH) --adapter-name simulation \
+	  --port $(CONFORMANCE_PORT) --witness-file '$(SIM_WITNESS)' \
+	  $(foreach r,$(CONFORMANCE_ROBOTS),--robot-id $(r)) \
+	  --adapter-cmd '$(PYTHON) adapters/simulation/sim_adapter.py --endpoint localhost:{port} --latch --scenario healthy-fleet --witness-file $(SIM_WITNESS) $(foreach r,$(CONFORMANCE_ROBOTS),--robot-id $(r))' $(CONFORMANCE_ARGS)
 
 .PHONY: stream-lease-measure
 # THE SENSOR-STREAM FAIL-SAFE, MEASURED. Stands up a control plane, lets the simulation
