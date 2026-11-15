@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -3628,6 +3629,8 @@ func (r *FleetActionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fleetv1.FleetAction{}).
 		Watches(&fleetv1.Robot{}, handler.EnqueueRequestsFromMapFunc(robotToAction)).
+		// A robot that becomes free wakes the actions waiting for one (fleetaction_robot_wake.go).
+		Watches(&fleetv1.Robot{}, r.wakeHandler(), builder.WithPredicates(robotBecameFree)).
 		Watches(&fleetv1.FleetAdapter{}, handler.EnqueueRequestsFromMapFunc(adapterToActions)).
 		Complete(r)
 }
