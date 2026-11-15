@@ -83,8 +83,9 @@ type dispatchHolds struct {
 	tree *estopscope.Tree
 }
 
-// liveReader is the reader the robot-id hold lists Robots through: the uncached
-// APIReader when one is wired, else the client (a unit test's fake client is uncached).
+// liveReader is the reader the robot-id hold lists Robots through, and currentCandidate
+// re-reads the selected robot through: the uncached APIReader when one is wired, else the
+// client (a unit test's fake client is uncached).
 func (r *FleetActionReconciler) liveReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader

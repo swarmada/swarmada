@@ -876,7 +876,10 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		// getting work. Filtering the candidate list HERE covers both the normal selection below and
 		// the preemption search, which reads the same slice. Dispatch only: telemetry, heartbeats and
 		// estop are untouched, and work already in flight is never revoked by this gate.
-		eligible, withheld, filtersDegraded, restrictions := r.filterDispatchEligible(ctx, action, robotList.Items)
+		// filterDispatchEligible, with the pass's judge kept: currentCandidate judges the live copy
+		// of the robot selection chooses against the same state.
+		judge, filtersDegraded, restrictions := r.newDispatchJudge(ctx, action)
+		eligible, withheld := judge.filter(ctx, robotList.Items)
 		// FA-R5's plane-side half: a robot whose adapter has already DECLINED this
 		// assignment on an operating constraint is not offered it again. Applied after the
 		// numbered filters and outside them — the chain is RFC-0001's roster and this is a
@@ -977,9 +980,16 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		clearSensorStreamRefusal(action)
 
 		acceptDegraded := r.acceptDegraded(ctx, action)
-		robot, declined, err := r.selectServable(ctx, action, robotList.Items,
+		robot, declined, dropped, err := r.selectServable(ctx, action, robotList.Items, judge,
 			acceptDegraded, r.preferSameManufacturer(ctx, req.Namespace),
 			r.honorPreferredRobot(ctx, req.Namespace))
+		if len(dropped) > 0 {
+			// Robots the re-read found taken or changed since the cache read are withheld with
+			// the gate that refused them, so the no-candidate message names it, and the
+			// preemption search below does not reach them on a copy now known to be stale.
+			withheld = append(withheld, dropped...)
+			robotList.Items = withoutRobots(robotList.Items, dropped)
+		}
 		// preemptVictim is a lower-band action whose robot a preemptor-band (Critical or High) action will take.
 		// It is FOUND here but marked Preempted only AFTER the TDE gate grants, so a
 		// denied/failed assignment never strands a Preempted victim.
@@ -1192,13 +1202,12 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		}
 
 		logger.Info("scheduling task", "robot", robot.Name)
-		// Observe the completed Pending→Assigned latency and release the anchor
-		// (RFC-0001 #control-plane-observability-prometheus-metrics-contract). Cleared in the same write that sets Assigned.
-		if action.Status.PendingSince != nil {
-			metrics.ObserveAssignmentLatency(action.Namespace, priorityLabel(action.Spec.Priority),
-				time.Since(action.Status.PendingSince.Time))
-			action.Status.PendingSince = nil
-		}
+		// Release the Pending→Assigned latency anchor in the same write that sets Assigned
+		// (RFC-0001 #control-plane-observability-prometheus-metrics-contract). The latency is
+		// observed only once the robot commit below has landed: an assignment that loses the
+		// robot reverts to Pending and is not an assignment.
+		pendingSince := action.Status.PendingSince
+		action.Status.PendingSince = nil
 		action.Status.Phase = fleetv1.ActionPhaseAssigned
 		action.Status.AssignedRobot = robot.Name
 		action.Status.Message = ""
@@ -1298,13 +1307,22 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 			action.Status.Phase = fleetv1.ActionPhasePending
 			action.Status.AssignedRobot = ""
 			action.Status.LeaseExpiresAt = nil
-			n := metav1.Now()
-			action.Status.PendingSince = &n
+			// It was never assigned: the wait it measures goes on from where it began.
+			if pendingSince != nil {
+				action.Status.PendingSince = pendingSince
+			} else {
+				n := metav1.Now()
+				action.Status.PendingSince = &n
+			}
 			action.Status.Message = "robot commit failed after task assignment; reverted to Pending"
 			if revertErr := r.patchActionStatus(ctx, action, revertOriginal); revertErr != nil {
 				logger.Error(revertErr, "failed to revert task to Pending after robot commit failure")
 			}
 			return ctrl.Result{}, fmt.Errorf("patching robot status: %w", err)
+		}
+		if pendingSince != nil {
+			metrics.ObserveAssignmentLatency(action.Namespace, priorityLabel(action.Spec.Priority),
+				time.Since(pendingSince.Time))
 		}
 		// Deliver the assignment to the robot's adapter over the wire (AFTER the
 		// authoritative commit; fencing token = the freshly-minted generation). An
@@ -1845,33 +1863,46 @@ func (r *FleetActionReconciler) onDisconnectPolicy(ctx context.Context, namespac
 // over the whole list on purpose: one round trip per attempt, not one per eligible robot.
 func (r *FleetActionReconciler) selectServableRobot(ctx context.Context, action *fleetv1.FleetAction,
 	candidates []fleetv1.Robot, acceptDegraded, preferSameManufacturer, honorPreferredRobot bool) (fleetv1.Robot, error) {
-	robot, _, err := r.selectServable(ctx, action, candidates, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
+	// Its own pass's judge: a candidate re-read as changed is judged by every filter, though the
+	// candidates given here may not have been.
+	judge, _, _ := r.newDispatchJudge(ctx, action)
+	robot, _, _, err := r.selectServable(ctx, action, candidates, judge, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
 	return robot, err
 }
 
 // selectServable is selectServableRobot, also returning the last adapter that declined with
-// a reason, so the caller can carry it onto the action when no candidate is left; nil when
-// none declined.
+// a reason, so the caller can carry it onto the action when no candidate is left (nil when
+// none declined), and the candidates currentCandidate withheld, with the gate that refused
+// each. judge is the dispatch pass's own (newDispatchJudge).
 func (r *FleetActionReconciler) selectServable(ctx context.Context, action *fleetv1.FleetAction,
-	candidates []fleetv1.Robot, acceptDegraded, preferSameManufacturer, honorPreferredRobot bool) (fleetv1.Robot, *adapterDecline, error) {
+	candidates []fleetv1.Robot, judge *dispatchJudge, acceptDegraded, preferSameManufacturer, honorPreferredRobot bool,
+) (fleetv1.Robot, *adapterDecline, []dispatchExclusion, error) {
 	pool := candidates
 	var declined *adapterDecline
+	var dropped []dispatchExclusion
 	// Bounded by the pool size: every iteration removes exactly one candidate.
 	for range candidates {
-		robot, err := r.Scheduler.SelectRobot(action, pool, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
+		selected, err := r.Scheduler.SelectRobot(action, pool, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
 		if err != nil {
-			return robot, declined, err
+			return selected, declined, dropped, err
 		}
-		ok, d := r.actionServable(ctx, action, &robot)
-		if ok {
-			return robot, declined, nil
-		}
-		if d != nil {
-			declined = d
+		// The candidates are the cache's copies. Re-read the chosen one before its adapter is
+		// asked or a TDE slot is taken; a robot another action took since is withheld here.
+		robot, ex := r.currentCandidate(ctx, action, &selected, judge, acceptDegraded)
+		if ex != nil {
+			dropped = append(dropped, *ex)
+		} else {
+			ok, d := r.actionServable(ctx, action, &robot)
+			if ok {
+				return robot, declined, dropped, nil
+			}
+			if d != nil {
+				declined = d
+			}
 		}
 		next := make([]fleetv1.Robot, 0, len(pool)-1)
 		for i := range pool {
-			if pool[i].Name != robot.Name {
+			if pool[i].Name != selected.Name {
 				next = append(next, pool[i])
 			}
 		}
@@ -1881,7 +1912,7 @@ func (r *FleetActionReconciler) selectServable(ctx context.Context, action *flee
 	// pool so the caller's existing Pending path and message shape are unchanged — this is
 	// a scheduling miss, not a failure, and retryCount is not incremented (§9.2.3).
 	robot, err := r.Scheduler.SelectRobot(action, nil, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
-	return robot, declined, err
+	return robot, declined, dropped, err
 }
 
 // actionServableBy asks one robot's adapter whether it can serve this action instance.

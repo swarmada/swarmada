@@ -22,6 +22,9 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/command"
@@ -66,6 +69,31 @@ func validateAction() *fleetv1.FleetAction {
 
 func validateRobot(name string) fleetv1.Robot {
 	return fleetv1.Robot{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "warehouse-a"}}
+}
+
+// withStoredRobots gives r an API server's fake holding robots, and returns them as it stores
+// them. Selection re-reads the robot it chooses (currentCandidate) and goes on with the copy it
+// was given when the stored one is the same version.
+func withStoredRobots(t *testing.T, r *FleetActionReconciler, robots ...fleetv1.Robot) []fleetv1.Robot {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := fleetv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	b := fake.NewClientBuilder().WithScheme(scheme)
+	for i := range robots {
+		b = b.WithObjects(robots[i].DeepCopy())
+	}
+	r.Client = b.Build()
+	stored := make([]fleetv1.Robot, 0, len(robots))
+	for i := range robots {
+		var got fleetv1.Robot
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(&robots[i]), &got); err != nil {
+			t.Fatal(err)
+		}
+		stored = append(stored, got)
+	}
+	return stored
 }
 
 func TestValidateAction_ServableRobotIsAccepted(t *testing.T) {
@@ -186,9 +214,9 @@ func TestSelectServable_SkipsARefusedCandidateAndTakesTheNext(t *testing.T) {
 		"amr-1": {Servable: false, Message: "cannot reach that bin"},
 	}}
 	r := &FleetActionReconciler{Validator: v, Scheduler: &fixedScheduler{}}
+	robots := withStoredRobots(t, r, validateRobot("amr-1"), validateRobot("amr-2"))
 
-	got, err := r.selectServableRobot(context.Background(), validateAction(),
-		[]fleetv1.Robot{validateRobot("amr-1"), validateRobot("amr-2")}, false, false, false)
+	got, err := r.selectServableRobot(context.Background(), validateAction(), robots, false, false, false)
 	if err != nil {
 		t.Fatalf("a servable second candidate must be selected: %v", err)
 	}
@@ -208,9 +236,9 @@ func TestSelectServable_AllRefusedIsASchedulingMissNotAFailure(t *testing.T) {
 		"amr-1": {Servable: false}, "amr-2": {Servable: false},
 	}}
 	r := &FleetActionReconciler{Validator: v, Scheduler: &fixedScheduler{}}
+	robots := withStoredRobots(t, r, validateRobot("amr-1"), validateRobot("amr-2"))
 
-	_, err := r.selectServableRobot(context.Background(), validateAction(),
-		[]fleetv1.Robot{validateRobot("amr-1"), validateRobot("amr-2")}, false, false, false)
+	_, err := r.selectServableRobot(context.Background(), validateAction(), robots, false, false, false)
 	if err == nil {
 		t.Fatal("with every candidate refusing, selection must report no eligible robot")
 	}
@@ -220,6 +248,7 @@ func TestSelectServable_TerminatesOnAnEmptyPool(t *testing.T) {
 	// A loop over candidates that removes one per pass must not spin when the pool starts
 	// empty — the scheduler's own error is the answer.
 	r := &FleetActionReconciler{Validator: &stubValidator{}, Scheduler: &fixedScheduler{}}
+	withStoredRobots(t, r)
 	if _, err := r.selectServableRobot(context.Background(), validateAction(), nil, false, false, false); err == nil {
 		t.Fatal("an empty candidate pool must report no eligible robot")
 	}
