@@ -37,6 +37,7 @@ Validate:   make conformance-sim
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -74,6 +75,8 @@ from swarmada_sdk.safety import (  # noqa: E402  (after the sys.path bootstrap)
     FenceDecision,
     FenceGuard,
     LeaseMonitor,
+    await_estop_confirmation,
+    command_estop,
     confirm_estop,
 )
 
@@ -294,6 +297,9 @@ _ROBOT_ACTING_ARMS = frozenset({
     "validate_action", "activate_stream", "deactivate_stream", "push_firmware", "model_update",
 })
 
+# The Command arms that can set a robot moving (`_on_assign`, `_on_zone_admission`).
+_MOTION_ARMS = frozenset({"assign_action", "zone_admission"})
+
 
 # Attributes carried on HardwareComponent (fleet_adapter.v1 tags 6-13). Listed once so the two
 # emission sites cannot drift.
@@ -301,6 +307,68 @@ _HW_ATTRS = (
     "max_payload_kg", "resolution_mp", "range_m", "horizontal_fov_deg",
     "depth_capable", "frame_rate_fps", "platform_length_mm", "platform_width_mm",
 )
+
+
+def _unserved_answer(pb, command, which: str, result, served: str, log_robot: str,
+                     why: str | None = None) -> None:
+    """Fill `result` with the refusal of a robot-acting command for a robot not served.
+
+    One ControlStream carries the commands for every Robot bound to this adapter, and
+    Command.robot_id selects which one
+    (RFC-0001 #fleet-adapter-protocol-the-controlstream-service). Running a command addressed
+    to any other id moves the wrong robot: an assignment for a second Robot object bound to
+    the same adapter drove this one out of a stopped zone. So nothing reaches a robot, a fence
+    or a lease, and each arm is answered with the refusal the contract already defines for it.
+    An assignment is declined ROBOT_UNAVAILABLE: the robot it names is not available through
+    this adapter, and the control plane releases the assignment to reschedule it.
+    INVALID_ACTION would say the action could not be served, which is not true of the action.
+    `served` names what this adapter does serve, for the message; `why` replaces the message
+    when the command is refused for another reason (SimFleet._command_fault).
+    """
+    message = why or (f"robot_id {command.robot_id!r} is not served by this adapter, which "
+                      f"serves {served}; nothing was done")
+    if which == "assign_action":
+        result.assign_action.CopyFrom(pb.AssignActionResult(
+            accepted=False, rejection=pb.ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE,
+            message=message))
+    elif which == "renew_lease":
+        result.renew_lease.CopyFrom(pb.RenewActionLeaseResult(
+            renewed=False, running=False, message=message))
+    elif which == "cancel_action":
+        result.cancel_action.CopyFrom(pb.CancelActionResult(acknowledged=False, message=message))
+    elif which == "pause":
+        result.pause.CopyFrom(pb.PauseResult(paused=False, message=message))
+    elif which == "resume":
+        result.resume.CopyFrom(pb.ResumeResult(resumed=False, message=message))
+    elif which == "zone_admission":
+        result.zone_admission.CopyFrom(pb.ZoneAdmissionAck(acknowledged=False))
+    elif which == "validate_action":
+        result.validate_action.CopyFrom(pb.ValidateActionResult(servable=False, message=message))
+    elif which == "activate_stream":
+        result.activate_stream.CopyFrom(pb.ActivateStreamResult(activated=False, message=message))
+    elif which == "deactivate_stream":
+        result.deactivate_stream.CopyFrom(
+            pb.DeactivateStreamResult(deactivated=False, message=message))
+    elif which == "push_firmware":
+        result.push_firmware.CopyFrom(pb.FirmwareResult(accepted=False, message=message))
+    elif which == "model_update":
+        result.model_update.CopyFrom(pb.ModelUpdateResult(acknowledged=False, message=message))
+    if why is None:  # the marker means "not served"; a refusal for another reason logs its own
+        print(f"UNSERVED_REFUSED robot={log_robot} addressed={command.robot_id!r} arm={which} "
+              f"command_id={command.command_id}", file=sys.stderr, flush=True)
+
+
+class _Link:
+    """The two stream queues a robot writes to.
+
+    A robot served alone owns its link. Robots served together (SimFleet) share the fleet's
+    one link, so a new session's queues replace the old ones for every robot in a single
+    assignment, and no robot goes on writing to a stream that has died.
+    """
+
+    def __init__(self) -> None:
+        self.outbox: queue.Queue = queue.Queue()         # → ControlStream
+        self.safety_outbox: queue.Queue = queue.Queue()  # → SafetyStream (acks + drills)
 
 
 def _hw_component(pb, hs, status_enum):
@@ -328,8 +396,13 @@ class SimAdapter:
                  engine=None, namespace: str = "default", model_artifacts=None,
                  artifact_dir: str | None = None, artifact_store: str = "sim-scratch",
                  provisioning_interval_s: float | None = None,
-                 command_derived_plant: bool = False, latch: bool = False) -> None:
+                 command_derived_plant: bool = False, latch: bool = False,
+                 fleet: SimFleet | None = None) -> None:
         self._pb = pb
+        # The SimFleet this robot is served by, beside others on the same streams, or None
+        # when it is served alone. Alone, nothing below reads it: every `if self._fleet`
+        # branch is the fleet's, and the robot served alone takes the code it always took.
+        self._fleet = fleet
         # The stop latch (RFC-0001 #fleet-adapter-protocol-the-stop-latch), kept with --latch
         # only, and the contract version that follows from it (CONTRACT_VERSION, above).
         self._latching = latch
@@ -344,6 +417,14 @@ class SimAdapter:
         self._local_set_id = ""              # the latest set whose clear has not taken effect
         self._local_changed_ms = 0
         self._interrupted: dict[str, int] = {}  # action_id -> fencing token, of interrupted work
+        # Served beside others (SimFleet) a stop is commanded at once and its rest confirmed
+        # later, in the robot's lane; these three hold what lies between. All under
+        # _latch_lock. Served alone, a stop is confirmed before anything else can touch the
+        # robot, and they stay 0, False and empty.
+        self._stops_in_flight = 0          # stops commanded and not yet answered
+        self._motion_held = False          # work accepted under one, to move once it is answered
+        self._hold_unconfirmed = False     # a stop answered meanwhile was not confirmed
+        self._stop_states: dict = {}       # stop ID -> EstopState: STOPPING until answered
         # A simulated plant with no motion channel independent of the command path (ADR-0071):
         # a cancel is commanded and its rest is not witnessed, so the cancel answer is
         # CANCEL_DISPOSITION_STOP_UNCONFIRMED (to a control plane at 1.4.0 or later) instead of
@@ -453,11 +534,30 @@ class SimAdapter:
         self._artifact_store = artifact_store
         self._artifacts = None
 
-        self._outbox: queue.Queue = queue.Queue()   # → ControlStream
-        self._safety_outbox: queue.Queue = queue.Queue()  # → SafetyStream (acks + drills)
+        # The ControlStream and SafetyStream queues (_outbox, _safety_outbox, below): this
+        # robot's own, or the fleet's, which every robot it serves writes to.
+        self._link = fleet.link if fleet is not None else _Link()
         self._edge_addr: queue.Queue = queue.Queue()  # advertised edge endpoints
-        self._shutdown = threading.Event()
+        self._shutdown = fleet.shutdown_event if fleet is not None else threading.Event()
+        if fleet is not None:
+            self._sim_lock = fleet.sim_lock   # one simulator, one lock, for every robot in it
         self._telemetry_started = False
+
+    @property
+    def _outbox(self) -> queue.Queue:
+        return self._link.outbox
+
+    @_outbox.setter
+    def _outbox(self, value: queue.Queue) -> None:
+        self._link.outbox = value
+
+    @property
+    def _safety_outbox(self) -> queue.Queue:
+        return self._link.safety_outbox
+
+    @_safety_outbox.setter
+    def _safety_outbox(self, value: queue.Queue) -> None:
+        self._link.safety_outbox = value
 
     def shutdown(self) -> None:
         """Signal every loop to exit and unblock the two stream request generators, so
@@ -599,8 +699,7 @@ class SimAdapter:
             if not cp.hello_ack.accepted:
                 raise RuntimeError(f"handshake rejected: {cp.hello_ack.message}")
             self._negotiated_contract = cp.hello_ack.negotiated_contract_version
-            self._outbox.put(pb.AdapterMessage(  # C2.1: register the admitted robot
-                register=pb.RegisterRobot(robot_id=self._robot)))
+            self._send_register(self._outbox)  # C2.1: register the admitted robot
             # Surface the scenario's full hardware manifest once, up front, so the
             # control plane has the component inventory before the first fault delta.
             self._send_capabilities_snapshot()
@@ -611,54 +710,7 @@ class SimAdapter:
                 self._telemetry_started = True
                 threading.Thread(target=self._telemetry_loop, args=(stub,), daemon=True).start()
         elif kind == "register_ack":
-            # C2.1's fallback: register FIRST, and announce for admission only when the
-            # control plane says this robot has no Robot object yet. Anything else that is
-            # not accepted is a real refusal and is not answered by announcing — retrying as
-            # a Discover would be an adapter reaching for a robot it was told it may not
-            # touch.
-            if not cp.register_ack.accepted:
-                if cp.register_ack.rejection == pb.REGISTRATION_REJECTION_NOT_ADMITTED:
-                    # One provisioning-loop iteration: announce (which keeps the
-                    # DiscoveredRobot's TTL fresh), then register again after the interval.
-                    self._admitted = False
-                    self._catalog_unseen = True
-                    self._outbox.put(pb.AdapterMessage(discover=self._discover_message()))
-                    outbox = self._outbox
-                    self._schedule(self._provisioning_interval_s,
-                                   lambda: self._provisioning_iteration(outbox))
-                    print(f"NOT_ADMITTED robot={self._robot}; announced for operator "
-                          f"admission, next register in {self._provisioning_interval_s:.0f}s "
-                          f"(C2.1)", file=sys.stderr)
-                else:
-                    if self._latching:
-                        # The Stop Latch, A refused register: work held for the robot is
-                        # interrupted work.
-                        with self._latch_lock:
-                            self._interrupt_work()
-                    print(f"register refused robot={self._robot}: "
-                          f"{cp.register_ack.message}", file=sys.stderr)
-                return
-            # Accepted: this robot IS admitted, so ordinary operation resumes.
-            self._admitted = True
-            if self._catalog_unseen:
-                # Admission picked up by the provisioning loop: the snapshot sent at hello
-                # time was dropped, so FleetAdapter.status.supportedActions has nothing yet.
-                self._catalog_unseen = False
-                self._send_capabilities_snapshot()
-            for e in cp.register_ack.edge_endpoints:  # C8: dial each edge node
-                self._edge_addr.put(e.address)
-            self._reconcile_action_state(cp.register_ack)
-            # C2.3 — adopt the per-robot cadence the control plane returned. Clamped to
-            # the protocol's 1-30s bound; 0 means "not specified", keep the default.
-            secs = cp.register_ack.telemetry_interval_seconds
-            # Only a POSITIVE value is a cadence. 0 means "not specified" (the field is
-            # optional and Robot.spec.telemetryIntervalSeconds is nilable), and a negative
-            # value is malformed — clamping that to the 1s minimum would let a buggy
-            # control plane force the fastest permitted telemetry rate, so it is ignored
-            # in favour of the adapter's own default. Legitimate values are clamped to the
-            # protocol's 1-30s range.
-            if secs > 0:
-                self._telemetry_interval = max(1.0, min(30.0, float(secs)))
+            self._on_register_ack(cp.register_ack)
         elif kind == "discover_ack":
             # Announced and staged. The robot is NOT under management yet: an operator has
             # to admit it, and the provisioning loop picks that up. The ack's TTL sets the
@@ -678,7 +730,83 @@ class SimAdapter:
         elif kind == "command":
             self._handle_command(cp.command)
 
+    def _send_register(self, outbox: queue.Queue) -> None:
+        """Put this robot's RegisterRobot on `outbox`, the stream it is registering on.
+
+        A RegisterAck names no robot. Served alone, this robot is the one every ack is for.
+        Served beside others, the fleet pairs each ack with the register it answers, in
+        order, so the fleet sends it (SimFleet._send_register).
+        """
+        if self._fleet is not None:
+            self._fleet._send_register(self, outbox)
+            return
+        outbox.put(self._pb.AdapterMessage(register=self._pb.RegisterRobot(robot_id=self._robot)))
+
+    def _on_register_ack(self, ack) -> None:
+        """The RegisterAck that answers this robot's register."""
+        pb = self._pb
+        # C2.1's fallback: register FIRST, and announce for admission only when the
+        # control plane says this robot has no Robot object yet. Anything else that is
+        # not accepted is a real refusal and is not answered by announcing — retrying as
+        # a Discover would be an adapter reaching for a robot it was told it may not
+        # touch.
+        if not ack.accepted:
+            if ack.rejection == pb.REGISTRATION_REJECTION_NOT_ADMITTED:
+                # One provisioning-loop iteration: announce (which keeps the
+                # DiscoveredRobot's TTL fresh), then register again after the interval.
+                self._admitted = False
+                self._catalog_unseen = True
+                self._outbox.put(pb.AdapterMessage(discover=self._discover_message()))
+                outbox = self._outbox
+                self._schedule(self._provisioning_interval_s,
+                               lambda: self._provisioning_iteration(outbox))
+                print(f"NOT_ADMITTED robot={self._robot}; announced for operator "
+                      f"admission, next register in {self._provisioning_interval_s:.0f}s "
+                      f"(C2.1)", file=sys.stderr)
+            else:
+                if self._latching:
+                    # The Stop Latch, A refused register: work held for the robot is
+                    # interrupted work.
+                    with self._latch_lock:
+                        self._interrupt_work()
+                print(f"register refused robot={self._robot}: "
+                      f"{ack.message}", file=sys.stderr)
+            return
+        # Accepted: this robot IS admitted, so ordinary operation resumes.
+        self._admitted = True
+        if self._catalog_unseen:
+            # Admission picked up by the provisioning loop: the snapshot sent at hello
+            # time was dropped, so FleetAdapter.status.supportedActions has nothing yet.
+            self._catalog_unseen = False
+            self._send_capabilities_snapshot()
+        if self._fleet is None:  # a fleet attaches its robots to edge nodes itself
+            for e in ack.edge_endpoints:  # C8: dial each edge node
+                self._edge_addr.put(e.address)
+        self._reconcile_action_state(ack)
+        # C2.3 — adopt the per-robot cadence the control plane returned. Clamped to
+        # the protocol's 1-30s bound; 0 means "not specified", keep the default.
+        secs = ack.telemetry_interval_seconds
+        # Only a POSITIVE value is a cadence. 0 means "not specified" (the field is
+        # optional and Robot.spec.telemetryIntervalSeconds is nilable), and a negative
+        # value is malformed — clamping that to the 1s minimum would let a buggy
+        # control plane force the fastest permitted telemetry rate, so it is ignored
+        # in favour of the adapter's own default. Legitimate values are clamped to the
+        # protocol's 1-30s range.
+        if secs > 0:
+            self._telemetry_interval = max(1.0, min(30.0, float(secs)))
+
     def _handle_command(self, command) -> None:
+        if self._fleet is not None and command.WhichOneof("command") in _MOTION_ARMS:
+            # A robot served beside others has its stops begun on other threads (the
+            # SafetyStream reader, the tick thread, an edge thread), each under this lock. So
+            # the latch check and the motion it allows are one step: a stop either comes
+            # first, and the work is refused or held, or comes after, and interrupts it.
+            with self._latch_lock:
+                self._handle_command_now(command)
+            return
+        self._handle_command_now(command)
+
+    def _handle_command_now(self, command) -> None:
         pb = self._pb
         if self._latching and command.robot_id == self._robot and self._latch_command(command):
             return
@@ -839,9 +967,13 @@ class SimAdapter:
         """Every latched stop ID as an EstopAck, and the local latch as a LocalStopReport."""
         pb = self._pb
         for estop_id in sorted(self._latched):
-            outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot, estop_ack=pb.EstopAck(
-                estop_id=estop_id, state=pb.ESTOP_STATE_STOPPED,
-                confirmed_at_ms=int(time.time() * 1000), message="latched (report)")))
+            # A stop a fleet is still confirming reads STOPPING, and one it could not confirm
+            # FAILED (_stop_states); every other latched stop was confirmed before it latched.
+            state = self._stop_states.get(estop_id, pb.ESTOP_STATE_STOPPED)
+            ack = pb.EstopAck(estop_id=estop_id, state=state, message="latched (report)")
+            if state == pb.ESTOP_STATE_STOPPED:
+                ack.confirmed_at_ms = int(time.time() * 1000)
+            outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot, estop_ack=ack))
         outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot, local_stop=pb.LocalStopReport(
             latched=self._local_set, changed_at_ms=self._local_changed_ms, source="robot",
             set_id=self._local_set_id)))
@@ -875,6 +1007,9 @@ class SimAdapter:
         estop_id = command.estop.estop_id
         if estop_id in self._cleared:
             return  # a fence for an ID already cleared is ignored
+        if self._fleet is not None:
+            self._fleet_fence(command)
+            return
         self._latched.add(estop_id)
         self._fenced.add(estop_id)
         self._interrupt_work()
@@ -886,11 +1021,147 @@ class SimAdapter:
         if clear is not None:
             self._take_clear(clear, self._safety_outbox)
 
-    def _answer_fence(self, command, ack) -> None:
-        """The EstopAck on SafetyStream, and the receipt on ControlStream that RFC-0001 permits."""
+    def _fleet_fence(self, command) -> None:
+        """The fence, for a robot served beside others: latch and stop now, confirm in its lane.
+
+        Called from _latch_command, under the latch lock, on the ControlStream reader. The
+        stop ID is latched and the stop commanded before this returns, so a command behind the
+        fence on the stream meets the latch. Waiting for rest happens in this robot's lane
+        (SimFleet), so the ControlStream reader, which carries every robot's commands, never
+        waits on one robot's stop.
+
+        The ID is recorded as FENCED only once the fence is answered, STOPPED or FAILED
+        (_fence_arrived). A clear for it that arrives meanwhile is kept, as one that comes
+        before its fence is, and is taken right after the fence's EstopAck, so the clear's ack
+        never goes out ahead of the stop's.
+        """
+        pb = self._pb
+        estop_id = command.estop.estop_id
+        self._fleet_stop_begun(estop_id)
+        self._latched.add(estop_id)
+        control_outbox = self._outbox   # the stream this fence came on, for its receipt
+        try:
+            # The stop first, before anything that can fault; then the work it interrupts.
+            initiated = self._command_stop_now()
+            self._interrupt_work()
+        except Exception as exc:  # noqa: BLE001 -- the fence is answered whatever happened
+            print(f"FENCE_ERROR robot={self._robot} id={estop_id}: {exc!r}", file=sys.stderr,
+                  flush=True)
+            self._fleet_stop_answered(pb.ESTOP_STATE_FAILED, estop_id)
+            self._answer_fence(command, pb.EstopAck(
+                estop_id=estop_id, state=pb.ESTOP_STATE_FAILED,
+                message="fence: the stop could not be completed"), control_outbox)
+            self._fence_arrived(estop_id)
+            return
+
+        answered_once = []   # set once the fence is answered, so it is never answered twice
+
+        def finish() -> None:
+            answered = pb.ESTOP_STATE_FAILED
+            try:
+                state = self._fleet._await_rest(self._robot)
+                ack = pb.EstopAck(estop_id=estop_id, state=state, stop_initiated_at=initiated,
+                                  confirmed_at_ms=int(time.time() * 1000), message="fence")
+                with self._latch_lock:
+                    self._answer_fence(command, ack, control_outbox)
+                    answered_once.append(True)
+                    answered = state
+                    self._fence_arrived(estop_id)
+            finally:
+                self._fleet_stop_answered(answered, estop_id)
+
+        def failed() -> None:
+            # The lane could not finish: escalate, unless the fence was already answered. The
+            # ID stays latched; its state reads FAILED (_fleet_stop_answered).
+            if not answered_once:
+                self._answer_fence(command, pb.EstopAck(
+                    estop_id=estop_id, state=pb.ESTOP_STATE_FAILED, stop_initiated_at=initiated,
+                    message="fence: rest could not be confirmed"), control_outbox)
+            self._fence_arrived(estop_id)
+
+        self._fleet._lane(self._robot).submit(finish, on_error=failed)
+
+    def _fence_arrived(self, estop_id: str) -> None:
+        """Record that `estop_id`'s fence has arrived, and take a clear kept for it.
+
+        RFC-0001 #fleet-adapter-protocol-the-stop-latch, The clear: a clear lifts an ID "only
+        once the stop's fence has arrived on the ControlStream"; confirmed rest is not a
+        condition. So a fence answered FAILED is still one that arrived, and its stop stays
+        clearable: an operator's clear must not wait for a restart. Lifting the latch moves
+        nothing by itself.
+        """
+        with self._latch_lock:
+            if estop_id in self._fenced:
+                return
+            self._fenced.add(estop_id)
+            clear = self._pending_clears.pop(estop_id, None)
+            if clear is not None:
+                self._take_clear(clear, self._safety_outbox)
+
+    def _command_stop_now(self) -> int:
+        """Command the stop and return the epoch-ms it was commanded at, without waiting.
+
+        Fleet only. The robot's simulator is the fleet's _FleetWorld, which moves the world
+        up to now before any command, so the stop takes effect from this moment.
+        """
+        with self._sim_lock:
+            initiated = int(time.time() * 1000)
+            command_estop(self._sim, self._robot)
+        return initiated
+
+    def _fleet_stop_begun(self, estop_id: str = "") -> None:
+        """A stop of this robot is commanded and will be answered from its lane. Under _latch_lock.
+
+        Until it is answered (_fleet_stop_answered) the robot is not set moving
+        (`_on_assign`, `_on_zone_admission`), and the latch report reads its ID STOPPING.
+        """
+        with self._latch_lock:
+            self._stops_in_flight += 1
+            if estop_id and estop_id not in self._cleared:   # a cleared ID is never reported
+                self._stop_states[estop_id] = self._pb.ESTOP_STATE_STOPPING
+
+    def _fleet_stop_answered(self, state, estop_id: str = "") -> None:
+        """A stop of this robot has been answered `state`; called exactly once per stop begun.
+
+        When the last stop in flight is answered, work accepted meanwhile moves, as a robot
+        served alone takes it once its stop's ack is out: only if every stop it waited on was
+        confirmed (a robot whose rest could not be confirmed is not set moving again), and not
+        while a zone hold or the latch holds the robot.
+        """
+        pb = self._pb
+        with self._latch_lock:
+            if estop_id and estop_id not in self._cleared:
+                self._stop_states[estop_id] = state
+            if state != pb.ESTOP_STATE_STOPPED:
+                self._hold_unconfirmed = True
+            self._stops_in_flight -= 1
+            if self._stops_in_flight:
+                return
+            held, unconfirmed = self._motion_held, self._hold_unconfirmed
+            self._motion_held = self._hold_unconfirmed = False
+            if not held:
+                return
+            if unconfirmed:
+                print(f"MOTION_NOT_RESUMED robot={self._robot} action={self._current_action}: "
+                      f"a stop it waited on was not confirmed", file=sys.stderr, flush=True)
+                return
+            if (self._zone_hold or self._under_latch() or not self._current_action
+                    or self._assigned_target is None):
+                return
+            with self._sim_lock:
+                self._sim.command_move(self._robot, *self._assigned_target)
+            self._move_target = self._assigned_target
+
+    def _answer_fence(self, command, ack, control_outbox: queue.Queue | None = None) -> None:
+        """The EstopAck on SafetyStream, and the receipt on ControlStream that RFC-0001 permits.
+
+        The receipt goes on `control_outbox`, the stream the fence came on, when one is given:
+        a fleet answers a fence from a lane, after the stream may have been replaced, and a
+        CommandResult is accepted only from the stream its command was pushed down.
+        """
         pb = self._pb
         self._safety_outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot, estop_ack=ack))
-        self._outbox.put(pb.AdapterMessage(command_result=pb.CommandResult(
+        (control_outbox or self._outbox).put(pb.AdapterMessage(command_result=pb.CommandResult(
             command_id=command.command_id, robot_id=command.robot_id, estop=ack)))
 
     def _refuse_under_latch(self, command) -> None:
@@ -940,6 +1211,7 @@ class SimAdapter:
             return
         self._latched.discard(estop_id)
         self._cleared.add(estop_id)
+        self._stop_states.pop(estop_id, None)
         if clear.ends_local_set and clear.ends_local_set == self._local_set_id:
             self._local_set_id = ""  # the refusal from that set ends; a reset lifts the latch
         outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot, estop_clear_ack=(
@@ -959,51 +1231,13 @@ class SimAdapter:
                     set_id=self._local_set_id)))
 
     def _refuse_unserved(self, command, which: str, result) -> None:
-        """Refuse a command addressed to a robot this adapter does not serve.
+        """Refuse a command addressed to a robot this adapter, serving one, does not serve.
 
-        One ControlStream carries the commands for every Robot bound to this adapter, and
-        Command.robot_id selects which one
-        (RFC-0001 #fleet-adapter-protocol-the-controlstream-service). This adapter serves
-        exactly one. Running a command addressed to any other id on it
-        moves the wrong robot: an assignment for a second Robot object bound to the same
-        adapter drove this one out of a stopped zone. So nothing here reaches the robot, the
-        fence or the lease, and each arm is answered with the refusal the contract already
-        defines for it. An assignment is declined ROBOT_UNAVAILABLE: the robot it names is
-        not available through this adapter, and the control plane releases the assignment
-        to reschedule it. INVALID_ACTION would say the action could not be served, which is
-        not true of the action.
+        The refusal, and why it is the one each arm gets, is `_unserved_answer`'s; a SimFleet
+        answers a command for a robot it does not serve with the same function.
         """
-        pb = self._pb
-        why = (f"robot_id {command.robot_id!r} is not served by this adapter, which serves "
-               f"{self._robot!r}; nothing was done")
-        if which == "assign_action":
-            result.assign_action.CopyFrom(pb.AssignActionResult(
-                accepted=False, rejection=pb.ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE,
-                message=why))
-        elif which == "renew_lease":
-            result.renew_lease.CopyFrom(pb.RenewActionLeaseResult(
-                renewed=False, running=False, message=why))
-        elif which == "cancel_action":
-            result.cancel_action.CopyFrom(pb.CancelActionResult(acknowledged=False, message=why))
-        elif which == "pause":
-            result.pause.CopyFrom(pb.PauseResult(paused=False, message=why))
-        elif which == "resume":
-            result.resume.CopyFrom(pb.ResumeResult(resumed=False, message=why))
-        elif which == "zone_admission":
-            result.zone_admission.CopyFrom(pb.ZoneAdmissionAck(acknowledged=False))
-        elif which == "validate_action":
-            result.validate_action.CopyFrom(pb.ValidateActionResult(servable=False, message=why))
-        elif which == "activate_stream":
-            result.activate_stream.CopyFrom(pb.ActivateStreamResult(activated=False, message=why))
-        elif which == "deactivate_stream":
-            result.deactivate_stream.CopyFrom(
-                pb.DeactivateStreamResult(deactivated=False, message=why))
-        elif which == "push_firmware":
-            result.push_firmware.CopyFrom(pb.FirmwareResult(accepted=False, message=why))
-        elif which == "model_update":
-            result.model_update.CopyFrom(pb.ModelUpdateResult(acknowledged=False, message=why))
-        print(f"UNSERVED_REFUSED robot={self._robot} addressed={command.robot_id!r} arm={which} "
-              f"command_id={command.command_id}", file=sys.stderr, flush=True)
+        _unserved_answer(self._pb, command, which, result, served=repr(self._robot),
+                         log_robot=self._robot)
 
     def _on_pause(self, pause, result) -> None:
         # Pause halts the sim; require_stop_before_ack acks paused=true only once the
@@ -1041,10 +1275,14 @@ class SimAdapter:
         if za.admit:
             self._zone_hold = ""
             if self._current_action and self._assigned_target is not None:
-                with self._sim_lock:
-                    # proceed with the assigned task, to the target it named
-                    self._sim.command_move(self._robot, *self._assigned_target)
-                self._move_target = self._assigned_target
+                if self._fleet is not None and self._stops_in_flight:
+                    # Not under a stop still being confirmed (see _on_assign).
+                    self._motion_held = True
+                else:
+                    with self._sim_lock:
+                        # proceed with the assigned task, to the target it named
+                        self._sim.command_move(self._robot, *self._assigned_target)
+                    self._move_target = self._assigned_target
         else:
             self._zone_hold = za.zone_name
             with self._sim_lock:
@@ -1704,12 +1942,20 @@ class SimAdapter:
         # the task back to Pending — but the robot stays
         # stopped at the boundary until zone_admission(admit=true) releases it.
         self._assigned_target = tuple(target) if entry[2] else None
+        held = False
         with self._sim_lock:
             if self._zone_hold or not entry[2]:
                 self._sim.command_stop(self._robot)
+            elif self._fleet is not None and self._stops_in_flight:
+                # A stop of this robot is still being confirmed: it is not set moving under
+                # it. The work is accepted and moves once the stop is confirmed
+                # (_fleet_stop_finished), as a robot served alone takes it after its ack.
+                self._sim.command_stop(self._robot)
+                held = True
             else:
                 self._sim.command_move(self._robot, *target)
-        self._move_target = None if self._zone_hold else self._assigned_target
+        self._move_target = None if (self._zone_hold or held) else self._assigned_target
+        self._motion_held = held
         self._current_action = task.action_id
         self._action_fencing_token = task.fencing_token
         if task.lease_duration_ms:
@@ -1871,6 +2117,9 @@ class SimAdapter:
         expired = self._lease_action
         if not expired or expired != self._current_action:
             return  # superseded: the lease this timer belonged to is no longer held
+        if self._fleet is not None:
+            self._fleet_self_stop(robot, expired)
+            return
         with self._sim_lock:
             self._sim.command_stop(robot)
         token = self._action_fencing_token   # the token the expired action was accepted under
@@ -1890,6 +2139,51 @@ class SimAdapter:
         self._current_action = ""
         self._lease_action = ""
         self._move_target = None
+
+    def _fleet_self_stop(self, robot: str, expired: str) -> None:
+        """C4.2 for a robot served beside others: stop now, confirm rest in its lane.
+
+        The lease expires on the fleet's tick thread, and that thread is what moves the
+        simulated world, so it cannot be the one that waits for this robot to come to rest.
+        The stop is commanded and STOPPED reported here, and the action is dropped at once,
+        so arrival cannot be read as completion while rest is awaited; the terminal FAILED,
+        which says whether rest was confirmed, follows from the lane.
+        """
+        pb = self._pb
+        with self._latch_lock:
+            if expired != self._lease_action or expired != self._current_action:
+                return  # superseded while the lock was taken
+            self._fleet_stop_begun()
+            token = self._action_fencing_token
+            try:
+                with self._sim_lock:
+                    self._sim.command_stop(robot)   # the stop first, before anything can fault
+                self._current_action = ""
+                self._lease_action = ""
+                self._move_target = None
+                self._emit_action_status(expired, "STOPPED", "assignment lease expired")
+            except Exception:
+                self._fleet_stop_answered(pb.ESTOP_STATE_FAILED)
+                raise   # logged by the tick loop (SimFleet._guarded)
+
+        def report(rest) -> None:
+            self._outbox.put(pb.AdapterMessage(action_status=pb.ActionStatusUpdate(
+                action_id=expired, state=pb.ACTION_STATE_FAILED, fencing_token=token,
+                message=("ended by lease expiry" if rest == pb.ESTOP_STATE_STOPPED else
+                         "ended by lease expiry; rest not confirmed within the stopping "
+                         "budget"),
+                end_cause=pb.ACTION_END_CAUSE_LEASE_EXPIRED)))
+
+        def finish() -> None:
+            answered = pb.ESTOP_STATE_FAILED
+            try:
+                rest = self._fleet._await_rest(robot)
+                report(rest)
+                answered = rest
+            finally:
+                self._fleet_stop_answered(answered)
+
+        self._fleet._lane(robot).submit(finish, on_error=lambda: report(pb.ESTOP_STATE_FAILED))
 
     # ── Telemetry (C6) ───────────────────────────────────────────────────────
 
@@ -1931,7 +2225,6 @@ class SimAdapter:
         # so the robot moves at its real speed. Telemetry goes out once per
         # _telemetry_interval, which a RegisterAck may set to several seconds (C2.3): the
         # cadence the control plane hears must not set how fast the robot moves.
-        pb = self._pb
         self._telemetry_start = time.time()
         last_sent = float("-inf")
         while not self._shutdown.is_set():
@@ -1956,19 +2249,24 @@ class SimAdapter:
             if self._scenario_telemetry_gap(elapsed):
                 time.sleep(_TICK_DT)
                 continue
-            phase = (pb.RobotPhase.ROBOT_PHASE_IN_PROGRESS if self._current_action
-                     else pb.RobotPhase.ROBOT_PHASE_IDLE)
-            # C6.2: set explicit presence on safety-relevant scalars.
-            self._outbox.put(pb.AdapterMessage(telemetry=pb.TelemetryPayload(
-                robot_id=self._robot,
-                timestamp_ms=int(time.time() * 1000),
-                position=pb.RobotPosition(x=pose.x, y=pose.y, floor=pose.floor),
-                battery=pb.BatteryStatus(percent=self._scenario_battery(elapsed, sim_battery)),
-                phase=phase,
-                current_action=self._current_action,
-                hardware=self._hardware_updates(),  # scenario-driven, delta-compressed
-            )))
+            self._outbox.put(self._telemetry_message(elapsed, pose, sim_battery))
             time.sleep(_TICK_DT)
+
+    def _telemetry_message(self, elapsed: float, pose, sim_battery: int):
+        """This robot's TelemetryPayload for one telemetry tick."""
+        pb = self._pb
+        phase = (pb.RobotPhase.ROBOT_PHASE_IN_PROGRESS if self._current_action
+                 else pb.RobotPhase.ROBOT_PHASE_IDLE)
+        # C6.2: set explicit presence on safety-relevant scalars.
+        return pb.AdapterMessage(telemetry=pb.TelemetryPayload(
+            robot_id=self._robot,
+            timestamp_ms=int(time.time() * 1000),
+            position=pb.RobotPosition(x=pose.x, y=pose.y, floor=pose.floor),
+            battery=pb.BatteryStatus(percent=self._scenario_battery(elapsed, sim_battery)),
+            phase=phase,
+            current_action=self._current_action,
+            hardware=self._hardware_updates(),  # scenario-driven, delta-compressed
+        ))
 
     # ── Scenario-driven battery / comms / estop (proto mapping only) ─────────────
 
@@ -2019,6 +2317,9 @@ class SimAdapter:
         if self._engine is None or self._estop_drilled or not self._engine.estop_due(elapsed):
             return
         self._estop_drilled = True
+        if self._fleet is not None:
+            self._fleet_estop_drill()
+            return
         pb = self._pb
         with self._sim_lock:
             state = confirm_estop(self._sim, self._robot)  # C5 discipline: never inferred
@@ -2033,6 +2334,48 @@ class SimAdapter:
                 state=(pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED
                        else pb.ESTOP_STATE_FAILED),
                 message="estop drill (scenario)")))
+
+    def _fleet_estop_drill(self) -> None:
+        """The estop drill for a robot served beside others: stop now, confirm in its lane.
+
+        It fires on the fleet's tick thread, which moves the world, so rest is awaited in the
+        robot's lane, as for every stop the fleet confirms.
+        """
+        pb = self._pb
+        with self._latch_lock:
+            self._fleet_stop_begun()
+            try:
+                initiated = self._command_stop_now()   # the stop first
+                dropped = self._current_action
+                self._current_action = ""  # safe-hold: the task is dropped, like a real estop
+                self._move_target = None
+                self._emit_action_status(dropped, "STOPPED", "estop safe-hold")
+            except Exception:
+                self._fleet_stop_answered(pb.ESTOP_STATE_FAILED)
+                self._safety_outbox.put(pb.AdapterSafetyMessage(
+                    robot_id=self._robot, estop_ack=pb.EstopAck(
+                        estop_id=f"drill-{self._robot}", state=pb.ESTOP_STATE_FAILED,
+                        message="estop drill (scenario): the stop could not be completed")))
+                raise   # logged by the tick loop (SimFleet._guarded)
+
+        def ack(state) -> None:
+            self._safety_outbox.put(pb.AdapterSafetyMessage(
+                robot_id=self._robot,
+                estop_ack=pb.EstopAck(
+                    estop_id=f"drill-{self._robot}", stop_initiated_at=initiated, state=state,
+                    confirmed_at_ms=int(time.time() * 1000),
+                    message="estop drill (scenario)")))
+
+        def finish() -> None:
+            answered = pb.ESTOP_STATE_FAILED
+            try:
+                state = self._fleet._await_rest(self._robot)
+                ack(state)
+                answered = state
+            finally:
+                self._fleet_stop_answered(answered)
+
+        self._fleet._lane(self._robot).submit(finish, on_error=lambda: ack(pb.ESTOP_STATE_FAILED))
 
     # ── Scenario-driven hardware reporting (proto mapping only) ──────────────────
 
@@ -2078,7 +2421,7 @@ class SimAdapter:
         """
         if self._admitted or self._shutdown.is_set() or outbox is not self._outbox:
             return
-        outbox.put(self._pb.AdapterMessage(register=self._pb.RegisterRobot(robot_id=self._robot)))
+        self._send_register(outbox)
 
     def _discover_message(self):
         """The DiscoverRobot this adapter announces when the control plane answers a
@@ -2260,6 +2603,51 @@ class SimAdapter:
             estop_clear_ack=pb.EstopClearAck(estop_id=cp.estop_clear.estop_id,
                                              lifted_at_ms=int(time.time() * 1000)))
 
+    def _fleet_estop_begin(self, cp) -> int:
+        """The first half of `_on_safety_estop` for a robot served beside others.
+
+        Run on the SafetyStream reader, which carries every robot's stops: the ID is latched,
+        the work it interrupts dropped and the stop commanded, all before it returns, so the
+        next robot's stop is commanded without waiting for this one to come to rest. Returns
+        the epoch-ms the stop was commanded at (C5.3). Every call is answered by exactly one
+        `_fleet_estop_finish`, which the caller submits to the robot's lane.
+        """
+        estop_id = cp.estop.estop_id if self._latching else ""
+        with self._latch_lock:
+            self._fleet_stop_begun(estop_id)
+            try:
+                if self._latching:
+                    self._latch_stop(cp.estop.estop_id)
+                with self._sim_lock:
+                    initiated_ms = int(time.time() * 1000)
+                    command_estop(self._sim, self._robot)  # C5: confirmed later, never inferred
+                    self._current_action = ""
+                    self._assigned_target = None
+                    self._move_target = None
+            except BaseException:
+                self._fleet_stop_answered(self._pb.ESTOP_STATE_FAILED, estop_id)
+                raise
+        return initiated_ms
+
+    def _fleet_estop_finish(self, cp, initiated_ms: int, outbox: queue.Queue) -> None:
+        """The second half, in the robot's lane: confirmed rest, then the EstopAck on `outbox`."""
+        pb = self._pb
+        estop_id = cp.estop.estop_id if self._latching else ""
+        answered = pb.ESTOP_STATE_FAILED
+        try:
+            state = self._fleet._await_rest(self._robot)
+            _demo_estop_ack_delay()  # demo-test fixture: delays the ACK only, not the stop
+            outbox.put(pb.AdapterSafetyMessage(
+                robot_id=cp.robot_id,
+                estop_ack=pb.EstopAck(
+                    estop_id=self._ack_id(cp.estop.estop_id),
+                    stop_initiated_at=initiated_ms,
+                    confirmed_at_ms=int(time.time() * 1000),
+                    state=state)))
+            answered = state
+        finally:
+            self._fleet_stop_answered(answered, estop_id)
+
     # ── EdgeStream (C8) ──────────────────────────────────────────────────────
 
     def _edge_loop(self) -> None:
@@ -2298,6 +2686,707 @@ class SimAdapter:
                       file=sys.stderr, flush=True)
                 outbox.put(pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
                     estop_id=ec.estop.estop_id, state=ack_state)))
+
+
+# ── Several robots on one connection (SimFleet) ──────────────────────────────────
+
+# The world's tick while any robot's stop is being confirmed. A fleet confirms rest by reading
+# it, not by ticking the world itself (_LockedPlant), so the tick thread runs finer while a
+# confirmation waits, and a decelerating robot is seen at rest within one fine tick of it.
+_CONFIRM_TICK_DT = 0.05
+
+
+class _LockedPlant:
+    """The simulator as the SDK's ASYNCHRONOUS plant (safety.confirm_estop): `tick` is a no-op.
+
+    In a fleet, the tick thread moves the world for every robot. A confirmation that ticked it
+    as well would run every OTHER robot faster for as long as it waited, so this one only
+    reads rest, under the simulator lock, and `await_estop_confirmation`'s sleep supplies the
+    time. Rest is still the plant's ground truth (`is_stopped`), never inferred.
+    """
+
+    #: Every is_stopped() reads the simulated world itself, under the lock, as it is at that
+    #: moment; the fleet's tick thread keeps that world current, and every robot command moves
+    #: it up to now first (_FleetWorld). So any reading taken after the stop was commanded is
+    #: newer than the stop, and confirmation needs no state_seq: the declaration KinematicSim
+    #: makes for itself (swarmada_sdk.safety.await_estop_confirmation).
+    tick_keeps_state_current = True
+
+    def __init__(self, sim, lock: threading.Lock) -> None:
+        self._sim = sim
+        self._lock = lock
+
+    def tick(self, dt: float) -> None:
+        """Nothing: the fleet's tick thread moves the world."""
+
+    def is_stopped(self, robot_id: str) -> bool:
+        with self._lock:
+            return self._sim.is_stopped(robot_id)
+
+
+class _FleetWorld:
+    """The fleet's simulator as each of its robots drives it.
+
+    Every motion command moves the world up to now before it takes effect
+    (SimFleet._advance_world_locked). The tick thread advances the world in steps, and a
+    command issued between two steps would otherwise be applied from the previous step: a
+    stop would decelerate the robot for time before it was commanded, and rest would be
+    confirmed sooner than the plant could reach it. Callers hold the fleet's sim_lock, as
+    every simulator call in SimAdapter does. Everything else is the simulator's own.
+    """
+
+    def __init__(self, fleet: SimFleet, sim) -> None:
+        self._fleet = fleet
+        self._sim = sim
+
+    def command_stop(self, robot_id: str) -> None:
+        self._fleet._advance_world_locked()
+        self._sim.command_stop(robot_id)
+
+    def command_move(self, robot_id: str, target_x: float, target_y: float) -> None:
+        self._fleet._advance_world_locked()
+        self._sim.command_move(robot_id, target_x, target_y)
+
+    def __getattr__(self, name: str):
+        return getattr(self._sim, name)
+
+
+class _Lane:
+    """One robot's waiting work, in arrival order, on a thread of its own.
+
+    Confirming a stop waits for the robot to come to rest. A stream reader carries every
+    robot's messages, so it must not be the one that waits; each robot's confirmations and
+    answers run here instead, in the order they were submitted, so a robot's stop and its
+    clear are answered in the order they came, and no robot's stop waits on another's.
+    """
+
+    def __init__(self, robot_id: str) -> None:
+        self._robot = robot_id
+        self._tasks: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True, name=f"sim-lane-{robot_id}").start()
+
+    def submit(self, fn, on_error=None) -> None:
+        """Run `fn` after everything already submitted; run `on_error` if it raises."""
+        self._tasks.put((fn, on_error))
+
+    def _run(self) -> None:
+        while True:
+            fn, on_error = self._tasks.get()
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 -- a lane outlives any one task
+                print(f"LANE_ERROR robot={self._robot}: {exc!r}", file=sys.stderr, flush=True)
+                if on_error is None:
+                    continue
+                try:
+                    on_error()  # each stop's on_error answers FAILED, which escalates
+                except BaseException as exc2:  # noqa: BLE001
+                    print(f"LANE_ERROR robot={self._robot} (on_error): {exc2!r}",
+                          file=sys.stderr, flush=True)
+
+
+class SimFleet:
+    """Several simulated robots served on one ControlStream and one SafetyStream.
+
+    One stream multiplexes every robot an adapter manages, and each message names its robot
+    (RFC-0001 #fleet-adapter-protocol-the-controlstream-service). The fleet owns the
+    connection. Each robot is a SimAdapter built with ``fleet=self``, holding all of its own
+    state -- fence, lease, latch, action, stream leases, install state -- so the per-robot
+    logic is the logic a robot served alone runs. What the fleet adds:
+
+    * ROUTING. A Command, an Estop and an EstopClear go to the robot their robot_id names,
+      and to no other. One naming a robot the fleet does not serve reaches no robot: a
+      robot-acting Command is refused with the arm's own refusal (`_unserved_answer`), a
+      fence and an Estop are answered ESTOP_STATE_FAILED (nothing was stopped, so nothing can
+      be confirmed), and any other arm is declined unsupported.
+    * REGISTER-ACK PAIRING. A RegisterAck names no robot. The control plane answers the
+      registers on a stream in the order they arrive, every one, a refusal included
+      (internal/controlstream: one receive loop per stream, and `refuse` answers a register),
+      so each ack answers the oldest register still unanswered on that stream. Every register
+      goes through `_send_register`, which records it in the order it is put on the stream.
+      A DiscoverAck is not paired: all a robot takes from it is the TTL, which is the
+      namespace's and so the same for every robot, whichever discover it answers.
+    * ONE WORLD. The simulator moves every robot it holds on each tick, so one tick thread
+      advances it for all of them; N robots each ticking it would run the world N times too
+      fast.
+    * LANES. Confirming that a robot is at rest waits. The SafetyStream reader, the
+      ControlStream reader and the tick thread each serve every robot, so none of them waits
+      for one: each commands the stop at once and hands the confirmation and the answer to
+      the robot's lane (`_Lane`). A fleet-wide stop is commanded for every robot before any
+      one robot's rest is awaited.
+    * EDGE NODES. One EdgeStream per node. An edge-issued Estop names no robot; it stops every
+      robot whose RegisterAck listed that node, and its one EstopAck is STOPPED only once
+      every one of them is confirmed at rest, FAILED otherwise
+      (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
+
+    Every robot runs the same scenario: each fires its own estop drill, and a scenario stream
+    drop drops the one connection. All robots spawn at the origin, as one adapter per robot
+    does today.
+    """
+
+    def __init__(self, pb, pb_grpc, sim, robot_ids: list[str], zone: str, vendor: str,
+                 engine=None, **robot_kwargs) -> None:
+        if len(robot_ids) < 2:
+            raise ValueError("a SimFleet serves two or more robots; one is a SimAdapter")
+        if len(set(robot_ids)) != len(robot_ids) or not all(robot_ids):
+            raise ValueError(f"robot ids must be distinct and non-empty: {robot_ids!r}")
+        self._pb = pb
+        self._pb_grpc = pb_grpc
+        self._sim = sim
+        self._engine = engine
+        self._vendor = vendor
+        # Shared by every robot: the stream queues, shutdown, and the one simulator's lock.
+        self.link = _Link()
+        self.shutdown_event = threading.Event()
+        self.sim_lock = threading.Lock()
+        self._plant = _LockedPlant(sim, self.sim_lock)
+        self._ids = list(robot_ids)
+        world = _FleetWorld(self, sim)   # each robot drives the world through it
+        self._robots = {rid: SimAdapter(pb, pb_grpc, world, rid, zone, vendor, engine,
+                                        fleet=self, **robot_kwargs) for rid in robot_ids}
+        self._lanes = {rid: _Lane(rid) for rid in robot_ids}
+        self._served = "[" + ", ".join(repr(r) for r in robot_ids) + "]"
+        first = self._robots[robot_ids[0]]
+        self._namespace = first._namespace
+        # The version every robot reports (SimAdapter._contract_version, set once from
+        # CONTRACT_VERSION and LATCH_CONTRACT_VERSION, which internal/contract's
+        # adapter_versions_test checks), and so the one the fleet's hello reports.
+        self._hello_contract = first._contract_version
+        # Registers put on the current stream and not yet answered, oldest first.
+        self._register_lock = threading.Lock()
+        self._unanswered: collections.deque = collections.deque()
+        self._confirm_lock = threading.Lock()
+        self._confirming = 0                      # stops whose rest is being awaited
+        self._tick_wake = threading.Event()       # set to end the tick thread's wait early
+        self._tick_started = False
+        self._tick_start = 0.0
+        self._world_at: float | None = None       # monotonic time the world was moved to
+        self._active_call = None
+        self._reconnect_pending = False
+        self._edge_lock = threading.Lock()
+        self._edge_robots: dict[str, list] = {}     # edge address -> robots served through it
+        self._edge_outboxes: dict[str, queue.Queue] = {}
+
+    def robot(self, robot_id: str) -> SimAdapter:
+        return self._robots[robot_id]
+
+    def _lane(self, robot_id: str) -> _Lane:
+        return self._lanes[robot_id]
+
+    def _await_rest(self, robot_id: str):
+        """Wait for `robot_id`'s CONFIRMED rest; the proto EstopState. Never on the tick thread."""
+        pb = self._pb
+        with self._confirm_lock:
+            self._confirming += 1
+        self._tick_wake.set()
+        try:
+            state = await_estop_confirmation(self._plant, robot_id)
+        finally:
+            with self._confirm_lock:
+                self._confirming -= 1
+        return pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED else pb.ESTOP_STATE_FAILED
+
+    def shutdown(self) -> None:
+        """As SimAdapter.shutdown, for the fleet's streams."""
+        self.shutdown_event.set()
+        self.link.outbox.put(None)
+        self.link.safety_outbox.put(None)
+        call = self._active_call
+        if call is not None:
+            try:
+                call.cancel()
+            except Exception:  # noqa: BLE001 — best-effort during shutdown
+                pass
+
+    # ── ControlStream ────────────────────────────────────────────────────────
+
+    def _send_register(self, robot: SimAdapter, outbox: queue.Queue) -> None:
+        """Put `robot`'s RegisterRobot on `outbox`, recorded as the newest unanswered one.
+
+        The record and the put happen under one lock, so the order of the record is the order
+        on the stream, which is the order the acks come back in. A register for a stream that
+        has been replaced is not sent: the new stream registers every robot on its own.
+        """
+        pb = self._pb
+        with self._register_lock:
+            if outbox is not self.link.outbox:
+                return
+            self._unanswered.append(robot)
+            outbox.put(pb.AdapterMessage(register=pb.RegisterRobot(robot_id=robot._robot)))
+
+    def _control_requests(self) -> Iterator:
+        """Outbound messages for ONE ControlStream session (SimAdapter._control_requests)."""
+        pb = self._pb
+        outbox = self.link.outbox
+        yield pb.AdapterMessage(hello=pb.AdapterHello(  # C1.2: hello first
+            vendor=self._vendor, adapter_version="0.1.0-sim",
+            protocol_version="fleet_adapter.v1", contract_version=self._hello_contract,
+            namespace=self._namespace))
+        while True:
+            msg = outbox.get()
+            if msg is None:
+                return
+            yield msg
+
+    def run_control_stream(self, stub) -> None:
+        with self.sim_lock:
+            for rid in self._ids:
+                self._sim.spawn(rid, 0.0, 0.0)
+        threading.Thread(target=self._stream_lease_loop, daemon=True).start()
+        while not self.shutdown_event.is_set():
+            self._reconnect_pending = False
+            # A fresh outbox per session, swapped for every robot at once (the shared link),
+            # and no register of the old session is left waiting for an ack.
+            with self._register_lock:
+                self.link.outbox = queue.Queue()
+                self._unanswered.clear()
+            call = stub.ControlStream(self._control_requests())
+            self._active_call = call
+            dropped = False
+            try:
+                for cp in call:
+                    self._handle_control_plane(cp)
+            except grpc.RpcError as exc:
+                if self.shutdown_event.is_set():
+                    break
+                dropped = True
+                print(f"control stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
+            finally:
+                self._active_call = None
+            if self.shutdown_event.is_set():
+                break
+            if self._reconnect_pending:
+                self._await_reconnect()
+                continue
+            if dropped:
+                time.sleep(0.5)
+                continue
+            break  # clean close (response iterator ended without error)
+        self.shutdown_event.set()
+
+    def _handle_control_plane(self, cp) -> None:
+        pb = self._pb
+        kind = cp.WhichOneof("payload")
+        if kind == "hello_ack":
+            if not cp.hello_ack.accepted:
+                raise RuntimeError(f"handshake rejected: {cp.hello_ack.message}")
+            for rid in self._ids:   # C2.1, robot by robot: register, then the snapshot
+                robot = self._robots[rid]
+                robot._negotiated_contract = cp.hello_ack.negotiated_contract_version
+                robot._send_register(self.link.outbox)
+                robot._send_capabilities_snapshot()
+                robot._snapshot_pending = True  # C6.1: a full snapshot on the new stream
+            if not self._tick_started:
+                self._tick_started = True
+                threading.Thread(target=self._tick_loop, daemon=True).start()
+        elif kind == "register_ack":
+            with self._register_lock:
+                robot = self._unanswered.popleft() if self._unanswered else None
+            if robot is None:
+                # More acks than registers: the control plane broke the pairing this relies
+                # on. Applying it to a guessed robot could adopt another robot's fencing
+                # token or cancel its action, so it is applied to none.
+                print(f"REGISTER_ACK_UNPAIRED accepted={cp.register_ack.accepted} "
+                      f"message={cp.register_ack.message!r}", file=sys.stderr, flush=True)
+                return
+            robot._on_register_ack(cp.register_ack)
+            if cp.register_ack.accepted:  # C8: the robot's edge nodes, as this ack lists them
+                self._edge_sync(robot, [e.address for e in cp.register_ack.edge_endpoints])
+        elif kind == "discover_ack":
+            for robot in self._robots.values():
+                robot._provisioning_interval_s = _provisioning_interval(
+                    cp.discover_ack.ttl_seconds, robot._provisioning_override)
+            print(f"DISCOVERED {cp.discover_ack.discovered_robot_name}: "
+                  f"{cp.discover_ack.message}", file=sys.stderr)
+        elif kind == "heartbeat":
+            # Echoed whatever it names, as SimAdapter does: the adapter-scoped probe (empty
+            # robot_id) is answered once for the whole adapter.
+            self.link.outbox.put(pb.AdapterMessage(
+                heartbeat=pb.HeartbeatResponse(robot_id=cp.heartbeat.robot_id)))
+        elif kind == "command":
+            self._on_command(cp.command)
+
+    def _on_command(self, command) -> None:
+        pb = self._pb
+        robot = self._robots.get(command.robot_id)
+        if robot is not None:
+            try:
+                robot._handle_command(command)
+            except Exception as exc:  # noqa: BLE001 -- one robot's fault must not end the rest
+                self._command_fault(robot, command, exc)
+            return
+        which = command.WhichOneof("command")
+        result = pb.CommandResult(command_id=command.command_id, robot_id=command.robot_id)
+        if which in _ROBOT_ACTING_ARMS:
+            _unserved_answer(pb, command, which, result, served=self._served,
+                             log_robot=",".join(self._ids))
+        elif which == "estop":
+            # A fence for a robot none of these is. Nothing was stopped, so nothing can be
+            # confirmed: FAILED, which escalates. No robot this fleet serves is stopped by it.
+            ack = pb.EstopAck(
+                estop_id=command.estop.estop_id, state=pb.ESTOP_STATE_FAILED,
+                message=(f"robot_id {command.robot_id!r} is not served by this adapter, which "
+                         f"serves {self._served}; no stop was commanded and none can be "
+                         f"confirmed"))
+            result.estop.CopyFrom(ack)
+            self.link.safety_outbox.put(pb.AdapterSafetyMessage(robot_id=command.robot_id,
+                                                                estop_ack=ack))
+            print(f"FENCE_UNSERVED robots={','.join(self._ids)} addressed={command.robot_id!r} "
+                  f"id={command.estop.estop_id}", file=sys.stderr, flush=True)
+        else:
+            result.unsupported = True
+            print(f"UNSERVED_DECLINED robots={','.join(self._ids)} "
+                  f"addressed={command.robot_id!r} arm={which} command_id={command.command_id}",
+                  file=sys.stderr, flush=True)
+        self.link.outbox.put(pb.AdapterMessage(command_result=result))
+
+    def _command_fault(self, robot: SimAdapter, command, exc: Exception) -> None:
+        """A robot's handler raised. Stop that robot, end its work, refuse the command.
+
+        Served alone, the exception ends the process, and the robot with it. Served beside
+        others, ending the process would take every robot with it, so the fault is contained
+        to its robot, on the safe side: the handler may have left it moving or holding work
+        it never reported, so its work is ended as a stop ends it (FAILED, interrupted) and
+        it is stopped; then the command is refused in band, as a command for a robot not
+        served is, so the control plane does not wait on an answer.
+        """
+        pb = self._pb
+        which = command.WhichOneof("command")
+        print(f"COMMAND_ERROR robot={robot._robot} arm={which} command_id={command.command_id}: "
+              f"{exc!r}", file=sys.stderr, flush=True)
+        try:
+            with self.sim_lock:
+                robot._sim.command_stop(robot._robot)   # the stop first, before anything else
+        except Exception as exc2:  # noqa: BLE001
+            print(f"COMMAND_ERROR robot={robot._robot}: the stop after it failed too: {exc2!r}",
+                  file=sys.stderr, flush=True)
+        try:
+            with robot._latch_lock:
+                robot._move_target = None
+                robot._motion_held = False
+                robot._interrupt_work()
+        except Exception as exc2:  # noqa: BLE001
+            print(f"COMMAND_ERROR robot={robot._robot}: the stop after it failed too: {exc2!r}",
+                  file=sys.stderr, flush=True)
+        result = pb.CommandResult(command_id=command.command_id, robot_id=command.robot_id)
+        if which in _ROBOT_ACTING_ARMS:
+            _unserved_answer(pb, command, which, result, served=self._served,
+                             log_robot=robot._robot,
+                             why=(f"the adapter failed while handling this command for "
+                                  f"{command.robot_id!r} ({exc!r}); the robot was stopped"))
+        elif which == "estop":
+            result.estop.CopyFrom(pb.EstopAck(estop_id=command.estop.estop_id,
+                                              state=pb.ESTOP_STATE_FAILED,
+                                              message="the adapter failed handling the fence"))
+        else:
+            result.unsupported = True
+        self.link.outbox.put(pb.AdapterMessage(command_result=result))
+
+    # ── The world, telemetry and the scenario ────────────────────────────────
+
+    def _tick_loop(self) -> None:
+        """SimAdapter._telemetry_loop for every robot, around ONE tick of the world per pass."""
+        start = time.time()
+        self._tick_start = start
+        for robot in self._robots.values():
+            robot._telemetry_start = start
+        last_sent = {rid: float("-inf") for rid in self._ids}
+        last_pass = time.monotonic()
+        with self.sim_lock:
+            self._world_at = last_pass
+        while not self.shutdown_event.is_set():
+            pass_at = time.monotonic()
+            dt = min(pass_at - last_pass, 2 * _TICK_DT)   # what a job has had since last pass
+            last_pass = pass_at
+            elapsed = time.time() - start
+            for robot in self._robots.values():
+                self._guarded(robot, robot._lease.tick)  # C4 self-stop check
+                self._guarded(robot, robot._maybe_estop_drill, elapsed)
+            self._maybe_stream_drop(elapsed)
+            with self.sim_lock:
+                self._advance_world_locked()
+                readings = [(self._robots[rid], self._sim.pose(rid),
+                             self._sim.battery_percent(rid)) for rid in self._ids]
+            now = time.monotonic()
+            for robot, pose, battery in readings:
+                self._guarded(robot, robot._complete_on_arrival)
+                self._guarded(robot, robot._advance_job, dt)
+                if now - last_sent[robot._robot] < robot._telemetry_interval:
+                    continue
+                last_sent[robot._robot] = now
+                if robot._scenario_telemetry_gap(elapsed):
+                    continue
+                self._guarded(robot, lambda r=robot, p=pose, b=battery: r._outbox.put(
+                    r._telemetry_message(elapsed, p, b)))
+            # Fine passes while a stop is being confirmed, and a confirmation that starts
+            # wakes a coarse wait at once (_await_rest): rest is then seen within one fine
+            # tick of the robot reaching it. Cleared before the read, so no wake is lost.
+            self._tick_wake.clear()
+            self._tick_wake.wait(_CONFIRM_TICK_DT if self._confirming else _TICK_DT)
+
+    def _advance_world_locked(self) -> None:
+        """Move the world up to now. Called with sim_lock held.
+
+        The world keeps wall-clock time: each tick covers exactly the time since the last,
+        however a pass was woken or delayed (bounded, so a stalled host does not move a robot
+        metres in one step). Every robot command catches the world up before it takes effect
+        (_FleetWorld), so the tick after a stop decelerates the robot only for time after the
+        stop was commanded: a stop is never applied retroactively, which would report rest
+        sooner than the plant could reach it, and a move never starts before it was commanded.
+        """
+        now = time.monotonic()
+        if self._world_at is None:
+            return  # no tick thread yet: nothing has moved, so there is nothing to catch up
+        dt = min(now - self._world_at, 2 * _TICK_DT)
+        self._world_at = now
+        if dt > 0:
+            self._sim.tick(dt)
+
+    @staticmethod
+    def _guarded(robot: SimAdapter, fn, *args) -> None:
+        """Run one robot's step; a fault in it is logged and does not stop the others'."""
+        try:
+            fn(*args)
+        except Exception as exc:  # noqa: BLE001 -- one robot's fault must not freeze the fleet
+            print(f"TICK_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr, flush=True)
+
+    def _maybe_stream_drop(self, elapsed: float) -> None:
+        """comms-flaky, for the one connection (SimAdapter._maybe_stream_drop)."""
+        if self._engine is None or self._reconnect_pending:
+            return
+        if self._engine.stream_down_at(elapsed):
+            self._reconnect_pending = True
+            call = self._active_call
+            if call is not None:
+                call.cancel()
+            self.link.outbox.put(None)
+
+    def _await_reconnect(self) -> None:
+        """comms-flaky: hold the outage open until the scenario's reconnect time."""
+        window = self._engine.stream_drop_window() if self._engine else None
+        if window is None:
+            return
+        _, reconnect_at = window
+        while not self.shutdown_event.is_set():
+            if time.time() - self._tick_start >= reconnect_at:
+                return
+            time.sleep(1.0)
+
+    def _stream_lease_loop(self) -> None:
+        """SimAdapter._stream_lease_loop for every robot, on one thread."""
+        while not self.shutdown_event.is_set():
+            for robot in self._robots.values():
+                self._guarded(robot, robot._stream_lease.tick)
+            time.sleep(_STREAM_LEASE_TICK_S)
+
+    # ── SafetyStream (C5) ────────────────────────────────────────────────────
+
+    def run_safety_stream(self, stub) -> None:
+        def requests(outbox: queue.Queue) -> Iterator:
+            while True:
+                msg = outbox.get()
+                if msg is None:
+                    return
+                yield msg
+
+        # Resilient as SimAdapter.run_safety_stream, with a fresh queue per session.
+        while not self.shutdown_event.is_set():
+            outbox = self.link.safety_outbox = queue.Queue()
+            if self.shutdown_event.is_set():
+                return
+            for robot in self._robots.values():
+                if robot._latching:
+                    with robot._latch_lock:
+                        robot._report_latch(outbox)  # on each SafetyStream that opens
+            try:
+                for cp in stub.SafetyStream(requests(outbox)):
+                    self._on_safety(cp, outbox)
+            except grpc.RpcError as exc:
+                outbox.put(None)
+                if self.shutdown_event.is_set():
+                    return
+                print(f"safety stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
+                time.sleep(0.5)
+                continue
+            return
+
+    def _on_safety(self, cp, outbox: queue.Queue) -> None:
+        """Route one SafetyStream message. The reader never waits for a robot to rest."""
+        pb = self._pb
+        kind = cp.WhichOneof("payload")
+        robot = self._robots.get(cp.robot_id)
+        if kind == "estop":
+            if robot is None:
+                print(f"ESTOP_UNSERVED robots={','.join(self._ids)} addressed={cp.robot_id!r} "
+                      f"id={cp.estop.estop_id}", file=sys.stderr, flush=True)
+                outbox.put(pb.AdapterSafetyMessage(robot_id=cp.robot_id, estop_ack=pb.EstopAck(
+                    estop_id=cp.estop.estop_id, state=pb.ESTOP_STATE_FAILED,
+                    message=(f"robot_id {cp.robot_id!r} is not served by this adapter, which "
+                             f"serves {self._served}; no stop was commanded and none can be "
+                             f"confirmed"))))
+                return
+
+            def failed(initiated=None) -> None:
+                ack = pb.EstopAck(estop_id=cp.estop.estop_id, state=pb.ESTOP_STATE_FAILED,
+                                  message="rest could not be confirmed")
+                if initiated is not None:
+                    ack.stop_initiated_at = initiated
+                outbox.put(pb.AdapterSafetyMessage(robot_id=cp.robot_id, estop_ack=ack))
+
+            try:
+                initiated = robot._fleet_estop_begin(cp)
+            except Exception as exc:  # noqa: BLE001 -- answer the stop whatever happened
+                print(f"ESTOP_ERROR robot={cp.robot_id}: {exc!r}", file=sys.stderr, flush=True)
+                failed()
+                return
+            self._lane(cp.robot_id).submit(
+                lambda: robot._fleet_estop_finish(cp, initiated, outbox),
+                on_error=lambda: failed(initiated))
+        elif kind == "estop_clear":
+            if robot is None:
+                print(f"ESTOP_CLEAR_UNSERVED robots={','.join(self._ids)} "
+                      f"addressed={cp.robot_id!r} id={cp.estop_clear.estop_id}",
+                      file=sys.stderr, flush=True)
+                return
+            # In the robot's lane, behind any of its stops still being confirmed, so a clear's
+            # ack never goes out ahead of the ack of a stop that came before it.
+            if robot._latching:
+                self._lane(cp.robot_id).submit(
+                    lambda: robot._on_estop_clear(cp.estop_clear, outbox))
+            else:
+                self._lane(cp.robot_id).submit(lambda: outbox.put(robot._on_safety_clear(cp)))
+
+    # ── EdgeStream (C8) ──────────────────────────────────────────────────────
+
+    def _edge_sync(self, robot: SimAdapter, addresses: list[str]) -> None:
+        """Serve `robot` through exactly the edge nodes its latest accepted RegisterAck lists.
+
+        A node it no longer lists stops stopping it: its zone chain changed, and an estop from
+        that node is not for it. A node it newly lists is dialled once, for every robot that
+        lists it, and keeps being redialled (_edge_loop).
+        """
+        listed = set(addresses)
+        with self._edge_lock:
+            for address, robots in self._edge_robots.items():
+                if address not in listed and robot in robots:
+                    robots.remove(robot)
+        for address in addresses:
+            self._edge_attach(robot, address)
+
+    def _edge_attach(self, robot: SimAdapter, address: str) -> None:
+        """Record that `robot` is served through the edge node at `address`; dial it once.
+
+        C8.2: a PositionFrame for the robot goes to the node when it is attached, so the node
+        has a pose to evaluate (as SimAdapter._edge_loop sends one when it dials), and on
+        every stream to the node that opens after (_edge_loop).
+        """
+        with self._edge_lock:
+            robots = self._edge_robots.setdefault(address, [])
+            if robot in robots:
+                return  # re-registered on a new ControlStream: already attached
+            robots.append(robot)
+            if address not in self._edge_outboxes:
+                self._edge_outboxes[address] = queue.Queue()   # replaced per stream
+                threading.Thread(target=self._edge_loop, args=(address,),
+                                 daemon=True, name=f"sim-edge-{address}").start()
+                return   # the loop sends a frame for every robot attached when it dials
+            outbox = self._edge_outboxes[address]
+        outbox.put(self._position_frame(robot))
+
+    def _position_frame(self, robot: SimAdapter):
+        pb = self._pb
+        with self.sim_lock:
+            pose = self._sim.pose(robot._robot)
+        return pb.AdapterEdgeMessage(position=pb.PositionFrame(
+            robot_id=robot._robot,
+            position=pb.RobotPosition(x=pose.x, y=pose.y, floor=pose.floor)))
+
+    def _edge_loop(self, address: str) -> None:
+        """Hold an EdgeStream to `address` for the life of the adapter (C8.1).
+
+        A stream that fails is redialled with a backoff, as the ControlStream is, so the
+        robots served through the node do not lose their headless estop path for good. Each
+        stream gets a fresh queue, so a dying stream's request generator cannot take a message
+        meant for the next one.
+        """
+        estub = self._pb_grpc.EdgeServiceStub(grpc.insecure_channel(address))
+        backoff = 0.5
+        while not self.shutdown_event.is_set():
+            with self._edge_lock:
+                outbox = self._edge_outboxes[address] = queue.Queue()
+                robots = list(self._edge_robots.get(address, []))
+            for robot in robots:
+                outbox.put(self._position_frame(robot))
+
+            def requests(q: queue.Queue = outbox) -> Iterator:
+                while True:
+                    msg = q.get()
+                    if msg is None:
+                        return
+                    yield msg
+
+            try:
+                for ec in estub.EdgeStream(requests()):
+                    backoff = 0.5   # the stream is up: the next failure starts short again
+                    if ec.WhichOneof("msg") == "estop":  # C8.3: same confirmed discipline as C5
+                        outbox.put(self._edge_estop(address, ec.estop))
+            except grpc.RpcError as exc:
+                if self.shutdown_event.is_set():
+                    return
+                print(f"edge stream {address} dropped ({exc.code()}); redialling in "
+                      f"{backoff:.1f}s", file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001 -- the node's headless estop path must survive
+                print(f"EDGE_ERROR {address}: {exc!r}; redialling in {backoff:.1f}s",
+                      file=sys.stderr, flush=True)
+            finally:
+                outbox.put(None)   # release this stream's request generator
+            if self.shutdown_event.wait(backoff):
+                return
+            backoff = min(backoff * 2, 5.0)
+
+    def _edge_estop(self, address: str, estop):
+        """Stop every robot served through `address`; one ack, STOPPED only if all rest."""
+        pb = self._pb
+        with self._edge_lock:
+            robots = list(self._edge_robots.get(address, []))
+        # Every robot's stop is commanded before any one robot's rest is awaited, and a fault
+        # in one robot's stop neither skips the others nor withholds the ack: that robot is
+        # counted not confirmed, so the ack is FAILED.
+        begun = []
+        failed = []
+        for robot in robots:
+            try:
+                with robot._latch_lock:
+                    robot._fleet_stop_begun()
+                    begun.append(robot)
+                    if robot._latching:
+                        robot._set_local_latch()
+                    robot._command_stop_now()
+            except Exception as exc:  # noqa: BLE001 -- the other robots are still stopped
+                print(f"EDGE_ESTOP_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr,
+                      flush=True)
+                failed.append(robot._robot)
+        states = [(rid, pb.ESTOP_STATE_FAILED) for rid in failed]
+        for robot in begun:
+            state = pb.ESTOP_STATE_FAILED
+            try:
+                if robot._robot not in failed:
+                    state = self._await_rest(robot._robot)
+            except Exception as exc:  # noqa: BLE001 -- that robot is not confirmed: FAILED
+                print(f"EDGE_ESTOP_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr,
+                      flush=True)
+            finally:
+                robot._fleet_stop_answered(state)
+            if robot._robot not in failed:
+                states.append((robot._robot, state))
+        stopped = bool(states) and all(s == pb.ESTOP_STATE_STOPPED for _, s in states)
+        for rid, state in states:
+            print(f"EDGE_ESTOP_CONFIRMED robot={rid} id={estop.estop_id} "
+                  f"state={'STOPPED' if state == pb.ESTOP_STATE_STOPPED else 'FAILED'}",
+                  file=sys.stderr, flush=True)
+        return pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
+            estop_id=estop.estop_id,
+            state=pb.ESTOP_STATE_STOPPED if stopped else pb.ESTOP_STATE_FAILED))
 
 
 class ModelArtifacts:
@@ -2344,7 +3433,9 @@ def main() -> None:
     ap.add_argument("--endpoint", default="localhost:9445")
     ap.add_argument("--simulator", default="kinematic", choices=["kinematic", "isaac"],
                     help="simulator backend ($0 default: kinematic)")
-    ap.add_argument("--robot-id", default="robot-conformance-1")
+    ap.add_argument("--robot-id", action="append", default=None, metavar="ID",
+                    help="a robot this adapter serves; repeat it to serve several on one "
+                         "ControlStream (default: robot-conformance-1)")
     ap.add_argument("--command-derived-plant", action="store_true",
                     help="simulate a plant with no motion channel independent of the command path: "
                          "a cancel is answered CANCEL_DISPOSITION_STOP_UNCONFIRMED to a control "
@@ -2428,6 +3519,13 @@ def main() -> None:
     args = ap.parse_args()
     if args.model_trust_root and not args.model_frames:
         ap.error("--model-trust-root needs --model-frames")
+    robot_ids = args.robot_id or ["robot-conformance-1"]
+    if len(robot_ids) > 1:
+        repeated = sorted({r for r in robot_ids if robot_ids.count(r) > 1})
+        if repeated:
+            ap.error(f"--robot-id given more than once for {', '.join(repeated)}")
+        if not all(robot_ids):
+            ap.error("--robot-id must not be empty")
 
     _tls_flags = (args.tls_ca, args.tls_cert, args.tls_key)
     if any(_tls_flags) and not all(_tls_flags):
@@ -2467,12 +3565,19 @@ def main() -> None:
         with open(args.model_trust_root, "rb") as fh:
             model_artifacts = ModelArtifacts(fh.read(), args.model_trust_root_name,
                                              args.model_frames, args.model_results_dir or "")
-    adapter = SimAdapter(pb, pb_grpc, sim, args.robot_id, args.zone, args.vendor, engine,
-                         namespace=args.namespace, model_artifacts=model_artifacts,
-                         artifact_dir=args.artifact_dir, artifact_store=args.artifact_store,
-                         provisioning_interval_s=args.provisioning_interval,
-                         command_derived_plant=args.command_derived_plant,
-                         latch=args.latch)
+    robot_kwargs = dict(namespace=args.namespace, model_artifacts=model_artifacts,
+                        artifact_dir=args.artifact_dir, artifact_store=args.artifact_store,
+                        provisioning_interval_s=args.provisioning_interval,
+                        command_derived_plant=args.command_derived_plant,
+                        latch=args.latch)
+    if len(robot_ids) == 1:
+        # One robot: the adapter as it has always run, byte for byte
+        # (tests/python/test_sim_adapter_golden_transcript.py).
+        adapter = SimAdapter(pb, pb_grpc, sim, robot_ids[0], args.zone, args.vendor, engine,
+                             **robot_kwargs)
+    else:
+        adapter = SimFleet(pb, pb_grpc, sim, robot_ids, args.zone, args.vendor, engine,
+                           **robot_kwargs)
 
     # Graceful shutdown: on SIGTERM/SIGINT close both streams cleanly rather than
     # letting the transport drop surface as an UNAVAILABLE reconnect in the log. The
