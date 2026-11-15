@@ -25,7 +25,7 @@ an index. Install it from the checkout, as below, and never by name. Python 3.10
 ```bash
 pip install path/to/swarmada/sdk/python -e '.[dev]'
 make test                                    # safety-wiring tests
-make conformance SWARMADA=path/to/swarmada   # the conformance harness (C0-C19)
+make conformance SWARMADA=path/to/swarmada   # the conformance harness (C0-C20)
 make profile SWARMADA=path/to/swarmada       # the profiled verdict
 python -m {{cookiecutter.python_package}}.adapter --endpoint <control-plane>:<port> \
   --namespace {{cookiecutter.namespace}}     # PYTHONPATH must include path/to/swarmada/proto

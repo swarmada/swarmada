@@ -24,13 +24,14 @@
 # reporting away exactly the obligation it owes is a visible change and not a quiet one.
 inert :: conformance-reports/compute-endpoint-plate-watcher-grpc.yaml::verdict :: 1 :: a LEVEL verdict of notApplicable — every check in it was inapplicable. Reported as such rather than as a pass earned by having nothing to do; the register is where "nothing to do" is counted
 inert :: conformance-reports/compute-endpoint-plate-watcher-grpc.yaml::statistics :: 3 :: three checks reported away across this surface's levels. Since suite 2026.10.13 CE6.3 and CE6.4 (request/response rules, inapplicable to this resident endpoint) are in no level: CE6.1-CE6.5 are registered excluded
-inert :: conformance-reports/fleet-adapter.yaml::statistics :: 1 :: one check reported away: C5.6 (the other permitted estop shape). C19.4 is measured since suite 2026.09.28's recording: the simulation adapter now declares an enum parameter (Custom operation)
+inert :: conformance-reports/fleet-adapter.yaml::statistics :: 6 :: six checks reported away: C5.6 (the other permitted estop shape), and since suite 2026.11.14 C20.1, C20.2, C20.5, C20.6 and C20.7, which need a second robot and record adapter-serves-one-robot in the single-robot run the reports are profiled from. C19.4 is measured since suite 2026.09.28's recording: the simulation adapter now declares an enum parameter (Custom operation)
+inert :: conformance-reports/fleet-adapter.yaml::verdict :: 1 :: the multi-robot profile's Core level is notApplicable: its four rows (C20.2, C20.5-C20.7) need a second robot, and the reports are profiled from a single-robot run. `make conformance-sim-multi` grades them
 
 # ── skip · the conformance reports' own arithmetic ───────────────────────────────────────
 # Not a recount: these are the `skip:` numbers the reports themselves publish. A regenerated
 # report that skips one more check than the last one fails this gate instead of informing it.
 skip :: conformance-reports/fleet-adapter.yaml::statistics :: 7 :: the adapter surface's published skip count (C6.3 moved to the control-plane surface as CP8.1; C19.2 unestablished: the simulation adapter declares no required parameter)
-skip :: conformance-reports/control-plane.yaml::statistics :: 7 :: the control-plane surface's published skip count (includes CP8.1, moved from the adapter surface's C6.3; CP2.3-CP2.5 are in no level since suite 2026.10.13, registered excluded)
+skip :: conformance-reports/control-plane.yaml::statistics :: 8 :: the control-plane surface's published skip count (includes CP8.1, moved from the adapter surface's C6.3, and CP9.1, the RegisterAck order, since suite 2026.11.14; both need a running control plane. CP2.3-CP2.5 are in no level since suite 2026.10.13, registered excluded)
 skip :: conformance-reports/compute-endpoint-plate-watcher-grpc.yaml::statistics :: 8 :: this endpoint's published skip count
 skip :: conformance-reports/compute-endpoint-plate-reader-grpc.yaml::statistics :: 5 :: this endpoint's published skip count
 

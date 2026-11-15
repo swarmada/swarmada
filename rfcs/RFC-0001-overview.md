@@ -185,9 +185,9 @@ The four compute configuration resources (`ComputeEndpoint`, `ComputeWorkloadTem
 rather than reconciled. `EdgeNode` is not: it is specified ahead of its controller, no
 shipped code path reads an `EdgeNode` object, and nothing writes any field of its `status`.
 Each chapter's maturity note states what is and is not wired at v0.4. The Traffic Deconfliction Engine and the
-`ControlStream`/`SafetyStream` wire are live; and the executable conformance catalog `C0`–`C19` covers the protocol
-surface — 75 checks, of which the harness runs 71 (`C8.4` is an obligation on the edge
-node, so no adapter result can pass or fail it; `C3.10`, `C3.11` and `C16.2` are defined; this release does not run them) and 67 count toward conformance (`C0.2`–`C0.4` record harness context, and `C6.3` is graded on the control plane as `CP8.1`). `C18` is the sensor-stream duty cycle, added
+`ControlStream`/`SafetyStream` wire are live; and the executable conformance catalog `C0`–`C20` covers the protocol
+surface — 83 checks, of which the harness runs 79 (`C8.4` is an obligation on the edge
+node, so no adapter result can pass or fail it; `C3.10`, `C3.11` and `C16.2` are defined; this release does not run them) and 75 count toward conformance (`C0.2`–`C0.4` record harness context, and `C6.3` is graded on the control plane as `CP8.1`). `C18` is the sensor-stream duty cycle, added
 2026-09-14: it is the first family to close the frames-never-on-the-control-plane rule
 and the lease-bound stop, both of which the wire contract had stated as normative and
 disclosed as unchecked. The in-tree simulation adapter and the ROS 2,

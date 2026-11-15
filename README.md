@@ -32,7 +32,7 @@ from different manufacturers, under one standardized API.
 
 - **Swarmada specifies that contract and publishes that catalog.**
   [RFC-0001](rfcs/dist/RFC-0001-core-spec.md) is normative and the reference
-  implementation follows it rather than defining it; the C0–C19 conformance suite is
+  implementation follows it rather than defining it; the C0–C20 conformance suite is
   executable, and adapter conformance is reported on the `FleetAdapter` resource.
 
 ## How it works
@@ -234,7 +234,7 @@ kubectl get robots,fleettasks -n warehouse-a
 - [Architecture](docs/architecture.md) — the two-plane control/data model, the
   control-plane components, and the CRDs
 - [Quickstart](docs/quickstart.md) — run the demos on a local `kind` cluster and
-  the C0–C19 adapter conformance suite
+  the C0–C20 adapter conformance suite
 - [Adapters](docs/adapters.md) — writing a Fleet Adapter, and the reference set
 - [API design principles](docs/api-principles.md) — CRD and protocol conventions
 - [RFC-0001 overview](rfcs/RFC-0001-overview.md) — a 2–3 page reader's guide to the specification
@@ -286,7 +286,7 @@ Swarmada is pre-release; public claims track the code:
   `FleetZone`/`Robot`, a local safety-input hook, and a no-hardware demo
   (`cmd/edge`, `examples/edge-node`).
 - **Adapters** — the Fleet Adapter contract is defined by `proto/` and RFC-0001,
-  and the in-tree simulation adapter drives the demo. An executable C0–C19
+  and the in-tree simulation adapter drives the demo. An executable C0–C20
   conformance harness (`adapters/conformance/`) is in-tree, and three reference
   adapters (per [ADR-0005](docs/adr/0005-reference-adapter-policy.md)) are maintained
   in their own repositories — ROS 2, VDA5050, and MAVLink — and are cloned into

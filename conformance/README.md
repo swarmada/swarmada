@@ -43,7 +43,7 @@ python3 -m conformance compute-endpoint --endpoint plate-reader-grpc --target 10
 # The deployment. Static: no cluster, no API server, no network.
 python3 -m conformance control-plane
 
-# A Fleet Adapter, from a run of the C0-C19 harness.
+# A Fleet Adapter, from a run of the C0-C20 harness.
 make conformance CONFORMANCE_ARGS='--json /tmp/adapter.json'
 python3 -m conformance fleet-adapter --adapter-report /tmp/adapter.json --tier FullControl
 ```

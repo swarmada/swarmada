@@ -218,7 +218,9 @@ def test_a_stale_installed_entry_is_named_by_the_gate(tmp_path: Path) -> None:
     """
     reports = _profiled_clone(tmp_path, "as-shipped")
     assert _install(reports, "as-shipped").returncode == 0
-    stale = "conformance-reports/fleet-adapter.yaml::verdict"
+    # A report whose levels are all graded: an inert-verdict entry for it names nothing.
+    # (fleet-adapter.yaml has one since suite 2026.11.14: the multi-robot Core level.)
+    stale = "conformance-reports/compute-endpoint-plate-reader-grpc.yaml::verdict"
     with (reports / OVERLAY).open("a", encoding="utf-8") as f:
         f.write(f"inert :: {stale} :: 1 :: planted by this test: a level the report lacks\n")
     red = _gate(tmp_path)

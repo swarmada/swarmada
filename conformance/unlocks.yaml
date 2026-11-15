@@ -78,6 +78,9 @@ byCause:
   contract-predates-obligation: >-
     the adapter reports the contract version that made the row an obligation (C5.8: 1.4.0,
     which carries the stop latch) and meets the row there
+  adapter-serves-one-robot: >-
+    the adapter serves two or more robots on one connection, and the run names each of them
+    (--robot-id, repeated)
   no-motion-witness: >-
     an external motion witness on a hardware run, timestamped on a clock aligned with the
     harness; in a simulated run, the simulator's plant model passed as the witness

@@ -1,7 +1,7 @@
 # Full-surface sim harness
 
 The integration / visual / metrics layer on top of the reference simulation
-adapter. Where the conformance harness (`make conformance`, C0–C19) proves
+adapter. Where the conformance harness (`make conformance`, C0–C20) proves
 per-endpoint correctness, this proves the whole surface flows end-to-end through a
 real control plane: every consumed adapter field, every metrics-contract alert, and all three
 RPC services (ControlStream, SafetyStream, EdgeStream) in one run.

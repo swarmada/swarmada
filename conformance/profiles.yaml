@@ -53,6 +53,41 @@ kind: ProfileRegistry
 # every row. A suite revision is provenance recorded beside a result, never a component of
 # the contract version an adapter negotiates (ADR-0032, Decision bullet 1).
 #
+# 2026.11.14 -- harness. Eight new rows, and one change to what the harness sends:
+#   1. New C20 (adapters/CONFORMANCE.md, C20): robots served on one connection are kept apart.
+#      C20.2 (a command acts only on the robot it names), C20.5 (each robot keeps its own
+#      fencing-token mark), C20.6 (its own lease) and C20.7 (a stop latches only its own robot,
+#      and its clear lifts only that robot) are MUST rows; C20.1 (a stop or work for one robot
+#      leaves the others alone) is advisory (SHOULD). They run when the harness is told two or
+#      more robots (--robot-id, repeated: multi-robot mode), and a run that names one robot
+#      records them `adapter-serves-one-robot`, never an obligation. C20.3 (a command for a
+#      robot the adapter does not serve is refused, and moves no robot) and C20.4 (a stop for
+#      such a robot is never confirmed, before and after registration) run in every run and
+#      are advisory: RFC-0001 states neither in words. They sit in the new `multi-robot`
+#      profile, which gates no capability tier.
+#   2. New C5.9 (SHOULD, a `safety` Extended feature): rest is confirmed only from a reading
+#      the adapter received after it commanded the stop (CONFORMANCE.md, What may confirm
+#      rest). Advisory for the same reason, and not testable without a motion witness.
+#   3. Multi-robot mode: each robot-scoped row runs once per robot and records the worst
+#      result, with each robot's detail; C2.1 plays first contact with each robot, the
+#      reconnect re-registers each, C8.2 needs a PositionFrame for each robot, and C8.3 a
+#      LocalStopReport for each on a 1.4.0 connection. A single-robot run's rows are graded as
+#      before.
+#   4. The reconnect's RegisterAck lists the edge endpoint the first one listed. It listed
+#      none, which tells an adapter that serves a robot through exactly the nodes its latest
+#      RegisterAck lists to stop serving it through the edge node, so C8.3 then failed an
+#      adapter for obeying the harness.
+#   5. New CP9.1 (SHOULD, ControlPlane `registration-order` Extended): one RegisterAck for
+#      each RegisterRobot on a stream, in the order the registers arrived, refusals included.
+#      Advisory: RFC-0001 §9.2.7 does not state the order in words, and an erratum that would
+#      is a filed candidate. Recorded `needs-live-cluster` in the static run; the reference
+#      server's half is a Go test.
+#   The levels of the existing rows did not change, and a single-robot run of the simulation
+#   adapter grades every one of them as at 2026.11.09. The check set grew, so a result earned
+#   before it is re-earned. The contract version did not move. The reports the samples pin
+#   are re-recorded at this revision with `make conformance-sim`. The floor-mapping report
+#   stays pending re-recording (`pendingReRecording:` below).
+#
 # 2026.11.09 -- harness. C2.1 plays first contact with a robot that has no Robot yet: the first
 #   register is refused NOT_ADMITTED, the adapter must announce the robot with a discover, and the
 #   register of its provisioning loop's next iteration is accepted as the admission (RFC-0001
@@ -279,7 +314,7 @@ kind: ProfileRegistry
 #
 # 2026.09.03 -- harness. Adds C2.4 (the redial re-registers) and moves the pass bar on C2.1,
 # C7.2/C7.3, C10.2 and C16.1, so a result earned against 2026.09.02 does not carry forward.
-revision: "2026.11.09"
+revision: "2026.11.14"
 revisions:
   - revision: "2026.09.03"
     class: harness
@@ -1448,6 +1483,100 @@ revisions:
       "C19.4": "MUST"
       "C19.5": "MUST"
 
+  - revision: "2026.11.14"
+    class: harness
+    reason: >-
+      new C20 (robots served on one connection kept apart; a command or a stop for a robot the
+      adapter does not serve) and C5.9 (rest confirmed only from a reading after the stop); a
+      multi-robot mode that runs each robot-scoped row per robot; the reconnect's RegisterAck
+      lists the edge endpoint
+    pendingReRecording:
+      recordedAt: "2026.10.17"
+      reason: >-
+        recorded at suite 2026.10.17; pending re-recording since 2026.10.22.2, where C4.2 and C2.2
+        no longer count ACTION_STATE_STOPPED as a terminal report
+      reports:
+        - examples/floor-mapping/robot/conformance-report.json
+    harnessChecks:
+      "C0.1": "MUST"
+      "C0.2": "MAY"
+      "C0.3": "MAY"
+      "C0.4": "MAY"
+      "C1.1": "MUST"
+      "C1.2": "MUST"
+      "C1.3": "MUST"
+      "C1.4": "MUST NOT"
+      "C1.5": "SHOULD"
+      "C2.1": "MUST"
+      "C2.2": "MUST"
+      "C2.3": "MUST"
+      "C2.4": "MUST NOT"
+      "C3.1": "MUST"
+      "C3.2": "MUST"
+      "C3.3": "MUST"
+      "C3.4": "MUST"
+      "C3.5": "MUST"
+      "C3.6": "MUST"
+      "C3.7": "MUST"
+      "C3.8": "MUST|SHOULD"
+      "C3.9": "MUST"
+      "C4.1": "MUST"
+      "C4.2": "MUST"
+      "C4.3": "MUST"
+      "C4.4": "MUST"
+      "C5.1": "MUST"
+      "C5.2": "MUST"
+      "C5.3": "MUST NOT"
+      "C5.4": "MUST NOT"
+      "C5.5": "MUST"
+      "C5.6": "MUST"
+      "C5.7": "MUST NOT"
+      "C5.8": "MUST"
+      "C5.9": "SHOULD"
+      "C6.1": "MUST"
+      "C6.2": "MUST"
+      "C6.3": "MUST NOT"
+      "C6.4": "MUST"
+      "C7.1": "MAY"
+      "C7.2": "MUST"
+      "C7.3": "MUST"
+      "C8.1": "MUST"
+      "C8.2": "MUST"
+      "C8.3": "MUST"
+      "C9.1": "SHOULD"
+      "C10.1": "MAY"
+      "C10.2": "MUST"
+      "C11.1": "MUST"
+      "C12.1": "MUST"
+      "C12.2": "MUST"
+      "C13.1": "MUST"
+      "C13.2": "SHOULD"
+      "C14.1": "MUST"
+      "C14.2": "MUST"
+      "C15.1": "MUST"
+      "C15.2": "MUST"
+      "C16.1": "MUST"
+      "C17.1": "MUST"
+      "C17.2": "MUST"
+      "C17.3": "MUST"
+      "C17.4": "MUST"
+      "C18.1": "MUST"
+      "C18.2": "MUST NOT"
+      "C18.3": "MUST"
+      "C18.4": "MUST"
+      "C18.5": "MUST"
+      "C19.1": "MUST"
+      "C19.2": "MUST"
+      "C19.3": "MUST"
+      "C19.4": "MUST"
+      "C19.5": "MUST"
+      "C20.1": "SHOULD"
+      "C20.2": "MUST"
+      "C20.3": "SHOULD"
+      "C20.4": "SHOULD"
+      "C20.5": "MUST"
+      "C20.6": "MUST"
+      "C20.7": "MUST"
 # The capability tiers, adopted as vocabulary from Open-RMF's fleet-adapter
 # integration levels. The tier axis is defined on the FleetAdapter surface and
 # selects which profiles that surface is OBLIGED to satisfy. The other two
@@ -1519,6 +1648,12 @@ surfaces:
         precondition: >-
           at least one motion channel independent of the command path that can confirm rest
         core:     [C5.1, C5.2, C5.3, C5.4, C5.5, C5.6, C5.7, C14.1, C14.2]
+        # C5.9 is advisory (SHOULD): RFC-0001 does not state in words that only a reading
+        # taken after the stop may confirm rest. Extended, so a failure marks the feature
+        # unsupported and leaves the level alone.
+        extended: [C5.9]
+        features:
+          safety.fresh-rest-reading: [C5.9]
       - name: discovery
         core:     [C12.1, C12.2]
       - name: traffic
@@ -1547,6 +1682,21 @@ surfaces:
           dispatch.fencing-token-adoption: [C3.8]
       - name: lease
         core:     [C4.1, C4.2, C4.3, C4.4]
+      # C20 -- several robots on one connection. ALWAYS APPLICABLE: a run that names one robot
+      # records the four Core rows `adapter-serves-one-robot`, which is never an obligation,
+      # so a single-robot adapter's profile is not held short. IT GATES NO CAPABILITY TIER:
+      # RFC-0001's tier chapter is the complete statement of what a tier requires and does not
+      # name it. The Core rows are MUSTs per robot (the routing of Command.robot_id, and the
+      # fencing, lease and latch rules, each kept per robot). C20.1, C20.3 and C20.4 are
+      # advisory: RFC-0001 does not state them in words, so they are Extended features, and a
+      # failure marks the feature unsupported.
+      - name: multi-robot
+        core:     [C20.2, C20.5, C20.6, C20.7]
+        extended: [C20.1, C20.3, C20.4]
+        features:
+          multi-robot.isolation:         [C20.1]
+          multi-robot.unserved-command:  [C20.3]
+          multi-robot.unserved-stop:     [C20.4]
       - name: edge
         conditional: "RegisterAck.edge_endpoints is non-empty for at least one managed robot"
         core:     [C8.1, C8.2, C8.3]
@@ -1826,6 +1976,16 @@ surfaces:
       # for the reason CP7.3 is.
       - name: status-discipline
         core:     [CP8.1]
+      # One RegisterAck for each RegisterRobot on a stream, in the order the registers
+      # arrived, refusals included. A RegisterAck names no robot, so this order is the only
+      # thing that pairs an ack with its robot for an adapter serving several. RFC-0001
+      # §9.2.7 does not state the order in words, so the row is Extended, an advisory
+      # feature no level counts, until an erratum states it. Recorded as not exercised in
+      # every static run, for the reason CP8.1 is.
+      - name: registration-order
+        extended: [CP9.1]
+        features:
+          registration-order.ack-order: [CP9.1]
       # EXTENDED, NEVER CORE. A deployment that declines
       # workload-create RBAC must pass Core IN FULL. CP5.5 is the check that
       # asserts the decline is a legitimate outcome rather than a gap.

@@ -164,6 +164,11 @@ class SkipCause(StrEnum):
     #: an obligation (C5.8: the stop latch binds a connection at 1.4.0). NOT-APPLICABLE: the
     #: rule does not bind the version the adapter declared.
     CONTRACT_PREDATES_OBLIGATION = "contract-predates-obligation"
+    #: The run names one robot, so a row that grades what one robot's traffic does to another
+    #: robot's has no second robot (C20.1, C20.2, C20.5-C20.7). NOT-APPLICABLE, like
+    #: CONTRACT_PREDATES_OBLIGATION: an adapter that serves one robot has no other robot to
+    #: keep apart from it.
+    ADAPTER_SERVES_ONE_ROBOT = "adapter-serves-one-robot"
     #: The run had no motion witness, so the time of a STOPPED could not be compared with
     #: the robot's actual rest (C5.7).
     NO_MOTION_WITNESS = "no-motion-witness"
@@ -328,7 +333,8 @@ NOT_APPLICABLE_CAUSES = {SkipCause.BINDING_NOT_DECLARED,
                          SkipCause.ADAPTER_DECLARES_NO_SENSOR_STREAM,
                          SkipCause.ADAPTER_DECLARES_NO_ENUM_PARAM,
                          SkipCause.ADAPTER_DECLARES_NO_CUSTOM_VERB,
-                         SkipCause.CONTRACT_PREDATES_OBLIGATION}
+                         SkipCause.CONTRACT_PREDATES_OBLIGATION,
+                         SkipCause.ADAPTER_SERVES_ONE_ROBOT}
 
 
 class UnenumeratedSkipCause(ValueError):  # noqa: N818 -- public name; callers catch it
@@ -466,6 +472,7 @@ CAUSE_GRADE: dict[SkipCause, Grade] = {
     SkipCause.ADAPTER_DECLARES_NO_ENUM_PARAM: Grade.NOT_SUPPORTED_BY_PLATFORM,
     SkipCause.ADAPTER_DECLARES_NO_CUSTOM_VERB: Grade.NOT_SUPPORTED_BY_PLATFORM,
     SkipCause.CONTRACT_PREDATES_OBLIGATION: Grade.NOT_SUPPORTED_BY_PLATFORM,
+    SkipCause.ADAPTER_SERVES_ONE_ROBOT: Grade.NOT_SUPPORTED_BY_PLATFORM,
     SkipCause.NO_MOTION_WITNESS: Grade.NOT_TESTABLE_HERE,
     SkipCause.NO_INDEPENDENT_MOTION_CHANNEL: Grade.NOT_SUPPORTED_BY_PLATFORM,
 }

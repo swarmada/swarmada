@@ -92,8 +92,10 @@ Every robot runs the same `--scenario`, and all of them start at the origin.
 # $0, dependency-free (KinematicSim):
 PYTHONPATH=proto python3 adapters/simulation/sim_adapter.py --endpoint localhost:9090
 
-# Validate against the conformance harness (C0–C19), with --latch:
+# Validate against the conformance harness (C0–C20), with --latch:
 make conformance-sim
+# The same, one adapter serving two robots (multi-robot mode, C20):
+make conformance-sim-multi
 
 # Run the safety unit tests (C3/C4/C5) — repo suite and the SDK's own:
 make test-py

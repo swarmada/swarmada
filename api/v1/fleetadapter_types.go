@@ -33,7 +33,7 @@ import (
 // implemented (internal/controller/fleetadapter_controller.go: digest- and
 // signature-verified conformance report consumption per RFC-0001 #fleetadapter-status-fields-and-phase-machine).
 // The RFC-0001 #fleet-adapter-protocol conformance suite (adapters/conformance/) is an
-// executable harness that drives checks C0 through C19 (adapters/CONFORMANCE.md).
+// executable harness that drives checks C0 through C20 (adapters/CONFORMANCE.md).
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
 

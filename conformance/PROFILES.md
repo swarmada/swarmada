@@ -71,6 +71,7 @@ profile keeps `CP2.1` and `CP2.2` as Core.
 | `ComputeEndpoint` | `binding-http`, `binding-grpc`, `binding-mcp` | Core, for the declared binding only |
 | `ComputeEndpoint` | `service-contract` | Core, when `contract: Service` |
 | `ControlPlane` | `attestation`, `containment`, `endpoint-dispatch`, `result-is-data`, `image-provenance`, `zone-restrictions`, `status-discipline` | Core (`endpoint-dispatch` is `CP2.1`–`CP2.2`; `CP2.3`–`CP2.5` are registered `excluded`) |
+| `ControlPlane` | `registration-order` | Extended (`CP9.1`), until RFC-0001 states the order of `RegisterAck`s |
 | `ControlPlane` | `cluster-compute` | **Extended, never Core** |
 | `ControlPlane` | `reactive-dispatch` | Extended |
 | `ControlPlane` | `trigger-consumer` | Reserved by RFC-0003, a draft for review that is not part of the draft 4 contract: absent from the published registry, never graded at v0.4 |

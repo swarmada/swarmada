@@ -12,7 +12,7 @@ SWARMADA_ABS = $(abspath $(SWARMADA))
 test:            ## Run the safety-wiring tests
 	$(PYTHON) -m pytest tests/ -v
 
-conformance:     ## Run the Swarmada conformance harness (C0-C19) against this adapter
+conformance:     ## Run the Swarmada conformance harness (C0-C20) against this adapter
 	@test -d "$(SWARMADA_ABS)/adapters/conformance" || { \
 	  echo "SWARMADA=$(SWARMADA) is not a Swarmada checkout; pass SWARMADA=<path>"; exit 2; }
 	cd "$(SWARMADA_ABS)" && $(PYTHON) -m adapters.conformance --stub-path proto \

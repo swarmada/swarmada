@@ -187,7 +187,7 @@ directory (`adapters/external/<name>/`).
 
 The [conformance harness](../adapters/conformance/README.md) starts its own
 `fleet_adapter.v1` gRPC test server, launches the adapter under test against
-it, drives it through the C0–C19 scenarios in
+it, drives it through the C0–C20 scenarios in
 [`CONFORMANCE.md`](../adapters/CONFORMANCE.md), and reports pass/fail/skip
 per check. It does not require a real Kubernetes control plane — it *is* the
 control-plane side, for test purposes.
