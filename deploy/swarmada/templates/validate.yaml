@@ -7,6 +7,16 @@ and `helm install` with the reason, instead of installing a control plane that
 starts but cannot do what its values say.
 */ -}}
 
+{{- $qps := float64 .Values.manager.kubeAPI.qps }}
+{{- /* NaN is refused too: a template's gt is "neither less nor equal", true for NaN. */}}
+{{- if or (lt $qps 5.0) (gt $qps 3.4028234663852886e+38) }}
+{{- fail (printf "manager.kubeAPI.qps=%v is refused: it must be a number of at least 5 requests per second, and the manager refuses anything else at startup. Leader election has a limiter of this size, and a renewal must be admitted within its deadline." .Values.manager.kubeAPI.qps) }}
+{{- end }}
+
+{{- if or (lt (float64 .Values.manager.kubeAPI.burst) 1.0) (ne (float64 .Values.manager.kubeAPI.burst) (float64 (int .Values.manager.kubeAPI.burst))) }}
+{{- fail (printf "manager.kubeAPI.burst=%v is refused: it must be a whole number of at least 1." .Values.manager.kubeAPI.burst) }}
+{{- end }}
+
 {{- if and .Values.controlStream.enabled (gt (int .Values.replicaCount) 1) }}
 {{- fail (printf "replicaCount=%d with controlStream.enabled=true is refused. Every replica accepts adapter streams, but commands are issued by the leading replica and pushed only to the streams that replica holds in memory; the Service spreads adapter connections across replicas, so an adapter connected to any other replica receives no commands. Set replicaCount=1 (multi-replica command delivery is not implemented)." (int .Values.replicaCount)) }}
 {{- end }}

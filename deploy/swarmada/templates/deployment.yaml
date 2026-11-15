@@ -47,6 +47,8 @@ spec:
           args:
             - --metrics-bind-address=:{{ .Values.manager.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.manager.healthPort }}
+            - --kube-api-qps={{ .Values.manager.kubeAPI.qps }}
+            - --kube-api-burst={{ int .Values.manager.kubeAPI.burst }}
             {{- if .Values.manager.leaderElect }}
             - --leader-elect
             - --leader-election-id={{ .Values.manager.leaderElectionID }}

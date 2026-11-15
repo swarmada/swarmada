@@ -42,6 +42,7 @@ import (
 	"github.com/swarmada/swarmada/internal/command"
 	"github.com/swarmada/swarmada/internal/controller"
 	"github.com/swarmada/swarmada/internal/controlstream"
+	"github.com/swarmada/swarmada/internal/kubeclientmetrics"
 	"github.com/swarmada/swarmada/internal/metrics"
 	"github.com/swarmada/swarmada/internal/probe"
 	rbacpreflight "github.com/swarmada/swarmada/internal/rbac"
@@ -108,6 +109,8 @@ func main() {
 		fleetAdapterTLSKeyFile      string
 		fleetAdapterClientCAFile    string
 		requireLatchContract        bool
+		kubeAPIQPS                  float64
+		kubeAPIBurst                int
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address for the metrics endpoint.")
@@ -173,6 +176,21 @@ func main() {
 			"sent every stop. Off at v0.4: the in-tree deployments run the simulation adapter at 1.3.0, which "+
 			"this would leave with no work.")
 
+	// The client budget is per client and per resource kind, not one limit for the manager;
+	// see client_budget.go.
+	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", defaultKubeAPIQPS,
+		"Client-side rate limit, in requests per second, of each of the manager's Kubernetes API "+
+			"clients for each resource kind; at least 5. Leader election has a limiter of its own of "+
+			"this size: each renewal is a Get and an Update of its Lease, both admitted within the "+
+			"renew deadline (3s by default), so renewals start to fail below about 0.7 and the manager "+
+			"then loses leadership and exits. 5 leaves a wide margin at that default. With "+
+			"--leader-elect, the manager also refuses a QPS below 6 divided by "+
+			"--leader-election-renew-deadline in seconds (12 at 500ms). "+
+			"rest_client_rate_limiter_wait_seconds shows the waits.")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", defaultKubeAPIBurst,
+		"The most requests each of the manager's Kubernetes API clients may send at once for one "+
+			"resource kind: the capacity of the token bucket --kube-api-qps refills.")
+
 	opts := zap.Options{
 		Development: true,
 		TimeEncoder: zapcore.ISO8601TimeEncoder,
@@ -182,7 +200,24 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	if err := applyClientBudget(restConfig, kubeAPIQPS, kubeAPIBurst); err != nil {
+		setupLog.Error(err, "invalid Kubernetes API client budget")
+		os.Exit(1)
+	}
+	if enableLeaderElection {
+		if err := checkRenewalBudget(kubeAPIQPS, leaderElectionRenewDeadline); err != nil {
+			setupLog.Error(err, "Kubernetes API client budget too low for leader election")
+			os.Exit(1)
+		}
+	}
+	setupLog.Info("Kubernetes API client budget, per client and resource kind",
+		"qps", restConfig.QPS, "burst", restConfig.Burst)
+	// Before NewManager, so the hook is set before any goroutine sends a request. client-go
+	// reads the hook on each request, so every client the manager builds reports its waits.
+	kubeclientmetrics.Install(crmetrics.Registry)
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Metrics: ctrlmetrics.Options{
 			BindAddress: metricsAddr,

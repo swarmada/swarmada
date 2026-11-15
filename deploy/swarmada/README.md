@@ -46,6 +46,7 @@ and runs a task through it with admission webhooks and ControlStream authorizati
 |-----|---------|---------|
 | `image.repository` / `image.tag` | `ghcr.io/swarmada/swarmada` / chart appVersion | Controller-manager image |
 | `replicaCount` | `1` | Manager replicas. Must be `1` while `controlStream.enabled` (see "One replica") |
+| `manager.kubeAPI.qps` / `.burst` | `20` / `30` | Client-side rate limit of the manager's Kubernetes API requests, per client and resource kind (see "Manager API client budget") |
 | `controlStream.enabled` / `.port` | `true` / `9445` | Fleet Adapter gRPC endpoint (off the fixed 9443 webhook port) |
 | `controlStream.tls.certManager.enabled` | `true` | Issue the ControlStream CA and server certificate via cert-manager |
 | `controlStream.tls.certManager.adapterClients` | `[]` | One client certificate per FleetAdapter (`name`, `namespace`, optional `secretName`) |
@@ -160,6 +161,46 @@ The chart CRDs are regenerated from `config/crd/bases` with `make helm-sync`
   with `Fail` a namespace that holds one of those objects stays `Terminating` at least until
   the manager serves again. See
   [Deleting a namespace during a manager outage](../../docs/operations.md#4-deleting-a-namespace-during-a-manager-outage).
+
+## Manager API client budget
+
+The manager limits its own requests to the Kubernetes API server on the client side
+(`--kube-api-qps`, `--kube-api-burst`; `manager.kubeAPI.qps` and `.burst`). The defaults,
+20 requests per second with a burst of 30, are controller-runtime's. `burst` is the most
+requests a limiter admits at once.
+
+`qps` must be at least 5. Leader election has a limiter of its own of this size. Each
+renewal is a Get and an Update of its Lease, and both must be admitted within the renew
+deadline, 3 seconds, so renewals start to fail below about 0.7 requests per second; the
+manager then loses leadership and exits. 5 leaves a wide margin. With leader election on,
+the manager also refuses a QPS below 6 divided by `--leader-election-renew-deadline` in
+seconds; the chart keeps the 3-second default, where 5 is the stricter floor.
+
+The limit is not one budget for the whole manager. Each of the manager's clients has a
+limiter of its own for each resource kind: the uncached reader has one for Robots, one for
+lists of Robots, one for FleetZones, and so on. The cached client reads from the informer
+cache, so its limiters carry only its writes; a kind's status writes share the kind's
+limiter. Each informer has one limiter for its list and its watch. A request waits only on
+the limiter of its own client and kind, and each one admits `qps` requests per second.
+
+A few limiters are shared across kinds: each event recorder has one for Events, used by
+every controller, and the API discovery behind the manager's resource lookups has one.
+
+One kind's limiter on one client carries all that client's requests of the kind. The
+uncached Robot reads behind an e-stop's state write wait behind every other uncached Robot
+read, so when that limiter is the bottleneck, their latency grows with the number of
+robots read and falls with `qps`.
+
+`rest_client_rate_limiter_wait_seconds` on `/metrics` is how long requests waited, by `verb`
+and `path`. The path has the namespace and the object name replaced by `{namespace}` and
+`{name}`, so it names the resource kind; it does not say which client's limiter a request
+waited on. A request whose deadline would pass before its turn is refused at once, with the
+error "client rate limiter Wait returned an error", and is recorded as a wait of about zero.
+Under heavy throttling, read the waits together with those errors. The manager also logs
+waits over one second, though client-go thins those log lines out.
+
+The API server has its own limits (API Priority and Fairness). Raising these values sends
+more requests to it; size them against what it admits.
 
 ## Metrics scraping
 
