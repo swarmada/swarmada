@@ -152,12 +152,24 @@ class _Stub:
         return iter(self._safety)
 
 
+def _is_repeated(fd) -> bool:
+    """Whether `fd` is a repeated field, across the protobuf range the repo allows (>=3.20.3).
+
+    protobuf 7 has no FieldDescriptor.label any more (CI installs 7.x); releases before
+    FieldDescriptor.is_repeated have only the label. Use is_repeated where it exists.
+    """
+    is_repeated = getattr(fd, "is_repeated", None)
+    if is_repeated is not None:
+        return bool(is_repeated() if callable(is_repeated) else is_repeated)
+    return fd.label == fd.LABEL_REPEATED
+
+
 def _scrub(msg) -> None:
     for fd, value in msg.ListFields():
         if fd.type == fd.TYPE_MESSAGE:
             if fd.message_type.GetOptions().map_entry:
                 continue  # this proto's maps hold scalars only
-            if fd.label == fd.LABEL_REPEATED:
+            if _is_repeated(fd):
                 for item in value:
                     _scrub(item)
             else:
@@ -171,7 +183,9 @@ def _line(tag: str, msg) -> str:
     copy.CopyFrom(msg)
     _scrub(copy)
     kind = copy.WhichOneof("payload") if copy.DESCRIPTOR.oneofs_by_name.get("payload") else ""
-    text = text_format.MessageToString(copy, as_one_line=True)
+    # as_utf8: protobuf before 4.x escapes non-ASCII text as octal by default and later
+    # releases print it as is; asking for UTF-8 makes every release print the same.
+    text = text_format.MessageToString(copy, as_one_line=True, as_utf8=True)
     return _normalise(f"[{tag}] {kind}: {text}")
 
 
@@ -405,3 +419,30 @@ def test_single_robot_wire_traffic_is_unchanged(name: str, latch: bool, drill: b
 def test_transcript_is_deterministic() -> None:
     """Two runs agree, so a golden difference is a behaviour change and not noise."""
     assert _transcript(latch=True) == _transcript(latch=True)
+
+
+class _Descriptor:
+    """A FieldDescriptor of one protobuf release or the other, for _is_repeated."""
+
+    LABEL_OPTIONAL = 1
+    LABEL_REPEATED = 3
+
+    def __init__(self, repeated: bool, shape: str) -> None:
+        if shape == "label":         # before is_repeated (the Mini's 5.29.x)
+            self.label = self.LABEL_REPEATED if repeated else self.LABEL_OPTIONAL
+        elif shape == "property":    # protobuf 7: is_repeated, and no label
+            self.is_repeated = repeated
+        else:                        # a method, should a release expose it as one
+            self.is_repeated = lambda: repeated
+
+
+@pytest.mark.parametrize("shape", ["label", "property", "method"])
+@pytest.mark.parametrize("repeated", [True, False])
+def test_is_repeated_reads_either_protobuf_api(shape: str, repeated: bool) -> None:
+    assert _is_repeated(_Descriptor(repeated, shape)) is repeated
+
+
+def test_is_repeated_agrees_with_the_installed_protobuf() -> None:
+    fields = pb.CapabilitiesSnapshot.DESCRIPTOR.fields_by_name
+    assert _is_repeated(fields["hardware"]) is True
+    assert _is_repeated(fields["robot_id"]) is False
