@@ -44,6 +44,7 @@ import (
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/estopscope"
+	"github.com/swarmada/swarmada/internal/kubeclientmetrics"
 	"github.com/swarmada/swarmada/internal/telemetry"
 	"github.com/swarmada/swarmada/internal/zone"
 	"github.com/swarmada/swarmada/internal/zonegeometry"
@@ -62,6 +63,8 @@ type ZoneController struct {
 	client.Client
 	// APIReader reads the API server, bypassing the cache, for the stop a currentZone move is
 	// held on (holdZoneMove). Nil falls back to Client, which only a test without a manager has.
+	// It is read only where a currentZone write may follow: a frame that moves nothing, and a
+	// robot a declared zone has nothing to write for, are decided on the cache (zoneReader).
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  record.EventRecorder
@@ -95,7 +98,13 @@ type ZoneController struct {
 	// different sizes: a robot crossing between two unrestricted zones changes its
 	// containment and changes nothing an adapter must do (ADR-0059; zone_containment.go).
 	lastContaining map[string][]string
-	lastPushed     map[types.NamespacedName]pushedConstraints
+	// lastRead is the robot's resourceVersion the memos were last decided against: the copy a
+	// frame read past the cache, or the one a write returned. It saves reads, and is not what
+	// makes the cache-decided frame safe (that is recordsHold's check that the cached copy
+	// records what the frame derives): once the informer delivers a write by anyone else, the
+	// cached version differs from it, and the robot's next frame reads it past the cache.
+	lastRead   map[string]string
+	lastPushed map[types.NamespacedName]pushedConstraints
 	// positioned records, per zoneMemoKey, that at least one frame carrying a position
 	// has reached ObservePosition for the robot since this process started. It is the
 	// only evidence that separates "reported a position that matched no polygon" from
@@ -284,13 +293,23 @@ func (z *ZoneController) placeDeclaredMembers(
 	if err := z.List(ctx, &robots, client.InNamespace(zoneObj.Namespace)); err != nil {
 		return fmt.Errorf("listing robots for declared zone membership: %w", err)
 	}
+	reader := z.zoneReader(readerZonePlacement)
 	for i := range robots.Items {
 		robot := &robots.Items[i]
-		if z.APIReader != nil {
+		// Decided on the cache first: a robot the cache shows nothing to write for is not read
+		// past it. A cache behind the API server can only delay a write here, never make one:
+		// the write below is decided again on the API server's copy. And the fields this
+		// decision reads (spec.zone, status.currentZone, status.specZoneMatchesCurrent) each
+		// enqueue this reconcile again when they change (robotZoneChanged), so a robot skipped
+		// on a lagging cache is placed once the cache catches up.
+		if _, write := declaredPlacement(robot, zoneObj.Name, declaredOnly); !write {
+			continue
+		}
+		if reader != nil {
 			// The hold below decides on the recorded zone as the API server has it, not as the
 			// cache has it (the stop guard, estopscope).
 			fresh := &fleetv1.Robot{}
-			if err := z.APIReader.Get(ctx, client.ObjectKeyFromObject(robot), fresh); err != nil {
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(robot), fresh); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
 				}
@@ -298,17 +317,9 @@ func (z *ZoneController) placeDeclaredMembers(
 			}
 			robot = fresh
 		}
-		placed, declared := placeRobot(robot.Spec.Zone, declaredOnly, nil, nil)
-		switch {
-		case declared && placed == zoneObj.Name:
-			if m := robot.Status.SpecZoneMatchesCurrent; robot.Status.CurrentZone == placed && m != nil && *m {
-				continue // already placed; RA-1
-			}
-		case robot.Status.CurrentZone == zoneObj.Name:
-			// Here, but no longer declared here: withdraw to placed, which differs
-			// from zoneObj in this branch, so this is always a transition.
-		default:
-			continue
+		placed, write := declaredPlacement(robot, zoneObj.Name, declaredOnly)
+		if !write {
+			continue // the API server already records it; RA-1
 		}
 		if z.holdZoneMove(ctx, robot, robot.Status.CurrentZone, placed) {
 			continue // applied once the stop is: see ObservePosition
@@ -325,13 +336,36 @@ func (z *ZoneController) placeDeclaredMembers(
 		// robot's next frame is compared against it rather than against a value this
 		// write replaced.
 		if id := robot.Annotations[RobotIDAnnotation]; id != "" {
-			z.recordZone(zoneMemoKey(robot.Namespace, id), placed, placed)
+			key := zoneMemoKey(robot.Namespace, id)
+			z.recordZone(key, placed, placed)
+			z.noteRead(key, robot.ResourceVersion)
 		}
 		if oldZone != placed {
 			z.signalZoneTransition(ctx, robot, oldZone, placed)
 		}
 	}
 	return nil
+}
+
+// declaredPlacement is placeDeclaredMembers' decision for one robot as read: the zone to write and
+// whether a write is due. A robot declared in zoneName is placed there unless it already is
+// (with specZoneMatchesCurrent true); a robot recorded in zoneName but no longer declared there is
+// withdrawn to the zone its declaration places it in, or to ""; any other robot is left alone.
+func declaredPlacement(robot *fleetv1.Robot, zoneName string, declaredOnly map[string]bool) (string, bool) {
+	placed, declared := placeRobot(robot.Spec.Zone, declaredOnly, nil, nil)
+	switch {
+	case declared && placed == zoneName:
+		if m := robot.Status.SpecZoneMatchesCurrent; robot.Status.CurrentZone == placed && m != nil && *m {
+			return placed, false // already placed; RA-1
+		}
+		return placed, true
+	case robot.Status.CurrentZone == zoneName:
+		// Here, but no longer declared here: withdraw to placed, which differs from zoneName
+		// in this branch, so this is always a transition.
+		return placed, true
+	default:
+		return placed, false
+	}
 }
 
 // placeRobot answers "which zone does this robot report" for the Zone Controller.
@@ -483,6 +517,19 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 	if robot == nil {
 		return // robot_id not mapped to a Robot yet; drop, don't fail
 	}
+	// A frame that moves nothing is decided on the cache. When the cached copy records the zone
+	// and containment set the memos hold, and the frame derives that same zone and set, applyFrame
+	// would write nothing for that copy, so the read past the cache, and the hold check behind
+	// it, are skipped. Skipping them writes nothing, so it cannot move a robot out of a stop: the
+	// robot stays where it is recorded, as a held move does. The one way the API server can
+	// differ is a write the cache has not delivered yet (an edit by someone else; only this
+	// controller writes these fields otherwise), and that only delays the write-back: once the
+	// informer delivers it, the cached copy no longer matches and the next frame reads the robot
+	// past the cache. The cached copy must also be the version last decided on (lastRead), which
+	// saves the reads a version already decided would cost.
+	if z.frameMovesNothing(f, robot) {
+		return
+	}
 	// The cache resolved the robot; the API server says where it is recorded now. A cached
 	// copy can lag the write that put the robot into a zone whose stop is being applied, and
 	// the hold below decides on the recorded zone (the stop guard, estopscope). The status
@@ -495,7 +542,7 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 	// that outlasts those writes, as patchHolds' does. Only a frame refused at every attempt is
 	// dropped, and the next one derives the move again.
 	key := client.ObjectKeyFromObject(robot)
-	rd := z.APIReader
+	rd := z.zoneReader(readerPositionFrame)
 	if rd == nil {
 		rd = z.Client
 	}
@@ -518,6 +565,25 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 	}
 }
 
+// frameMovesNothing marks the robot positioned and reports whether the frame moves nothing: the
+// cached robot is the version last decided on, recorded as the memos hold, and the frame derives
+// that zone and containment set (recordsHold). applyFrame would then write nothing. It reads no
+// API: the robot is the cache's copy.
+func (z *ZoneController) frameMovesNothing(f telemetry.Frame, robot *fleetv1.Robot) bool {
+	memo := zoneMemoKey(robot.Namespace, f.RobotID)
+	z.zonesMu.RLock()
+	candidates := z.zones[robot.Namespace]
+	declaredOnly := z.declaredOnly[robot.Namespace]
+	z.zonesMu.RUnlock()
+	pos := zone.Position{X: f.Position.X, Y: f.Position.Y, Floor: f.Position.Floor}
+	newZone, _ := placeRobot(robot.Spec.Zone, declaredOnly, &pos, candidates)
+	if !z.recordsHold(memo, robot, newZone, zone.DeriveContainingZones(pos, candidates)) {
+		return false
+	}
+	z.markPositioned(memo)
+	return true
+}
+
 // applyFrame derives the zone and the containment set of robot, as read, from the frame, and
 // writes both when either moved. It returns the status write's error; the memos are then
 // forgotten, so the next derivation (this frame's retry, or the next frame) compares against
@@ -527,6 +593,8 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 	// already sees the robot as having reported a position.
 	memo := zoneMemoKey(robot.Namespace, f.RobotID)
 	z.markPositioned(memo)
+	// The memos must describe the robot as read; if they do not, what is recorded wins.
+	z.dropMemosRecordedOtherwise(memo, robot)
 
 	z.zonesMu.RLock()
 	candidates := z.zones[robot.Namespace]
@@ -565,6 +633,7 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 	zoneMoved := z.recordZone(memo, newZone, robot.Status.CurrentZone)
 	containmentMoved := z.recordContainment(memo, newContaining, robot.Status.ContainingZones)
 	if !zoneMoved && !containmentMoved {
+		z.noteRead(memo, robot.ResourceVersion)
 		return nil // unchanged since the last write (or persisted status) — RA-1
 	}
 
@@ -586,6 +655,8 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 		log.FromContext(ctx).Error(err, "writing currentZone", "robot", robot.Name, "zone", newZone)
 		return err
 	}
+	// The write returned the robot's new version; the memos describe it.
+	z.noteRead(memo, robot.ResourceVersion)
 
 	// FA-R7 — tell the adapter what may be running where the robot NOW IS. Gated a
 	// second time inside, on the resolved RULE set rather than on the containment set:
@@ -622,7 +693,7 @@ func (z *ZoneController) holdZoneMove(ctx context.Context, robot *fleetv1.Robot,
 	if from == "" || from == to {
 		return false
 	}
-	rd := z.APIReader
+	rd := z.zoneReader(readerZoneHold)
 	if rd == nil {
 		rd = z.Client
 	}
@@ -705,6 +776,69 @@ func (z *ZoneController) signalZoneTransition(ctx context.Context, robot *fleetv
 // contain "/", so the key is unambiguous.
 func zoneMemoKey(namespace, robotID string) string { return namespace + "/" + robotID }
 
+// The zone controller's uncached reads, by caller (kubeclientmetrics.UncachedReadDuration).
+const (
+	readerZonePlacement = "zone_placement" // placeDeclaredMembers: a robot it may write
+	readerPositionFrame = "position_frame" // ObservePosition: a frame that may move the robot
+	readerZoneHold      = "zone_hold"      // holdZoneMove: the stops a move is checked against
+)
+
+// zoneReader is APIReader with its reads recorded under caller, or nil without one.
+func (z *ZoneController) zoneReader(caller string) client.Reader {
+	return kubeclientmetrics.Reader(z.APIReader, caller)
+}
+
+// recordsHold reports whether a frame deriving zone and containing for the cached robot would
+// move nothing, without advancing the memos. All of these must hold:
+//
+//   - both memos have been seen: a robot this process has not decided on since it started (a
+//     restart, a leadership change, ForgetRobot, a refused write) has none;
+//   - the cached copy is the version the memos were last decided against (lastRead): this only
+//     saves reads, since a version already decided needs no second look;
+//   - that copy records what the memos hold, and the frame derives it. This is what makes the
+//     skip safe: applyFrame, given that copy, would write nothing.
+//
+// Anything else takes the read past the cache, where applyFrame compares the memos with what
+// the API server records and corrects either.
+func (z *ZoneController) recordsHold(key string, robot *fleetv1.Robot, zone string, containing []string) bool {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	prevZone, zoneSeen := z.lastZone[key]
+	prevSet, setSeen := z.lastContaining[key]
+	read, readSeen := z.lastRead[key]
+	return zoneSeen && setSeen && readSeen && read != "" && read == robot.ResourceVersion &&
+		robot.Status.CurrentZone == prevZone && sameZoneSet(robot.Status.ContainingZones, prevSet) &&
+		prevZone == zone && sameZoneSet(prevSet, containing)
+}
+
+// noteRead records the robot's resourceVersion the memos for key now describe.
+func (z *ZoneController) noteRead(key, resourceVersion string) {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	if z.lastRead == nil {
+		z.lastRead = make(map[string]string)
+	}
+	z.lastRead[key] = resourceVersion
+}
+
+// dropMemosRecordedOtherwise forgets the memos for key when they disagree with what robot, read
+// past the cache, records: someone else edited status.currentZone or status.containingZones, or
+// a race left the memos describing an older copy. The compare-and-sets then seed from what is
+// recorded, so the frame writes the zone it derives over an edit, and a move a stop holds is
+// held from where the robot is recorded.
+func (z *ZoneController) dropMemosRecordedOtherwise(key string, robot *fleetv1.Robot) {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	prevZone, zoneSeen := z.lastZone[key]
+	prevSet, setSeen := z.lastContaining[key]
+	if (zoneSeen && prevZone != robot.Status.CurrentZone) ||
+		(setSeen && !sameZoneSet(prevSet, robot.Status.ContainingZones)) {
+		delete(z.lastZone, key)
+		delete(z.lastContaining, key)
+		delete(z.lastRead, key)
+	}
+}
+
 // recordZone compare-and-sets the last-derived zone for a robot under a lock, so
 // concurrent frames for the same robot never both write a transition. On first
 // sight it seeds from the persisted status, so a post-restart unchanged frame
@@ -735,6 +869,7 @@ func (z *ZoneController) forgetMemos(key string) {
 	defer z.lastMu.Unlock()
 	delete(z.lastZone, key)
 	delete(z.lastContaining, key)
+	delete(z.lastRead, key)
 }
 
 // ForgetRobot drops the position observer's memos for the robot with this wire
@@ -752,6 +887,7 @@ func (z *ZoneController) ForgetRobot(namespace, robotID string) bool {
 	_, positioned := z.positioned[key]
 	delete(z.lastZone, key)
 	delete(z.lastContaining, key)
+	delete(z.lastRead, key)
 	delete(z.positioned, key)
 	return zoned || contained || positioned
 }
@@ -986,10 +1122,13 @@ func declaredOnlyFrom(zones []fleetv1.FleetZone) map[string]bool {
 
 // robotZoneChanged admits the Robot events that can move a zone's status or a
 // robot's declared placement: create, delete, and an update that changes
-// status.currentZone (robotCount) or spec.zone. A spec.zone change is included for
-// FZ-G5: a robot re-homed into a zone with no usable geometry is placed by that
-// zone's reconcile, and no other event would enqueue it. Other Robot writes are
-// ignored.
+// status.currentZone (robotCount), spec.zone or status.specZoneMatchesCurrent. A spec.zone
+// change is included for FZ-G5: a robot re-homed into a zone with no usable geometry is
+// placed by that zone's reconcile, and no other event would enqueue it.
+// specZoneMatchesCurrent is included because placeDeclaredMembers decides on the cache
+// whether a robot is already placed, which reads it: a change to it alone (an edit by
+// someone else, or an informer relist that skipped the version between) must enqueue the
+// reconcile that corrects it. Other Robot writes are ignored.
 var robotZoneChanged = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		oldR, ok1 := e.ObjectOld.(*fleetv1.Robot)
@@ -997,7 +1136,8 @@ var robotZoneChanged = predicate.Funcs{
 		if !ok1 || !ok2 {
 			return false
 		}
-		return oldR.Status.CurrentZone != newR.Status.CurrentZone || oldR.Spec.Zone != newR.Spec.Zone
+		return oldR.Status.CurrentZone != newR.Status.CurrentZone || oldR.Spec.Zone != newR.Spec.Zone ||
+			!equality.Semantic.DeepEqual(oldR.Status.SpecZoneMatchesCurrent, newR.Status.SpecZoneMatchesCurrent)
 	},
 	CreateFunc:  func(event.CreateEvent) bool { return true },
 	DeleteFunc:  func(event.DeleteEvent) bool { return true },

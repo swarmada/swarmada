@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -115,15 +116,7 @@ func containmentFingerprint(rules []fleetv1.EffectiveZoneRestriction, unresolved
 // comparison. That is the whole reason the sort exists; without it this would have to
 // allocate a map per frame, on the hottest path in the controller.
 func sameZoneSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(a, b) // nil and empty are equal; order matters, as above
 }
 
 // recordContainment compare-and-sets the last-derived containment set for a robot,

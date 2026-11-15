@@ -22,6 +22,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/swarmada/swarmada/internal/kubeclientmetrics"
 	"github.com/swarmada/swarmada/internal/leadership"
 )
 
@@ -63,7 +64,7 @@ func setupLeadership(mgr ctrl.Manager, leaderElection bool, electionID string) (
 	err := mgr.Add(&leadership.Runnable{
 		State: state,
 		Terms: &leadership.Floor{
-			Reader:        mgr.GetAPIReader(),
+			Reader:        kubeclientmetrics.Reader(mgr.GetAPIReader(), "leadership_floor"),
 			Writer:        mgr.GetClient(),
 			Namespace:     ns,
 			ElectionLease: election,

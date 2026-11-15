@@ -305,7 +305,7 @@ func main() {
 		cmdDispatcher = command.New(mgr.GetClient())
 		// The motion gate and the register's fences read the Robot past the cache; a fence that
 		// cannot be sent on a new ControlStream is an Event on the Robot (internal/command/fence.go).
-		cmdDispatcher.APIReader = mgr.GetAPIReader()
+		cmdDispatcher.APIReader = kubeclientmetrics.Reader(mgr.GetAPIReader(), "motion_gate")
 		cmdDispatcher.Recorder = mgr.GetEventRecorderFor("command-dispatcher")
 		prober = cmdDispatcher
 		modelPusher = cmdDispatcher
@@ -415,7 +415,7 @@ func main() {
 	}
 	if err = (&controller.FleetActionReconciler{
 		Client:                   mgr.GetClient(),
-		APIReader:                mgr.GetAPIReader(),
+		APIReader:                kubeclientmetrics.Reader(mgr.GetAPIReader(), "fleet_action"),
 		Scheme:                   mgr.GetScheme(),
 		TDE:                      tdeEngine,
 		Commander:                actionCommander,
@@ -446,7 +446,7 @@ func main() {
 	// nothing on this path dispatches until a human clears the flag.
 	if err = (&controller.TaskTriggerReconciler{
 		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "task_trigger"),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorderFor("tasktrigger-controller"),
 	}).SetupWithManager(mgr); err != nil {
@@ -470,7 +470,7 @@ func main() {
 		Recorder:  mgr.GetEventRecorderFor("modelrollout-controller"),
 		Pusher:    modelPusher,
 		Audit:     auditRecorder,
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "model_rollout"),
 		Acks:      modelAcks,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelRollout")
@@ -483,7 +483,7 @@ func main() {
 	// (unreachable/timeout/unsupported) is never reported Healthy.
 	if err = (&controller.RobotProbeReconciler{
 		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "robot_probe"),
 		Scheme:    mgr.GetScheme(),
 		Prober:    prober,
 		Audit:     auditRecorder,
@@ -523,7 +523,7 @@ func main() {
 
 	if err = (&controller.ModelPolicyReconciler{
 		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "model_policy"),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorderFor("modelpolicy-controller"),
 		Audit:     auditRecorder,
@@ -601,7 +601,7 @@ func main() {
 	safetyDispatcher := safety.New(mgr.GetClient(), mgr.GetEventRecorderFor("estop"))
 	// The estopState write compares against the stored Robot, read past the cache: a
 	// cached read can miss another trigger's outcome written a moment before.
-	safetyDispatcher.APIReader = mgr.GetAPIReader()
+	safetyDispatcher.APIReader = kubeclientmetrics.Reader(mgr.GetAPIReader(), "safety_dispatcher")
 	// The resume confirmation judges a cleared robot on capabilities derived from the
 	// hardware its witnessing frame reported, not on the stored list, which the Robot
 	// reconciler writes later (RFC-0001 #safety-estop-state-machine).
@@ -636,7 +636,7 @@ func main() {
 		Estopper:  safetyDispatcher,
 		Recorder:  mgr.GetEventRecorderFor("zone-estop"),
 		Audit:     auditRecorder,
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "zone_estop"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ZoneEstop")
 		os.Exit(1)
@@ -655,7 +655,7 @@ func main() {
 		Resumer:   safetyDispatcher,
 		Audit:     auditRecorder,
 		Recorder:  mgr.GetEventRecorderFor("robotestop"),
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "robot_estop"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RobotEstop")
 		os.Exit(1)
@@ -670,7 +670,7 @@ func main() {
 		Estopper:  safetyDispatcher,
 		Audit:     auditRecorder,
 		Recorder:  mgr.GetEventRecorderFor("namespace-estop"),
-		APIReader: mgr.GetAPIReader(),
+		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "namespace_estop"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NamespaceEstop")
 		os.Exit(1)
@@ -699,7 +699,7 @@ func main() {
 			setupLog.Error(err, "invalid ControlStream mTLS configuration")
 			os.Exit(1)
 		}
-		statusSink := &controller.RobotStatusSink{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}
+		statusSink := &controller.RobotStatusSink{Client: mgr.GetClient(), APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "robot_status")}
 		// Per-namespace telemetry resolution (RFC-0001 #swarmadaconfig-telemetry-pipeline-and-status-projection): each frame is routed to the
 		// TSDB sink and status write-policy configured in its namespace's
 		// SwarmadaConfig.spec.telemetry. Resolution is FAIL-SAFE — an unsynced cache,
@@ -755,7 +755,7 @@ func main() {
 		// sees it), which is why the Event recorder and the audit chain are wired onto it too. A
 		// failure report under a stop, and every retained outcome, is decided on the API server's
 		// copy: the API reader is required.
-		actionStatus, asErr := controller.NewActionStatusIngestor(mgr.GetClient(), mgr.GetAPIReader(),
+		actionStatus, asErr := controller.NewActionStatusIngestor(mgr.GetClient(), kubeclientmetrics.Reader(mgr.GetAPIReader(), "action_status"),
 			mgr.GetEventRecorderFor("actionstatus-ingestor"), auditRecorder)
 		if asErr != nil {
 			setupLog.Error(asErr, "unable to build the action status ingestor")
@@ -777,7 +777,7 @@ func main() {
 			// status-only DiscoveredRobot (populating macAddress + reported
 			// inventory) for an unadmitted robot and rejects a malformed robot_id
 			// with INVALID_ROBOT_ID; Register confirms an admitted Robot.
-			Registrar: &registrar.Registrar{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()},
+			Registrar: &registrar.Registrar{Client: mgr.GetClient(), APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "registrar")},
 			// Per-message robot_id authorization (RFC-0001 #security-fleet-adapter-authentication-robot-identity): every robot-scoped
 			// message is checked against the adapter's mTLS identity and refused on
 			// failure (fail closed). nil (dev only, --fleet-adapter-insecure-authz)
@@ -884,7 +884,7 @@ func main() {
 		// cached list can miss a child zone admitted just before the Robot.
 		if err = (&swarmadawebhook.RobotAdmissionGate{
 			Client:     mgr.GetClient(),
-			APIReader:  mgr.GetAPIReader(),
+			APIReader:  kubeclientmetrics.Reader(mgr.GetAPIReader(), "webhook_robot_admission"),
 			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Robot")
@@ -896,7 +896,7 @@ func main() {
 		// holds a FleetZone, FleetTask, FirmwareRollout or ModelRollout, whose DELETE
 		// checks stay failurePolicy=Fail.
 		if err = (&swarmadawebhook.RobotDeleteGuard{
-			APIReader: mgr.GetAPIReader(),
+			APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "webhook_robot_delete"),
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Robot delete")
 			os.Exit(1)
@@ -905,7 +905,7 @@ func main() {
 		// without estop-clear on that stop, on its own webhook with failurePolicy Ignore; the stop
 		// finalizer keeps such work through a manager outage.
 		if err = (&swarmadawebhook.FleetActionDeleteGuard{
-			APIReader:  mgr.GetAPIReader(),
+			APIReader:  kubeclientmetrics.Reader(mgr.GetAPIReader(), "webhook_fleetaction_delete"),
 			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FleetAction delete")
@@ -916,7 +916,7 @@ func main() {
 		// with failurePolicy Ignore so that this check does not hold a namespace delete
 		// through a manager outage.
 		if err = (&swarmadawebhook.SwarmadaConfigDeleteGuard{
-			APIReader: mgr.GetAPIReader(),
+			APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "webhook_config_delete"),
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "SwarmadaConfig delete")
 			os.Exit(1)
@@ -947,7 +947,7 @@ func main() {
 		// a cached parent can miss the write that would make a new parentZone close a cycle.
 		if err = (&swarmadawebhook.FleetZoneValidator{
 			Client:     mgr.GetClient(),
-			APIReader:  mgr.GetAPIReader(),
+			APIReader:  kubeclientmetrics.Reader(mgr.GetAPIReader(), "webhook_zone_validator"),
 			EstopAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FleetZone")
@@ -968,7 +968,7 @@ func main() {
 		if err = (&swarmadawebhook.FleetActionValidator{
 			CancelAuthz: &swarmadawebhook.SARAuthorizer{Client: mgr.GetClient()},
 			Reader:      mgr.GetClient(),
-			APIReader:   mgr.GetAPIReader(),
+			APIReader:   kubeclientmetrics.Reader(mgr.GetAPIReader(), "webhook_fleetaction"),
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FleetAction")
 			os.Exit(1)
@@ -1061,7 +1061,7 @@ func main() {
 	// not the manager's own namespace: G1 reads in the namespace of every action it
 	// admits, so a grant confined to POD_NAMESPACE would pass here and leave the gate
 	// open everywhere else. "" is every namespace.
-	if err := rbacpreflight.Preflight(context.Background(), mgr.GetAPIReader(), ""); err != nil {
+	if err := rbacpreflight.Preflight(context.Background(), kubeclientmetrics.Reader(mgr.GetAPIReader(), "rbac_preflight"), ""); err != nil {
 		setupLog.Error(err, "RBAC preflight failed")
 		os.Exit(1)
 	}
