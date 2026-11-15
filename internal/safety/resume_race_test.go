@@ -56,31 +56,39 @@ func (s *staleReadClient) Get(ctx context.Context, key client.ObjectKey, obj cli
 	return err
 }
 
-// gatedAckSender answers the first estop at once with STOPPED and holds the answer to
-// every later one until release is closed, as an adapter whose robot takes a moment to
-// stop.
+// gatedAckSender answers the first stop at once with STOPPED and holds the answer to every
+// other stop until release is closed, as an adapter whose robot takes a moment to stop.
+//
+// A stop is known by its estop_id, not by the order of the sends: the dispatcher may send a
+// stop more than once. RegisterStream re-sends, from its own goroutine, the stops a robot
+// holds down the stream it registers (resendHeld), and a loaded runner can schedule that
+// goroutine after the first stop is recorded. A re-send is answered as its stop's first send
+// was, and sent is closed once.
 type gatedAckSender struct {
-	d       *Dispatcher
-	mu      sync.Mutex
-	sends   int
-	sent    chan struct{} // closed when the first held estop has gone out
-	release chan struct{}
+	d        *Dispatcher
+	mu       sync.Mutex
+	firstID  string // estop_id of the first stop sent
+	sentOnce sync.Once
+	sent     chan struct{} // closed when the first held stop has gone out
+	release  chan struct{}
 }
 
 func (s *gatedAckSender) Send(m *fav1.ControlPlaneSafetyMessage) error {
 	if m.GetEstop() == nil {
 		return nil // an EstopClear: the gate counts stops only
 	}
-	s.mu.Lock()
-	s.sends++
-	first := s.sends == 1
-	s.mu.Unlock()
 	id, robot := m.GetEstop().GetEstopId(), m.GetRobotId()
+	s.mu.Lock()
+	if s.firstID == "" {
+		s.firstID = id
+	}
+	first := id == s.firstID
+	s.mu.Unlock()
 	if first {
 		_ = s.d.RouteAck(identity("acme"), s, robot, ackState(id, fav1.EstopState_ESTOP_STATE_STOPPED))
 		return nil
 	}
-	close(s.sent)
+	s.sentOnce.Do(func() { close(s.sent) })
 	go func() {
 		<-s.release
 		_ = s.d.RouteAck(identity("acme"), s, robot, ackState(id, fav1.EstopState_ESTOP_STATE_STOPPED))
@@ -98,6 +106,11 @@ func TestResume_AConfirmationDoesNotReleaseAStopConfirmedAfterItsRead(t *testing
 	d, c, _ := newDispatcher(t, "acme")
 	d.deliveryTimeout = 10 * time.Second // the stop waits on its held ack, not on the window
 	d.confirmTimeout = 10 * time.Second
+	// Installed before the stream is registered: RegisterStream's re-send goroutine reads
+	// d.APIReader, and may run at any point of the test. The reader passes every read through
+	// except the one it is told to hold, which only the confirmation's context asks for.
+	stale := &staleReadClient{Client: c, n: 2, read: make(chan struct{}), release: make(chan struct{})}
+	d.APIReader = stale
 	sender := &gatedAckSender{d: d, sent: make(chan struct{}), release: make(chan struct{})}
 	d.RegisterStream(identity("acme"), sender)
 	ctx := context.Background()
@@ -112,9 +125,6 @@ func TestResume_AConfirmationDoesNotReleaseAStopConfirmedAfterItsRead(t *testing
 		t.Fatalf("ClearEstop = %s (err %v), want Resuming", state, err)
 	}
 	projected(t, d, c, clearedAt.Add(time.Minute), fleetv1.RobotPhaseIdle, activeCap("lidar"))
-
-	stale := &staleReadClient{Client: c, n: 2, read: make(chan struct{}), release: make(chan struct{})}
-	d.APIReader = stale
 
 	// The zone's stop is issued; its STOPPED is held.
 	triggered := make(chan fleetv1.RobotEstopState, 1)
