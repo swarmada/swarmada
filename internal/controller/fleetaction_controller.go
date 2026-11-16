@@ -123,8 +123,17 @@ type FleetActionReconciler struct {
 	// a Robot admitted a moment ago is counted when deciding whether two carry one wire
 	// robot-id (dispatch_holds.go). Nil falls back to Client.
 	APIReader client.Reader
-	Scheme    *runtime.Scheme
-	Scheduler scheduler.Scheduler
+	// ConfirmReader is the uncached reader that confirms, past the cache, that no stop holds an
+	// assignment or a stop finalizer's release (stop_reads_cached.go). StopPathReader is the
+	// one the Paused and Revoking stop checks read through. Each carries its own caller label
+	// on the uncached-read metric; nil falls back to APIReader.
+	ConfirmReader  client.Reader
+	StopPathReader client.Reader
+	// ReleaseReader is the uncached reader a stop finalizer's release is confirmed through
+	// (syncHeldFinalizer), with its own caller label; nil falls back to ConfirmReader.
+	ReleaseReader client.Reader
+	Scheme        *runtime.Scheme
+	Scheduler     scheduler.Scheduler
 	// TDE is the deconfliction gate the reconciler MUST pass before committing an
 	// assignment (RFC-0001 #tde-normative-invariants, TDE-1). Defaulted in SetupWithManager; a nil TDE (only via
 	// direct construction in unit tests) skips the zone-capacity gate.
@@ -166,6 +175,9 @@ type FleetActionReconciler struct {
 	capacityWaiters capacityWaiters
 	// unreachable backs off the recheck of an action every robot of which had an unreachable adapter.
 	unreachable unreachableBackoff
+	// uncachedNext names the actions whose next dispatch pass reads every stop past the cache,
+	// because a confirmation found a stop the cache had not shown (stop_reads_cached.go).
+	uncachedNext uncachedPasses
 
 	// orphans remembers when this process first saw a robot record an action that no longer
 	// exists; the record is released once the longest lease plus the skew margin has passed
@@ -412,6 +424,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 	action := &fleetv1.FleetAction{}
 	if err := r.Get(ctx, req.NamespacedName, action); err != nil {
 		if errors.IsNotFound(err) {
+			r.uncachedNext.clear(req.NamespacedName)
 			return r.releaseOrphanedRecords(ctx, req)
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching fleetaction: %w", err)
@@ -578,7 +591,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		// the robot holds the work as a recorded one does, and so does every stop in the namespace
 		// once the Robot object is gone.
 		if action.Status.Phase == fleetv1.ActionPhaseRevoking {
-			stops, confirmed, _, err := r.stopsOverBoundRobot(ctx, action)
+			stops, confirmed, _, err := r.stopsOverBoundRobotWith(ctx, action, true)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -649,7 +662,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 			// A stop the robot has not confirmed: the lease is not renewed, and once it is
 			// provably dead the work waits for a person; it never moves alone (invariant I1).
 			if found {
-				if stops, confirmed, err := r.stopOver(ctx, robot); err != nil {
+				if stops, confirmed, err := r.stopOverCacheFirst(ctx, robot); err != nil {
 					return ctrl.Result{}, err
 				} else if len(stops) > 0 && !confirmed {
 					return r.holdUnderUnconfirmedStop(ctx, action, original, robot.Name, stops, now, leaseDur, leaseRenew, leaseSkew)
@@ -949,8 +962,14 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 
+		// The pass scans the stops from the cache, and confirms past it before the TDE gate
+		// (stop_reads_cached.go); after a confirmation found a stop the cache had missed, or while
+		// row A15 holds the action, it scans them from the API server as before.
+		scan, cachedScan := r.stopScanReader(action)
+		r.uncachedNext.clear(req.NamespacedName)
+
 		// Row A15: no dispatch toward a destination in a zone under a stop (dispatch_zone_stopped.go).
-		if res, held, err := r.holdForStoppedDestination(ctx, action, original); held || err != nil {
+		if res, held, err := r.holdForStoppedDestination(ctx, action, original, scan); held || err != nil {
 			return res, err
 		}
 
@@ -964,6 +983,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		// filterDispatchEligible, with the pass's judge kept: currentCandidate judges the live copy
 		// of the robot selection chooses against the same state.
 		judge, filtersDegraded, restrictions := r.newDispatchJudge(ctx, action)
+		judge.scan = scan
 		eligible, withheld := judge.filter(ctx, robotList.Items)
 		// FA-R5's plane-side half: a robot whose adapter has already DECLINED this
 		// assignment on an operating constraint is not offered it again. Applied after the
@@ -1195,6 +1215,25 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 						declineMessage(declined))
 				}
 				return ctrl.Result{RequeueAfter: pendingRecheckInterval}, nil
+			}
+		}
+
+		// ── The stop confirmation ─────────────────────────────────────────────────
+		// The pass judged the stops from the cache. Before anything is written or the TDE is
+		// asked, every stop it judged for this robot and this destination is read again past the
+		// cache. One that holds, or a read that fails, assigns nothing: the next pass reads every
+		// stop from the API server, as the dispatch pass did before, and writes the hold it finds.
+		if cachedScan {
+			verified := robot.ResourceVersion != "" && judge.verified[robot.Name] == robot.ResourceVersion
+			var cachedTree *estopscope.Tree
+			if judge.holds != nil {
+				cachedTree = judge.holds.tree
+			}
+			if why, cerr := r.confirmNoStop(ctx, action, &robot, verified, cachedTree); cerr != nil || why != "" {
+				r.uncachedNext.mark(req.NamespacedName)
+				logger.Info("the stop confirmation withheld the assignment; the next pass reads every stop "+
+					"from the API server", "robot", robot.Name, "reason", why, "err", errString(cerr))
+				return ctrl.Result{Requeue: true}, nil
 			}
 		}
 
@@ -2663,6 +2702,24 @@ func (r *FleetActionReconciler) stopOver(ctx context.Context, robot *fleetv1.Rob
 	return stops, stopConfirmed(live), nil
 }
 
+// stopOverCacheFirst is stopOver for the Paused check: the robot is read from the API server, so
+// whether it confirmed its stop is the live answer, and the stops are read from the cache when the
+// cache shows one, from the API server when it shows none (stop_reads_cached.go).
+func (r *FleetActionReconciler) stopOverCacheFirst(ctx context.Context, robot *fleetv1.Robot) ([]string, bool, error) {
+	live := &fleetv1.Robot{}
+	if err := r.stopPathReader().Get(ctx, types.NamespacedName{Namespace: robot.Namespace, Name: robot.Name}, live); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("reading robot %s for its stop: %w", robot.Name, err)
+	}
+	stops, err := stopNamesCacheFirst(ctx, r.Client, r.stopPathReader(), live)
+	if err != nil {
+		return nil, false, err
+	}
+	return stops, stopConfirmed(live), nil
+}
+
 // stopsOverBoundRobot reads from the API server the stops that hold the work of the robot action is
 // bound to, and whether that robot has confirmed its stop. While the robot's Robot object exists
 // they are the stops over it (stopNames), a stop issued and not yet written onto it included. Once
@@ -2671,21 +2728,52 @@ func (r *FleetActionReconciler) stopOver(ctx context.Context, robot *fleetv1.Rob
 // carries a stop, issued or in force, and every namespace stop then holds the work, since the robot
 // may stand under any of them (RFC-0001 #safety-action-table, invariant I1).
 func (r *FleetActionReconciler) stopsOverBoundRobot(ctx context.Context, action *fleetv1.FleetAction) (stops []string, confirmed, gone bool, err error) {
+	return r.stopsOverBoundRobotWith(ctx, action, false)
+}
+
+// stopsOverBoundRobotWith is stopsOverBoundRobot. With cacheFirst (the Revoking check), the robot
+// is still read from the API server, so whether it confirmed its stop is the live answer, but the
+// zones and configs are read from the cache when the cache shows a stop: a stop the cache shows
+// holds the work, and "no stop" is only ever the API server's answer (stop_reads_cached.go).
+func (r *FleetActionReconciler) stopsOverBoundRobotWith(ctx context.Context, action *fleetv1.FleetAction, cacheFirst bool) (stops []string, confirmed, gone bool, err error) {
+	rd := r.liveReader()
+	if cacheFirst {
+		rd = r.stopPathReader()
+	}
 	live := &fleetv1.Robot{}
-	err = r.liveReader().Get(ctx, types.NamespacedName{Namespace: action.Namespace, Name: action.Status.AssignedRobot}, live)
+	err = rd.Get(ctx, types.NamespacedName{Namespace: action.Namespace, Name: action.Status.AssignedRobot}, live)
 	switch {
 	case err == nil:
-		if stops, err = stopNames(ctx, r.liveReader(), live); err != nil {
+		if cacheFirst {
+			stops, err = stopNamesCacheFirst(ctx, r.Client, rd, live)
+		} else {
+			stops, err = stopNames(ctx, rd, live)
+		}
+		if err != nil {
 			return nil, false, false, err
 		}
 		return stops, stopConfirmed(live), false, nil
 	case !errors.IsNotFound(err):
 		return nil, false, false, fmt.Errorf("reading robot %s for its stop: %w", action.Status.AssignedRobot, err)
 	}
-	t, configs, err := estopscope.ReadWorld(ctx, r.liveReader(), action.Namespace)
+	if cacheFirst {
+		if t, configs, err := estopscope.ReadWorld(ctx, r.Client, action.Namespace); err == nil {
+			if stops := everyStopIn(t, configs); len(stops) > 0 {
+				return stops, false, true, nil
+			}
+		}
+	}
+	t, configs, err := estopscope.ReadWorld(ctx, rd, action.Namespace)
 	if err != nil {
 		return nil, false, true, err
 	}
+	return everyStopIn(t, configs), false, true, nil
+}
+
+// everyStopIn names every zone stop and namespace stop, issued or in force, in a namespace's
+// zone tree and configs; sorted, nil when there is none.
+func everyStopIn(t *estopscope.Tree, configs []fleetv1.SwarmadaConfig) []string {
+	var stops []string
 	for _, name := range t.Names() {
 		if estopscope.Carries(t.Zone(name)) {
 			stops = append(stops, string(estopscope.KindZone)+"/"+name)
@@ -2697,7 +2785,7 @@ func (r *FleetActionReconciler) stopsOverBoundRobot(ctx context.Context, action 
 		}
 	}
 	sort.Strings(stops)
-	return stops, false, true, nil
+	return stops
 }
 
 // holdUnderUnconfirmedStop keeps a Paused action bound to a robot whose stop is not confirmed:
@@ -3283,6 +3371,7 @@ func (r *FleetActionReconciler) releaseRobotForStop(ctx context.Context, action 
 // the inert lease horizon once. Every step is idempotent, so repeat reconciles
 // of a retired action write nothing.
 func (r *FleetActionReconciler) retireTerminalAction(ctx context.Context, req ctrl.Request, action *fleetv1.FleetAction) (ctrl.Result, error) {
+	r.uncachedNext.clear(req.NamespacedName)
 	r.releaseReservation(ctx, req.Namespace, action.Spec.Zone, action.Name)
 	// The bound robot reported the end, or its stop was confirmed before the cancel finalized:
 	// it is released on that proof.
