@@ -43,25 +43,24 @@ import (
 // syncHeldFinalizer holds the stop finalizer on action while a robot that records it is under a
 // stop, and releases it otherwise, or when the namespace is being torn down. It returns the robots
 // that hold the record.
+//
+// The holders are judged from the cache: a stop the cache shows holds the finalizer. Before the
+// finalizer is released on the cache's "no stop", the robots and their stops are read again from
+// the API server (stop_reads_cached.go), and the release goes ahead only if that also says no stop
+// holds any robot that records the action. A finalizer the cache is late to add is added once the
+// cache shows the stop: the fan-out's own Robot writes bring this action back (a known limit; the
+// delete guards still read the API server).
 func (r *FleetActionReconciler) syncHeldFinalizer(ctx context.Context, action *fleetv1.FleetAction) ([]string, error) {
-	var robots fleetv1.RobotList
-	if err := r.List(ctx, &robots, client.InNamespace(action.Namespace)); err != nil {
-		return nil, fmt.Errorf("listing robots for the stop finalizer: %w", err)
+	holders, err := heldRecorders(ctx, r.Client, r.Client, action)
+	if err != nil {
+		return nil, err
 	}
-	var holders []string
-	for i := range robots.Items {
-		if robots.Items[i].Status.AssignedAction != action.Name {
-			continue
-		}
-		held, err := heldRecord(ctx, r.liveReader(), &robots.Items[i])
-		if err != nil {
+	has := controllerutil.ContainsFinalizer(action, estopscope.StopFinalizer)
+	if len(holders) == 0 && has {
+		if holders, err = heldRecorders(ctx, r.releaseReader(), r.releaseReader(), action); err != nil {
 			return nil, err
 		}
-		if held {
-			holders = append(holders, robots.Items[i].Name)
-		}
 	}
-	sort.Strings(holders)
 	hold := len(holders) > 0
 	if hold && action.DeletionTimestamp != nil {
 		terminating, err := namespaceBeingDeleted(ctx, r.liveReader(), action.Namespace)
@@ -70,7 +69,6 @@ func (r *FleetActionReconciler) syncHeldFinalizer(ctx context.Context, action *f
 		}
 		hold = !terminating
 	}
-	has := controllerutil.ContainsFinalizer(action, estopscope.StopFinalizer)
 	if hold == has {
 		return holders, nil
 	}
@@ -86,6 +84,30 @@ func (r *FleetActionReconciler) syncHeldFinalizer(ctx context.Context, action *f
 	if !hold {
 		return nil, nil
 	}
+	return holders, nil
+}
+
+// heldRecorders lists through robots the robots that record action, and returns, sorted, those a
+// stop holds (heldRecord, its stops read through stops).
+func heldRecorders(ctx context.Context, robots, stops client.Reader, action *fleetv1.FleetAction) ([]string, error) {
+	var list fleetv1.RobotList
+	if err := robots.List(ctx, &list, client.InNamespace(action.Namespace)); err != nil {
+		return nil, fmt.Errorf("listing robots for the stop finalizer: %w", err)
+	}
+	var holders []string
+	for i := range list.Items {
+		if list.Items[i].Status.AssignedAction != action.Name {
+			continue
+		}
+		held, err := heldRecord(ctx, stops, &list.Items[i])
+		if err != nil {
+			return nil, err
+		}
+		if held {
+			holders = append(holders, list.Items[i].Name)
+		}
+	}
+	sort.Strings(holders)
 	return holders, nil
 }
 

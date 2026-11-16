@@ -72,6 +72,10 @@ type RobotEstopReconciler struct {
 	// the stored Robot and a second reconcile cannot claim it again. Nil falls back to
 	// Client.
 	APIReader client.Reader
+	// ConfirmReader is the uncached reader that confirms no stop holds a robot before its stop
+	// finalizer is released (robotKeepsStopFinalizerCacheFirst). It carries its own caller label on
+	// the uncached-read metric; nil falls back to APIReader.
+	ConfirmReader client.Reader
 
 	// answered holds, per robot, the last resume request this process claimed and answered,
 	// so a claim whose drop failed, or that a stale cached read still shows, is not reported
@@ -131,7 +135,7 @@ func (r *RobotEstopReconciler) reconcileRobot(ctx context.Context, req ctrl.Requ
 		var again, done bool
 		var err error
 		robot, again, done, err = holdStopFinalizer(ctx, r.Client, r.reader(), robot, func(rb *fleetv1.Robot) (bool, error) {
-			return robotKeepsStopFinalizer(ctx, r.reader(), rb)
+			return robotKeepsStopFinalizerCacheFirst(ctx, r.Client, r.confirmReader(), rb)
 		})
 		if done || err != nil {
 			return ctrl.Result{}, err
@@ -312,7 +316,7 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, req ctrl.Req
 
 	removedMarker := robot.Annotations[annEstopProcessed]
 	robot, again, err := dropClearedMarker(ctx, r.Client, r.reader(), robot, func(rb *fleetv1.Robot) (bool, error) {
-		keep, err := robotKeepsStopFinalizer(ctx, r.reader(), rb)
+		keep, err := robotKeepsStopFinalizerCacheFirst(ctx, r.Client, r.confirmReader(), rb)
 		return !keep, err
 	})
 	if err != nil {
@@ -324,6 +328,14 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, req ctrl.Req
 		return r.reconcileRobot(ctx, req, robot)
 	}
 	return ctrl.Result{}, nil
+}
+
+// confirmReader is the uncached reader a finalizer release is confirmed through.
+func (r *RobotEstopReconciler) confirmReader() client.Reader {
+	if r.ConfirmReader != nil {
+		return r.ConfirmReader
+	}
+	return r.reader()
 }
 
 // reader is the uncached reader when one is wired, else the client.

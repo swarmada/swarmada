@@ -231,9 +231,17 @@ type dispatchJudge struct {
 	action *fleetv1.FleetAction
 	st     *dispatchFilterState
 	holds  *dispatchHolds
-	ready  map[string]bool     // adapter name → dispatch-ready
-	reason map[string]string   // adapter name → why it is not
-	served map[string][]string // adapter name → spec.servesRobotClasses, once ready
+	// scan is the reader the holds read the zones and configs through: the dispatch pass sets the
+	// cache, which it confirms past before assigning (stop_reads_cached.go); nil reads them from
+	// the API server, as every other judge does.
+	scan client.Reader
+	// verified is, per robot name, the resourceVersion currentCandidate read past the cache. The
+	// robot commit is locked to that version, so a copy at it needs no second read by the stop
+	// confirmation (confirmNoStop).
+	verified map[string]string
+	ready    map[string]bool     // adapter name → dispatch-ready
+	reason   map[string]string   // adapter name → why it is not
+	served   map[string][]string // adapter name → spec.servesRobotClasses, once ready
 }
 
 // newDispatchJudge builds a pass's judge, with what newDispatchFilterState also returns: the
@@ -244,6 +252,7 @@ func (r *FleetActionReconciler) newDispatchJudge(
 	st, degraded, restrictions := r.newDispatchFilterState(ctx, action)
 	return &dispatchJudge{r: r, action: action, st: st,
 		ready: make(map[string]bool, 4), reason: make(map[string]string, 4), served: make(map[string][]string, 4),
+		verified: make(map[string]string, 2),
 	}, degraded, restrictions
 }
 
@@ -264,7 +273,7 @@ func (j *dispatchJudge) filter(ctx context.Context, robots []fleetv1.Robot) ([]f
 // judge returns the gate that withholds robot from this pass's action, or nil.
 func (j *dispatchJudge) judge(ctx context.Context, robot *fleetv1.Robot) *dispatchExclusion {
 	if j.holds == nil {
-		j.holds = j.r.newDispatchHolds(ctx, j.action.Namespace)
+		j.holds = j.r.newDispatchHolds(ctx, j.action.Namespace, j.scan)
 	}
 
 	// A Robot being deleted takes no new work, whatever it holds (see

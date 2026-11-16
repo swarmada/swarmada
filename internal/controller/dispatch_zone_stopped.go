@@ -25,6 +25,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
@@ -44,21 +45,23 @@ const conditionZoneStopped = "ZoneStopped"
 //
 // A stop counts while its zone carries the trigger, or the processed marker of a stop whose clear
 // is not yet applied (estopscope.Carries): the cautious reading, a clear takes the hold away only
-// once it has been applied. The tree is read from the API server, as the dispatch holds read it: a
-// trigger written a moment ago is in force now. A read that fails, or a chain deeper than the
+// once it has been applied. The tree is read through scan, as the dispatch holds read it: the
+// dispatch pass passes the cache and confirms past it before assigning (confirmNoStop), and the API
+// server while the action already carries the hold, so a stale cache never lifts it (stopScanReader).
+// A read that fails, or a chain deeper than the
 // walk's bound, holds the action too: the hold fails closed. A namespace stop is not a zone under a
 // stop; it withholds every robot already (namespaceStop), so it writes no condition here.
 //
 // When the destination is no longer under a stop, the condition is removed from the action in
 // memory, so the write this pass makes, the commit's included, carries the removal. It reports
 // whether the action is held, and the result to return when it is.
-func (r *FleetActionReconciler) holdForStoppedDestination(ctx context.Context, action, original *fleetv1.FleetAction) (ctrl.Result, bool, error) {
+func (r *FleetActionReconciler) holdForStoppedDestination(ctx context.Context, action, original *fleetv1.FleetAction, scan client.Reader) (ctrl.Result, bool, error) {
 	if action.Spec.Zone == "" {
 		apimeta.RemoveStatusCondition(&action.Status.Conditions, conditionZoneStopped)
 		return ctrl.Result{}, false, nil
 	}
 	var msg string
-	tree, _, err := estopscope.ReadWorld(ctx, r.liveReader(), action.Namespace)
+	tree, _, err := estopscope.ReadWorld(ctx, scan, action.Namespace)
 	if err == nil {
 		var reaching []string
 		reaching, err = tree.Reaching(action.Spec.Zone, estopscope.Carries)

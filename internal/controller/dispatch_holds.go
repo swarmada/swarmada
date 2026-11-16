@@ -98,13 +98,16 @@ func (r *FleetActionReconciler) liveReader() client.Reader {
 // action requeues, so a transient read error costs latency, never a dispatch nobody could
 // check.
 //
-// The Robot list is uncached and the FleetZone list is not, and the difference is the
-// race each one closes. A twin can be admitted in the instant before dispatch, and the
-// cache is exactly what has not seen it yet. A zone's estop is written by this manager's
-// own zone-estop controller and reaches the cache in the time the watch takes; the robots
-// it reaches are also stamped with their own estopState, which filter 10 reads. The
-// SwarmadaConfig list is cached for the same reason as the FleetZones.
-func (r *FleetActionReconciler) newDispatchHolds(ctx context.Context, namespace string) *dispatchHolds {
+// The Robot list is always read from the API server: a twin can be admitted in the instant
+// before dispatch, and the cache is exactly what has not seen it yet. The FleetZone and
+// SwarmadaConfig lists are read through scan. The dispatch pass passes the cache and, before it
+// assigns, reads past the cache every stop it judged for the chosen robot (confirmNoStop,
+// stop_reads_cached.go), so a trigger written a moment ago still holds the assignment. A nil
+// scan reads them from the API server.
+func (r *FleetActionReconciler) newDispatchHolds(ctx context.Context, namespace string, scan client.Reader) *dispatchHolds {
+	if scan == nil {
+		scan = r.liveReader()
+	}
 	h := &dispatchHolds{}
 	var robots fleetv1.RobotList
 	if err := r.liveReader().List(ctx, &robots, client.InNamespace(namespace)); err != nil {
@@ -112,10 +115,8 @@ func (r *FleetActionReconciler) newDispatchHolds(ctx context.Context, namespace 
 	} else {
 		h.holders = wireIDHolders(robots.Items)
 	}
-	// The zone and config lists are read from the API server too (the stop guard): a trigger
-	// written a moment ago is in force now, whether or not the cache has seen it.
 	var zones fleetv1.FleetZoneList
-	if err := r.liveReader().List(ctx, &zones, client.InNamespace(namespace)); err != nil {
+	if err := scan.List(ctx, &zones, client.InNamespace(namespace)); err != nil {
 		h.zonesUnread = err
 	} else {
 		h.zones = make(map[string]*fleetv1.FleetZone, len(zones.Items))
@@ -125,7 +126,7 @@ func (r *FleetActionReconciler) newDispatchHolds(ctx context.Context, namespace 
 		h.tree = estopscope.TreeOf(zones.Items)
 	}
 	var configs fleetv1.SwarmadaConfigList
-	if err := r.liveReader().List(ctx, &configs, client.InNamespace(namespace)); err != nil {
+	if err := scan.List(ctx, &configs, client.InNamespace(namespace)); err != nil {
 		h.configsUnread = err
 	} else {
 		for i := range configs.Items {

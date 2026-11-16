@@ -416,6 +416,9 @@ func main() {
 	if err = (&controller.FleetActionReconciler{
 		Client:                   mgr.GetClient(),
 		APIReader:                kubeclientmetrics.Reader(mgr.GetAPIReader(), "fleet_action"),
+		ConfirmReader:            kubeclientmetrics.Reader(mgr.GetAPIReader(), "fleet_action_confirm"),
+		StopPathReader:           kubeclientmetrics.Reader(mgr.GetAPIReader(), "fleet_action_stop_paths"),
+		ReleaseReader:            kubeclientmetrics.Reader(mgr.GetAPIReader(), "fleet_action_release"),
 		Scheme:                   mgr.GetScheme(),
 		TDE:                      tdeEngine,
 		Commander:                actionCommander,
@@ -649,13 +652,14 @@ func main() {
 	// the operator clears, and this controller drives ConfirmResume until telemetry
 	// confirms the robot may leave it (RFC-0001 #safety-estop-state-machine).
 	if err = (&controller.RobotEstopReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Estopper:  safetyDispatcher,
-		Resumer:   safetyDispatcher,
-		Audit:     auditRecorder,
-		Recorder:  mgr.GetEventRecorderFor("robotestop"),
-		APIReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "robot_estop"),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Estopper:      safetyDispatcher,
+		Resumer:       safetyDispatcher,
+		Audit:         auditRecorder,
+		Recorder:      mgr.GetEventRecorderFor("robotestop"),
+		APIReader:     kubeclientmetrics.Reader(mgr.GetAPIReader(), "robot_estop"),
+		ConfirmReader: kubeclientmetrics.Reader(mgr.GetAPIReader(), "robot_estop_confirm"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RobotEstop")
 		os.Exit(1)

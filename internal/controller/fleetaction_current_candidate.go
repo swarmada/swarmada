@@ -67,6 +67,7 @@ func (r *FleetActionReconciler) currentCandidate(ctx context.Context, action *fl
 		logger.Info("could not re-read the selected robot; the robot commit's lock decides", "err", err.Error())
 		return *selected, nil
 	}
+	judge.verified[live.Name] = live.ResourceVersion
 	if live.ResourceVersion == selected.ResourceVersion {
 		return *selected, nil
 	}
