@@ -66,8 +66,24 @@ func wakeDeleting(r *fleetv1.Robot) *fleetv1.Robot {
 }
 
 // The Robot events that wake the waiting actions, and the ones that do not.
-func TestRobotBecameFree(t *testing.T) {
+func TestRobotWakeEvent(t *testing.T) {
 	idle := wakeRobot(fleetv1.RobotPhaseIdle, "", fleetv1.RobotEstopNormal, "aisle-1")
+	with := func(r *fleetv1.Robot, edit func(*fleetv1.Robot)) *fleetv1.Robot {
+		r = r.DeepCopy()
+		edit(r)
+		return r
+	}
+	battery := func(v int32) func(*fleetv1.Robot) { return func(r *fleetv1.Robot) { r.Status.BatteryPercent = &v } }
+	capability := func(s fleetv1.CapabilityStatus) func(*fleetv1.Robot) {
+		return func(r *fleetv1.Robot) {
+			r.Status.Capabilities = []fleetv1.CapabilityStatusEntry{{Name: "lift", Status: s}}
+		}
+	}
+	model := func(s fleetv1.ModelStatus) func(*fleetv1.Robot) {
+		return func(r *fleetv1.Robot) {
+			r.Status.InstalledModels = []fleetv1.InstalledModelStatusEntry{{Name: "m", Status: s}}
+		}
+	}
 	for _, tc := range []struct {
 		name     string
 		old, new *fleetv1.Robot
@@ -83,7 +99,15 @@ func TestRobotBecameFree(t *testing.T) {
 		{"it came back from Offline", wakeRobot(fleetv1.RobotPhaseOffline, "", "", "aisle-1"), idle, true},
 		{"it came back from Charging", wakeRobot(fleetv1.RobotPhaseCharging, "", "", "aisle-1"), idle, true},
 		{"a free robot moved zone", wakeRobot(fleetv1.RobotPhaseIdle, "", "", "aisle-2"), idle, true},
-		{"a free robot's other status moved (battery, conditions)", idle.DeepCopy(), idle, false},
+		{"a free robot's other status moved (conditions)", idle.DeepCopy(), idle, false},
+		{"a free robot's battery rose", with(idle, battery(30)), with(idle, battery(70)), true},
+		{"a free robot's battery was first reported", idle, with(idle, battery(70)), true},
+		{"a free robot's battery fell", with(idle, battery(70)), with(idle, battery(30)), false},
+		{"a free robot's capability went Degraded → Active", with(idle, capability(fleetv1.CapabilityStatusDegraded)),
+			with(idle, capability(fleetv1.CapabilityStatusActive)), true},
+		{"a free robot's model update ended", with(idle, model(fleetv1.ModelStatusUpdating)), with(idle, model(fleetv1.ModelStatusActive)), true},
+		{"a free robot's adapter honours a new rule", idle,
+			with(idle, func(r *fleetv1.Robot) { r.Status.HonouredOperatingConstraints = []string{"camera"} }), true},
 		{"a free robot took an action", idle, wakeRobot(fleetv1.RobotPhaseAssigned, "pick-1", "", "aisle-1"), false},
 		{"a stop is still clearing (Resuming holds work)", wakeRobot(fleetv1.RobotPhaseIdle, "", fleetv1.RobotEstopStopped, "aisle-1"),
 			wakeRobot(fleetv1.RobotPhaseIdle, "", fleetv1.RobotEstopResuming, "aisle-1"), false},
@@ -98,21 +122,21 @@ func TestRobotBecameFree(t *testing.T) {
 			wakeRobot(fleetv1.RobotPhaseIdle, "pick-0", "", "aisle-1"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := robotBecameFree.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got != tc.want {
-				t.Fatalf("robotBecameFree.Update = %v, want %v", got, tc.want)
+			if got := robotWakeEvent.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got != tc.want {
+				t.Fatalf("robotWakeEvent.Update = %v, want %v", got, tc.want)
 			}
 		})
 	}
-	if !robotBecameFree.Create(event.CreateEvent{Object: idle}) {
+	if !robotWakeEvent.Create(event.CreateEvent{Object: idle}) {
 		t.Error("a robot created free does not wake the waiting actions")
 	}
-	if robotBecameFree.Create(event.CreateEvent{Object: wakeRobot(fleetv1.RobotPhaseDiscovered, "", "", "")}) {
+	if robotWakeEvent.Create(event.CreateEvent{Object: wakeRobot(fleetv1.RobotPhaseDiscovered, "", "", "")}) {
 		t.Error("a robot created not yet free woke the waiting actions")
 	}
-	if robotBecameFree.Create(event.CreateEvent{Object: wakeHeldByZone(idle)}) {
+	if robotWakeEvent.Create(event.CreateEvent{Object: wakeHeldByZone(idle)}) {
 		t.Error("a robot created under a zone's stop woke the waiting actions")
 	}
-	if robotBecameFree.Delete(event.DeleteEvent{Object: idle}) {
+	if robotWakeEvent.Delete(event.DeleteEvent{Object: idle}) {
 		t.Error("a deleted robot woke the waiting actions")
 	}
 }
@@ -325,13 +349,13 @@ func TestMayTakeAction_DropsOnlyWhatDispatchWouldRefuse(t *testing.T) {
 		pinned := a.Spec.RobotSelector != "" && a.Spec.RobotSelector == robot.Name
 		return a.Spec.Zone != "" && !pinned && excludedByZone(robot, a, resolveZoneLeaves(a.Spec.Zone, zoneItems)) != nil
 	}
-	takeable := func(t *testing.T, c client.Client, robot *fleetv1.Robot, movedFrom *string, crossCheck bool) []string {
+	wakes := func(t *testing.T, c client.Client, robot, prev *fleetv1.Robot, crossCheck bool) []string {
 		t.Helper()
 		r := &FleetActionReconciler{Client: c, Scheme: scheme}
 		leaves := r.zoneLeavesFor(context.Background(), actionNS)
 		var kept []string
 		for _, a := range actions {
-			if mayTakeAction(robot, a, leaves, movedFrom) {
+			if mayTakeAction(robot, a, leaves, prev) {
 				kept = append(kept, a.Name)
 			} else if crossCheck && !dispatchRefuses(robot, a) {
 				t.Errorf("the wake dropped %s, which dispatch's filters would not refuse this robot", a.Name)
@@ -340,13 +364,14 @@ func TestMayTakeAction_DropsOnlyWhatDispatchWouldRefuse(t *testing.T) {
 		return kept
 	}
 	readable := fake.NewClientBuilder().WithScheme(scheme).WithObjects(zones...).Build()
+	movedFrom := func(zone string) func(*fleetv1.Robot) { return func(r *fleetv1.Robot) { r.Status.CurrentZone = zone } }
 
 	for _, tc := range []struct {
-		name      string
-		robot     func(*fleetv1.Robot)
-		movedFrom *string
-		c         client.Client
-		want      []string
+		name  string
+		robot func(*fleetv1.Robot)
+		prev  func(*fleetv1.Robot) // nil: the robot has just become free
+		c     client.Client
+		want  []string
 	}{
 		{"a robot that became free, in a leaf zone", nil, nil, readable, []string{"a-no-zone", "b-its-leaf", "c-its-parent",
 			"g-pinned-here-elsewhere", "i-needs-lift", "k-needs-degraded-camera", "l-light-load", "p-battery-floor-below"}},
@@ -365,19 +390,34 @@ func TestMayTakeAction_DropsOnlyWhatDispatchWouldRefuse(t *testing.T) {
 			}).Build(),
 			[]string{"a-no-zone", "b-its-leaf", "c-its-parent", "d-sibling-leaf", "e-other-root", "f-unknown-zone",
 				"g-pinned-here-elsewhere", "i-needs-lift", "k-needs-degraded-camera", "l-light-load", "p-battery-floor-below"}},
-		{"a free robot moved from a sibling leaf: only the zone it entered", nil, ptr.To("aisle-2"), readable,
+		{"a free robot moved from a sibling leaf: only the zone it entered", nil, movedFrom("aisle-2"), readable,
 			[]string{"b-its-leaf"}},
-		{"a free robot moved from another root: every zone it entered", nil, ptr.To("dock"), readable,
+		{"a free robot moved from another root: every zone it entered", nil, movedFrom("dock"), readable,
 			[]string{"b-its-leaf", "c-its-parent"}},
-		{"a free robot moved from no zone: every zone it entered", nil, ptr.To(""), readable,
+		{"a free robot moved from no zone: every zone it entered", nil, movedFrom(""), readable,
 			[]string{"b-its-leaf", "c-its-parent"}},
+		{"a free robot's battery rose past a floor: only the actions with that floor",
+			func(r *fleetv1.Robot) { r.Status.BatteryPercent = ptr.To[int32](70) }, func(*fleetv1.Robot) {}, readable,
+			[]string{"o-battery-floor-above", "r-pinned-here-battery-floor-above"}},
+		{"a free robot's capability went Degraded → Active: the action that refuses Degraded",
+			func(r *fleetv1.Robot) { r.Status.Capabilities[1].Status = fleetv1.CapabilityStatusActive }, func(*fleetv1.Robot) {}, readable,
+			[]string{"k-needs-degraded-camera"}},
+		{"a free robot's model update ended: the action that needs its capability",
+			func(r *fleetv1.Robot) { r.Status.InstalledModels[0].Status = fleetv1.ModelStatusActive }, func(*fleetv1.Robot) {}, readable,
+			[]string{"q-needs-a-capability-whose-model-is-updating"}},
+		{"a free robot's change that admits nothing new", nil, func(*fleetv1.Robot) {}, readable, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := robot.DeepCopy()
 			if tc.robot != nil {
 				tc.robot(r)
 			}
-			got := takeable(t, tc.c, r, tc.movedFrom, tc.movedFrom == nil)
+			var prev *fleetv1.Robot
+			if tc.prev != nil {
+				prev = robot.DeepCopy()
+				tc.prev(prev)
+			}
+			got := wakes(t, tc.c, r, prev, prev == nil)
 			if !slices.Equal(got, tc.want) {
 				t.Fatalf("takes %v, want %v", got, tc.want)
 			}

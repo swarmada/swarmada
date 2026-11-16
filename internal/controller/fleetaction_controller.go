@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,6 +90,13 @@ const (
 	// this interval at all. Pointing one field at both would give a single number two
 	// unrelated meanings and two different fail-safes.
 	pendingRecheckInterval = 15 * time.Second
+	// unreachableRetryInterval is the recheck of an action every robot of which it asked had an
+	// unreachable adapter: an adapter that has just reconnected is Connected a moment before its
+	// stream is registered.
+	unreachableRetryInterval = 2 * time.Second
+	// deadlineRequeueMargin puts a deadline-bound requeue just past the deadline, so the check sees it
+	// passed (untilDeadline).
+	deadlineRequeueMargin = 100 * time.Millisecond
 )
 
 // RBAC for the FleetAction controller. Declared as a standalone, markers-only
@@ -150,6 +158,14 @@ type FleetActionReconciler struct {
 	// this reconciler — including every test that builds one by hand — needs no change.
 	// See dispatch_operating_declines.go for why this is scoped to that one rejection.
 	declines operatingDeclineMemo
+	// woken holds the actions a wake has enqueued whose reconcile has not started
+	// (fleetaction_robot_wake.go). Reconcile forgets each action as it starts.
+	woken wakeMemo
+	// capacityWaiters holds the actions the TDE denied a slot, per zone, for the zone wake
+	// (fleetaction_wake_sources.go).
+	capacityWaiters capacityWaiters
+	// unreachable backs off the recheck of an action every robot of which had an unreachable adapter.
+	unreachable unreachableBackoff
 
 	// orphans remembers when this process first saw a robot record an action that no longer
 	// exists; the record is released once the longest lease plus the skew margin has passed
@@ -303,11 +319,16 @@ const reasonStopUnconfirmed = "StopUnconfirmed"
 // write that loses to a newer object, the ingestor's report of the action's end among them, is
 // not an error: the action is read again and reconciled from what the API server holds.
 func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	r.woken.forget(req.NamespacedName)
+	deadline := r.unstartedDeadline(ctx, req)
 	res, err := r.reconcileAction(ctx, req)
 	if err != nil && errors.IsConflict(err) {
 		log.FromContext(ctx).V(1).Info("a write lost to a newer object; reading it again",
 			"fleetaction", req.NamespacedName, "err", err.Error())
 		return ctrl.Result{Requeue: true}, nil
+	}
+	if err == nil && res.RequeueAfter > 0 && deadline != nil {
+		res.RequeueAfter = clampToDeadline(res.RequeueAfter, *deadline, time.Now())
 	}
 	return res, err
 }
@@ -318,6 +339,70 @@ func (r *FleetActionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // whatever the API server holds, a terminal phase included.
 func (r *FleetActionReconciler) patchActionStatus(ctx context.Context, action, original *fleetv1.FleetAction) error {
 	return r.Status().Patch(ctx, action, executorguard.StatusPatch(original))
+}
+
+// unstartedDeadline returns the spec.deadline of an action that is unstarted (Pending, or no phase
+// yet) as the reconcile starts, is not being deleted, and has not reached it; nil otherwise. A
+// requeue of such an action is cut to just past the deadline (clampToDeadline), so the deadline
+// check (row A16, at the top of reconcileAction) runs then, not at the requeue: a held Pending
+// action no longer has an adapter's heartbeat to wake it. A deadline already passed is left alone:
+// the pass that just ran would have failed the action if it could, and clamping again would loop.
+func (r *FleetActionReconciler) unstartedDeadline(ctx context.Context, req ctrl.Request) *time.Time {
+	action := &fleetv1.FleetAction{}
+	if err := r.Get(ctx, req.NamespacedName, action); err != nil || action.Spec.Deadline == nil ||
+		action.DeletionTimestamp != nil ||
+		(action.Status.Phase != "" && action.Status.Phase != fleetv1.ActionPhasePending) ||
+		!time.Now().Before(action.Spec.Deadline.Time) {
+		return nil
+	}
+	d := action.Spec.Deadline.Time
+	return &d
+}
+
+// clampToDeadline cuts a requeue that would pass deadline to just past it.
+func clampToDeadline(after time.Duration, deadline, now time.Time) time.Duration {
+	until := deadline.Sub(now) + deadlineRequeueMargin
+	if until >= after {
+		return after
+	}
+	return max(until, deadlineRequeueMargin)
+}
+
+// unreachableBackoff is the recheck of an action every robot of which it asked had an unreachable
+// adapter: 2 s, then 4, 8, and the ordinary 15 s, starting again after a minute without one. The
+// first short recheck covers an adapter that has just reconnected (Connected a moment before its
+// stream is registered); the backoff keeps an adapter that stays Connected but cannot answer from
+// putting its actions through the one worker every 2 s.
+type unreachableBackoff struct {
+	mu sync.Mutex
+	m  map[types.NamespacedName]unreachableTry
+}
+
+type unreachableTry struct {
+	n  int
+	at time.Time
+}
+
+func (u *unreachableBackoff) next(key types.NamespacedName, now time.Time) time.Duration {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.m == nil {
+		u.m = map[types.NamespacedName]unreachableTry{}
+	}
+	try := u.m[key]
+	if now.Sub(try.at) >= time.Minute {
+		try.n = 0
+	} else {
+		try.n = min(try.n+1, 3) // 2 s << 3 is past the 15 s cap; more would overflow
+	}
+	try.at = now
+	u.m[key] = try
+	for k, v := range u.m {
+		if now.Sub(v.at) >= time.Minute {
+			delete(u.m, k)
+		}
+	}
+	return min(unreachableRetryInterval<<try.n, pendingRecheckInterval)
 }
 
 // reconcileAction is one pass of Reconcile.
@@ -980,7 +1065,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		clearSensorStreamRefusal(action)
 
 		acceptDegraded := r.acceptDegraded(ctx, action)
-		robot, declined, dropped, err := r.selectServable(ctx, action, robotList.Items, judge,
+		robot, declined, dropped, allUnreachable, err := r.selectServable(ctx, action, robotList.Items, judge,
 			acceptDegraded, r.preferSameManufacturer(ctx, req.Namespace),
 			r.honorPreferredRobot(ctx, req.Namespace))
 		if len(dropped) > 0 {
@@ -1089,6 +1174,12 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 				action.Status.Message = msg
 				if !setAdapterDeclined(action, declined) {
 					_ = r.patchActionStatus(ctx, action, original)
+					if allUnreachable {
+						// Every robot it chose had an unreachable adapter. An adapter that has just
+						// reconnected is written Connected before its stream is registered, so the
+						// wake it caused can arrive first; its next heartbeat no longer retries.
+						return ctrl.Result{RequeueAfter: r.unreachable.next(req.NamespacedName, time.Now())}, nil
+					}
 					return ctrl.Result{RequeueAfter: pendingRecheckInterval}, nil
 				}
 				// A NEW decline reason: written under the resourceVersion this reconcile
@@ -1127,7 +1218,9 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 				// the TDE's RetryAfter hint, bounded by the deconfliction backoff.
 				logger.Info("TDE denied assignment; requeuing", "reason", res.DeniedReason, "err", terr)
 				action.Status.Phase = fleetv1.ActionPhasePending
-				action.Status.Message = "awaiting zone capacity (traffic deconfliction)"
+				action.Status.Message = awaitingZoneCapacity
+				// Recorded before the write: a slot freed by the next reconcile can be seen first.
+				r.capacityWaiters.add(req.Namespace, action.Spec.Zone, action.Name)
 				_ = r.patchActionStatus(ctx, action, original)
 				minRetry, maxRetry := r.tdeRetryBounds(ctx, req.Namespace)
 				return ctrl.Result{RequeueAfter: clampRetryAfter(res.RetryAfter, minRetry, maxRetry)}, nil
@@ -1202,6 +1295,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		}
 
 		logger.Info("scheduling task", "robot", robot.Name)
+		r.capacityWaiters.remove(req.Namespace, action.Spec.Zone, action.Name)
 		// Release the Pending→Assigned latency anchor in the same write that sets Assigned
 		// (RFC-0001 #control-plane-observability-prometheus-metrics-contract). The latency is
 		// observed only once the robot commit below has landed: an assignment that loses the
@@ -1866,25 +1960,28 @@ func (r *FleetActionReconciler) selectServableRobot(ctx context.Context, action 
 	// Its own pass's judge: a candidate re-read as changed is judged by every filter, though the
 	// candidates given here may not have been.
 	judge, _, _ := r.newDispatchJudge(ctx, action)
-	robot, _, _, err := r.selectServable(ctx, action, candidates, judge, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
+	robot, _, _, _, err := r.selectServable(ctx, action, candidates, judge, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
 	return robot, err
 }
 
 // selectServable is selectServableRobot, also returning the last adapter that declined with
 // a reason, so the caller can carry it onto the action when no candidate is left (nil when
-// none declined), and the candidates currentCandidate withheld, with the gate that refused
-// each. judge is the dispatch pass's own (newDispatchJudge).
+// none declined), the candidates currentCandidate withheld, with the gate that refused each, and
+// whether every robot whose adapter was asked was unreachable (at least one was asked). judge is
+// the dispatch pass's own (newDispatchJudge).
 func (r *FleetActionReconciler) selectServable(ctx context.Context, action *fleetv1.FleetAction,
 	candidates []fleetv1.Robot, judge *dispatchJudge, acceptDegraded, preferSameManufacturer, honorPreferredRobot bool,
-) (fleetv1.Robot, *adapterDecline, []dispatchExclusion, error) {
+) (fleetv1.Robot, *adapterDecline, []dispatchExclusion, bool, error) {
 	pool := candidates
 	var declined *adapterDecline
 	var dropped []dispatchExclusion
+	asked, unreachable := 0, 0
+	allUnreachable := func() bool { return asked > 0 && unreachable == asked }
 	// Bounded by the pool size: every iteration removes exactly one candidate.
 	for range candidates {
 		selected, err := r.Scheduler.SelectRobot(action, pool, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
 		if err != nil {
-			return selected, declined, dropped, err
+			return selected, declined, dropped, allUnreachable(), err
 		}
 		// The candidates are the cache's copies. Re-read the chosen one before its adapter is
 		// asked or a TDE slot is taken; a robot another action took since is withheld here.
@@ -1892,9 +1989,13 @@ func (r *FleetActionReconciler) selectServable(ctx context.Context, action *flee
 		if ex != nil {
 			dropped = append(dropped, *ex)
 		} else {
-			ok, d := r.actionServable(ctx, action, &robot)
+			ok, d, gone := r.actionServableOrUnreachable(ctx, action, &robot)
 			if ok {
-				return robot, declined, dropped, nil
+				return robot, declined, dropped, false, nil
+			}
+			asked++
+			if gone {
+				unreachable++
 			}
 			if d != nil {
 				declined = d
@@ -1912,7 +2013,7 @@ func (r *FleetActionReconciler) selectServable(ctx context.Context, action *flee
 	// pool so the caller's existing Pending path and message shape are unchanged — this is
 	// a scheduling miss, not a failure, and retryCount is not incremented (§9.2.3).
 	robot, err := r.Scheduler.SelectRobot(action, nil, acceptDegraded, preferSameManufacturer, honorPreferredRobot)
-	return robot, declined, dropped, err
+	return robot, declined, dropped, allUnreachable(), err
 }
 
 // actionServableBy asks one robot's adapter whether it can serve this action instance.
@@ -1939,8 +2040,15 @@ func (r *FleetActionReconciler) actionServableBy(ctx context.Context, action *fl
 // answered servable=false: the one reply that carries a reason the adapter chose to give.
 // An unreachable adapter declined nothing, so it returns none.
 func (r *FleetActionReconciler) actionServable(ctx context.Context, action *fleetv1.FleetAction, robot *fleetv1.Robot) (bool, *adapterDecline) {
+	ok, d, _ := r.actionServableOrUnreachable(ctx, action, robot)
+	return ok, d
+}
+
+// actionServableOrUnreachable is actionServable, also saying whether the adapter was unreachable.
+func (r *FleetActionReconciler) actionServableOrUnreachable(ctx context.Context, action *fleetv1.FleetAction,
+	robot *fleetv1.Robot) (bool, *adapterDecline, bool) {
 	if r.Validator == nil {
-		return true, nil // catalog gate only — the v0.2 behaviour
+		return true, nil, false // catalog gate only — the v0.2 behaviour
 	}
 	logger := log.FromContext(ctx)
 	var payload []byte
@@ -1953,15 +2061,15 @@ func (r *FleetActionReconciler) actionServable(ctx context.Context, action *flee
 	case err != nil:
 		logger.V(1).Info("validate_action unreachable; skipping candidate",
 			"robot", robot.Name, "action", action.Name, "err", err)
-		return false, nil
+		return false, nil, true
 	case out.Unsupported:
-		return true, nil
+		return true, nil, false
 	case !out.Servable:
 		logger.Info("adapter cannot serve this action instance; trying another robot",
 			"robot", robot.Name, "action", action.Name, "reason", out.Message)
-		return false, &adapterDecline{Adapter: robot.Spec.Adapter.Name, Robot: robot.Name, Reason: out.Message}
+		return false, &adapterDecline{Adapter: robot.Spec.Adapter.Name, Robot: robot.Name, Reason: out.Message}, false
 	default:
-		return true, nil
+		return true, nil, false
 	}
 }
 
@@ -3661,8 +3769,15 @@ func (r *FleetActionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&fleetv1.FleetAction{}).
 		Watches(&fleetv1.Robot{}, handler.EnqueueRequestsFromMapFunc(robotToAction)).
 		// A robot that becomes free wakes the actions waiting for one (fleetaction_robot_wake.go).
-		Watches(&fleetv1.Robot{}, r.wakeHandler(), builder.WithPredicates(robotBecameFree)).
-		Watches(&fleetv1.FleetAdapter{}, handler.EnqueueRequestsFromMapFunc(adapterToActions)).
+		Watches(&fleetv1.Robot{}, r.wakeHandler(), builder.WithPredicates(robotWakeEvent)).
+		// An adapter's liveness heartbeat is filtered out: it changes nothing an action reads, and it
+		// re-enqueued every Pending action of the namespace on each beat (fleetaction_wake_sources.go).
+		Watches(&fleetv1.FleetAdapter{}, handler.EnqueueRequestsFromMapFunc(adapterToActions),
+			builder.WithPredicates(adapterChangeMatters)).
+		// What the heartbeats used to cover, woken where it happens (fleetaction_wake_sources.go).
+		Watches(&fleetv1.FleetZone{}, r.zoneWakeHandler()).
+		Watches(&fleetv1.SwarmadaConfig{}, r.namespaceWakeHandler()).
+		Watches(&fleetv1.ZoneMaintenance{}, r.maintenanceWakeHandler()).
 		Complete(r)
 }
 
