@@ -154,6 +154,23 @@ namespace already held, follow
 its sections *Take the delete checks out* and *Remove a ZoneMaintenance finalizer* apply with the
 manager serving too.
 
+### A large stop slows reads and writes on the manager's client budget
+
+**Limitation.** The manager shares one client budget with the API server (`--kube-api-qps`,
+default 20). During a zone or namespace stop, position frames that may move a robot read the
+`Robot` from the API server rather than the cache, and each dispatch pass for a `Pending` action
+lists every robot in the namespace. These reads compete with the stop's own reads and status
+writes. In a test with 25 robots per stop, about one uncached read in eight during the stops was
+a position frame's.
+
+**What you will see.** In large namespaces a stop's status writes and the next assignments take
+longer, and the manager's client logs waits on its rate limiter.
+
+**Instead.** Keep the defaults for small fleets. For hundreds of robots in one namespace, raise
+`--kube-api-qps` and `--kube-api-burst`. The trade-off is more load on the API server from the
+manager, so raise them only as far as your API server can serve. A fix is planned for the next
+patch release.
+
 ## Security and audit
 
 ### Some custom RBAC verbs are checked only by swarmctl
@@ -746,6 +763,45 @@ from the model's own monitoring or the adapter's telemetry, and use the probe fo
 higher value is the healthier one. See
 [RFC-0001, RobotProbe](../rfcs/dist/RFC-0001-core-spec.md#robotprobe-the-verify-probe-commands).
 
+### A zone or namespace stop can take longer than RFC-0001's 2 s to record every outcome
+
+**Limitation.** RFC-0001 v0.4 requires every robot in a zone or namespace stop to reach its outcome
+(`Stopped` or `Failed`, recorded) within 2 s of the operator's trigger, for a fleet of 50 robots.
+The stop itself goes out at once: in tests with simulated robots, every robot was sent its stop
+within about 1 s and acknowledged it within 0.2 s. Recording each robot's outcome takes longer,
+because the outcome writes queue behind the manager's other writes to `Robot` objects. On the
+default client budget it took 3.83 s at the 95th percentile with 25 robots per stop, and about 19 s
+with 100 robots per stop. All four figures were measured before 0.4.1's last stop and dispatch
+changes, and were timed from the stop's processing pass, not from the operator's trigger.
+
+**What you will see.** `swarmada_estop_fanout_duration_seconds` above 2 s for large stops. From
+0.4.1 it counts from when the control plane first sees the operator's trigger, not from when the
+stop's pass starts; admission and the watch's own delay come before that. After a manager restart
+or a change of leader, a stop whose trigger was already written is timed from its pass.
+
+**Instead.** Expect a robot's recorded outcome to lag its stop in large namespaces. To shorten the
+lag, see
+[A large stop slows reads and writes on the manager's client budget](#a-large-stop-slows-reads-and-writes-on-the-managers-client-budget).
+Whether a different implementation could meet the bound, and what would change, is being worked out
+for a later release.
+
+### A robot can stay stopped after both of its stops are cleared
+
+**Limitation.** A robot that carries its own stop and is also covered by a zone or namespace stop
+can be left `Stopped` when the two are cleared at about the same time. No stop is then in force,
+and no clear reaches the robot again.
+
+**What you will see.** The robot reads `Stopped` with no stop trigger, record or processed marker,
+and `swarmctl estop resume` refuses it, because it is not `Resuming`.
+
+**Instead.** Stop and clear it at robot scope, then resume it:
+
+1. `kubectl annotate robot <name> swarmada.io/estop-triggered="<reason>" -n <namespace>`
+2. Once the robot carries a `swarmada.io/estop-processed` annotation:
+   `kubectl annotate robot <name> swarmada.io/estop-triggered- -n <namespace>`. The robot moves
+   to `Resuming`.
+3. `swarmctl estop resume <name> --reason "<text>" -n <namespace>`
+
 ## Scheduling
 
 ### A robot with no position gets no work in zones with site-aligned geometry
@@ -946,6 +1002,82 @@ it until that action's lease lapses.
 **Instead.** Cancel a running action and wait for `Cancelled` before you delete it:
 `swarmctl cancel <name> --reason "<text>" -n <namespace>`. Keep the robot's adapter connected, so that
 it acknowledges the cancel and the robot is freed at once.
+
+### A robot its adapter reports offline can still be given work
+
+**Limitation.** The control plane writes a robot's reported phase only when it is `Error`. A robot
+whose adapter keeps streaming telemetry that reports it `OFFLINE` stays `Idle` and `Ready`, so the
+scheduler can assign it an action. The control plane marks a robot `Offline` itself only when its
+adapter stops heartbeating, or when no telemetry for the robot arrives for three telemetry
+intervals.
+
+**What you will see.** An action assigned to a robot the adapter reports offline. With the VDA 5050
+adapter, the assignment is refused with `ROBOT_UNAVAILABLE`, and the robot is held off that action
+for a while (below).
+
+**Instead.** Have the adapter refuse work for a vehicle it reads as offline, with
+`ROBOT_UNAVAILABLE`, as the VDA 5050 adapter does.
+
+### An assignment refused at the send while a stop holds the robot is paused, not reverted
+
+**Limitation.** An assignment the control plane cannot send because the robot's registration has
+not been processed, or because its adapter's stream did not negotiate contract `1.4.0`, returns to
+`Pending` and is sent once the robot can take it. When the send is refused because a stop holds the
+robot, `Resuming` included, the assignment is not reverted: the action is paused on the robot, as
+for any work a stop holds, and stays with it until an operator decides. RFC-0001's action table
+(row A24) specifies a revert there too.
+
+**What you will see.** The action stays with the robot, paused, after the stop is cleared.
+
+**Instead.** Have a holder of `estop-clear` on the stop, or on the robot after the release,
+requeue the action, or cancel it, as for other work a stop held; see
+[After a stop, an operator moves the work](#after-a-stop-an-operator-moves-the-work-nothing-moves-it-automatically)
+and [RFC-0001, Safety](../rfcs/dist/RFC-0001-core-spec.md#safety-action-table).
+
+### A robot held off an action is skipped even when it ranks first
+
+**Limitation.** After a robot's adapter refuses an action as `ROBOT_UNAVAILABLE`, or the control
+plane finds at the send that the robot's registration has not been processed (or its stream is
+below contract `1.4.0`), that robot is not offered that action again for a hold-off: 60 s, doubling
+with each repeat up to 10 min. It is skipped for that action even if it passes every candidate
+filter and ranks first, and the action goes to the next-ranked robot, or waits. The robot's
+registration being processed ends a not-registered hold at once, as do its `Ready` condition
+turning `True` again and its deletion; the action is offered it on its next pass, within 15 s.
+RFC-0001 v0.4's rank phase selects the first robot in the order.
+
+**What you will see.** A `RobotHeldOff` Event on the action, naming the robot and the wait, and a
+log line. The hold is not written to the action's status. An action pinned to that robot waits up
+to 10 min.
+
+**Instead.** Fix what keeps the robot from taking work: its registration, its adapter's contract,
+or its availability. A robot that registers is offered the action again at once.
+
+### A full zone does not hold a robot at its boundary
+
+**Limitation.** A zone's `spec.maxConcurrentRobots` is enforced when work is assigned, not at the
+zone's edge. An action whose zone is at capacity is not assigned: it stays `Pending` and is retried
+when a slot frees, unless a Critical or High action preempts lower-priority work there. The control
+plane does not stop a robot that enters a full zone anyway, for example on its way to another zone,
+or after a preemption. When a robot's current zone changes and the zone is then over its limit, the
+Zone Controller sends a hold (`zone_admission`) to the adapters of the robots whose names sort at or
+past the limit. It chooses them by name, not by arrival, so the robot held can be one already
+working in the zone while the robot that entered is let through; RFC-0001 v0.4 discloses this as not
+met. The ROS 2 and VDA 5050 adapters decline the hold, so with them nothing holds the robot. The
+simulation adapter honours it and stops the robot where it is, inside the zone. The field's
+description in the `FleetZone` CRD says a robot is held at the boundary; the next RFC draft corrects
+it.
+
+**What you will see.** An action waiting for a slot shows `Pending` with the message "awaiting zone
+capacity (traffic deconfliction)". A zone can hold more robots than its limit, with a
+`ZoneCapacityReached` Warning event on the `FleetZone` whose message says it is "holding robot …
+at boundary". That wording is wrong: no robot is held at the boundary. With the ROS 2 and VDA 5050
+adapters the robot it names carries on with its current action; the simulation adapter stops it
+where it is. Only new work in the full zone waits. A fix is planned.
+
+**Instead.** Set `maxConcurrentRobots` for the work you assign to the zone. Keep robots that are not
+assigned to a capacity-limited zone from routing through it, or rely on the robot's own navigation
+to keep its distance. See
+[RFC-0001, Zone Controller](../rfcs/dist/RFC-0001-core-spec.md#control-plane-zone-controller).
 
 ## Adapters
 
@@ -1429,6 +1561,35 @@ waits there until the next admission change for that zone.
 
 **Instead.** Nothing moves while it waits. If it waits too long, cancel or requeue its action. See
 [RFC-0001, Safety](../rfcs/dist/RFC-0001-core-spec.md#safety-how-the-two-interact).
+
+### An adapter can turn Degraded during a large stop
+
+**Limitation.** The manager handles an adapter's heartbeat on that adapter's stream, and marks the
+adapter's robots live with `Robot` status writes. Those writes share a rate limiter with a stop's
+own writes to each robot. During a stop that covers about 100 robots of one adapter, heartbeats wait
+behind the stop's writes, and the adapter turns `Degraded` for about 20 s.
+
+**What you will see.** The `FleetAdapter` reads `Degraded` during a large stop and for a few seconds after it. Its
+robots are given no new work until it reads `Connected` again.
+
+**Instead.** Nothing is needed: the adapter returns to `Connected` once the stop's writes are done.
+A fix is planned for the next patch release.
+
+### The VDA 5050 adapter's MQTT connection has no TLS and no login
+
+**Limitation.** In 0.4.1, the VDA 5050 adapter (`fleet-adapter-vda5050`) connects to its MQTT
+broker over plain TCP and does not log in, so the broker must accept anonymous clients. Anyone who
+can reach the broker can read every vehicle's topics, send the vehicles orders and instant actions,
+and forge a vehicle's `state` or `connection` messages. A forged `state` can make the adapter
+confirm an emergency stop the vehicle never made. A client that connects with the adapter's client
+id disconnects the adapter, and then no stop reaches the vehicle. Topic access rules for anonymous
+clients cannot tell the adapter from anyone else.
+
+**What you will see.** Nothing in the adapter's configuration sets a certificate, a user name or a
+password for the broker, and the broker must allow anonymous clients.
+
+**Instead.** Keep the broker on a private network that only the adapters and the vehicles reach.
+TLS and a login are planned for 0.5.0.
 
 ## Compute results
 
