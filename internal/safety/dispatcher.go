@@ -85,6 +85,11 @@ type Result struct {
 
 // Dispatcher pushes estops down live SafetyStreams and records confirmed outcomes.
 type Dispatcher struct {
+	// clearHookBeforeInflight is a test seam, nil in production. clearOnce calls it with the robot's
+	// write lock held, after its check for a stop issued since the clear's epoch and before it reads
+	// the stops in flight, so a test can issue a stop in that window.
+	clearHookBeforeInflight func()
+
 	Client   client.Client
 	Recorder record.EventRecorder
 	// APIReader reads the API server directly, bypassing the manager's cache. The

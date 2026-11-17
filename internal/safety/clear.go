@@ -58,6 +58,18 @@ var ErrNotLeading = errors.New("this control-plane process does not lead; nothin
 type Ends struct {
 	Hold func(fleetv1.EstopHold) bool
 	Stop func(fleetv1.RobotStop) bool
+	// Fresh, when set, replaces Hold and Stop with what it returns, read after the clear's
+	// epoch is issued (ClearEstop). The other carriers are judged on that read, not on one the
+	// caller took before: a stop issued since the caller's read, and not yet recorded on the
+	// robot, would otherwise read as ended, and the clear would release the robot from a stop
+	// in force (RFC-0001 #safety-robot-stop-table, row S5's guard). A trigger written before
+	// Fresh's read is in it; one written after has its stop issued after the clear's epoch, and
+	// supersedes the clear (supersededByLaterStop). An error fails the clear, which is retried.
+	Fresh func(ctx context.Context) (Ends, error)
+	// Held, when set, reports whether a stop other than the one being cleared reaches the robot as
+	// the clear reads it, on the same read as Hold and Stop: a carrier whose trigger reaches the
+	// robot through the zone tree, sent to the robot or not yet. Such a robot is not moved.
+	Held func(robot *fleetv1.Robot) bool
 }
 
 // clearStopsMinContract is the first contract version whose adapters answer an EstopClear.
@@ -172,6 +184,16 @@ func (d *Dispatcher) ClearEstop(ctx context.Context, namespace, robotID, cleared
 	if _, leading := d.leads(); !leading {
 		return "", fmt.Errorf("estop-clear: robot %q: %w", robotID, ErrNotLeading)
 	}
+	// The other carriers are read now, after the epoch, so that no stop issued before the epoch is
+	// judged on a read older than its trigger (Ends.Fresh).
+	if ends.Fresh != nil {
+		fresh, err := ends.Fresh(ctx)
+		if err != nil {
+			return "", fmt.Errorf("estop-clear: robot %q: reading the stops still in force: %w", robotID, err)
+		}
+		fresh.Fresh = nil
+		ends = fresh
+	}
 	o := d.orderFor(key)
 	var out clearResult
 	var err error
@@ -272,6 +294,10 @@ func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, ro
 		logger.Info("estop clear not written: the robot carries its own trigger")
 		return res, nil
 	}
+	if ends.Held != nil && ends.Held(stored) {
+		logger.Info("estop clear not written: another stop reaches the robot on the carriers read after the clear's epoch")
+		return res, nil
+	}
 	var holds []fleetv1.EstopHold
 	for _, h := range stored.Status.EstopHeldBy {
 		if ends.Hold == nil || !ends.Hold(h) {
@@ -307,6 +333,9 @@ func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, ro
 	}
 	// A stop this process sent and has not recorded yet is in its own state: it is in force unless
 	// its carrier has ended, and then this clear ends it too.
+	if d.clearHookBeforeInflight != nil {
+		d.clearHookBeforeInflight()
+	}
 	var unrecorded []*stopRecord
 	for _, r := range d.inflightOf(robotEstopKey(namespace, robotID)) {
 		if recorded[r.entry.ID] || d.settledByClear(r) {
@@ -318,6 +347,13 @@ func (d *Dispatcher) clearOnce(ctx context.Context, o *estopOrder, namespace, ro
 		}
 		unrecorded = append(unrecorded, r)
 		res.ended = append(res.ended, r.entry.ID)
+	}
+	// Asked again now that the stops in flight are read: a stop issued since the check above, in
+	// flight or about to be, has an epoch after this clear's. Its carrier's trigger may postdate
+	// the clear's read of the carriers, so the clear cannot judge it ended. The stop stands.
+	if d.supersededByLaterStop(o, epoch) {
+		logger.Info("estop clear superseded by a trigger issued while it was being decided; the stop stands")
+		return res, nil
 	}
 	base := stored.DeepCopy()
 	stored.Status.EstopState = fleetv1.RobotEstopResuming

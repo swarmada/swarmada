@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -264,37 +265,66 @@ func (r *RobotEstopReconciler) clearRobotEstop(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 	var live []estopscope.Holder
-	var orphaned []string
-	keep := map[string]bool{}
 	for _, h := range estopscope.Holders(robot, zones, configs) {
-		switch {
-		case h.Orphaned:
-			orphaned = append(orphaned, string(h.Kind)+"/"+h.Name)
-		default:
+		if !h.Orphaned {
 			live = append(live, h)
-			if h.Recorded {
-				keep[string(h.Kind)+"/"+h.Name] = true
-			}
 		}
 	}
 	detail := map[string]string{} // none on a robot-scope clear, unless another stop holds the robot
+	// The orphaned records the clear releases, as the clear itself judges them: its Resuming write
+	// removes every record it judged ended, and dropEndedHolds removes the rest.
+	released := map[string]bool{}
 	if len(live) > 0 {
 		detail["held_by"] = live[0].String()
 		heldByStandingStop(r.Recorder, robot, "robot", live[0])
-	} else if _, cerr := r.Estopper.ClearEstop(ctx, robot.Namespace, robot.Name, clearedBy,
-		clearEnds(nil, func(e fleetv1.EstopHold) bool { return !keep[string(estopscope.HoldKind(e.Kind))+"/"+e.Name] },
-			zones, configs)); cerr != nil {
-		return ctrl.Result{}, fmt.Errorf("clearing robot %s estop: %w", robot.Name, cerr)
+	} else {
+		var judged []string
+		state, cerr := r.Estopper.ClearEstop(ctx, robot.Namespace, robot.Name, clearedBy,
+			// Judged on the carriers as the clear reads them after its epoch, not as this pass read
+			// them above: a stop sent to the robot since, and not yet recorded, is still in force.
+			freshClearEnds(r.reader(), r.Client, robot.Namespace, func(z []fleetv1.FleetZone, cf []fleetv1.SwarmadaConfig) safety.Ends {
+				judged = nil
+				e := clearEnds(nil, func(e fleetv1.EstopHold) bool {
+					if estopscope.HoldStands(e, z, cf) {
+						return false
+					}
+					if estopscope.HoldOrphaned(e, z, cf) {
+						judged = append(judged, string(estopscope.HoldKind(e.Kind))+"/"+e.Name)
+					}
+					return true
+				}, z, cf)
+				e.Held = func(rb *fleetv1.Robot) bool { return heldByLiveStop(rb, z, cf) }
+				return e
+			}))
+		if cerr != nil {
+			return ctrl.Result{}, fmt.Errorf("clearing robot %s estop: %w", robot.Name, cerr)
+		}
+		if state == fleetv1.RobotEstopResuming {
+			for _, h := range judged {
+				released[h] = true
+			}
+		}
 	}
 	// Every record this clear may end: a stop whose carrier no longer exists, and a record
-	// whose carrier has been cleared. A record of a stop that still holds is kept.
-	if err := dropHolds(ctx, r.Client, r.reader(), robot.Namespace, robot.Name, func(e fleetv1.EstopHold) bool {
-		return !keep[string(estopscope.HoldKind(e.Kind))+"/"+e.Name]
-	}); err != nil {
+	// whose carrier has been cleared. A record of a stop that still holds is kept, judged on the
+	// carriers read after the robot (dropEndedHolds), so a record written since this pass's read
+	// is kept while its stop stands.
+	// The audit names the orphaned records the write actually released, not those this pass's
+	// earlier read showed.
+	orphaned, err := dropEndedHolds(ctx, r.Client, r.reader(), robot.Namespace, robot.Name)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(orphaned) > 0 {
-		detail["released_orphaned_holds"] = strings.Join(orphaned, ",")
+	for _, h := range orphaned {
+		released[h] = true
+	}
+	if len(released) > 0 {
+		names := make([]string, 0, len(released))
+		for h := range released {
+			names = append(names, h)
+		}
+		sort.Strings(names)
+		detail["released_orphaned_holds"] = strings.Join(names, ",")
 	}
 	if len(detail) == 0 {
 		detail = nil
@@ -543,4 +573,16 @@ func (r *RobotEstopReconciler) clock() time.Time {
 		return r.now()
 	}
 	return time.Now()
+}
+
+// heldByLiveStop reports whether a stop other than the robot's own holds it on the carriers given:
+// a record whose carrier still holds its stop, or a zone's or the namespace's trigger that reaches
+// it. A record whose carrier is gone does not: the robot's own clear releases it (Orphaned).
+func heldByLiveStop(robot *fleetv1.Robot, zones []fleetv1.FleetZone, configs []fleetv1.SwarmadaConfig) bool {
+	for _, h := range estopscope.Holders(robot, zones, configs) {
+		if !h.Orphaned && h.Kind != estopscope.KindRobot {
+			return true
+		}
+	}
+	return false
 }
