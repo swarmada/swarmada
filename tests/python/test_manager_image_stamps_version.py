@@ -30,7 +30,8 @@ def _module() -> str:
 def _builder_stage() -> str:
     text = (ROOT / "Dockerfile").read_text().replace("\\\n", " ")
     for stage in re.split(r"(?m)^FROM\s+", text)[1:]:
-        if re.match(r"\S+\s+AS\s+builder\b", stage):
+        # FROM may carry flags before the image (--platform=$BUILDPLATFORM).
+        if re.match(r"(?:--\S+\s+)*\S+\s+AS\s+builder\b", stage):
             return stage
     raise AssertionError("Dockerfile has no stage named builder")
 

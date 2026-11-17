@@ -8,20 +8,18 @@ and the RFC differ, the RFC governs.
 
 ## Installing
 
-### No published image, binary or package
+### No published binary or package other than the manager image
 
-**Limitation.** No container image, `swarmctl` binary, Helm package or Python package is
-published. A release is a tag of the source. Building from source is the only install path.
+**Limitation.** The controller-manager image is published from 0.4.1
+([container-registry.md](container-registry.md)). No `swarmctl` binary, Helm package or Python
+package is published, and no other image is.
 
-**What you will see.** The chart's default image, `ghcr.io/swarmada/swarmada` at the chart's
-`appVersion`, is not published. A `helm install` with default values creates a manager Pod that
-cannot pull its image.
+**What you will see.** The chart installs from the source tree, `deploy/swarmada`. Its default
+image, `ghcr.io/swarmada/swarmada` at the chart's `appVersion`, is pulled from GHCR.
 
-**Instead.** Build the manager image with `make docker-build IMG=<ref>` and make it available to
-your cluster, then set `image.repository` and `image.tag` to the image you built; see
-[deploy/swarmada/README.md](../deploy/swarmada/README.md).
-Build `swarmctl` with `make swarmctl`, which writes `bin/swarmctl` for the host platform.
-`make first-run` does all of this on a `kind` cluster.
+**Instead.** Build `swarmctl` with `make swarmctl`, which writes `bin/swarmctl` for the host
+platform. Install the Python package from the source tree. `make first-run` builds and loads
+everything on a `kind` cluster.
 
 ### Kubernetes 1.31 or later
 

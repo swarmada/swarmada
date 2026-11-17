@@ -36,3 +36,10 @@ systems. See [docs/architecture.md](docs/architecture.md) → The safety boundar
 
 Swarmada is pre-release. Until a stable release, security fixes are applied to `main`.
 Supported-version ranges will be published here at the first tagged release.
+
+## Verifying release images
+
+From 0.4.1 the controller-manager image, `ghcr.io/swarmada/swarmada`, is signed with cosign,
+keyless through GitHub's OIDC identity, by the release workflow at the release tag, and
+carries SBOM and provenance attestations. Verify an image before you run it; the commands are
+in [docs/container-registry.md](docs/container-registry.md#verifying-a-release-image).

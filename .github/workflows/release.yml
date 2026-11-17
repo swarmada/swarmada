@@ -1,0 +1,236 @@
+# Release: on a vX.Y.Z tag, builds the controller-manager image for every platform in PLATFORMS,
+# pushes it by digest only, with BuildKit's SBOM and provenance attestations, signs it keylessly
+# with cosign (GitHub OIDC), verifies the signature on the index and on each platform image and the
+# attestations of each platform, and only then tags it X.Y.Z. A separate job moves latest, and only
+# when this version is the highest vX.Y.Z tag. On a pull request that changes the Dockerfile, the
+# modules or this file, the same build runs with no login, no push and no signing.
+#
+# Every action is pinned by commit SHA (the version is in the comment): the publish job holds
+# packages: write and id-token: write. The tag name reaches the scripts only through env, never
+# inlined into a run line. The builder stage cross-compiles (Dockerfile: --platform=$BUILDPLATFORM),
+# so no emulation is used.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - go.mod
+      - go.sum
+      - .github/workflows/release.yml
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/swarmada/swarmada
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  dry-run:
+    name: Build (dry run, no push)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+
+      - name: Build every platform
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: false
+          build-args: |
+            VERSION=0.0.0-dryrun
+            REVISION=${{ github.sha }}
+
+      # The pinned installer and cosign version, proven before a tag needs them (no signing here).
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+
+      - name: cosign is installed at the pinned version
+        run: cosign version
+
+  publish:
+    name: Build, push by digest, sign, verify, tag
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Required reviewers and the v* tag restriction are set on this environment in the repository
+    # settings (docs/release-process.md).
+    environment: release
+    concurrency:
+      group: release-publish-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Version from the tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          v="${REF_NAME#v}"
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag ${REF_NAME} is not vX.Y.Z"
+            exit 1
+          fi
+          chart="$(awk -F'"' '/^appVersion:/ {print $2}' deploy/swarmada/Chart.yaml)"
+          if [ "$chart" != "$v" ]; then
+            echo "::error::tag ${REF_NAME} does not match the chart's appVersion ${chart}"
+            exit 1
+          fi
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse a version already published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "${IMAGE}:${VERSION}" > /dev/null 2>&1; then
+            echo "::error::${IMAGE}:${VERSION} already exists; a release version is published once"
+            exit 1
+          fi
+
+      - name: Build and push by digest, with SBOM and provenance
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: generator=docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+
+      - name: Sign the index and every manifest in it (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes --recursive "${IMAGE}@${DIGEST}"
+
+      - name: Verify the signatures and each platform's SBOM and provenance
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+        run: |
+          set -eu
+          verify() {
+            cosign verify --certificate-identity "${IDENTITY}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$1" > /dev/null
+          }
+          verify "${IMAGE}@${DIGEST}"
+          index="$(docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}")"
+          for platform in $(printf '%s' "${PLATFORMS}" | tr ',' ' '); do
+            os="${platform%/*}"; arch="${platform#*/}"
+            pd="$(printf '%s' "$index" | jq -r --arg os "$os" --arg arch "$arch" \
+              '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest')"
+            if [ -z "$pd" ] || [ "$(printf '%s\n' "$pd" | wc -l)" -ne 1 ]; then
+              echo "::error::${platform}: no single image manifest in the index"
+              exit 1
+            fi
+            verify "${IMAGE}@${pd}"
+            ad="$(printf '%s' "$index" | jq -r --arg pd "$pd" \
+              '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest"
+                and .annotations["vnd.docker.reference.digest"] == $pd) | .digest')"
+            if [ -z "$ad" ]; then
+              echo "::error::${platform}: no attestation manifest"
+              exit 1
+            fi
+            types="$(docker buildx imagetools inspect --raw "${IMAGE}@${ad}" |
+              jq -r '.layers[].annotations["in-toto.io/predicate-type"] // empty')"
+            printf '%s\n' "$types" | grep -q '^https://spdx.dev/Document' ||
+              { echo "::error::${platform}: no SPDX SBOM attestation"; exit 1; }
+            printf '%s\n' "$types" | grep -q '^https://slsa.dev/provenance/' ||
+              { echo "::error::${platform}: no SLSA provenance attestation"; exit 1; }
+          done
+          echo "signed and verified: ${IMAGE}@${DIGEST}"
+
+      - name: Tag the verified digest X.Y.Z
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          docker buildx imagetools create --tag "${IMAGE}:${VERSION}" "${IMAGE}@${DIGEST}"
+          got="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{ .Manifest.Digest }}')"
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::${IMAGE}:${VERSION} is ${got}, not the verified ${DIGEST}"
+            exit 1
+          fi
+
+  latest:
+    name: Move latest to the highest release
+    needs: publish
+    runs-on: ubuntu-latest
+    # One at a time across all tags; a run waiting here is replaced by a newer one, which decides
+    # from the tags as they are then.
+    concurrency:
+      group: release-latest
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move latest only if this is the highest vX.Y.Z tag
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          highest="$(git ls-remote --tags "https://github.com/${REPO}.git" |
+            sed -n 's#.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' | sort -V | tail -1)"
+          if [ "$highest" != "$VERSION" ]; then
+            echo "latest stays: ${VERSION} is not the highest release (${highest})"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
+          echo "latest -> ${IMAGE}@${DIGEST} (${VERSION})"

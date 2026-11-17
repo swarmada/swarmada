@@ -27,8 +27,12 @@ helm upgrade swarmada deploy/swarmada -n swarmada-system
 helm uninstall swarmada -n swarmada-system   # CRDs and CRs are KEPT (see below)
 ```
 
-No manager image is published for this release; build it from source and give the
-chart its name. On kind:
+The chart's default image is `ghcr.io/swarmada/swarmada` at the chart's `appVersion`,
+published for `linux/amd64` and `linux/arm64` and signed by the release workflow. The chart
+does not check the signature: verify the image as
+[docs/container-registry.md](../../docs/container-registry.md#verifying-a-release-image) shows,
+and pin it by digest with `--set image.tag=X.Y.Z@sha256:<digest>`. To run an image built from
+source instead, give the chart its name. On kind:
 
 ```sh
 make docker-build IMG=swarmada-controller:dev

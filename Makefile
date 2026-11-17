@@ -130,6 +130,10 @@ MYPY           ?= mypy
 IMG            ?= ghcr.io/swarmada/swarmada:latest
 # The version the manager image stamps (Dockerfile ARG VERSION): the chart's appVersion.
 VERSION        ?= $(shell awk -F'"' '/^appVersion:/ {print $$2}' deploy/swarmada/Chart.yaml)
+# The commit the manager image is labelled with (org.opencontainers.image.revision); empty outside a checkout.
+REVISION       ?= $(shell git rev-parse HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+# The platforms the release workflow publishes the manager image for (.github/workflows/release.yml).
+MANAGER_PLATFORMS ?= linux/amd64,linux/arm64
 
 .PHONY: all help check-env
 
@@ -888,10 +892,13 @@ IMG_EDGE ?= ghcr.io/swarmada/edge:latest
 EDGE_PLATFORM  ?= linux/$(shell $(GO) env GOARCH)
 EDGE_PLATFORMS ?= linux/amd64,linux/arm64
 
-.PHONY: docker-build docker-push docker-build-edge docker-push-edge
+.PHONY: docker-build docker-buildx docker-push docker-build-edge docker-push-edge
 
 docker-build:   ## Build the controller-manager Docker image from the committed Go proto stubs (see Dockerfile)
-	docker build --build-arg VERSION=$(VERSION) -t $(IMG) .
+	docker build --build-arg VERSION=$(VERSION) --build-arg REVISION=$(REVISION) -t $(IMG) .
+
+docker-buildx:  ##! Build the controller-manager image for every published platform, without loading or pushing it (a build check)
+	docker buildx build --platform $(MANAGER_PLATFORMS) --build-arg VERSION=$(VERSION) --build-arg REVISION=$(REVISION) .
 
 docker-push:    ##! Push the controller-manager Docker image
 	docker push $(IMG)

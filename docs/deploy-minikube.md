@@ -94,9 +94,9 @@ distroless static, nonroot runtime) that compiles `cmd/manager`:
 make docker-build IMG=swarmada-controller:dev
 ```
 
-`IMG` defaults to `ghcr.io/swarmada/swarmada:latest` if you omit it — for a
-local dev loop, tagging it something like `swarmada-controller:dev` avoids
-any confusion with a real registry image.
+`IMG` defaults to `ghcr.io/swarmada/swarmada:latest` if you omit it — the name of the
+published image, so for a local dev loop tag it something like `swarmada-controller:dev`
+to keep it apart from the release.
 
 The Dockerfile's builder stage `COPY proto/ proto/`s the committed Go stubs
 (`proto/fleet_adapter/v1/*.pb.go`), so `docker-build` needs no codegen

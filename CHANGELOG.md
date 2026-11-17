@@ -10,6 +10,24 @@ were **added** or **amended**; the version increment follows
 
 ## [Unreleased]
 
+### Added
+
+- **The controller-manager image is published.** A release workflow
+  (`.github/workflows/release.yml`) runs on a `vX.Y.Z` tag. It builds
+  `ghcr.io/swarmada/swarmada` for `linux/amd64` and `linux/arm64`, tags it `X.Y.Z` and `latest`,
+  attaches BuildKit's SBOM and provenance attestations, and signs it with cosign, keyless
+  through GitHub's OIDC identity. A default `helm install` pulls it. To verify an image, see
+  [docs/container-registry.md](docs/container-registry.md#verifying-a-release-image).
+- The manager image carries the OCI labels `org.opencontainers.image.source`, `.revision`,
+  `.version` and `.licenses`.
+
+### Changed
+
+- The manager `Dockerfile` declares `VERSION` after the module download, so a new version
+  reuses the cached download layer. The binary and its version stamp are unchanged.
+- A component release is tagged `vX.Y.Z`; see
+  [docs/release-process.md](docs/release-process.md#versioning).
+
 ## [RFC-0001 v0.4] - 2026-11-04
 
 **Spec version `0.4`.** RFC-0001 v0.4, with its two accepted amendments. Fleet-adapter contract `1.4.0`
