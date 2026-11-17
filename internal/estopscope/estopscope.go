@@ -142,6 +142,55 @@ func HeldOnRecord(robot *fleetv1.Robot) (Holder, bool) {
 	return Holder{}, false
 }
 
+// HoldStands reports whether one status.estopHeldBy entry still holds its stop by its carrier,
+// under the rule Holders applies to recorded entries: its carrier exists under the UID the
+// entry recorded and carries the trigger or the processed marker. An entry whose carrier is
+// gone, or was recreated under another UID, does not stand here; Holders names it Orphaned, and
+// only a robot-scope clear releases it. zones and configs are the robot's namespace's.
+func HoldStands(e fleetv1.EstopHold, zones []fleetv1.FleetZone, configs []fleetv1.SwarmadaConfig) bool {
+	var meta *carrierMeta
+	switch e.Kind {
+	case fleetv1.EstopHoldSwarmadaConfig:
+		for i := range configs {
+			if configs[i].Name == e.Name {
+				meta = &carrierMeta{uid: string(configs[i].UID), annotations: configs[i].Annotations}
+			}
+		}
+	default:
+		for i := range zones {
+			if zones[i].Name == e.Name {
+				meta = &carrierMeta{uid: string(zones[i].UID), annotations: zones[i].Annotations}
+			}
+		}
+	}
+	if meta == nil || (e.UID != "" && meta.uid != "" && e.UID != meta.uid) {
+		return false
+	}
+	return meta.inForce()
+}
+
+// HoldOrphaned reports whether one status.estopHeldBy entry names a carrier that is gone, or was
+// recreated under another UID: the entry Holders names Orphaned, which only a robot-scope clear
+// releases.
+func HoldOrphaned(e fleetv1.EstopHold, zones []fleetv1.FleetZone, configs []fleetv1.SwarmadaConfig) bool {
+	uid, found := "", false
+	switch e.Kind {
+	case fleetv1.EstopHoldSwarmadaConfig:
+		for i := range configs {
+			if configs[i].Name == e.Name {
+				uid, found = string(configs[i].UID), true
+			}
+		}
+	default:
+		for i := range zones {
+			if zones[i].Name == e.Name {
+				uid, found = string(zones[i].UID), true
+			}
+		}
+	}
+	return !found || (e.UID != "" && uid != "" && e.UID != uid)
+}
+
 // StandingStop returns the first stop Holders names, and whether there is one. Each clear
 // asks it after removing its own trigger and its own record from the robot, so the stop
 // being cleared is never the answer.

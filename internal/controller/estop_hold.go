@@ -120,6 +120,55 @@ func dropHolds(ctx context.Context, c client.Client, reader client.Reader, names
 	})
 }
 
+// dropEndedHolds removes from the robot's record every entry whose carrier no longer holds its
+// stop (estopscope.HoldStands): cleared, or gone (orphaned, which only a robot-scope clear
+// releases). Each attempt reads the robot, then the carriers: an entry the robot records was
+// written after its carrier's trigger, so a carrier read taken after the robot shows that trigger,
+// and the entry stays. A decision on carriers read before the robot could drop the entry of a
+// stop recorded in between, while that stop is in force. orphaned names the orphaned entries the
+// write that landed removed, as kind/name.
+func dropEndedHolds(ctx context.Context, c client.Client, reader client.Reader, namespace, robot string) (orphaned []string, err error) {
+	if reader == nil {
+		reader = c
+	}
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		cur := &fleetv1.Robot{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: robot}, cur); err != nil {
+			return err
+		}
+		if len(cur.Status.EstopHeldBy) == 0 {
+			return nil
+		}
+		zones, configs, err := readStandingStops(ctx, reader, namespace)
+		if err != nil {
+			return err
+		}
+		var next []fleetv1.EstopHold
+		orphaned = nil
+		for _, e := range cur.Status.EstopHeldBy {
+			switch {
+			case estopscope.HoldStands(e, zones, configs):
+				next = append(next, e)
+			case estopscope.HoldOrphaned(e, zones, configs):
+				orphaned = append(orphaned, string(estopscope.HoldKind(e.Kind))+"/"+e.Name)
+			}
+		}
+		if len(next) == len(cur.Status.EstopHeldBy) {
+			return nil
+		}
+		base := cur.DeepCopy()
+		cur.Status.EstopHeldBy = next
+		return c.Status().Patch(ctx, cur, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, nil // the robot is gone: nothing was released
+	case err != nil:
+		return nil, fmt.Errorf("writing the estop hold record of robot %s: %w", robot, err)
+	}
+	return orphaned, nil
+}
+
 // patchHolds applies edit to the robot's record, read from the API server, and writes it
 // under an optimistic lock, retried on a conflict, with a backoff long enough to outlast the
 // other status writes a stop makes (its record, its outcome). A robot that no longer exists has
@@ -344,6 +393,25 @@ func clearEnds(cleared *holdRef, drop func(fleetv1.EstopHold) bool, zones []flee
 	}}
 }
 
+// freshClearEnds is the Ends a clear judges the other carriers by, built from the namespace's
+// FleetZones and SwarmadaConfigs read inside the clear, after its epoch (safety.Ends.Fresh), and
+// not from a read the pass took before. A stop sent to the robot since that earlier read, and not
+// yet recorded on it, would otherwise read as ended. reader is the uncached reader; nil falls
+// back to c.
+func freshClearEnds(reader client.Reader, c client.Client, namespace string,
+	build func([]fleetv1.FleetZone, []fleetv1.SwarmadaConfig) safety.Ends) safety.Ends {
+	if reader == nil {
+		reader = c
+	}
+	return safety.Ends{Fresh: func(ctx context.Context) (safety.Ends, error) {
+		zones, configs, err := readStandingStops(ctx, reader, namespace)
+		if err != nil {
+			return safety.Ends{}, err
+		}
+		return build(zones, configs), nil
+	}}
+}
+
 // clearCarrier applies the clear of ref's stop to robots. A robot another stop still holds
 // keeps its state and loses only ref's record. Every other robot is moved to Resuming
 // (Estopper.ClearEstop), and then loses ref's record, so a crash between the two is retried
@@ -362,7 +430,19 @@ func clearCarrier(ctx context.Context, c client.Client, reader client.Reader, es
 			held.add(r.Name, by)
 			heldByStandingStop(rec, r, clearedScope, by)
 		} else {
-			if _, err := est.ClearEstop(ctx, namespace, r.Name, clearedBy, clearEnds(&ref, ref.names, zones, configs)); err != nil {
+			// zones and configs were read at the start of this pass, for the robots before this one
+			// too; the clear judges the other carriers on a read of its own, taken after its epoch.
+			ends := freshClearEnds(reader, c, namespace, func(z []fleetv1.FleetZone, cf []fleetv1.SwarmadaConfig) safety.Ends {
+				e := clearEnds(&ref, ref.names, z, cf)
+				// The pre-check above read the carriers at the start of the pass; this one reads
+				// them after the clear's epoch, for the robot as the clear reads it.
+				e.Held = func(rb *fleetv1.Robot) bool {
+					_, held := estopscope.StandingStop(withoutHold(rb, ref), z, cf)
+					return held
+				}
+				return e
+			})
+			if _, err := est.ClearEstop(ctx, namespace, r.Name, clearedBy, ends); err != nil {
 				errs = append(errs, fmt.Errorf("clearing robot %s: %w", r.Name, err))
 				continue
 			}
