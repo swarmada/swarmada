@@ -164,6 +164,7 @@ func TestSilentRobotBehindLiveAdapter_GoesOfflineAndReturnsWhenItTalks(t *testin
 		frameClock = clock
 		frame("talker", 90)
 		far.AdapterHeartbeat(context.Background(), id)
+		far.liveness.flush() // the stamps are written by the adapter's liveness worker
 		if s := lastSeen(t, c, "silent"); s.After(prevSilent) {
 			silentStamps++
 			prevSilent = s
