@@ -29,10 +29,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -62,6 +64,13 @@ const (
 	// event has woken it: a robot a missed event left unstopped is stopped on the next pass.
 	stopInForceResync = 30 * time.Second
 )
+
+// inForceResync is stopInForceResync spread over ±20 % (24 s to 36 s), so carriers whose stops
+// went into force together do not resync, and read the API server, in lockstep: their reads would
+// otherwise reach the client's buckets at the same moment, every time.
+func inForceResync() time.Duration {
+	return wait.Jitter(stopInForceResync*4/5, 0.5)
+}
 
 // ZoneEstopper is the confirmed per-robot estop primitive the zone fan-out reuses.
 // [github.com/swarmada/swarmada/internal/safety.Dispatcher] satisfies it: it pushes
@@ -105,6 +114,26 @@ type ZoneEstopReconciler struct {
 	APIReader client.Reader
 	// markers is the processed marker this process last wrote or removed on each zone.
 	markers writtenMarkers
+	// MaxConcurrentStops is how many zones' passes run at once; 0 is defaultMaxConcurrentStops.
+	// controller-runtime never hands one zone to two workers, so each zone's passes stay in
+	// order, while one zone's stop never waits for another zone's pass (row S1).
+	MaxConcurrentStops int
+	// seen is when this process first saw each zone's trigger (the fan-out metric's start).
+	seen triggerSeen
+}
+
+// defaultMaxConcurrentStops is how many carriers' passes each stop controller runs at once. A
+// stop waits for another carrier's pass only when this many passes of its kind are running
+// already (a disclosed bound; ADR-0043's addendum). Each worker is one idle goroutine until a
+// pass needs it.
+const defaultMaxConcurrentStops = 1024
+
+// concurrentStops is n, or the default for 0 and below.
+func concurrentStops(n int) int {
+	if n <= 0 {
+		return defaultMaxConcurrentStops
+	}
+	return n
 }
 
 // reader is the uncached reader when one is wired, else the client.
@@ -131,6 +160,7 @@ func (r *ZoneEstopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // clear finds a trigger written while it ran.
 func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Request, zone *fleetv1.FleetZone) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("fleetzone", req.NamespacedName)
+	passStart := time.Now()
 
 	if r.Estopper == nil {
 		return ctrl.Result{}, nil
@@ -172,7 +202,7 @@ func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Reques
 		if err := r.holdLateArrivals(ctx, req.Namespace, zone, trigger); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: stopInForceResync}, r.projectEstopStatus(ctx, req.Namespace, zone, nil, nil)
+		return ctrl.Result{RequeueAfter: inForceResync()}, r.projectEstopStatus(ctx, req.Namespace, zone, nil, nil)
 	case !firing && wasProcessed:
 		// The estop-trigger annotation was removed (the operator-authorized
 		// estop-clear verb): resume the robots and drop the processed marker.
@@ -194,27 +224,44 @@ func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Reques
 	issuedBy := actor.Identity
 
 	// ── Fan out to every robot in scope (confirmed estop each) ─────────────────
+	// Row S1: the stop is sent at once, and nothing is read past the cache before it. The robots
+	// the cache places in the stop's scope are sent now. The API server's view follows, and a robot
+	// it adds (admitted or moved a moment ago, not in the cache yet) is sent as soon as that read
+	// returns. A robot the cache still places in the zone after it left is stopped too: a stop
+	// reaches more robots, never fewer (estopscope FanOutScope).
+	ref := zoneHold(zone)
+	ep := startEstopEpisode(ctx, r.Estopper, req.Namespace, reason, issuedBy, metrics.ScopeZone, carrierOf(ref),
+		func(ctx context.Context, robot string) error {
+			return recordHoldAndWithdraw(ctx, r.Client, r.reader(), req.Namespace, robot, ref)
+		})
+	if cached, cerr := r.robotsInEstopScopeFrom(ctx, r.Client, req.Namespace, zone.Name, toChildren, false); cerr == nil {
+		ep.launch(cached)
+	} else {
+		logger.Info("zone estop: the cache could not place the stop's robots; sending after the API server's read",
+			"zone", zone.Name, "err", cerr.Error())
+	}
 	robots, err := r.robotsInEstopScope(ctx, req.Namespace, zone.Name, toChildren)
 	if err != nil {
+		// The stops already sent stand, and their goroutines record them; the pass is retried and
+		// reaches every robot again.
+		ep.wait()
 		return ctrl.Result{}, err
 	}
+	ep.launch(robots)
 	stopped, failed, unwritten := 0, 0, 0
 	// Collected for the audit entry: WHICH robots were in scope (RFC-0001 #safety-required-events
 	// robots_in_scope) and the worst ack latency across the fan-out. A per-robot
 	// rpc_sent_at/ack_received_at pair cannot collapse into one entry for a fan-out,
 	// so the robot-scope entries carry those; here the worst latency is the number
 	// that matters, because the RFC-0001 #safety-timing-requirements SLA is breached if ANY robot exceeds it.
-	inScope := make([]string, 0, len(robots))
 	var worstLatency time.Duration
 	// Issued in PARALLEL (RFC-0001 #safety-estop-scopes): one goroutine per robot, so a slow acknowledgement
-	// from one robot never delays the estop signal to the others. estopFanout also returns
-	// the episode's wall-clock duration — trigger to last robot resolved — which is the
-	// interval the per-robot latency histogram structurally cannot see (ADR-0042).
-	ref := zoneHold(zone)
-	outcomes, fanout := estopFanoutHeld(ctx, r.Estopper, req.Namespace, robots, reason, issuedBy,
-		metrics.ScopeZone, carrierOf(ref), func(ctx context.Context, robot string) error {
-			return recordHoldAndWithdraw(ctx, r.Client, r.reader(), req.Namespace, robot, ref)
-		})
+	// from one robot never delays the estop signal to the others. The episode's wall-clock
+	// duration, trigger to last robot resolved, is the interval the per-robot latency histogram
+	// structurally cannot see (ADR-0042).
+	outcomes, lastResolved := ep.wait()
+	fanout := lastResolved.Sub(ep.start)
+	inScope := make([]string, 0, len(outcomes))
 	// Aggregated after the join, in robot order: the counts, the worst latency and the audit
 	// entry must not depend on which goroutine happened to finish first.
 	for _, o := range outcomes {
@@ -235,9 +282,6 @@ func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Reques
 		}
 		stopped++
 	}
-	// Observed for every episode that fans out, including one that stopped nothing: a zone
-	// whose robots all failed to confirm is exactly the episode an operator needs timed.
-	metrics.ObserveEstopFanout(req.Namespace, metrics.ScopeZone, fanout)
 	logger.Info("zone estop fanned out", "zone", zone.Name, "reason", reason,
 		"robots", len(robots), "stopped", stopped, "unconfirmed", failed, "fanout", fanout)
 
@@ -308,6 +352,12 @@ func (r *ZoneEstopReconciler) reconcileZone(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("recording estop processed: %w", err)
 	}
 	r.markers.wrote(req.NamespacedName, trigger)
+	// Observed once per episode, on the pass that recorded it, from the operator's trigger as this
+	// process first saw it to the last robot's outcome. Every episode that fans out is observed,
+	// one that stopped nothing included: a zone whose robots all failed to confirm is exactly the
+	// episode an operator needs timed. A pass that failed and was retried is not a second episode.
+	metrics.ObserveEstopFanout(req.Namespace, metrics.ScopeZone, lastResolved.Sub(r.seen.since(req.NamespacedName, passStart)))
+	r.seen.forget(req.NamespacedName)
 
 	// Reflect the active estop in the status of every zone it reaches (RFC-0001
 	// #fleetzone-schema-root-zone).
@@ -351,9 +401,20 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, req ctrl.Reque
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	cleared, held, cerr := clearCarrier(ctx, r.Client, r.reader(), r.Estopper, r.Recorder, namespace, ref,
-		robots, zones, configs, clearedBy, "zone "+zone.Name)
-	logger.Info("zone estop cleared", "zone", zone.Name, "robots", len(robots),
+	// A trigger written while the clear runs interrupts it between robots: the new stop is
+	// issued at once (dropClearedMarker, below), not after every robot has been cleared.
+	retriggered := func(ctx context.Context) bool {
+		cur := &fleetv1.FleetZone{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(zone), cur); err != nil {
+			return false
+		}
+		_, firing := cur.Annotations[annEstopTriggered]
+		return firing
+	}
+	cleared, held, interrupted, cerr := clearCarrierUntil(ctx, r.Client, r.reader(), r.Estopper, r.Recorder, namespace,
+		ref, robots, zones, configs, clearedBy, "zone "+zone.Name, retriggered)
+	logger.Info("zone estop cleared", "zone", zone.Name, "robots", len(robots), "cleared", cleared,
+		"interruptedByNewTrigger", interrupted,
 		"heldByOwnEstop", held.own, "heldByWiderEstop", held.wider, "err", errString(cerr))
 
 	if r.Audit != nil {
@@ -368,7 +429,7 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, req ctrl.Reque
 			Outcome:   outcome,
 			Actor:     actor,
 			Resource:  audit.Resource{Kind: "FleetZone", Namespace: namespace, Name: zone.Name},
-			Detail:    held.detail(map[string]string{"robots": itoa(len(robots)), "cleared": itoa(cleared)}),
+			Detail:    held.detail(clearDetail(len(robots), cleared, interrupted)),
 		}); aerr != nil {
 			logger.Error(aerr, "recording ESTOP_CLEARED audit entry")
 		}
@@ -384,6 +445,7 @@ func (r *ZoneEstopReconciler) clearZoneEstop(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("clearing estop processed marker: %w", err)
 	}
 	r.markers.removed(client.ObjectKeyFromObject(zone), removedMarker)
+	r.seen.forget(client.ObjectKeyFromObject(zone))
 	if again {
 		// A trigger written while this clear ran: its stop is issued now.
 		return r.reconcileZone(ctx, req, zone)
@@ -550,11 +612,19 @@ func (r *ZoneEstopReconciler) robotsInEstopScope(ctx context.Context, namespace,
 	// Read from the API server, not the cache: a robot admitted or moved a moment ago is in
 	// the stop's scope now (the stop guard, estopscope). A read error fails the pass, which is
 	// retried; it never reads as "not covered".
+	return r.robotsInEstopScopeFrom(ctx, r.reader(), namespace, zoneName, toChildren, true)
+}
+
+// robotsInEstopScopeFrom is robotsInEstopScope read through rd. report names the robots whose
+// zone chain cannot be walked in a Warning Event; the firing pass's read from the cache, which
+// the API server's read follows, does not, so each such robot is named once.
+func (r *ZoneEstopReconciler) robotsInEstopScopeFrom(ctx context.Context, rd client.Reader, namespace, zoneName string,
+	toChildren, report bool) ([]fleetv1.Robot, error) {
 	var all fleetv1.RobotList
-	if err := r.reader().List(ctx, &all, client.InNamespace(namespace)); err != nil {
+	if err := rd.List(ctx, &all, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("listing robots: %w", err)
 	}
-	tree, err := estopscope.ReadTree(ctx, r.reader(), namespace)
+	tree, err := estopscope.ReadTree(ctx, rd, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("zone %s estop: %w", zoneName, err)
 	}
@@ -579,7 +649,7 @@ func (r *ZoneEstopReconciler) robotsInEstopScope(ctx context.Context, namespace,
 	for _, i := range undecidedAt {
 		undecided = append(undecided, fmt.Sprintf("%s (zone %s)", all.Items[i].Name, zones[i]))
 	}
-	if len(undecided) > 0 {
+	if len(undecided) > 0 && report {
 		log.FromContext(ctx).Info("zone estop: robots whose zone chain cannot be walked are stopped with it",
 			"zone", zoneName, "robots", undecided)
 		if r.Recorder != nil {
@@ -881,10 +951,11 @@ func itoa(n int) string { return fmt.Sprintf("%d", n) }
 // (holdLateArrivals).
 func (r *ZoneEstopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&fleetv1.FleetZone{}).
+		For(&fleetv1.FleetZone{}, builder.WithPredicates(r.seen.predicate())).
 		Watches(&fleetv1.FleetZone{}, handler.EnqueueRequestsFromMapFunc(r.ancestorsOfZone)).
 		Watches(&fleetv1.Robot{}, handler.EnqueueRequestsFromMapFunc(r.zonesAboveRobot),
 			builder.WithPredicates(robotEnteredAZone)).
 		Named("zoneestop").
+		WithOptions(crcontroller.Options{MaxConcurrentReconciles: concurrentStops(r.MaxConcurrentStops)}).
 		Complete(r)
 }

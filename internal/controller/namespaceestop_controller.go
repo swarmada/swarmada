@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -64,6 +65,11 @@ type NamespaceEstopReconciler struct {
 	// Recorder emits the EstopHeldByOwnTrigger Event on a robot a clear leaves stopped.
 	// Nil skips it.
 	Recorder record.EventRecorder
+	// MaxConcurrentStops is how many namespaces' passes run at once; 0 is
+	// defaultMaxConcurrentStops (see ZoneEstopReconciler.MaxConcurrentStops).
+	MaxConcurrentStops int
+	// seen is when this process first saw each namespace's trigger (the fan-out metric's start).
+	seen triggerSeen
 	// APIReader reads the API server directly, bypassing the manager's cache, for the hold
 	// records and the clear's robot list (see ZoneEstopReconciler.APIReader). Nil falls
 	// back to Client.
@@ -98,6 +104,7 @@ func (r *NamespaceEstopReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // when a clear finds a trigger written while it ran.
 func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req ctrl.Request, cfg *fleetv1.SwarmadaConfig) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("swarmadaconfig", req.NamespacedName)
+	passStart := time.Now()
 	if r.Estopper == nil {
 		return ctrl.Result{}, nil
 	}
@@ -130,7 +137,7 @@ func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req c
 		// its value: an absent marker reads as "", and an empty trigger is a stop like any
 		// other). A Robot created in the namespace since is stopped now, and the robots it
 		// covers are re-evaluated on a timer as well as on events.
-		return ctrl.Result{RequeueAfter: stopInForceResync}, r.holdLateArrivals(ctx, req.Namespace, cfg, trigger)
+		return ctrl.Result{RequeueAfter: inForceResync()}, r.holdLateArrivals(ctx, req.Namespace, cfg, trigger)
 	case !firing && wasProcessed:
 		r.markers.forget(req.NamespacedName)
 		return r.clearNamespaceEstop(ctx, req, cfg)
@@ -142,23 +149,38 @@ func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req c
 	actor := estopActor(cfg.Annotations, "namespace-estop:"+req.Namespace)
 	issuedBy := actor.Identity
 
+	// Row S1, as in the zone controller: the robots the cache holds are sent the stop now, and
+	// nothing is read past the cache before that. The API server's list follows, and a robot it
+	// adds (admitted a moment ago, not in the cache yet) is sent as soon as that read returns.
+	ref := configHold(cfg)
+	// Issued in PARALLEL (RFC-0001 #safety-estop-scopes); see estopFanout. A namespace estop is the widest
+	// fan-out there is, so it is where sequential dispatch cost the most.
+	ep := startEstopEpisode(ctx, r.Estopper, req.Namespace, reason, issuedBy, metrics.ScopeNamespace, carrierOf(ref),
+		func(ctx context.Context, robot string) error {
+			return recordHoldAndWithdraw(ctx, r.Client, r.reader(), req.Namespace, robot, ref)
+		})
+	var cached fleetv1.RobotList
+	if cerr := r.List(ctx, &cached, client.InNamespace(req.Namespace)); cerr == nil {
+		ep.launch(cached.Items)
+	} else {
+		logger.Info("namespace estop: the cache could not list the robots; sending after the API server's read",
+			"err", cerr.Error())
+	}
 	var robots fleetv1.RobotList
 	if err := r.reader().List(ctx, &robots, client.InNamespace(req.Namespace)); err != nil {
+		// The stops already sent stand, and their goroutines record them; the pass is retried.
+		ep.wait()
 		return ctrl.Result{}, fmt.Errorf("listing robots: %w", err)
 	}
+	ep.launch(robots.Items)
 	stopped, failed := 0, 0
 	// See the zone controller: robots_in_scope and the worst ack latency are the
 	// fan-out-meaningful half of RFC-0001 #safety-required-events's estop fields; per-robot rpc_sent_at /
 	// ack_received_at live on the robot-scope entries.
-	inScope := make([]string, 0, len(robots.Items))
 	var worstLatency time.Duration
-	ref := configHold(cfg)
-	// Issued in PARALLEL (RFC-0001 #safety-estop-scopes); see estopFanout. A namespace estop is the widest
-	// fan-out there is, so it is where sequential dispatch cost the most.
-	outcomes, fanout := estopFanoutHeld(ctx, r.Estopper, req.Namespace, robots.Items, reason, issuedBy,
-		metrics.ScopeNamespace, carrierOf(ref), func(ctx context.Context, robot string) error {
-			return recordHoldAndWithdraw(ctx, r.Client, r.reader(), req.Namespace, robot, ref)
-		})
+	outcomes, lastResolved := ep.wait()
+	fanout := lastResolved.Sub(ep.start)
+	inScope := make([]string, 0, len(outcomes))
 	unwritten := 0
 	for _, o := range outcomes {
 		inScope = append(inScope, o.robot)
@@ -178,7 +200,6 @@ func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req c
 		}
 		stopped++
 	}
-	metrics.ObserveEstopFanout(req.Namespace, metrics.ScopeNamespace, fanout)
 	logger.Info("namespace estop fanned out", "namespace", req.Namespace, "reason", reason,
 		"robots", len(robots.Items), "stopped", stopped, "unconfirmed", failed, "fanout", fanout)
 
@@ -225,6 +246,9 @@ func (r *NamespaceEstopReconciler) reconcileNamespace(ctx context.Context, req c
 		return ctrl.Result{}, fmt.Errorf("recording namespace estop processed: %w", err)
 	}
 	r.markers.wrote(req.NamespacedName, trigger)
+	// Once per episode, from the trigger as first seen (see the zone controller).
+	metrics.ObserveEstopFanout(req.Namespace, metrics.ScopeNamespace, lastResolved.Sub(r.seen.since(req.NamespacedName, passStart)))
+	r.seen.forget(req.NamespacedName)
 	return ctrl.Result{}, nil
 }
 
@@ -251,9 +275,20 @@ func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, req 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	cleared, held, cerr := clearCarrier(ctx, r.Client, r.reader(), r.Estopper, r.Recorder, namespace, configHold(cfg),
-		robots.Items, zones, configs, clearedBy, "namespace "+namespace)
-	logger.Info("namespace estop cleared", "namespace", namespace, "robots", len(robots.Items),
+	// As in the zone controller: a trigger written while the clear runs interrupts it between
+	// robots, and the new stop is issued at once (dropClearedMarker, below).
+	retriggered := func(ctx context.Context) bool {
+		cur := &fleetv1.SwarmadaConfig{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(cfg), cur); err != nil {
+			return false
+		}
+		_, firing := cur.Annotations[annEstopTriggered]
+		return firing
+	}
+	cleared, held, interrupted, cerr := clearCarrierUntil(ctx, r.Client, r.reader(), r.Estopper, r.Recorder, namespace,
+		configHold(cfg), robots.Items, zones, configs, clearedBy, "namespace "+namespace, retriggered)
+	logger.Info("namespace estop cleared", "namespace", namespace, "robots", len(robots.Items), "cleared", cleared,
+		"interruptedByNewTrigger", interrupted,
 		"heldByOwnEstop", held.own, "heldByWiderEstop", held.wider, "err", errString(cerr))
 
 	if r.Audit != nil {
@@ -268,7 +303,7 @@ func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, req 
 			Outcome:   outcome,
 			Actor:     actor,
 			Resource:  audit.Resource{Kind: "SwarmadaConfig", Namespace: namespace, Name: cfg.Name},
-			Detail:    held.detail(map[string]string{"robots": itoa(len(robots.Items)), "cleared": itoa(cleared)}),
+			Detail:    held.detail(clearDetail(len(robots.Items), cleared, interrupted)),
 		}); aerr != nil {
 			logger.Error(aerr, "recording ESTOP_CLEARED audit entry")
 		}
@@ -284,6 +319,7 @@ func (r *NamespaceEstopReconciler) clearNamespaceEstop(ctx context.Context, req 
 		return ctrl.Result{}, fmt.Errorf("clearing namespace estop processed marker: %w", err)
 	}
 	r.markers.removed(client.ObjectKeyFromObject(cfg), removedMarker)
+	r.seen.forget(client.ObjectKeyFromObject(cfg))
 	if again {
 		// A trigger written while this clear ran: its stop is issued now.
 		return r.reconcileNamespace(ctx, req, cfg)
@@ -417,9 +453,10 @@ var robotCreated = predicate.Funcs{
 // reconciles its SwarmadaConfig, so a stop in force reaches it (holdLateArrivals).
 func (r *NamespaceEstopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&fleetv1.SwarmadaConfig{}).
+		For(&fleetv1.SwarmadaConfig{}, builder.WithPredicates(r.seen.predicate())).
 		Watches(&fleetv1.Robot{}, handler.EnqueueRequestsFromMapFunc(r.configsOfRobot),
 			builder.WithPredicates(robotCreated)).
 		Named("namespaceestop").
+		WithOptions(crcontroller.Options{MaxConcurrentReconciles: concurrentStops(r.MaxConcurrentStops)}).
 		Complete(r)
 }

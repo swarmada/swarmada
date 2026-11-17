@@ -104,3 +104,23 @@ belongs where SLOs are evaluated.
 **A counter of episodes exceeding a fixed budget.** Rejected: it needs the budget baked in at
 emit time, so it cannot be re-evaluated per fleet size. A histogram lets the bound live in the
 alerting rule, where fleet size is known.
+
+## Amendment 1 — the episode is timed from the trigger as first seen, not from the pass
+
+The Decision above started the clock "in the fanning-out reconciler before the first send". That
+is later than RFC-0001's "from the operator's trigger" by however long the stop waited for its
+pass. A stop of one zone queued behind another zone's pass, or a namespace's stop behind
+another namespace's, waited there with the clock not running: in a measured case, 9 s that the
+metric never showed.
+
+- **The start** is when this process first saw the carrier's trigger, stamped by the controller's
+  watch on create and update, before the pass is queued. One stamp is kept per carrier. It is
+  never moved later, and it is dropped when the processed marker is written, when the clear is
+  applied, and when the carrier is deleted.
+- **It is still not the operator's trigger.** Admission and the watch's own latency come before
+  it. A process that starts, or gains leadership, with a trigger already written has no stamp,
+  and times that episode from its pass, so the time across a change of leader is not counted.
+- **The end** is the last robot's outcome: its `TriggerEstop` returned, so its `Stopped` or
+  `Failed` is written. The hold records written after it are not part of the episode.
+- **Once per episode.** The episode is observed on the pass that writes the processed marker. A
+  pass that failed and was retried is not a second episode.

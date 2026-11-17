@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -120,6 +121,13 @@ func dropHolds(ctx context.Context, c client.Client, reader client.Reader, names
 	})
 }
 
+// holdWriteBackoff is the retry of a hold record's write on a conflict, as long as the safety
+// dispatcher's for a stop's outcome (about half a minute: 30 attempts, 10 ms doubling to 1 s). A
+// stop writes the same robot several times in a few seconds (its record, its outcome), and more so
+// when several stops reach one robot at once; a hold record that gave up after retry.DefaultBackoff's
+// 1.3 s failed the pass, which fanned the stop out again to every robot.
+var holdWriteBackoff = wait.Backoff{Steps: 30, Duration: 10 * time.Millisecond, Factor: 2, Jitter: 0.1, Cap: time.Second}
+
 // dropEndedHolds removes from the robot's record every entry whose carrier no longer holds its
 // stop (estopscope.HoldStands): cleared, or gone (orphaned, which only a robot-scope clear
 // releases). Each attempt reads the robot, then the carriers: an entry the robot records was
@@ -131,7 +139,7 @@ func dropEndedHolds(ctx context.Context, c client.Client, reader client.Reader, 
 	if reader == nil {
 		reader = c
 	}
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err = retry.RetryOnConflict(holdWriteBackoff, func() error {
 		cur := &fleetv1.Robot{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: robot}, cur); err != nil {
 			return err
@@ -178,7 +186,7 @@ func patchHolds(ctx context.Context, c client.Client, reader client.Reader, name
 	if reader == nil {
 		reader = c
 	}
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(holdWriteBackoff, func() error {
 		cur := &fleetv1.Robot{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: robot}, cur); err != nil {
 			return err
@@ -289,7 +297,7 @@ func withdrawPendingFirmwareOnStop(ctx context.Context, c client.Client, reader 
 	// Read again and retried on a conflict: the stop's own record (status.stops) lands on the
 	// robot moments after the stop is sent, and changes its resourceVersion.
 	withdrawn := false
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(holdWriteBackoff, func() error {
 		rb := &fleetv1.Robot{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: robot}, rb); err != nil {
 			return err
@@ -421,10 +429,27 @@ func clearCarrier(ctx context.Context, c client.Client, reader client.Reader, es
 	rec record.EventRecorder, namespace string, ref holdRef, robots []fleetv1.Robot,
 	zones []fleetv1.FleetZone, configs []fleetv1.SwarmadaConfig, clearedBy, clearedScope string,
 ) (int, heldRobots, error) {
-	cleared := 0
-	var held heldRobots
+	cleared, held, _, err := clearCarrierUntil(ctx, c, reader, est, rec, namespace, ref, robots, zones, configs,
+		clearedBy, clearedScope, nil)
+	return cleared, held, err
+}
+
+// clearCarrierUntil is clearCarrier that stops before the next robot once retriggered reports
+// the carrier triggered again, and says so (interrupted). The robots not reached keep the stop
+// and its record. The caller then runs the new trigger as a new stop at once (dropClearedMarker),
+// instead of after clearing every robot: row S1 lets the new stop wait on nothing. A nil
+// retriggered clears every robot.
+func clearCarrierUntil(ctx context.Context, c client.Client, reader client.Reader, est ZoneEstopper,
+	rec record.EventRecorder, namespace string, ref holdRef, robots []fleetv1.Robot,
+	zones []fleetv1.FleetZone, configs []fleetv1.SwarmadaConfig, clearedBy, clearedScope string,
+	retriggered func(context.Context) bool,
+) (cleared int, held heldRobots, interrupted bool, err error) {
 	var errs []error
 	for i := range robots {
+		if i > 0 && retriggered != nil && retriggered(ctx) {
+			interrupted = true
+			break
+		}
 		r := &robots[i]
 		if by, ok := estopscope.StandingStop(withoutHold(r, ref), zones, configs); ok {
 			held.add(r.Name, by)
@@ -454,5 +479,15 @@ func clearCarrier(ctx context.Context, c client.Client, reader client.Reader, es
 			}
 		}
 	}
-	return cleared, held, errors.Join(errs...)
+	return cleared, held, interrupted, errors.Join(errs...)
+}
+
+// clearDetail is a zone's or namespace's ESTOP_CLEARED detail: the robots in the clear's scope,
+// how many it cleared, and, when a new trigger interrupted it, that it did.
+func clearDetail(robots, cleared int, interrupted bool) map[string]string {
+	d := map[string]string{"robots": itoa(robots), "cleared": itoa(cleared)}
+	if interrupted {
+		d["interrupted_by_new_trigger"] = "true"
+	}
+	return d
 }
