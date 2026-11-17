@@ -92,27 +92,88 @@ func estopFanout(ctx context.Context, est ZoneEstopper, namespace string, robots
 func estopFanoutHeld(ctx context.Context, est ZoneEstopper, namespace string, robots []fleetv1.Robot,
 	reason, issuedBy string, scope metrics.EstopScope, carrier safety.Carrier,
 	record func(ctx context.Context, robot string) error) ([]estopOutcome, time.Duration) {
-	out := make([]estopOutcome, len(robots))
-	start := time.Now()
+	ep := startEstopEpisode(ctx, est, namespace, reason, issuedBy, scope, carrier, record)
+	ep.launch(robots)
+	out, _ := ep.wait()
+	return out, time.Since(ep.start)
+}
 
-	var wg sync.WaitGroup
+// estopEpisode is one zone's or namespace's fan-out, launched in more than one batch: the
+// robots the cache already places in the stop's scope are sent at once, and the robots a read
+// past the cache adds are sent when that read returns (row S1: nothing is read, written or
+// awaited before a send). Each robot is launched once, in a goroutine of its own, whatever batch
+// names it again; wait joins them all.
+type estopEpisode struct {
+	ctx       context.Context
+	est       ZoneEstopper
+	namespace string
+	reason    string
+	issuedBy  string
+	scope     metrics.EstopScope
+	carrier   safety.Carrier
+	record    func(ctx context.Context, robot string) error
+	start     time.Time
+
+	mu       sync.Mutex
+	wg       sync.WaitGroup
+	out      []*estopOutcome
+	resolved []time.Time // when each robot's TriggerEstop returned: its outcome written
+	launched map[string]bool
+}
+
+func startEstopEpisode(ctx context.Context, est ZoneEstopper, namespace, reason, issuedBy string,
+	scope metrics.EstopScope, carrier safety.Carrier, record func(ctx context.Context, robot string) error) *estopEpisode {
+	return &estopEpisode{ctx: ctx, est: est, namespace: namespace, reason: reason, issuedBy: issuedBy,
+		scope: scope, carrier: carrier, record: record, start: time.Now(), launched: map[string]bool{}}
+}
+
+// launch sends the stop to every robot not launched yet, each in its own goroutine.
+func (e *estopEpisode) launch(robots []fleetv1.Robot) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for i := range robots {
-		wg.Add(1)
-		go func(i int, name string) {
-			defer wg.Done()
-			res, err := est.TriggerEstop(ctx, namespace, name, reason, issuedBy, scope, carrier)
+		name := robots[i].Name
+		if e.launched[name] {
+			continue
+		}
+		e.launched[name] = true
+		slot := &estopOutcome{robot: name}
+		e.out = append(e.out, slot)
+		e.resolved = append(e.resolved, time.Time{})
+		at := len(e.resolved) - 1
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			res, err := e.est.TriggerEstop(e.ctx, e.namespace, name, e.reason, e.issuedBy, e.scope, e.carrier)
+			done := time.Now()
 			var recErr error
-			if record != nil {
-				recErr = record(ctx, name)
+			if e.record != nil {
+				recErr = e.record(e.ctx, name)
 			}
-			// Each goroutine owns exactly one slot, so no lock is needed and the result
-			// lands at the robot's original index regardless of completion order.
-			out[i] = estopOutcome{robot: name, result: res, err: err, recErr: recErr}
-		}(i, robots[i].Name)
+			e.mu.Lock()
+			*slot = estopOutcome{robot: name, result: res, err: err, recErr: recErr}
+			e.resolved[at] = done
+			e.mu.Unlock()
+		}()
 	}
-	wg.Wait()
+}
 
-	return out, time.Since(start)
+// wait joins every robot launched and returns the outcomes in launch order, and when the last
+// robot resolved: its TriggerEstop returned, so its outcome was written. The hold records,
+// written after, are not part of it. An episode that launched nothing resolved at its start.
+func (e *estopEpisode) wait() ([]estopOutcome, time.Time) {
+	e.wg.Wait()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]estopOutcome, len(e.out))
+	last := e.start
+	for i, o := range e.out {
+		out[i] = *o
+		if e.resolved[i].After(last) {
+			last = e.resolved[i]
+		}
+	}
+	return out, last
 }
 
 // carrierOf is the stop carrier a zone's or the namespace's hold names: the stop's record on

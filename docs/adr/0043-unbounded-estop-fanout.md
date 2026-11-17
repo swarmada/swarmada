@@ -124,3 +124,35 @@ safety defect would have coupled a correctness fix to a much larger refactor.
 **Cap the fan-out and let the remainder proceed on the next reconcile.** Rejected outright: it
 makes an emergency stop eventually-consistent. A robot whose stop is deferred to a requeue is a
 robot still moving, and the operator has no way to tell which.
+
+## Amendment 1 — stops of different carriers run at once, up to a disclosed bound
+
+The Decision makes one stop's robots independent of each other. It said nothing about two stops.
+Each estop controller ran one pass at a time, and a pass returns only once every robot's outcome
+and hold record are written. So a stop of one zone waited for another zone's pass to finish:
+9 s behind a 10 s write trail in a test, and longer at 100 robots under load. A namespace's stop
+waited for another namespace's in the same way. That is the defect this ADR removed, one level
+up.
+
+- **Different carriers run at once.** Each estop controller runs up to 1,024 passes at a time.
+  controller-runtime never hands one carrier to two workers, so each carrier's passes stay in
+  order: trigger, clear and re-trigger as before.
+- **This bound is a pool, and it is disclosed.** A stop waits for another carrier's pass only
+  when 1,024 passes of its kind are already running: stops, clears, resyncs and late arrivals
+  together. The argument above, that a pool only needs a larger fleet to expose it, applies. Here
+  the "fleet" is carriers being stopped or cleared at the same moment, not robots. The release
+  notes state the bound, and `controller_runtime_active_workers` for `zoneestop` and
+  `namespaceestop` shows how close a deployment comes to it.
+- **The first send reads nothing past the cache.** The robots the cache places in the stop's
+  scope are sent at once. The API server's list follows, and a robot it adds, admitted or moved a
+  moment ago, is sent when that read returns. A robot the cache still shows in the zone
+  after it left is stopped too: a stop reaches more robots, never fewer.
+- **A re-trigger interrupts its own carrier's clear.** The clear stops before its next robot and
+  the new trigger is issued as a new stop, instead of waiting for every robot to be cleared.
+- **Not done: a cap on the routine passes.** Resyncs, late arrivals and clears are not limited
+  separately. A late arrival's stop is a send that row S1 lets wait on nothing, and a cap would
+  make it wait. Their reads are spread instead: a stop in force resyncs every 24 to 36 s, not
+  every 30 s in lockstep.
+- **Concurrent stops add up on the Robot write budget.** Each pass's outcome and hold writes share
+  the manager client's bucket. Several stops at once therefore resolve later than one would, which
+  RFC-0001's fan-out bound measures.
