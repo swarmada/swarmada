@@ -156,13 +156,12 @@ adapter in the cluster, admits the robot the adapter announces, and runs a
 Install the control plane with Helm. The chart's defaults serve the admission webhooks
 and the `ControlStream` with cert-manager-issued certificates, so install
 [cert-manager](https://cert-manager.io) first, or see
-[deploy/swarmada/README.md](deploy/swarmada/README.md) for the alternatives. No manager
-image is published; that README shows how to build and load one, and how to give an
-adapter its client certificate:
+[deploy/swarmada/README.md](deploy/swarmada/README.md) for the alternatives. The chart's
+default image is the published manager image at the chart's version; that README also shows
+how to run one built from source, and how to give an adapter its client certificate:
 
 ```bash
 helm install swarmada deploy/swarmada -n swarmada-system --create-namespace \
-  --set image.repository=swarmada-controller --set image.tag=dev \
   --set 'controlStream.tls.certManager.adapterClients[0].name=sim-fleet-adapter' \
   --set 'controlStream.tls.certManager.adapterClients[0].namespace=warehouse-a'
 ```

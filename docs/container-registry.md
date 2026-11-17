@@ -43,14 +43,37 @@ Graduated project and the natural end-state for a security-mature org
 infrastructure, which this project does not do today. Revisit if a deployment
 arises that justifies the hosting cost.
 
+## Verifying a release image
+
+The release workflow signs the manager image keylessly: the certificate names the workflow
+file at the release tag, issued through GitHub's OIDC provider, and the signature is logged
+in Rekor. It signs with cosign v3; use cosign v3 or later to verify, since earlier versions
+may not find the signature. To verify a release, for example `0.4.1`:
+
+```bash
+cosign verify ghcr.io/swarmada/swarmada:0.4.1 \
+  --certificate-identity https://github.com/swarmada/swarmada/.github/workflows/release.yml@refs/tags/v0.4.1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Each platform image is signed too, and verifies with the same command against its own
+digest. The SBOM (SPDX) and the SLSA provenance are BuildKit attestations attached to the
+image, one per platform:
+
+```bash
+docker buildx imagetools inspect ghcr.io/swarmada/swarmada:0.4.1 --format '{{ json .SBOM }}'
+docker buildx imagetools inspect ghcr.io/swarmada/swarmada:0.4.1 --format '{{ json .Provenance }}'
+```
+
 ## Image naming scheme
 
-All images follow `ghcr.io/swarmada/<name>:<tag>`, tagged both `latest` and
-the release semver (`vMAJOR.MINOR.PATCH`), consistent with the existing `IMG` convention.
+All images follow `ghcr.io/swarmada/<name>:<tag>`, tagged with the release version
+`X.Y.Z` (no "v", the chart's `appVersion`) and `latest`, consistent with the existing `IMG`
+convention.
 
 | Image | Source | Purpose | Status |
 |---|---|---|---|
-| `ghcr.io/swarmada/swarmada` | `Dockerfile` (root) → `cmd/manager` | The controller-manager | **Already the Makefile default** — this doc formalizes it, doesn't change it |
+| `ghcr.io/swarmada/swarmada` | `Dockerfile` (root) → `cmd/manager` | The controller-manager | **Published from 0.4.1** by `.github/workflows/release.yml` on a `vX.Y.Z` tag: `linux/amd64` and `linux/arm64`, signed with cosign (keyless), with SBOM and provenance attestations. `X.Y.Z` is published once; `latest` is the highest release. Also the Makefile default |
 | `ghcr.io/swarmada/edge` | `Dockerfile.edge` → `cmd/edge` | The Zone Controller edge node (`examples/edge-node`'s binary, containerized) | Buildable, not published — `make docker-build-edge` builds it for the host architecture and `make docker-push-edge` pushes amd64 and arm64 (`IMG_EDGE`, default `ghcr.io/swarmada/edge:latest`); no workflow pushes it |
 | `ghcr.io/swarmada/fleet-adapter-sim` | `Dockerfile.sim-adapter` → `adapters/simulation` | The in-tree simulation adapter, containerized for the quickstart/CI (rather than requiring a local Python install) | Built locally, not published — `examples/first-run/run.sh` builds it as `swarmada-sim-adapter:dev` and loads it into kind; no Makefile target or workflow pushes it |
 | `ghcr.io/swarmada/fleet-adapter-ros2` | own repo: `fleet-adapter-ros2` | ROS 2 / Nav2 reference adapter | Not built — no image; the adapter's conformance status is its row in [`adapters/REGISTRY.md`](../adapters/REGISTRY.md) |
