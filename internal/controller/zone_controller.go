@@ -105,6 +105,12 @@ type ZoneController struct {
 	// cached version differs from it, and the robot's next frame reads it past the cache.
 	lastRead   map[string]string
 	lastPushed map[types.NamespacedName]pushedConstraints
+	// unsurePush records, per zoneMemoKey, a containment write whose outcome is unknown: it failed
+	// with an error that is not a conflict (a timeout, a lost connection, a server error), so it
+	// may have landed. Its push (FA-R7) was not sent. The next frame that completes for the robot
+	// reads what is recorded and pushes the rules in force there; the push is gated on what was
+	// last sent, so it sends only if the write landed.
+	unsurePush map[string]bool
 	// positioned records, per zoneMemoKey, that at least one frame carrying a position
 	// has reached ObservePosition for the robot since this process started. It is the
 	// only evidence that separates "reported a position that matched no polygon" from
@@ -666,6 +672,11 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 	containmentMoved := z.recordContainment(memo, newContaining, robot.Status.ContainingZones)
 	if !zoneMoved && !containmentMoved {
 		z.noteRead(memo, robot.ResourceVersion)
+		if z.takeUnsurePush(memo) {
+			// A write whose outcome was unknown may have moved the containment this copy records,
+			// and its push was not sent: the adapter may still be running the old zone's rules.
+			z.pushZoneConstraints(ctx, robot, newContaining)
+		}
 		return nil // unchanged since the last write (or persisted status) — RA-1
 	}
 
@@ -685,17 +696,21 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 			return err
 		}
 		log.FromContext(ctx).Error(err, "writing currentZone", "robot", robot.Name, "zone", newZone)
+		if containmentMoved {
+			z.markUnsurePush(memo) // the write may have landed
+		}
 		return err
 	}
 	// The write returned the robot's new version; the memos describe it.
 	z.noteRead(memo, robot.ResourceVersion)
+	unsure := z.takeUnsurePush(memo)
 
 	// FA-R7 — tell the adapter what may be running where the robot NOW IS. Gated a
 	// second time inside, on the resolved RULE set rather than on the containment set:
 	// crossing from one unrestricted zone into another is a containment transition that
 	// changes nothing an adapter must do, and re-sending an identical set would be a
 	// command per boundary crossing.
-	if containmentMoved {
+	if containmentMoved || unsure {
 		z.pushZoneConstraints(ctx, robot, newContaining)
 	}
 
@@ -894,6 +909,26 @@ func (z *ZoneController) recordZone(key, newZone, statusZone string) bool {
 	return true
 }
 
+// markUnsurePush records a containment write of unknown outcome for key (unsurePush).
+func (z *ZoneController) markUnsurePush(key string) {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	if z.unsurePush == nil {
+		z.unsurePush = map[string]bool{}
+	}
+	z.unsurePush[key] = true
+}
+
+// takeUnsurePush reports whether the robot has a containment write of unknown outcome, and
+// clears it (unsurePush).
+func (z *ZoneController) takeUnsurePush(key string) bool {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	unsure := z.unsurePush[key]
+	delete(z.unsurePush, key)
+	return unsure
+}
+
 // forgetMemos drops the zone and containment memos for key, so the next derivation seeds
 // them from the Robot's persisted status. It keeps the robot's positioned mark.
 func (z *ZoneController) forgetMemos(key string) {
@@ -921,6 +956,7 @@ func (z *ZoneController) ForgetRobot(namespace, robotID string) bool {
 	delete(z.lastContaining, key)
 	delete(z.lastRead, key)
 	delete(z.positioned, key)
+	delete(z.unsurePush, key)
 	return zoned || contained || positioned
 }
 
