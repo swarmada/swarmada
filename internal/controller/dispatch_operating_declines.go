@@ -47,7 +47,9 @@ import (
 // The other five rejection values are facts about a MOMENT. A busy robot becomes free, an
 // unreachable adapter reconnects, a stale fencing token is superseded by the next
 // generation; re-offering after a backoff is the right behaviour for all of them, and
-// that behaviour is deliberately left alone here.
+// that behaviour is deliberately left alone here. ROBOT_UNAVAILABLE's backoff is A24's
+// hold-off (assignment_holdoff.go), because the action's own writes re-offered it on every
+// pass, ahead of any requeue.
 //
 // OPERATING_CONSTRAINT_UNMET is not like them. It is a STANDING property of this (robot,
 // action) pair for as long as the zone rule stands and the adapter is the build it is:

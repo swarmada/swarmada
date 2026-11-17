@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	fleetv1 "github.com/swarmada/swarmada/api/v1"
 	"github.com/swarmada/swarmada/internal/command"
@@ -189,22 +190,30 @@ func TestEnvtest_InvalidAction_EveryCandidateRefusingNamesThePayload(t *testing.
 	}
 }
 
-// THE THREE MOMENT-FACTS ARE UNTOUCHED, and this is the guard the finding asked for by
+// THE MOMENT-FACTS ARE STILL RETRIED, and this is the guard the finding asked for by
 // name. A busy robot becomes free; waiting is the correct response and the plane must
-// keep doing it.
+// keep doing it. ROBOT_UNAVAILABLE is retried too, after a bounded hold-off rather than
+// on the next pass (A24's hold-off, assignment_holdoff.go): offered on
+// every pass it looped 416 times in 91 s on 7d1cd19. The hold ends on its own, and at once
+// when the robot registers, turns Ready again or is deleted, so it idles nothing for good.
 func TestEnvtest_InvalidAction_TheMomentFactsAreStillRetried(t *testing.T) {
 	requireEnvtest(t)
 	ctx := context.Background()
-	for _, tc := range []struct{ name, rejection string }{
-		{"busy", "ASSIGN_ACTION_REJECTION_ROBOT_BUSY"},
-		{"unavailable", "ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE"},
-		{"stale-token", "ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN"},
+	for _, tc := range []struct {
+		name, rejection string
+		heldOff         bool // retried only once the hold-off is over
+	}{
+		{"busy", "ASSIGN_ACTION_REJECTION_ROBOT_BUSY", false},
+		{"unavailable", "ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE", true},
+		{"stale-token", "ASSIGN_ACTION_REJECTION_STALE_FENCING_TOKEN", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ns := envtestNamespace(t)
 			cmd := &rejectCommander{rejectWith: map[string]string{"amr-1": tc.rejection}}
 			r := &FleetActionReconciler{Client: envK8s, Scheme: envScheme,
 				Scheduler: scheduler.NewDefaultScheduler(), Commander: cmd}
+			clock := time.Now()
+			r.holdOffs.clock = func() time.Time { return clock }
 
 			f12SeedAdapter(t, ns)
 			zrSeedZone(t, ns, "ward", "", nil, []fleetv1.EffectiveZoneRestriction{}, true)
@@ -212,6 +221,17 @@ func TestEnvtest_InvalidAction_TheMomentFactsAreStillRetried(t *testing.T) {
 
 			req := zrSeedAction(t, ns, "act-1", "ward")
 			for i := 1; i <= 2; i++ {
+				if i == 2 && tc.heldOff {
+					// Inside the hold-off the second pass offers amr-1 nothing.
+					if _, err := r.Reconcile(ctx, req); err != nil {
+						t.Fatalf("reconcile inside the hold-off: %v", err)
+					}
+					if len(cmd.assignTo) != 1 {
+						t.Fatalf("%s: assignments pushed to %v inside the hold-off, want amr-1 once",
+							tc.name, cmd.assignTo)
+					}
+					clock = clock.Add(holdOffFloor + time.Second)
+				}
 				if _, err := r.Reconcile(ctx, req); err != nil {
 					t.Fatalf("reconcile %d: %v", i, err)
 				}

@@ -77,6 +77,9 @@ type fenceState struct {
 	gen        map[string]uint64            // namespace/name/uid → bumped each time a stop is added
 	contract   map[CommandSender]string     // stream → the contract version agreed for it
 	withheld   map[string]map[string]motion // namespace/name/uid → motion withheld by a stop, by key
+	// registers counts the registers processed for each robot, by namespace/wire robot_id, on any
+	// stream (RegisterEpoch).
+	registers map[string]uint64
 }
 
 func (f *fenceState) init() {
@@ -84,6 +87,7 @@ func (f *fenceState) init() {
 		f.held, f.locks, f.ready = map[string]map[string]bool{}, map[string]*sync.Mutex{}, map[CommandSender]map[string]bool{}
 		f.registered, f.gen, f.withheld = map[CommandSender]map[string]bool{}, map[string]uint64{}, map[string]map[string]motion{}
 		f.contract = map[CommandSender]string{}
+		f.registers = map[string]uint64{}
 	}
 }
 
@@ -192,6 +196,23 @@ func (d *Dispatcher) markRegistered(sender CommandSender, wireID string) {
 		d.fence.registered[sender] = map[string]bool{}
 	}
 	d.fence.registered[sender][wireID] = true
+}
+
+// RegisterEpoch returns how many registers this process has processed for the robot with wire
+// robot_id wireID in namespace, on any of its streams. It only grows, so a reader that kept an
+// earlier value can tell that the robot has registered since: the FleetAction controller's hold-off
+// memo drops a robot's entries then (internal/controller/assignment_holdoff.go).
+func (d *Dispatcher) RegisterEpoch(namespace, wireID string) uint64 {
+	d.fence.mu.Lock()
+	defer d.fence.mu.Unlock()
+	return d.fence.registers[namespace+"/"+wireID]
+}
+
+func (d *Dispatcher) countRegister(namespace, wireID string) {
+	d.fence.mu.Lock()
+	defer d.fence.mu.Unlock()
+	d.fence.init()
+	d.fence.registers[namespace+"/"+wireID]++
 }
 
 func (d *Dispatcher) isRegistered(sender CommandSender, wireID string) bool {
@@ -392,6 +413,7 @@ func (d *Dispatcher) roundTripAssign(ctx context.Context, namespace, robotName s
 func (d *Dispatcher) RobotRegistered(ctx context.Context, sender CommandSender, namespace, wireID string) {
 	logger := log.FromContext(ctx).WithValues("namespace", namespace, "robot", wireID)
 	d.markRegistered(sender, wireID)
+	d.countRegister(namespace, wireID)
 	var reader client.Reader = d.Client
 	if d.APIReader != nil {
 		reader = d.APIReader
