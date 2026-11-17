@@ -847,31 +847,29 @@ func (s *Server) ControlStream(stream fav1.FleetAdapterService_ControlStreamServ
 		s.supersede(ctx, log, identity, replaced, id.PeerAddr)
 	}
 
+	// Once a newer stream holds the identity, this one writes no presence and answers no
+	// confirming exchange, whichever path its heartbeats take: the newer stream's handshake
+	// decides the adapter's phase, and only the stream that holds the identity speaks for it.
+	ctx = withSuperseded(ctx, superseded)
 	done := make(chan struct{})
 	defer close(done)
 	// Heartbeats are recorded as they arrive, not behind the messages read before them: a backlog
 	// of telemetry waiting on the API server must not make a live adapter read Degraded, nor delay
 	// the answer to a per-robot confirming exchange (ADR-0054's amendment). The presence write runs
 	// in its own goroutine, joined before the deferred disconnect above, so no presence write
-	// follows the stream's disconnect. Once a newer stream holds the identity, this one writes no
-	// presence: the newer stream's handshake decides the adapter's phase.
+	// follows the stream's disconnect.
 	pump := &presencePump{notify: make(chan struct{}, 1)}
 	pctx, pcancel := context.WithCancel(ctx)
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
-		pump.run(pctx, func(at time.Time) {
-			select {
-			case <-superseded:
-				return
-			default:
-			}
-			s.recordPresence(pctx, identity, at)
-		})
+		pump.run(pctx, func(at time.Time) { s.recordPresence(pctx, identity, at) })
 	}()
 	defer func() { pcancel(); <-pumpDone }()
-	// handling is when the message the loop is handling was read (UnixNano), 0 while it is idle: a
-	// loop held longer than the presence limit takes heartbeats back into its own order.
+	// handling is when the loop started handling its current message (UnixNano), 0 while it is
+	// idle: a loop held on one message longer than the presence limit takes heartbeats back into
+	// its own order. A backlog of messages each handled in turn is not a wedge, however far
+	// behind it runs.
 	var handling atomic.Int64
 	q := recvControl(stream, done, func(msg *fav1.AdapterMessage) bool {
 		return s.heartbeatOnArrival(ctx, identity, msg, pump, &handling, done)
@@ -902,7 +900,7 @@ func (s *Server) ControlStream(stream fav1.FleetAdapterService_ControlStreamServ
 				log.Info("adapter ControlStream is behind: a message waited before it was handled",
 					"lag", lag.Round(time.Second), "queued", len(q.items))
 			}
-			handling.Store(it.at.UnixNano())
+			handling.Store(time.Now().UnixNano())
 			err := s.dispatch(withReceivedAt(ctx, it.at), w, id, identity, it.msg)
 			handling.Store(0)
 			if err != nil {
@@ -1005,6 +1003,34 @@ func recvControl(stream fav1.FleetAdapterService_ControlStreamServer, done <-cha
 	return q
 }
 
+// beatAnswers is how long after it was read a per-robot heartbeat still answers a confirming
+// exchange: one heartbeat interval at the default. A heartbeat recorded as it arrives answers at
+// once; this bounds one that waited its turn in a wedged loop.
+const beatAnswers = 10 * time.Second
+
+// supersededKey carries, in a stream's context, the channel closed when a newer stream under the
+// same identity is accepted.
+type supersededKey struct{}
+
+func withSuperseded(ctx context.Context, superseded <-chan struct{}) context.Context {
+	return context.WithValue(ctx, supersededKey{}, superseded)
+}
+
+// streamSuperseded reports whether a newer stream holds this stream's identity. A context that
+// carries no such channel (an unverified stream, a test) is never superseded.
+func streamSuperseded(ctx context.Context) bool {
+	ch, _ := ctx.Value(supersededKey{}).(<-chan struct{})
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 // receivedAtKey carries, in a dispatch's context, when its message was read.
 type receivedAtKey struct{}
 
@@ -1043,7 +1069,7 @@ func (s *Server) heartbeatOnArrival(ctx context.Context, tlsID TLSIdentity, msg 
 		return false
 	default:
 	}
-	if !s.stillLeading() {
+	if streamSuperseded(ctx) || !s.stillLeading() {
 		return false
 	}
 	if rid := hb.GetRobotId(); rid != "" {
@@ -1071,9 +1097,9 @@ func (s *Server) presenceWedgeLimit() time.Duration {
 }
 
 // recordPresence writes the adapter's presence for a heartbeat read at at, while this process
-// leads.
+// leads and no newer stream holds the identity.
 func (s *Server) recordPresence(ctx context.Context, tlsID TLSIdentity, at time.Time) {
-	if s.Presence == nil || !s.stillLeading() {
+	if s.Presence == nil || streamSuperseded(ctx) || !s.stillLeading() {
 		return
 	}
 	if p, ok := s.Presence.(AdapterHeartbeatAt); ok {
@@ -1250,7 +1276,11 @@ func (s *Server) dispatch(ctx context.Context, w *streamWriter, id AdapterIdenti
 		// presence and robot liveness are different questions: one adapter multiplexes
 		// many robots, so an adapter being alive says nothing about whether a
 		// particular robot's telemetry stall is real.
-		if router, ok := s.Commands.(HeartbeatRouter); ok && tlsID.Verified {
+		//
+		// A heartbeat that waited in the queue longer than beatAnswers is not an answer: the robot
+		// was alive when it was read, which says nothing about a probe opened since.
+		if router, ok := s.Commands.(HeartbeatRouter); ok && tlsID.Verified && !streamSuperseded(ctx) &&
+			time.Since(receivedAt(ctx)) <= beatAnswers {
 			router.RouteHeartbeat(tlsID.Namespace, p.Heartbeat.GetRobotId())
 		}
 		return nil

@@ -81,6 +81,9 @@ type FleetAdapterReconciler struct {
 	// Recorder emits the Warning Event for a superseded ControlStream. Nil emits none.
 	Recorder record.EventRecorder
 	now      func() time.Time
+	// APIReader reads around the cache. A presence write that conflicts is derived again from it,
+	// once: the cache can lag the previous write. Nil reads through the client.
+	APIReader client.Reader
 
 	// liveness runs projectLiveness for each adapter off the ControlStream and off the heartbeat's
 	// own write: the stamps share the manager's Robot write budget with every other Robot write,
@@ -486,19 +489,47 @@ func (r *FleetAdapterReconciler) AdapterHeartbeat(ctx context.Context, id contro
 // heartbeats come every half interval, so it stays younger than the interval while they arrive,
 // and a burst of per-robot heartbeats is not a burst of writes. A heartbeat re-asserts Connected
 // only while it is younger than one interval; an older one is left to the staleness check. The
-// write carries the resourceVersion it was derived from: a write derived from an older copy (a
-// superseded stream's, say, after the new stream's handshake wrote Rejected) conflicts and is
-// dropped, and the next heartbeat writes again.
+// write carries the resourceVersion it was derived from. A write that conflicts was derived from
+// an older copy, usually a cache behind the previous write: it is derived once more from the API
+// server, so the new copy's phase (Rejected, say) is kept, and a second conflict is dropped until
+// the next heartbeat.
+//
+// Once ctx has ended (the stream is gone), no stamp run starts.
 func (r *FleetAdapterReconciler) AdapterHeartbeatAt(ctx context.Context, id controlstream.TLSIdentity, receivedAt time.Time) {
 	receivedAt = receivedAt.Truncate(time.Second) // status times are stored to the second
 	logger := log.FromContext(ctx)
-	fa := &fleetv1.FleetAdapter{}
-	if err := r.Get(ctx, types.NamespacedName{Name: id.AdapterName, Namespace: id.Namespace}, fa); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.Error(err, "fetching FleetAdapter for presence update", "adapter", id.AdapterName)
+	var reader client.Reader = r.Client
+	for attempt := 1; ; attempt++ {
+		err := r.writePresence(ctx, reader, id, receivedAt)
+		if err != nil && errors.IsConflict(err) && attempt == 1 {
+			if r.APIReader != nil {
+				reader = r.APIReader
+			}
+			continue
 		}
-		r.liveness.signal(r, id, receivedAt)
+		switch {
+		case err == nil:
+		case errors.IsConflict(err):
+			logger.V(1).Info("presence write lost to a newer FleetAdapter status twice; the next heartbeat writes again",
+				"adapter", id.AdapterName)
+		default:
+			logger.Error(err, "writing FleetAdapter presence status", "adapter", id.AdapterName)
+		}
+		break
+	}
+	if ctx.Err() != nil {
 		return
+	}
+	r.liveness.signal(r, id, receivedAt)
+}
+
+// writePresence is one attempt of AdapterHeartbeatAt's write, derived from the FleetAdapter as
+// reader holds it. A FleetAdapter that does not exist is not an error.
+func (r *FleetAdapterReconciler) writePresence(ctx context.Context, reader client.Reader, id controlstream.TLSIdentity,
+	receivedAt time.Time) error {
+	fa := &fleetv1.FleetAdapter{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: id.AdapterName, Namespace: id.Namespace}, fa); err != nil {
+		return client.IgnoreNotFound(err)
 	}
 	interval := adapterInterval(fa.Spec.HeartbeatIntervalSeconds)
 	base := fa.DeepCopy()
@@ -520,17 +551,10 @@ func (r *FleetAdapterReconciler) AdapterHeartbeatAt(ctx context.Context, id cont
 		st.Phase = fleetv1.FleetAdapterPhaseConnected
 		st.Message = "adapter live"
 	}
-	if !reflect.DeepEqual(base.Status, fa.Status) {
-		if err := r.Status().Patch(ctx, fa, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			if errors.IsConflict(err) {
-				logger.V(1).Info("presence write lost to a newer FleetAdapter status; the next heartbeat writes again",
-					"adapter", id.AdapterName)
-			} else {
-				logger.Error(err, "patching FleetAdapter presence status", "adapter", id.AdapterName)
-			}
-		}
+	if reflect.DeepEqual(base.Status, fa.Status) {
+		return nil
 	}
-	r.liveness.signal(r, id, receivedAt)
+	return r.Status().Patch(ctx, fa, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // AdapterDisconnected moves a live adapter to Disconnected on stream loss. Its liveness worker
