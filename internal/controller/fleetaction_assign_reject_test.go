@@ -103,11 +103,12 @@ func TestAssign_StaleLeaderTermStands(t *testing.T) {
 	}
 }
 
-// An assignment the command dispatcher did not send because a stop holds the robot, or because the
-// robot's register is not yet processed on its stream, went nowhere and is no refusal: the commit
-// stands, with no A24 revert, and the stop's own rows decide the action from here (A1).
+// An assignment the command dispatcher did not send because a stop holds the robot went nowhere and
+// is no refusal: the commit stands, with no A24 revert, and the stop's own rows decide the action from
+// here (A1). That is narrower than A24, which reverts under a stop too.
+// The other refusals at the send revert (assignment_revert_test.go).
 func TestAssign_NotSentUnderAStopStands(t *testing.T) {
-	for _, err := range []error{command.ErrHeldByStop, command.ErrNotRegistered} {
+	for _, err := range []error{command.ErrHeldByStop} {
 		t.Run(err.Error(), func(t *testing.T) {
 			r, c := newActionReconciler(t, pendingAction("t1"), robotInPhase("r1", fleetv1.RobotPhaseIdle, ""))
 			r.Commander = &fakeCommander{assignErr: err}

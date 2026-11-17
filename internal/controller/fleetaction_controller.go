@@ -178,6 +178,11 @@ type FleetActionReconciler struct {
 	// uncachedNext names the actions whose next dispatch pass reads every stop past the cache,
 	// because a confirmation found a stop the cache had not shown (stop_reads_cached.go).
 	uncachedNext uncachedPasses
+	// notSent limits the AssignmentNotSent Event to one per action and reason (assignment_revert.go).
+	notSent notSentEvents
+	// holdOffs keeps a robot off an action for a while after A24 reverted the action's assignment to
+	// it as not sent or refused as unavailable (assignment_holdoff.go).
+	holdOffs holdOffMemo
 
 	// orphans remembers when this process first saw a robot record an action that no longer
 	// exists; the record is released once the longest lease plus the skew margin has passed
@@ -991,6 +996,12 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		// process-local scheduling memo — but reported as filter 12, because it is the same
 		// rule reached from stronger evidence. See dispatch_operating_declines.go.
 		eligible, withheld = dropDeclinedCandidates(action, r.declines.declined(action), eligible, withheld)
+		// A24's hold-off: a robot this action's assignment was just reverted on (not sent, or refused
+		// as unavailable) is not offered it again for a while. Applied here, before selection, the
+		// generation and the TDE, so a held pass writes nothing. The hold is not a candidate filter:
+		// a held robot selection would take is left out of the no-candidate tally, one it would
+		// not take is counted with what keeps it (assignableHeld, assignment_holdoff.go).
+		eligible, held := r.dropHeldOff(ctx, action, eligible)
 		logDispatchExclusions(ctx, action, withheld)
 		// Kept for filter 12's refusal sentence, which names the zones containing each
 		// robot it withheld (operatingConstraintMessage); eligible is a new slice, so this
@@ -1085,6 +1096,7 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		clearSensorStreamRefusal(action)
 
 		acceptDegraded := r.acceptDegraded(ctx, action)
+		heldAssignable, heldOthers, heldMessage := assignableHeld(held, action, acceptDegraded)
 		robot, declined, dropped, allUnreachable, err := r.selectServable(ctx, action, robotList.Items, judge,
 			acceptDegraded, r.preferSameManufacturer(ctx, req.Namespace),
 			r.honorPreferredRobot(ctx, req.Namespace))
@@ -1105,7 +1117,10 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 			// same band rule as the TDE reservation preemption. It displaces one robot
 			// from its action to this one; the displaced action is evicted safely via its
 			// Preempted phase.
-			if action.Spec.Priority.CanPreempt() {
+			// Not while a robot selection would take is held off this action: that robot is
+			// eligible, and §9.4.2 preempts only when none is. A held robot that is not Idle is
+			// not eligible and does not stop it (assignableHeld, assignment_holdoff.go).
+			if action.Spec.Priority.CanPreempt() && heldAssignable == 0 {
 				cand, victim, perr := r.findPreemptionCandidate(ctx, action, robotList.Items)
 				if perr != nil {
 					return ctrl.Result{}, perr
@@ -1137,7 +1152,14 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 				// to know which zones were excluded even while the reason nothing was
 				// dispatched is something else entirely. It is a stable string over a
 				// stable exclusion set, so this patch still repeats unchanged (RA-1).
-				msg := noCandidateMessage(action, withheld, robotList.Items, acceptDegraded, filtersDegraded) + narrowNote
+				// The held robots selection would not take are counted with what keeps them; the
+				// others are left out (assignableHeld).
+				tallied := robotList.Items
+				if len(heldOthers) > 0 {
+					tallied = append(append(make([]fleetv1.Robot, 0, len(robotList.Items)+len(heldOthers)),
+						robotList.Items...), heldOthers...)
+				}
+				msg := noCandidateMessage(action, withheld, tallied, acceptDegraded, filtersDegraded) + narrowNote
 
 				// ── Candidate filter 12 — adapter operating-constraint support ──
 				//
@@ -1189,8 +1211,24 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 						len(withheld), len(withheld), action.Spec.Type) + ". " + msg
 				}
 
-				logger.Info("no eligible robot, requeuing", "reason", msg)
+				logger.Info("no eligible robot, requeuing", "reason", msg, "heldOff", len(held),
+					"heldAssignable", heldAssignable)
 				action.Status.Phase = fleetv1.ActionPhasePending
+				if heldAssignable > 0 {
+					// The hold is not written to status (RFC-0001 §9.4.2's exclusion records); it is
+					// the RobotHeldOff Event and the log (assignment_holdoff.go). The tally leaves the
+					// assignable held robots out, so with nothing else excluded or left it would
+					// misstate the fleet: the message the revert wrote stands, with the narrowing
+					// note. Otherwise the tally and the other exclusions' sentences are written, with
+					// the revert's message after them. Both come from the memo, so an unchanged fleet
+					// writes an unchanged string (RA-1). A held robot that is not Idle is not why
+					// nothing was dispatched: the tally names it, and no revert message is added.
+					if len(withheld) == 0 && len(tallied) == 0 {
+						msg = heldMessage + narrowNote
+					} else {
+						msg += ". " + heldMessage
+					}
+				}
 				action.Status.Message = msg
 				if !setAdapterDeclined(action, declined) {
 					_ = r.patchActionStatus(ctx, action, original)
@@ -1453,6 +1491,8 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 			}
 			return ctrl.Result{}, fmt.Errorf("patching robot status: %w", err)
 		}
+		// The Assigned transition: pendingSince → now (v0.4's definition), observed at the commit,
+		// whatever the send does next; a revert writes pendingSince again (assignment_revert.go).
 		if pendingSince != nil {
 			metrics.ObserveAssignmentLatency(action.Namespace, priorityLabel(action.Spec.Priority),
 				time.Since(pendingSince.Time))
@@ -1477,8 +1517,29 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 		if restrictions != nil {
 			inForce, _ = restrictions.operating.forRobot(&robot)
 		}
-		rejected, rejection, declineMsg, unhonourable := r.pushAssignAction(
+		// The robot's register count before the send: a register processed during a revert below
+		// then ends the hold-off it records (assignment_holdoff.go).
+		epoch := r.robotEpoch(&robot)
+		rejected, rejection, declineMsg, unhonourable, notSent := r.pushAssignAction(
 			ctx, action, robot.Name, leaseDur, operatingConstraintsForWire(inForce))
+		// A victim this assignment displaced on this robot is still running there if the
+		// assignment never reached it; the revert gives the robot's record back to it.
+		victim := ""
+		if preemptVictim != nil && preemptVictim.Status.AssignedRobot == robot.Name {
+			victim = preemptVictim.Name
+		}
+		// gen is the generation minted for this commit above (action.Status.AssignmentGeneration).
+		if notSent != "" {
+			// Row A24, its second trigger: the control plane's own check at the send refused it,
+			// so no AssignAction went on the wire.
+			r.recordNotSent(ctx, action, robot.Name, notSent)
+			res, reverted, err := r.revertAssignment(ctx, action, robot.Name, gen, victim,
+				fmt.Sprintf("the assignment was not sent (%s); rescheduling", notSent))
+			if reverted {
+				r.holdRobotOff(ctx, action, &robot, "the assignment was not sent: "+notSent, epoch)
+			}
+			return res, err
+		}
 		if rejected {
 			// The release below clears assignedRobot, and the next assignment clears
 			// status.message, so the Events are what keeps the robot that declined.
@@ -1500,10 +1561,16 @@ func (r *FleetActionReconciler) reconcileAction(ctx context.Context, req ctrl.Re
 			case rejectionOperatingConstraintUnmet, rejectionInvalidAction:
 				r.declines.record(action, robot.Name, rejection, unhonourable)
 			}
-			return r.releaseRejectedAssignment(ctx, req.Namespace, action, robot.Name, unhonourable)
+			res, reverted, err := r.releaseRejectedAssignment(ctx, action, robot.Name, gen, victim, unhonourable)
+			if reverted && rejection == rejectionRobotUnavailable {
+				r.holdRobotOff(ctx, action, &robot, "its adapter refused the assignment as ROBOT_UNAVAILABLE", epoch)
+			}
+			return res, err
 		}
 		// One candidate accepted: the question "who has already refused this" is closed.
 		r.declines.forget(action)
+		r.holdOffs.forget(action)
+		r.notSent.forget(req.NamespacedName)
 		return ctrl.Result{RequeueAfter: leaseRenew}, nil
 	}
 
@@ -1820,9 +1887,9 @@ func (r *FleetActionReconciler) releaseReservation(ctx context.Context, namespac
 func (r *FleetActionReconciler) pushAssignAction(
 	ctx context.Context, action *fleetv1.FleetAction, robotID string,
 	leaseDur time.Duration, operating []*fav1.EffectiveOperatingConstraint,
-) (rejected bool, rejection, message string, unhonourable []string) {
+) (rejected bool, rejection, message string, unhonourable []string, notSent string) {
 	if r.Commander == nil {
-		return false, "", "", nil
+		return false, "", "", nil, ""
 	}
 	gen := command.FencingToken(action.Status.AssignmentGeneration)
 	a := command.AssignAction{
@@ -1882,9 +1949,13 @@ func (r *FleetActionReconciler) pushAssignAction(
 	out, err := r.Commander.PushAssignAction(wctx, action.Namespace, robotID, a)
 	logger := log.FromContext(ctx)
 	if err != nil {
+		// The dispatcher's own check refused to send it: nothing went on the wire (A24).
+		if why := notSentReason(err); why != "" {
+			return false, "", "", nil, why
+		}
 		logger.V(1).Info("assign_action not delivered (best-effort; assignment stands, lease machinery governs)",
 			"task", action.Name, "robot", robotID, "reason", err.Error())
-		return false, "", "", nil
+		return false, "", "", nil, ""
 	}
 	if !out.Accepted {
 		logger.Info("adapter rejected assign_action; releasing the assignment to reschedule",
@@ -1894,9 +1965,9 @@ func (r *FleetActionReconciler) pushAssignAction(
 		// A decline that does not name the subject is not testable and does not satisfy
 		// FA-R5; a decline the plane receives named and then discards is no better to the
 		// operator reading the object.
-		return true, out.Rejection, out.Message, out.UnhonourableSubjects
+		return true, out.Rejection, out.Message, out.UnhonourableSubjects, ""
 	}
-	return false, "", "", nil
+	return false, "", "", nil, ""
 }
 
 // rejectionOperatingConstraintUnmet is AssignActionRejection's
@@ -3223,24 +3294,18 @@ func (r *FleetActionReconciler) recordAssignmentDeclined(action *fleetv1.FleetAc
 	r.Recorder.Event(robot, corev1.EventTypeWarning, eventAssignmentDeclined, msg)
 }
 
-// releaseRejectedAssignment rolls back a just-committed assignment the adapter
-// rejected: the robot did not accept the action (so it is not executing), so the
-// action returns to Pending — assignmentGeneration PRESERVED (next commit issues
-// strictly-greater) — the robot is freed to Idle (guarded), the TDE slot is
-// released, and a short backoff requeue lets the scheduler retry (possibly on
-// another robot). Safe: an explicit rejection is a provable not-executing.
+// releaseRejectedAssignment rolls back a just-committed assignment the adapter rejected (row A24,
+// its third trigger): the robot did not accept the action, so it is not executing it, and the
+// action returns to Pending through revertAssignment. That writes the Robot first, from a live
+// read under its resourceVersion, and gives its record back to a victim this assignment displaced
+// on it; then the action, assignmentGeneration kept (the next commit mints a higher one); then the
+// zone reservation. A short requeue lets the scheduler retry, possibly on another robot. Under a
+// stop nothing is released: row A1 pauses the action (holdRefusalUnderStop).
 func (r *FleetActionReconciler) releaseRejectedAssignment(
-	ctx context.Context, namespace string, action *fleetv1.FleetAction,
-	robotName string, unhonourable []string,
-) (ctrl.Result, error) {
-	if res, held, err := r.holdRefusalUnderStop(ctx, action, robotName); held || err != nil {
-		return res, err
-	}
-	base := action.DeepCopy() // the committed Assigned state
-	action.Status.Phase = fleetv1.ActionPhasePending
-	action.Status.AssignedRobot = ""
-	action.Status.LeaseExpiresAt = nil
-	action.Status.Message = "adapter rejected the assignment; rescheduling"
+	ctx context.Context, action *fleetv1.FleetAction, robotName string, gen int64, victim string,
+	unhonourable []string,
+) (ctrl.Result, bool, error) {
+	message := "adapter rejected the assignment; rescheduling"
 	// FA-R5's decline is the one rejection that names something, and naming it is the
 	// whole of what makes the obligation observable rather than a claim. The robot is
 	// named alongside the subject because the two send an operator to different places:
@@ -3250,21 +3315,15 @@ func (r *FleetActionReconciler) releaseRejectedAssignment(
 	if len(unhonourable) > 0 {
 		sorted := append([]string(nil), unhonourable...)
 		sort.Strings(sorted)
-		action.Status.Message = fmt.Sprintf(
+		message = fmt.Sprintf(
 			"robot %q declined the assignment: its adapter cannot honour the operating "+
 				"subject(s) %s in force where it stands, though its declaration says it can. "+
 				"The action is rescheduling to another candidate; declining costs the adapter "+
 				"nothing", robotName, strings.Join(sorted, ", "))
 	}
-	if err := r.patchActionStatus(ctx, action, base); err != nil {
-		return ctrl.Result{}, fmt.Errorf("releasing rejected assignment: %w", err)
-	}
-	if err := r.releaseRobotForStop(ctx, action, robotName); err != nil {
-		return ctrl.Result{}, err
-	}
-	r.releaseReservation(ctx, namespace, action.Spec.Zone, action.Name)
-	minRetry, _ := r.tdeRetryBounds(ctx, namespace)
-	return ctrl.Result{RequeueAfter: minRetry}, nil
+	// Row A24, its third trigger: the robot's answer that it never began this work. The revert
+	// holds the action under a stop, as for any refusal (holdRefusalUnderStop).
+	return r.revertAssignment(ctx, action, robotName, gen, victim, message)
 }
 
 // holdRefusalUnderStop is row A24's rule for a refusal under a stop, a refusal under the adapter's
@@ -3275,15 +3334,13 @@ func (r *FleetActionReconciler) releaseRejectedAssignment(
 // (pauseAssignedForEstop), and it stays with the robot until an operator decides (I1). held is
 // false when no stop holds the robot and the release goes ahead. A question the guard cannot answer
 // is an error, and nothing is released.
+//
+// robot is the caller's live read of the robot, the one its release writes under (revertAssignment):
+// the stop is judged on the same copy the write's resourceVersion comes from, so a stop recorded on
+// the robot after that read fails the write, and the next attempt reads it and holds.
 func (r *FleetActionReconciler) holdRefusalUnderStop(ctx context.Context, action *fleetv1.FleetAction,
-	robotName string) (ctrl.Result, bool, error) {
-	robot := &fleetv1.Robot{}
-	if err := r.liveReader().Get(ctx, types.NamespacedName{Name: robotName, Namespace: action.Namespace}, robot); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, false, nil
-		}
-		return ctrl.Result{}, true, fmt.Errorf("reading robot %s for its stop before releasing a refused assignment: %w", robotName, err)
-	}
+	robot *fleetv1.Robot) (ctrl.Result, bool, error) {
+	robotName := robot.Name
 	stops, err := stopNames(ctx, r.liveReader(), robot)
 	if err != nil {
 		return ctrl.Result{}, true, err
