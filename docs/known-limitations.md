@@ -500,14 +500,23 @@ registered, because no estop can reach it. The reference control plane does not 
 dispatches to any robot whose adapter is `Connected`, passed conformance and reports a supported
 contract version, and `Connected` is decided by the `ControlStream` alone.
 
+With the ROS 2 adapter, after a silent network loss no control-plane estop reaches the robot. A
+robot running an assignment or a manual drive stops on its own when its lease lapses (30 seconds by
+default), with no network needed, and the adapter can take up to about 5.5 minutes to notice the
+loss. On Linux, a stall of more than 20 seconds with unacknowledged data ends the control
+connection: the robot stops and the adapter redials. Until the control plane notices the loss too,
+an estop to the robot resolves `Failed` after its delivery window with "no EstopAck within delivery
+window (dropped estop)", and `swarmada_fleet_adapter_connected` still reads `1`.
+
 **What you will see.** The robot runs work normally and `swarmada_fleet_adapter_connected` reads
 `1`. An estop to it resolves `Failed` at once, and the manager log records "no SafetyStream to
 adapter <name>".
 
-**Instead.** Treat a `Failed` estop with that message as an estop-path outage: stop the robot at
-the robot, and keep it out of dispatch with a robot-scope stop (the `swarmada.io/estop-triggered`
-annotation on the `Robot`), which dispatch honours whether or not the stop reached the robot. Then
-check the adapter's `SafetyStream` dial. See
+**Instead.** Treat a `Failed` estop with that message, or with "no EstopAck within delivery window
+(dropped estop)", as an estop-path outage: stop the robot at the robot, and keep it out of dispatch
+with a robot-scope stop (the `swarmada.io/estop-triggered` annotation on the `Robot`), which
+dispatch honours whether or not the stop reached the robot. Then check the adapter's
+`SafetyStream` dial. See
 [RFC-0001, Scheduler](../rfcs/dist/RFC-0001-core-spec.md#control-plane-scheduler).
 
 ### A stop is kept on the Robot object only
@@ -695,6 +704,64 @@ it is recorded as inside the zone.
 
 **Instead.** For a guarantee that follows the robot, stop the robot, or stop the whole namespace (a
 fleet stop on its `SwarmadaConfig`). Use a zone's stop for the robots that are in the zone.
+
+### A robot moved into a zone with no polygon is outside that zone's stop until it is recorded there
+
+**Limitation.** A robot whose `spec.zone` names a zone with no polygon is in that zone by
+declaration (FZ-G5): the Zone Controller writes the zone to the robot's `status.currentZone`. A
+zone's stop reaches the robots whose `status.currentZone` (or `spec.zone` while that is empty) is
+the zone or one below it, as RFC-0001 defines the stop's reach. Between a `spec.zone` change into
+such a zone and the Zone Controller's write, the robot's `status.currentZone` still names its
+previous zone, and a stop over the new zone does not reach it. The window lasts until the control
+plane records the robot in the zone, and is longer while the API server is slow. Once the write
+lands, the control plane stops the robot as it stops any robot that enters a stopped zone (see *A
+robot outside a stopped zone is outside that zone's stop*). A stop over the robot's previous zone
+still reaches it in the window.
+
+**What you will see.** The zone reads `Triggered`, the robot's `spec.zone` names it, and the robot
+reads `Normal`, with `status.currentZone` naming its previous zone.
+
+**Instead.** Before you move a robot into a zone with no polygon, stop the robot itself if that
+zone may be stopped while it moves. Never hold back a zone stop for this: if a zone is stopped
+while a robot is being moved into it, also stop that robot, or stop the whole namespace.
+
+### The ROS 2 adapter's edge estop latch is kept by the adapter, not by the robot
+
+**Limitation.** An edge estop latches the robot: the adapter refuses every assignment and resume,
+and does not start again, until a person removes the latch file on the robot (`--edge-latch-file`,
+by default `~/.local/state/swarmada/edge-latch-<robot-id>`). RFC-0001 v0.4 asks for more than that:
+
+- The latch is not held at an interface of the robot's own: only this adapter reads the file.
+  Another program that drives the robot (a teleop node, a navigation goal from elsewhere, another
+  adapter) is not stopped by it, and the robot itself does not refuse motion while it is set.
+- The reset is removing that file on the robot's disk, not the robot's own reset control or the stop
+  device that tripped.
+- The adapter checks only the file that `--edge-latch-file` and `--robot-id` name, and the default
+  path is under the home directory of the user it runs as. Started with another path, robot id,
+  user or `HOME` (under `sudo` or a systemd unit, for example), it does not see the latch.
+- The file is written on a thread of its own as the estop arrives, or else once the estop is
+  answered (up to 2 s later), or during an orderly shutdown. A crash or power loss in the first
+  seconds after the estop can lose the latch. If the file cannot be written, the adapter logs
+  `EDGE_LATCH_NOT_PERSISTED` and holds the latch only until it exits.
+- Run in a container, the latch survives a restart only if the file's directory is mounted from the
+  robot's disk.
+
+After the edge node's host loses power or a network partition heals, edge estops can fail to reach
+the robot for up to about 5.5 minutes, until the adapter notices the dead stream and dials the edge
+node again.
+
+**What you will see.** The latch is not reported (`LocalStopReport`); the adapter is at contract
+1.3.0. The control plane does not know of the latch, records no stop for it, and may assign the
+robot work, which the adapter refuses with `ROBOT_UNAVAILABLE`. While the latch file is there, the
+adapter exits at start with `REFUSED: an edge estop set this robot's local latch (...)`, naming the
+file and the `rm` that clears it, so the robot stays disconnected. While it runs, each refused
+assignment's message names the edge estop that set the latch.
+
+**Instead.** Treat a robot the edge node stopped as stopped until a person has confirmed it safe at
+the robot and removed the latch file there, and keep any other program that can drive it from doing
+so meanwhile. To keep it out of dispatch, also stop it through the control plane (see *An edge estop
+is invisible to the control plane*). If you run the adapter in a container, mount the latch file's
+directory from the robot's disk.
 
 ### An update already under way on a robot continues when the robot is stopped
 
@@ -1104,6 +1171,14 @@ displace each other in turn. Under RFC-0001 each displacement is also a register
 event, so every robot of that identity is held again each time, and a process whose streams were
 replaced may still drive a robot it held work for. RFC-0001 requires one live process per adapter
 identity.
+
+**Where a stop goes.** While both processes run, a stop for any robot of that identity goes down
+the `SafetyStream` of the process that connected last. If that process does not drive the robot,
+it cannot stop it: the simulation adapter answers `FAILED`, and the robot is recorded `Failed`.
+The robot stops only when its own process connects again and the stop is sent again on its new
+stream, at least 0.5 s later for the simulation adapter and the full backoff for an adapter that
+waits longer. An adapter that stops its robots when its stream is replaced, as RFC-0001 requires,
+has stopped them already.
 
 **Instead.** Run one process per adapter identity. For more capacity, give each process its own
 `FleetAdapter` and client certificate. See
