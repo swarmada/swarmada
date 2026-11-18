@@ -48,7 +48,10 @@ def test_stream_powers_off_when_the_controller_partitions_mid_run() -> None:
     lease = LeaseMonitor(on_expiry=on_expiry)  # real clock: time.monotonic
 
     # ── The run starts: ActivateStream grants the lease
-    # (refcounted activation; rule 2's lease is what this test measures). ──
+    # (refcounted activation; rule 2's lease is what this test measures).
+    # The lease runs from its last grant or renewal, so the interval is measured
+    # from a time read right before each one: the lease's own reading comes after it. ──
+    last_renewal_at = time.monotonic()
     lease.grant(STREAM_KEY, duration_s=LEASE_SECONDS, generation=1)
     stream_on = True
     assert stream_on
@@ -60,13 +63,14 @@ def test_stream_powers_off_when_the_controller_partitions_mid_run() -> None:
     while time.monotonic() < alive_until:
         time.sleep(RENEW_INTERVAL_SECONDS)
         gen += 1
+        last_renewal_at = time.monotonic()
         renewed = lease.renew(STREAM_KEY, duration_s=LEASE_SECONDS, generation=gen)
         assert renewed, "a live controller's renewal must always be honoured"
         lease.tick()
         assert STREAM_KEY not in stopped_at, "must not stop while renewals are arriving"
 
-    # ── KILL THE CONTROLLER: stop renewing. This is the partition. ──
-    partition_started_at = time.monotonic()
+    # ── KILL THE CONTROLLER: stop renewing. This is the partition: the
+    # control plane has been silent since its last renewal. ──
 
     # The adapter's own tick loop keeps running locally — it has no way to
     # know the silence is a dead controller rather than a slow one, which is
@@ -74,16 +78,16 @@ def test_stream_powers_off_when_the_controller_partitions_mid_run() -> None:
     while STREAM_KEY not in stopped_at:
         time.sleep(POLL_SECONDS)
         lease.tick()
-        if time.monotonic() - partition_started_at > LEASE_SECONDS + 5.0:
+        if time.monotonic() - last_renewal_at > LEASE_SECONDS + 5.0:
             raise AssertionError(
                 "stream did not self-stop within 5s of the lease horizon — fail-safe did not fire"
             )
 
     stream_on = False
-    partition_to_off_seconds = stopped_at[STREAM_KEY] - partition_started_at
+    renewal_to_off_seconds = stopped_at[STREAM_KEY] - last_renewal_at
 
     print(  # noqa: T201 — this number is the deliverable; -s prints it.
-        f"\nMEASURED partition-to-stream-off interval: {partition_to_off_seconds:.3f}s "
+        f"\nMEASURED last-renewal-to-stream-off interval: {renewal_to_off_seconds:.3f}s "
         f"(lease duration was {LEASE_SECONDS:.3f}s, poll granularity {POLL_SECONDS * 1000:.0f}ms)"
     )
 
@@ -92,7 +96,13 @@ def test_stream_powers_off_when_the_controller_partitions_mid_run() -> None:
     # The stream must not outlive the lease horizon by more than roughly one
     # poll tick — the fail-safe claim is that partition STOPS the camera at
     # (approximately) the lease's own duration, not "eventually".
-    assert LEASE_SECONDS <= partition_to_off_seconds <= LEASE_SECONDS + 0.5, (
-        f"partition-to-off interval {partition_to_off_seconds:.3f}s should be within "
+    # The lower bound is written as the lease writes its deadline (a time plus the
+    # duration): a subtraction can round a hair under the duration.
+    assert stopped_at[STREAM_KEY] >= last_renewal_at + LEASE_SECONDS, (
+        f"the stream stopped {renewal_to_off_seconds:.7f}s after the last renewal, "
+        f"before the {LEASE_SECONDS:.3f}s lease ran out"
+    )
+    assert renewal_to_off_seconds <= LEASE_SECONDS + 0.5, (
+        f"last-renewal-to-off interval {renewal_to_off_seconds:.3f}s should be within "
         f"[{LEASE_SECONDS:.3f}, {LEASE_SECONDS + 0.5:.3f}]s of the lease duration"
     )
