@@ -105,6 +105,12 @@ type ZoneController struct {
 	// cached version differs from it, and the robot's next frame reads it past the cache.
 	lastRead   map[string]string
 	lastPushed map[types.NamespacedName]pushedConstraints
+	// unsurePush records, per zoneMemoKey, a containment write whose outcome is unknown: it failed
+	// with an error that is not a conflict (a timeout, a lost connection, a server error), so it
+	// may have landed. Its push (FA-R7) was not sent. The next frame that completes for the robot
+	// reads what is recorded and pushes the rules in force there; the push is gated on what was
+	// last sent, so it sends only if the write landed.
+	unsurePush map[string]bool
 	// positioned records, per zoneMemoKey, that at least one frame carrying a position
 	// has reached ObservePosition for the robot since this process started. It is the
 	// only evidence that separates "reported a position that matched no polygon" from
@@ -112,6 +118,15 @@ type ZoneController struct {
 	// The Robot reconciler reads it through PositionObserved for the ZonePositionOverdue
 	// condition. It is memory only and is never written to status.
 	positioned map[string]bool
+	// robotMu serializes, per robot, each attempt to decide and write its zone: the read past the
+	// cache, the stop check, the status write and the memos it advances (ObservePosition,
+	// placeDeclaredMembers). Two streams can deliver frames for one robot at once (an adapter's
+	// reconnect). Without it, a frame could read the robot while another frame's write was in
+	// flight, decide on that copy and note its version, and the robot would stay recorded where
+	// that write put it, with the frames that follow decided on a cache that shows it elsewhere.
+	// It is taken before lastMu, never while lastMu is held; the calls made under it carry
+	// robotLockedTimeout. Nothing on the stop path takes it.
+	robotMu robotLocks
 
 	// ready reports whether the controller has loaded zone geometry at least once,
 	// so currentZone-based TDE recovery validation can be trusted (RFC-0001 #tde-restart-recovery).
@@ -305,44 +320,60 @@ func (z *ZoneController) placeDeclaredMembers(
 		if _, write := declaredPlacement(robot, zoneObj.Name, declaredOnly); !write {
 			continue
 		}
-		if reader != nil {
-			// The hold below decides on the recorded zone as the API server has it, not as the
-			// cache has it (the stop guard, estopscope).
-			fresh := &fleetv1.Robot{}
-			if err := reader.Get(ctx, client.ObjectKeyFromObject(robot), fresh); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("re-reading robot %q for declared zone membership: %w", robot.Name, err)
+		if err := z.placeDeclaredMember(ctx, robot, zoneObj.Name, declaredOnly, reader); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// placeDeclaredMember decides robot's declared placement in zoneName again on the API server's
+// copy and writes it, holding the robot's lock (robotMu) from the read to the memos, as a frame's
+// attempt does.
+func (z *ZoneController) placeDeclaredMember(
+	ctx context.Context, robot *fleetv1.Robot, zoneName string, declaredOnly map[string]bool, reader client.Reader,
+) error {
+	unlock := z.robotMu.lock(client.ObjectKeyFromObject(robot))
+	defer unlock()
+	ctx, cancel := context.WithTimeout(ctx, robotLockedTimeout)
+	defer cancel()
+	if reader != nil {
+		// The hold below decides on the recorded zone as the API server has it, not as the
+		// cache has it (the stop guard, estopscope).
+		fresh := &fleetv1.Robot{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(robot), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
 			}
-			robot = fresh
+			return fmt.Errorf("re-reading robot %q for declared zone membership: %w", robot.Name, err)
 		}
-		placed, write := declaredPlacement(robot, zoneObj.Name, declaredOnly)
-		if !write {
-			continue // the API server already records it; RA-1
-		}
-		if z.holdZoneMove(ctx, robot, robot.Status.CurrentZone, placed) {
-			continue // applied once the stop is: see ObservePosition
-		}
-		oldZone := robot.Status.CurrentZone
-		original := robot.DeepCopy()
-		robot.Status.CurrentZone = placed
-		matches := placed != "" && placed == robot.Spec.Zone
-		robot.Status.SpecZoneMatchesCurrent = &matches
-		if err := z.Status().Patch(ctx, robot, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
-			return fmt.Errorf("writing declared currentZone for robot %q: %w", robot.Name, err)
-		}
-		// Advance the position observer's memo to the value just written, so the
-		// robot's next frame is compared against it rather than against a value this
-		// write replaced.
-		if id := robot.Annotations[RobotIDAnnotation]; id != "" {
-			key := zoneMemoKey(robot.Namespace, id)
-			z.recordZone(key, placed, placed)
-			z.noteRead(key, robot.ResourceVersion)
-		}
-		if oldZone != placed {
-			z.signalZoneTransition(ctx, robot, oldZone, placed)
-		}
+		robot = fresh
+	}
+	placed, write := declaredPlacement(robot, zoneName, declaredOnly)
+	if !write {
+		return nil // the API server already records it; RA-1
+	}
+	if z.holdZoneMove(ctx, robot, robot.Status.CurrentZone, placed) {
+		return nil // applied once the stop is: see ObservePosition
+	}
+	oldZone := robot.Status.CurrentZone
+	original := robot.DeepCopy()
+	robot.Status.CurrentZone = placed
+	matches := placed != "" && placed == robot.Spec.Zone
+	robot.Status.SpecZoneMatchesCurrent = &matches
+	if err := z.Status().Patch(ctx, robot, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("writing declared currentZone for robot %q: %w", robot.Name, err)
+	}
+	// Advance the position observer's memo to the value just written, so the
+	// robot's next frame is compared against it rather than against a value this
+	// write replaced.
+	if id := robot.Annotations[RobotIDAnnotation]; id != "" {
+		key := zoneMemoKey(robot.Namespace, id)
+		z.recordZone(key, placed, placed)
+		z.noteRead(key, robot.ResourceVersion)
+	}
+	if oldZone != placed {
+		z.signalZoneTransition(ctx, robot, oldZone, placed)
 	}
 	return nil
 }
@@ -541,6 +572,9 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 	// frame. The robot is read again and this frame derived again against it, under a backoff
 	// that outlasts those writes, as patchHolds' does. Only a frame refused at every attempt is
 	// dropped, and the next one derives the move again.
+	//
+	// Each attempt holds the robot's lock (robotMu) from its read to its memos, so a frame from a
+	// second stream reads the robot only once this one's write has committed or failed.
 	key := client.ObjectKeyFromObject(robot)
 	rd := z.zoneReader(readerPositionFrame)
 	if rd == nil {
@@ -549,6 +583,10 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 	attempts := 0
 	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		attempts++
+		unlock := z.robotMu.lock(key)
+		defer unlock()
+		ctx, cancel := context.WithTimeout(ctx, robotLockedTimeout)
+		defer cancel()
 		if z.APIReader != nil || attempts > 1 {
 			fresh := &fleetv1.Robot{}
 			if err := rd.Get(ctx, key, fresh); err != nil {
@@ -634,6 +672,11 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 	containmentMoved := z.recordContainment(memo, newContaining, robot.Status.ContainingZones)
 	if !zoneMoved && !containmentMoved {
 		z.noteRead(memo, robot.ResourceVersion)
+		if z.takeUnsurePush(memo) {
+			// A write whose outcome was unknown may have moved the containment this copy records,
+			// and its push was not sent: the adapter may still be running the old zone's rules.
+			z.pushZoneConstraints(ctx, robot, newContaining)
+		}
 		return nil // unchanged since the last write (or persisted status) — RA-1
 	}
 
@@ -653,17 +696,21 @@ func (z *ZoneController) applyFrame(ctx context.Context, f telemetry.Frame, robo
 			return err
 		}
 		log.FromContext(ctx).Error(err, "writing currentZone", "robot", robot.Name, "zone", newZone)
+		if containmentMoved {
+			z.markUnsurePush(memo) // the write may have landed
+		}
 		return err
 	}
 	// The write returned the robot's new version; the memos describe it.
 	z.noteRead(memo, robot.ResourceVersion)
+	unsure := z.takeUnsurePush(memo)
 
 	// FA-R7 — tell the adapter what may be running where the robot NOW IS. Gated a
 	// second time inside, on the resolved RULE set rather than on the containment set:
 	// crossing from one unrestricted zone into another is a containment transition that
 	// changes nothing an adapter must do, and re-sending an identical set would be a
 	// command per boundary crossing.
-	if containmentMoved {
+	if containmentMoved || unsure {
 		z.pushZoneConstraints(ctx, robot, newContaining)
 	}
 
@@ -862,6 +909,26 @@ func (z *ZoneController) recordZone(key, newZone, statusZone string) bool {
 	return true
 }
 
+// markUnsurePush records a containment write of unknown outcome for key (unsurePush).
+func (z *ZoneController) markUnsurePush(key string) {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	if z.unsurePush == nil {
+		z.unsurePush = map[string]bool{}
+	}
+	z.unsurePush[key] = true
+}
+
+// takeUnsurePush reports whether the robot has a containment write of unknown outcome, and
+// clears it (unsurePush).
+func (z *ZoneController) takeUnsurePush(key string) bool {
+	z.lastMu.Lock()
+	defer z.lastMu.Unlock()
+	unsure := z.unsurePush[key]
+	delete(z.unsurePush, key)
+	return unsure
+}
+
 // forgetMemos drops the zone and containment memos for key, so the next derivation seeds
 // them from the Robot's persisted status. It keeps the robot's positioned mark.
 func (z *ZoneController) forgetMemos(key string) {
@@ -889,6 +956,7 @@ func (z *ZoneController) ForgetRobot(namespace, robotID string) bool {
 	delete(z.lastContaining, key)
 	delete(z.lastRead, key)
 	delete(z.positioned, key)
+	delete(z.unsurePush, key)
 	return zoned || contained || positioned
 }
 

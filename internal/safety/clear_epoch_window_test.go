@@ -131,8 +131,16 @@ func TestClear_AStopIssuedInTheEpochWindowStands(t *testing.T) {
 			_, _ = d.TriggerEstop(ctx, ns, "amr-1", "namespace stop", "operator", metrics.ScopeNamespace,
 				Carrier{Kind: fleetv1.StopCarrierSwarmadaConfig, Name: "swarmada-config", UID: "cfg-uid"})
 		}()
+		// Its own Estop, not just any: registering the stream re-sends the zone's recorded stop in a
+		// goroutine of its own (resendHeld), and that Estop can reach the sender first. The
+		// namespace's stop is sent after its epoch is issued and after it is in flight, so once its
+		// Estop is seen, the clear's read of the stops in flight and its second check both follow
+		// its trigger.
 		deadline := time.Now().Add(5 * time.Second)
-		for sender.count(func(m *fav1.ControlPlaneSafetyMessage) bool { return m.GetEstop() != nil }) == 0 {
+		for sender.count(func(m *fav1.ControlPlaneSafetyMessage) bool {
+			e := m.GetEstop()
+			return e != nil && e.GetEstopId() != "stop-zone"
+		}) == 0 {
 			if time.Now().After(deadline) {
 				t.Error("the namespace's stop was never sent")
 				return
