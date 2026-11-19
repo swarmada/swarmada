@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarmada"
-version = "0.4.0"
+version = "0.4.1"
 description = "Swarmada – robot fleet orchestration (simulation, ML, tooling)"
 readme = "README.md"
 # 3.12 is the floor the dependency set actually permits: numpy requires >=3.12 and scikit-learn

@@ -11,10 +11,10 @@ description: |
 type: application
 
 # Chart version — bump on any chart change (SemVer). Independent of appVersion.
-version: 0.4.0
+version: 0.4.1
 # The Swarmada control-plane version this chart deploys (the container image tag
 # default). Alpha per RFC-0001's maturity table.
-appVersion: "0.4.0"
+appVersion: "0.4.1"
 
 # 1.31 is the floor: it is the oldest API server measured to admit an emergency stop on a
 # zone stored before one of the CRD's validation rules existed (CRD validation ratcheting);

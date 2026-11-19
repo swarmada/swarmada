@@ -10,6 +10,22 @@ were **added** or **amended**; the version increment follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-19
+
+**Components `0.4.1`**, implementing RFC-0001 v0.4. The spec version stays `0.4`: no normative
+RFC text changed. Fleet-adapter contract `1.4.0` (`fleet_adapter.v1`), supported range
+`>=1.3.0 <1.5.0`, unchanged. Conformance suite revision `2026.11.14`.
+
+- **Versions:** `pyproject.toml` and the chart's `version` and `appVersion` are `0.4.1`. The
+  release is tagged `v0.4.1`; the spec keeps its tag, `rfc-0001-v0.4`.
+- **Image:** `ghcr.io/swarmada/swarmada:0.4.1` is published and signed, and a default
+  `helm install` pulls it.
+- **API and protocol:** no CRD, proto or contract-version change.
+- **Upgrading:** results earned before suite revision `2026.11.09` are re-earned (see *Changed*).
+  `swarmada_estop_fanout_duration_seconds` now starts when the control plane first sees a stop's
+  trigger, so it includes the wait before the stop's pass and the pass's reads; compare it with
+  0.4.0's readings only with that in mind.
+
 ### Added
 
 - **The controller-manager image is published.** A release workflow
@@ -20,13 +36,141 @@ were **added** or **amended**; the version increment follows
   [docs/container-registry.md](docs/container-registry.md#verifying-a-release-image).
 - The manager image carries the OCI labels `org.opencontainers.image.source`, `.revision`,
   `.version` and `.licenses`.
+- **The manager's Kubernetes API client budget is configurable**: `--kube-api-qps` and
+  `--kube-api-burst`, and the chart's `manager.kubeAPI.qps` and `.burst`, with
+  controller-runtime's defaults, 20 and 30. The limit applies to each client and resource kind
+  separately. The manager and the chart refuse a QPS below 5; with `--leader-elect`, the manager
+  also refuses a QPS below 6 divided by `--leader-election-renew-deadline` in seconds. See the
+  chart README's "Manager API client budget".
+- **Metrics:** `rest_client_rate_limiter_wait_seconds{verb,path}`, the time a request waited on
+  the client-side limiter, and `swarmada_manager_uncached_read_duration_seconds{caller,verb,resource,result}`,
+  the manager's reads past its cache, by caller.
+- **`RobotHeldOff` Event.** After an assignment that was not sent, or that the adapter refused as
+  `ROBOT_UNAVAILABLE`, is reverted, the robot is not offered that action again for 60 s, doubling
+  to 10 min. A Normal `RobotHeldOff` Event on the action names the robot and the wait.
+- **The simulation adapter serves several robots on one `ControlStream`**: give `--robot-id` more
+  than once. Each robot has its own fencing token, lease, stop latch and action. With one
+  `--robot-id`, its wire traffic is unchanged.
+- **Conformance suite revision `2026.11.14`: multi-robot mode.** Given two or more `--robot-id`,
+  the harness runs each robot-scoped row once per robot. New rows: `C20.1`–`C20.7` (one robot's
+  commands, fencing-token mark, lease and stop leave the others alone), `C5.9` (rest is confirmed
+  only from a reading taken after the stop), and `CP9.1` (RegisterAcks in the order of the
+  registers). `make conformance-sim-multi` runs it against the simulation adapter with two
+  robots.
+- `examples/hello-world`: a four-leg `FleetTask` and a go-to-base task for the simulated robot.
 
 ### Changed
 
-- The manager `Dockerfile` declares `VERSION` after the module download, so a new version
-  reuses the cached download layer. The binary and its version stamp are unchanged.
 - A component release is tagged `vX.Y.Z`; see
   [docs/release-process.md](docs/release-process.md#versioning).
+- The manager `Dockerfile` declares `VERSION` after the module download, so a new version
+  reuses the cached download layer. The binary and its version stamp are unchanged.
+- **Conformance suite revision `2026.11.09`** (harness class, so results earned before it are
+  re-earned). `C2.1` refuses the first register `NOT_ADMITTED` and passes only when a discover
+  announcing the robot follows. `C5.8` is graded in dispatch Core, not safety. The default
+  `--run-timeout` is 180 s, from 60 s. `2026.11.14` (above) is also harness class.
+- **The SDK's stop confirmation takes a token (API change).** `command_estop` now returns an
+  `EstopToken`, which `await_estop_confirmation` takes, and a binding to a real robot exposes
+  `state_seq(robot)`, its count of state reports from that robot. Called without the token,
+  `await_estop_confirmation` counts from its own call, which is stricter. See *Fixed* and the SDK
+  README.
+- **The adapter template joins a control plane that has no `Robot` for it yet.** On a register
+  refused `NOT_ADMITTED`, it stops the robot's held work, sends a discover, and registers again
+  until it is admitted.
+- **`swarmada_estop_fanout_duration_seconds`** runs from when the control plane first sees a
+  stop's trigger to the last robot's outcome, once per stop. After a manager restart or a change
+  of leader, a trigger already written is timed from its pass.
+- The zone and namespace stop controllers run up to 1,024 stops at once; one carrier is never
+  processed by two workers. A stop in force resyncs every 24 to 36 s, not every 30 s in lockstep.
+- A `FleetAdapter` heartbeat no longer re-enqueues every waiting action. A robot becoming free,
+  a stop ending, a zone's restrictions changing, a zone slot freeing and a maintenance window
+  ending each wake the actions they may admit. An action whose every adapter was unreachable is
+  rechecked after 2, 4, 8 and 15 s.
+- A `currentZone` or `containingZones` edited on a `Robot` by someone else is written back by the
+  robot's next position frame.
+- The assignment-latency sample is taken once the robot commit has landed.
+- `adapters/REGISTRY.md`: the simulation and `fleet-adapter-ros2` rows are re-earned at
+  `2026.11.14`; the other rows are stale until re-run.
+
+### Fixed
+
+- **The SDK confirms an emergency stop only from a state report newer than the stop.** A robot
+  at rest shortly before the stop and moving again was confirmed `STOPPED` at once.
+  `command_estop` returns an `EstopToken`, and `await_estop_confirmation` confirms only once the
+  binding's `state_seq(robot)` has moved past it. A binding without `state_seq` keeps the old
+  check and is warned about once; see the SDK README.
+- `swarmada_sdk.__version__` reads `0.1.0`, as the SDK's `pyproject.toml` does; it read `0.0.1`.
+- **A clear judges the other stops on a read taken after it starts.** A stop another zone or the
+  namespace sent to a robot during a clear, not yet recorded on the robot, read as ended: the
+  robot was written `Resuming` and sent an `EstopClear` naming that stop while it was in force.
+- **Every zone and namespace stop is sent at its trigger.** A stop of one zone waited for another
+  zone's pass to finish writing its outcomes, 9 s in a test. It is now sent to the robots the
+  cache places in its scope at once, and to any robot the API server's list adds when that read
+  returns.
+- **A robot is recorded in the zone it is in when two streams report it at once.** During an
+  adapter's reconnect, two streams can deliver position reports for one robot at the same time. A
+  report from the new stream could be decided on the robot as it was before the old stream's status
+  write, and that stale write then landed: the robot was recorded in a zone it had left, and a stop
+  over the zone it was in did not reach it until a later report corrected the record. The Zone
+  Controller now decides and writes each robot's zone one writer at a time, and the API calls it
+  makes meanwhile carry a 60 s deadline.
+- **An adapter is sent the operating rules of the zone a robot entered, even when the write that
+  recorded the entry failed but landed.** A containment write that fails with a timeout, a lost
+  connection or a server error may still land. Its push of the operating rules was not sent, and
+  the adapter kept running the robot under the rules of the zone it had left, a speed limit among
+  them, until its containment changed again. The next position report now sends the rules in force
+  where the robot is recorded.
+- **A stop is issued once per trigger, and a clear runs once**, when the manager's cache is behind
+  the carrier's processed marker. Every robot was sent a second stop under a new stop ID, and the
+  audit log took a second `ESTOP_TRIGGERED` or `ESTOP_CLEARED` entry for one operator action. A
+  second robot clear could also drop the record of a stop recorded since the first.
+- **Writes a concurrent change could undo are locked to the copy read**: a clear's marker patch,
+  the stop finalizer's release (a trigger admitted meanwhile could lose its finalizer), and a
+  `FleetAction`'s annotation removals (an annotation written meanwhile was erased).
+- **A stop re-sent on a new `SafetyStream` before its record landed** goes under its own stop ID,
+  not a fresh one, so the clear that names it releases the robot.
+- **A robot's report of a stop ID is answered while a clear removes that ID**, on both 1.4.0 and
+  1.3.x connections. It was dropped, and on 1.3.x the ID could stay latched at the adapter until
+  its next `SafetyStream`.
+- **An assignment the robot never took up returns to `Pending`** (row A24) when the control
+  plane's own check at the send refused it: the robot's register not yet processed, or its stream
+  below contract `1.4.0`. The action stayed `Assigned` until its lease ran out. Under a stop it is
+  paused on the robot (row A1).
+- **A waiting action is assigned about 30 ms after a robot it can take becomes free** (in
+  envtest), not 1.7 to 2.8 s later on the adapter heartbeat.
+- **Dispatch re-reads the robot it selected before asking its adapter**, so an action no longer
+  takes a TDE slot and writes itself `Assigned` for a robot another action took a moment before.
+- **Fewer reads past the cache.** Stop checks read the informer cache and confirm "no stop" from
+  the API server only before acting on it. The zone controller reads a robot past the cache only
+  when a zone write may follow. At 50 robots and more, these reads filled the uncached reader's
+  limiters.
+- The conformance harness no longer crashes with `KeyError` on an adapter that serves no action.
+- `docs/adapters.md`'s VDA 5050 conformance command passes `--insecure`, without which the
+  adapter does not start against the harness.
+
+### Known limitations
+
+Each is described in [docs/known-limitations.md](docs/known-limitations.md), with what to do instead.
+
+- A large stop slows reads and writes on the manager's client budget.
+- A zone or namespace stop can take longer than RFC-0001's 2 s to record every outcome.
+- A robot can stay stopped after both of its stops are cleared; release it by hand.
+- A robot its adapter reports offline can still be given work.
+- An assignment refused at the send while a stop holds the robot is paused, not reverted.
+- A robot held off an action is skipped even when it ranks first.
+- A full zone does not hold a robot at its boundary.
+- An adapter can turn Degraded during a large stop.
+- The VDA 5050 adapter's MQTT connection has no TLS and no login.
+- A robot whose adapter has no SafetyStream can be given work. (updated)
+- One live stream per Fleet Adapter identity. (updated)
+- A robot moved into a zone with no polygon is outside that zone's stop until it is recorded there.
+- The ROS 2 adapter's edge estop latch is kept by the adapter, not by the robot.
+- The adapter template answers a cancel `STOPPED_SAFELY` without reading that the robot is at rest.
+- The adapter template confirms a stop on the stream that carried it.
+- The adapter template redials a stream closed as superseded.
+- The simulation adapter answers a cancel `STOPPED_SAFELY` without reading that the robot is at rest.
+- The simulation adapter, serving one robot, confirms a stop on the stream that carried it.
+- The simulation adapter redials a stream closed as superseded.
 
 ## [RFC-0001 v0.4] - 2026-11-04
 
@@ -2047,5 +2191,6 @@ contract note above), but the results are worth reading:
   and reconnects rather than raising an uncaught error, keeping an estop path live
   across transient connectivity loss.
 
-[Unreleased]: https://github.com/swarmada/swarmada/compare/rfc-0001-v0.4...HEAD
+[Unreleased]: https://github.com/swarmada/swarmada/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/swarmada/swarmada/releases/tag/v0.4.1
 [RFC-0001 v0.4]: https://github.com/swarmada/swarmada/releases/tag/rfc-0001-v0.4
