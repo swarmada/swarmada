@@ -1182,6 +1182,98 @@ has stopped them already.
 `FleetAdapter` and client certificate. See
 [RFC-0001, Connection lifecycle](../rfcs/dist/RFC-0001-core-spec.md#fleet-adapter-protocol-connection-lifecycle).
 
+### The adapter template answers a cancel `STOPPED_SAFELY` without reading that the robot is at rest
+
+**Limitation.** On a `cancel_action`, the adapter template (`adapters/template/`) commands the robot
+to stop and answers `CANCEL_DISPOSITION_STOPPED_SAFELY` at once. It doesn't read `is_stopped` first.
+The template's default robot is at rest when its stop command returns, so for that robot the answer
+is true. An adapter built from the template, for a robot that takes time to stop or may not stop,
+sends the same answer without its robot having earned it.
+
+**What you will see.** The control plane takes `STOPPED_SAFELY` as proof that the robot is off the
+action. The action is ended or requeued, and another robot can take it while the first one is still
+moving.
+
+**Instead.** In an adapter built from the template, answer `STOPPED_SAFELY` only once `is_stopped`
+confirms the robot is at rest, within the cancel's budget. Otherwise answer
+`CANCEL_DISPOSITION_STOP_UNCONFIRMED` (contract `1.4.0`): the control plane then holds the robot
+until its lease has provably expired.
+
+### The adapter template confirms a stop on the stream that carried it
+
+**Limitation.** The adapter template waits for a stop's confirmation, up to 2 s, on the thread that
+reads the stream the stop came on: the `SafetyStream` for an `Estop`, the `ControlStream` for a
+fence, and the `EdgeStream` for an edge stop. While it waits, it reads nothing more from that
+stream.
+
+**What you will see.** A stop, a clear, a lease renewal or a cancel sent during that wait reaches
+the adapter only when the confirmation ends. A second stop sent during the wait can be acknowledged
+after its 2 s delivery window, and is then recorded `Failed` with "no EstopAck within delivery
+window (dropped estop)". With the template's default robot, which is at rest at once, there is no
+wait.
+
+**Instead.** In an adapter built from the template, confirm the stop on a thread of its own, and
+send the `EstopAck` from there.
+
+### The adapter template redials a stream closed as superseded
+
+**Limitation.** The adapter template handles a stream closed with `ABORTED`, superseded by a newer
+stream under the same identity, like any other stream error: it redials on its backoff. It doesn't
+stop its robot or give up the work it holds. RFC-0001 requires a process whose stream is superseded
+to stop every robot it drives and to hold no work.
+
+**What you will see.** Two processes under one identity keep displacing each other, as in "One live
+stream per Fleet Adapter identity", and the process whose streams were replaced keeps driving the
+work it held.
+
+**Instead.** Run one process per adapter identity. In an adapter built from the template, treat
+`ABORTED` on either stream as superseded: stop the robot, give up its work, and don't redial. See
+[RFC-0001, Connection lifecycle](../rfcs/dist/RFC-0001-core-spec.md#fleet-adapter-protocol-connection-lifecycle).
+
+### The simulation adapter answers a cancel `STOPPED_SAFELY` without reading that the robot is at rest
+
+**Limitation.** On a `cancel_action`, the simulation adapter (`adapters/simulation/`) commands its
+simulated robot to stop and answers `CANCEL_DISPOSITION_STOPPED_SAFELY` at once, whether it serves
+one robot or several. It doesn't read `is_stopped` first. The simulated robot slows to rest after a
+stop rather than halting, so a robot that was moving is answered stopped before it is at rest.
+
+**What you will see.** The control plane takes `STOPPED_SAFELY` as proof that the robot is off the
+action, and can give the action to another robot while the simulated robot is still slowing. Run
+with `--command-derived-plant`, the adapter answers `CANCEL_DISPOSITION_STOP_UNCONFIRMED` instead.
+
+**Instead.** Don't read the simulation adapter's `STOPPED_SAFELY` as a witnessed stop. To see the
+control plane hold a robot whose rest is not witnessed, run the adapter with
+`--command-derived-plant`.
+
+### The simulation adapter, serving one robot, confirms a stop on the stream that carried it
+
+**Limitation.** Serving one robot, the simulation adapter waits for a stop's confirmation, up to 2
+s, on the thread that reads the stream the stop came on: the `SafetyStream` for an `Estop`, the
+`ControlStream` for a fence, and the `EdgeStream` for an edge stop. While it waits, it reads nothing
+more from that stream. Serving several robots, it confirms each stop off the reader.
+
+**What you will see.** A stop, a clear, a lease renewal or a cancel sent during that wait reaches
+the adapter only when the confirmation ends. A second stop sent during the wait can be acknowledged
+after its 2 s delivery window, and is then recorded `Failed` with "no EstopAck within delivery
+window (dropped estop)".
+
+**Instead.** To exercise stops that arrive close together, give the simulation adapter more than one
+`--robot-id`.
+
+### The simulation adapter redials a stream closed as superseded
+
+**Limitation.** The simulation adapter handles a stream closed with `ABORTED`, superseded by a newer
+stream under the same identity, like any other stream error: it redials after 0.5 s. It doesn't stop
+its robots or give up the work it holds. RFC-0001 requires a process whose stream is superseded to
+stop every robot it drives and to hold no work.
+
+**What you will see.** Two simulation adapters under one identity keep displacing each other, as in
+"One live stream per Fleet Adapter identity", and the one whose streams were replaced keeps driving
+the work it held.
+
+**Instead.** Run one simulation adapter per adapter identity. See
+[RFC-0001, Connection lifecycle](../rfcs/dist/RFC-0001-core-spec.md#fleet-adapter-protocol-connection-lifecycle).
+
 ### A maintenance window does not requeue paused work
 
 **Limitation.** A `ZoneMaintenance` window in `Immediate` mode, or in `Graceful` mode past its drain
