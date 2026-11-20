@@ -22,12 +22,15 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/swarmada/swarmada/internal/audit"
 	"github.com/swarmada/swarmada/internal/contract"
@@ -166,6 +169,14 @@ type AdapterPresence interface {
 	// called for a stream that another stream under the same identity replaced: the
 	// adapter is still connected, on the newer stream.
 	AdapterDisconnected(ctx context.Context, identity TLSIdentity)
+}
+
+// AdapterHeartbeatAt is satisfied by an AdapterPresence that records a heartbeat at the moment it
+// was received. The ControlStream records heartbeats as they arrive, apart from the messages
+// queued before them, so a heartbeat may be written a moment after it was read; the time given is
+// when it was read. Reached by type assertion; AdapterHeartbeat is called otherwise.
+type AdapterHeartbeatAt interface {
+	AdapterHeartbeatAt(ctx context.Context, identity TLSIdentity, receivedAt time.Time)
 }
 
 // AdapterSupersession is satisfied by an AdapterPresence that records one ControlStream
@@ -377,6 +388,10 @@ type ResourceGrantNotifier interface {
 // telemetry tick — RA-1). It implements fav1.FleetAdapterServiceServer;
 // SafetyStream remains Unimplemented until that enforcement lands.
 type Server struct {
+	// presenceWedge overrides presenceWedgeDefault (tests).
+	presenceWedge time.Duration
+	// presenceBacklog overrides presenceBacklogDefault (tests).
+	presenceBacklog time.Duration
 	fav1.UnimplementedFleetAdapterServiceServer
 
 	// Registrar answers Discover/Register. Nil rejects all registrations.
@@ -529,14 +544,9 @@ func (s *Server) supersedeSafety(ctx context.Context, log logr.Logger, identity 
 	}
 }
 
-// recvMessages runs stream.Recv on its own goroutine so the receive loop can also wait
-// for supersession. Messages are delivered in order, and an error only after every
-// message before it has been taken. The goroutine exits once done is closed.
-func recvMessages(stream fav1.FleetAdapterService_ControlStreamServer, done <-chan struct{}) (<-chan *fav1.AdapterMessage, <-chan error) {
-	return recvEach(stream.Recv, done)
-}
-
-// recvEach is recvMessages over any stream's Recv.
+// recvEach runs recv on its own goroutine so a receive loop can also wait for supersession.
+// Messages are delivered in order, and an error only after every message before it has been
+// taken. The goroutine exits once done is closed. The ControlStream uses recvControl.
 func recvEach[M any](recv func() (M, error), done <-chan struct{}) (<-chan M, <-chan error) {
 	msgs := make(chan M)
 	errs := make(chan error, 1)
@@ -839,28 +849,328 @@ func (s *Server) ControlStream(stream fav1.FleetAdapterService_ControlStreamServ
 		s.supersede(ctx, log, identity, replaced, id.PeerAddr)
 	}
 
+	// Once a newer stream holds the identity, this one writes no presence and answers no
+	// confirming exchange, whichever path its heartbeats take: the newer stream's handshake
+	// decides the adapter's phase, and only the stream that holds the identity speaks for it.
+	ctx = withSuperseded(ctx, superseded)
 	done := make(chan struct{})
 	defer close(done)
-	msgs, recvErr := recvMessages(stream, done)
+	// Heartbeats are recorded as they arrive, not behind the messages read before them: a backlog
+	// of telemetry waiting on the API server must not make a live adapter read Degraded, nor delay
+	// the answer to a per-robot confirming exchange (ADR-0054's amendment). The presence write runs
+	// in its own goroutine, joined before the deferred disconnect above, so no presence write
+	// follows the stream's disconnect.
+	pump := &presencePump{notify: make(chan struct{}, 1)}
+	pctx, pcancel := context.WithCancel(ctx)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		pump.run(pctx, func(at time.Time) { s.recordPresence(pctx, identity, at) })
+	}()
+	defer func() { pcancel(); <-pumpDone }()
+	// handling is when the loop started handling its current message (UnixNano), 0 while it is
+	// idle: a loop held on one message longer than the presence limit takes heartbeats back into
+	// its own order. behind is when the oldest message not handled yet was read (UnixNano), 0 once
+	// the queue is empty: a backlog older than the backlog limit takes them back too, however
+	// quickly each of its messages is handled, so the adapter's phase shows a loop that has fallen
+	// that far behind, and its robots are not stamped live while what they report waits.
+	var handling, behind atomic.Int64
+	q := recvControl(stream, done, func(msg *fav1.AdapterMessage) bool {
+		return s.heartbeatOnArrival(ctx, identity, msg, pump, &handling, &behind, done)
+	})
+	var lagLogged time.Time
 	for {
 		select {
 		case <-superseded:
-			log.Info("adapter ControlStream superseded by a newer stream under the same identity; closed")
+			log.Info("adapter ControlStream superseded by a newer stream under the same identity; closed",
+				"queuedDropped", len(q.items))
 			return supersededStatus(identity)
 		case <-lost:
-			log.Info("adapter ControlStream closed: this process lost leadership")
+			log.Info("adapter ControlStream closed: this process lost leadership", "queuedDropped", len(q.items))
 			return leadershipLostStatus()
-		case err := <-recvErr:
-			if err == io.EOF {
+		case err := <-q.errs:
+			// The stream broke (not a clean close): what was read and not handled yet is dropped,
+			// as the transport's own window was before.
+			log.Info("adapter ControlStream failed", "err", err.Error(), "queuedDropped", len(q.items))
+			return err
+		case it := <-q.items:
+			q.release(it.credit)
+			if it.err != nil { // the clean close, queued after every message read before it
 				log.Info("adapter ControlStream closed")
 				return nil
 			}
-			return err
-		case msg := <-msgs:
-			if err := s.dispatch(ctx, w, id, identity, msg); err != nil {
+			if lag := time.Since(it.at); lag > controlLagReported && time.Since(lagLogged) > controlLagReported {
+				lagLogged = time.Now()
+				log.Info("adapter ControlStream is behind: a message waited before it was handled",
+					"lag", lag.Round(time.Second), "queued", len(q.items))
+			}
+			behind.Store(it.at.UnixNano())
+			handling.Store(time.Now().UnixNano())
+			err := s.dispatch(withReceivedAt(ctx, it.at), w, id, identity, it.msg)
+			handling.Store(0)
+			if len(q.items) == 0 {
+				behind.Store(0)
+			}
+			if err != nil {
 				return err
 			}
 		}
+	}
+}
+
+// controlQueueLen and controlQueueKiB bound what is read from an adapter's ControlStream and not
+// handled yet: about 40 s of 50 messages a second, and 16 MiB. When either is reached the stream
+// is not read until there is room, as before the queue existed.
+const (
+	controlQueueLen = 2048
+	controlQueueKiB = 16 * 1024
+)
+
+// controlLagReported is how long a message may wait in the queue before the wait is logged (at
+// most once per this long per stream): a backlog the adapter's phase does not show while its
+// heartbeats are recorded as they arrive.
+const controlLagReported = 10 * time.Second
+
+// presenceWedgeDefault is how long the loop may be held on one message before heartbeats stop
+// skipping its queue: three heartbeat intervals at the default, the Disconnected bound, and the
+// default offline threshold T1. Past it the manager is wedged on this adapter, not catching up, and
+// the adapter's presence follows the loop again, so the phase shows it.
+const presenceWedgeDefault = 30 * time.Second
+
+// presenceBacklogDefault is how long ago the oldest message not handled yet may have been read
+// before heartbeats stop skipping the queue: three heartbeat intervals at the default, the same
+// bound as presenceWedgeDefault. Past it the loop is behind on what the adapter's robots report,
+// and the adapter's presence follows the loop again, so its phase and its robots' liveness show
+// the backlog. Stops, their clears and their acknowledgements travel on the SafetyStream, never in
+// this queue: the limit decides only when the adapter's phase follows the loop, and with it whether
+// its robots are given new work.
+const presenceBacklogDefault = 30 * time.Second
+
+// recvItem is one message read from the ControlStream, with when it was read and the queue credit
+// it holds, or the clean close (io.EOF) that ends the stream.
+type recvItem struct {
+	msg    *fav1.AdapterMessage
+	at     time.Time
+	credit int
+	err    error
+}
+
+// recvQueue is the ControlStream's read-ahead: the messages read and not handled yet, in order,
+// within controlQueueLen and controlQueueKiB; and a stream error other than a clean close, which is
+// not queued behind them.
+type recvQueue struct {
+	items  chan recvItem
+	errs   chan error
+	credit chan struct{} // one token per KiB queued
+}
+
+func (q *recvQueue) take(n int, done <-chan struct{}) bool {
+	for i := 0; i < n; i++ {
+		select {
+		case q.credit <- struct{}{}:
+		case <-done:
+			return false
+		}
+	}
+	return true
+}
+
+func (q *recvQueue) release(n int) {
+	for i := 0; i < n; i++ {
+		<-q.credit
+	}
+}
+
+// recvControl reads the ControlStream into a recvQueue. A message onArrival takes is not queued: it
+// has been handled where it was read. A clean close is queued after every message read before it,
+// so the stream is drained first; any other error is delivered at once.
+func recvControl(stream fav1.FleetAdapterService_ControlStreamServer, done <-chan struct{},
+	onArrival func(*fav1.AdapterMessage) bool) *recvQueue {
+	q := &recvQueue{items: make(chan recvItem, controlQueueLen), errs: make(chan error, 1),
+		credit: make(chan struct{}, controlQueueKiB)}
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			if err != nil {
+				if err != io.EOF {
+					q.errs <- err
+					return
+				}
+				select {
+				case q.items <- recvItem{err: err}:
+				case <-done:
+				}
+				return
+			}
+			at := time.Now()
+			if onArrival(msg) {
+				continue
+			}
+			n := min(proto.Size(msg)/1024+1, controlQueueKiB)
+			if !q.take(n, done) {
+				return
+			}
+			select {
+			case q.items <- recvItem{msg: msg, at: at, credit: n}:
+			case <-done:
+				return
+			}
+		}
+	}()
+	return q
+}
+
+// beatAnswers is how long after it was read a per-robot heartbeat still answers a confirming
+// exchange: one heartbeat interval at the default. A heartbeat recorded as it arrives answers at
+// once; this bounds one that waited its turn in a wedged loop.
+const beatAnswers = 10 * time.Second
+
+// supersededKey carries, in a stream's context, the channel closed when a newer stream under the
+// same identity is accepted.
+type supersededKey struct{}
+
+func withSuperseded(ctx context.Context, superseded <-chan struct{}) context.Context {
+	return context.WithValue(ctx, supersededKey{}, superseded)
+}
+
+// streamSuperseded reports whether a newer stream holds this stream's identity. A context that
+// carries no such channel (an unverified stream, a test) is never superseded.
+func streamSuperseded(ctx context.Context) bool {
+	ch, _ := ctx.Value(supersededKey{}).(<-chan struct{})
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// receivedAtKey carries, in a dispatch's context, when its message was read.
+type receivedAtKey struct{}
+
+func withReceivedAt(ctx context.Context, at time.Time) context.Context {
+	return context.WithValue(ctx, receivedAtKey{}, at)
+}
+
+// receivedAt is when the message being dispatched was read, or now when the context does not say.
+func receivedAt(ctx context.Context) time.Time {
+	if at, ok := ctx.Value(receivedAtKey{}).(time.Time); ok {
+		return at
+	}
+	return time.Now()
+}
+
+// heartbeatOnArrival records a Heartbeat where it is read, and reports whether it did. An
+// adapter-scoped one, and one naming a robot this adapter may observe, are recorded at once: the
+// adapter's presence (the pump), and the per-robot confirming exchange it answers. Anything else
+// (an unverified stream, a denial, a robot not admitted) is left to the stream's loop, which
+// decides it in order as before and seals a denial; nothing here writes.
+func (s *Server) heartbeatOnArrival(ctx context.Context, tlsID TLSIdentity, msg *fav1.AdapterMessage,
+	pump *presencePump, handling, behind *atomic.Int64, done <-chan struct{}) bool {
+	hb := msg.GetHeartbeat()
+	if hb == nil || !tlsID.Verified {
+		return false
+	}
+	at := time.Now()
+	// A loop held on one message past the limit is wedged, not catching up: the heartbeat takes its
+	// turn in the queue, recorded then at the time it was read, so the adapter's phase shows the
+	// wedge as before.
+	if busy := handling.Load(); busy != 0 && at.Sub(time.Unix(0, busy)) > s.presenceWedgeLimit() {
+		return false
+	}
+	// A backlog whose oldest message was read longer ago than the backlog limit is behind on what
+	// the adapter reports: the heartbeat takes its turn as well.
+	if oldest := behind.Load(); oldest != 0 && at.Sub(time.Unix(0, oldest)) > s.presenceBacklogLimit() {
+		return false
+	}
+	select {
+	case <-done:
+		return false
+	default:
+	}
+	if streamSuperseded(ctx) || !s.stillLeading() {
+		return false
+	}
+	if rid := hb.GetRobotId(); rid != "" {
+		if s.Authorizer != nil {
+			// authorizeObserve's rule, without its audit write.
+			err := s.Authorizer.AuthorizeRobot(ctx, tlsID, rid)
+			if err != nil && !errors.Is(err, ErrClassNotServed) && !errors.Is(err, ErrAdapterNotFound) {
+				return false
+			}
+		}
+		if router, ok := s.Commands.(HeartbeatRouter); ok {
+			router.RouteHeartbeat(tlsID.Namespace, rid)
+		}
+	}
+	pump.note(at)
+	return true
+}
+
+// presenceBacklogLimit is presenceBacklog, or presenceBacklogDefault when it is not set.
+func (s *Server) presenceBacklogLimit() time.Duration {
+	if s.presenceBacklog > 0 {
+		return s.presenceBacklog
+	}
+	return presenceBacklogDefault
+}
+
+// presenceWedgeLimit is presenceWedge, or presenceWedgeDefault when it is not set.
+func (s *Server) presenceWedgeLimit() time.Duration {
+	if s.presenceWedge > 0 {
+		return s.presenceWedge
+	}
+	return presenceWedgeDefault
+}
+
+// recordPresence writes the adapter's presence for a heartbeat read at at, while this process
+// leads and no newer stream holds the identity.
+func (s *Server) recordPresence(ctx context.Context, tlsID TLSIdentity, at time.Time) {
+	if s.Presence == nil || streamSuperseded(ctx) || !s.stillLeading() {
+		return
+	}
+	if p, ok := s.Presence.(AdapterHeartbeatAt); ok {
+		p.AdapterHeartbeatAt(ctx, tlsID, at)
+		return
+	}
+	s.Presence.AdapterHeartbeat(ctx, tlsID)
+}
+
+// presencePump coalesces heartbeats into presence writes: one write at a time, of the latest
+// heartbeat read, so a slow write is followed by one more write, not by one for each beat that
+// came meanwhile.
+type presencePump struct {
+	notify chan struct{}
+	mu     sync.Mutex
+	latest time.Time
+}
+
+func (p *presencePump) note(at time.Time) {
+	p.mu.Lock()
+	if at.After(p.latest) {
+		p.latest = at
+	}
+	p.mu.Unlock()
+	select {
+	case p.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (p *presencePump) run(ctx context.Context, write func(time.Time)) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.notify:
+		}
+		p.mu.Lock()
+		at := p.latest
+		p.mu.Unlock()
+		write(at)
 	}
 }
 
@@ -920,8 +1230,8 @@ func (s *Server) dispatch(ctx context.Context, w *streamWriter, id AdapterIdenti
 			// presence path (RFC-0001 #fleetadapter-status-fields-and-phase-machine), explicitly distinguished from the telemetry tick, and
 			// its status write is change-gated in AdapterHeartbeat.
 			if notAdmitted && msg.GetHeartbeat() != nil {
-				if s.Presence != nil && tlsID.Verified {
-					s.Presence.AdapterHeartbeat(ctx, tlsID)
+				if tlsID.Verified {
+					s.recordPresence(ctx, tlsID, receivedAt(ctx))
 				}
 				return nil
 			}
@@ -989,14 +1299,18 @@ func (s *Server) dispatch(ctx context.Context, w *streamWriter, id AdapterIdenti
 		// state — RouteHeartbeat below returns immediately on an empty robot_id, so
 		// an adapter cannot use the adapter-scoped form to answer a per-robot
 		// confirming exchange it was never asked.
-		if s.Presence != nil && tlsID.Verified {
-			s.Presence.AdapterHeartbeat(ctx, tlsID)
+		if tlsID.Verified {
+			s.recordPresence(ctx, tlsID, receivedAt(ctx))
 		}
 		// Also answer a pending per-ROBOT confirming exchange (RFC-0001 #safety-control-plane-response). Adapter
 		// presence and robot liveness are different questions: one adapter multiplexes
 		// many robots, so an adapter being alive says nothing about whether a
 		// particular robot's telemetry stall is real.
-		if router, ok := s.Commands.(HeartbeatRouter); ok && tlsID.Verified {
+		//
+		// A heartbeat that waited in the queue longer than beatAnswers is not an answer: the robot
+		// was alive when it was read, which says nothing about a probe opened since.
+		if router, ok := s.Commands.(HeartbeatRouter); ok && tlsID.Verified && !streamSuperseded(ctx) &&
+			time.Since(receivedAt(ctx)) <= beatAnswers {
 			router.RouteHeartbeat(tlsID.Namespace, p.Heartbeat.GetRobotId())
 		}
 		return nil

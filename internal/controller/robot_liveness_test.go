@@ -95,6 +95,7 @@ func TestProjectLiveness_FanOutScopedToAdapterAndNamespace(t *testing.T) {
 
 	r.AdapterConnected(context.Background(),
 		controlstream.TLSIdentity{AdapterName: "acme", Namespace: faNS, Verified: true}, compatibleNegotiation())
+	r.liveness.flush() // the stamps are written by the adapter's liveness worker
 
 	for _, name := range []string{"ra1", "ra2"} {
 		conn := getRobot(t, c, name, faNS).Status.Connectivity
@@ -120,6 +121,7 @@ func TestProjectLiveness_Throttle(t *testing.T) {
 		fresh := metav1.NewTime(now.Add(-5 * time.Second)) // 5s < 15s floor
 		r, c := newLivenessReconciler(t, now, robotBound("ra", faNS, "acme", &fresh))
 		r.AdapterHeartbeat(context.Background(), id)
+		r.liveness.flush() // the stamps are written by the adapter's liveness worker
 		got := getRobot(t, c, "ra", faNS).Status.Connectivity.LastSeenAt.Time
 		if !got.Equal(fresh.Time) {
 			t.Errorf("throttle failed: lastSeenAt moved to %v, expected no write (stays %v)", got, fresh.Time)
@@ -130,6 +132,7 @@ func TestProjectLiveness_Throttle(t *testing.T) {
 		stale := metav1.NewTime(now.Add(-20 * time.Second)) // 20s > 15s floor
 		r, c := newLivenessReconciler(t, now, robotBound("ra", faNS, "acme", &stale))
 		r.AdapterHeartbeat(context.Background(), id)
+		r.liveness.flush() // the stamps are written by the adapter's liveness worker
 		got := getRobot(t, c, "ra", faNS).Status.Connectivity.LastSeenAt.Time
 		if !got.Equal(now) {
 			t.Errorf("expected refresh to %v, got %v", now, got)
@@ -139,6 +142,7 @@ func TestProjectLiveness_Throttle(t *testing.T) {
 	t.Run("stamps a first-seen robot (nil connectivity)", func(t *testing.T) {
 		r, c := newLivenessReconciler(t, now, robotBound("ra", faNS, "acme", nil))
 		r.AdapterHeartbeat(context.Background(), id)
+		r.liveness.flush() // the stamps are written by the adapter's liveness worker
 		conn := getRobot(t, c, "ra", faNS).Status.Connectivity
 		if conn == nil || conn.LastSeenAt == nil || !conn.LastSeenAt.Time.Equal(now) {
 			t.Errorf("first-seen robot must be stamped to %v, got %+v", now, conn)

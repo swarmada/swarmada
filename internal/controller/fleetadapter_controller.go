@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -80,9 +81,18 @@ type FleetAdapterReconciler struct {
 	// Recorder emits the Warning Event for a superseded ControlStream. Nil emits none.
 	Recorder record.EventRecorder
 	now      func() time.Time
+	// APIReader reads around the cache. A presence write that conflicts is derived again from it,
+	// once: the cache can lag the previous write. Nil reads through the client.
+	APIReader client.Reader
+
+	// liveness runs projectLiveness for each adapter off the ControlStream and off the heartbeat's
+	// own write: the stamps share the manager's Robot write budget with every other Robot write,
+	// and a stop's fan-out can hold them for seconds.
+	liveness livenessWorkers
 }
 
 var _ controlstream.AdapterPresence = (*FleetAdapterReconciler)(nil)
+var _ controlstream.AdapterHeartbeatAt = (*FleetAdapterReconciler)(nil)
 var _ controlstream.AdapterSupersession = (*FleetAdapterReconciler)(nil)
 
 // +kubebuilder:rbac:groups=swarmada.io,resources=fleetadapters,verbs=get;list;watch
@@ -462,29 +472,93 @@ func (r *FleetAdapterReconciler) AdapterConnected(ctx context.Context, id contro
 	if reconnected {
 		metrics.IncAdapterReconnect(id.Namespace, id.AdapterName)
 	}
-	r.projectLiveness(ctx, id)
+	r.liveness.signal(r, id, r.clock())
 }
 
-// AdapterHeartbeat records a liveness probe, re-asserting Connected if it drifted.
+// AdapterHeartbeat records a liveness probe received now (AdapterHeartbeatAt).
 func (r *FleetAdapterReconciler) AdapterHeartbeat(ctx context.Context, id controlstream.TLSIdentity) {
-	r.mutateStatus(ctx, id, func(s *fleetv1.FleetAdapterStatus) {
-		now := metav1.NewTime(r.clock())
-		s.LastHeartbeat = &now
-		// Rejected is a NEGOTIATION verdict, not a liveness one: a heartbeat proves the adapter is
-		// alive, never that it became version-compatible. A rejected adapter deliberately keeps
-		// heartbeating (the handshake gate refuses registration, not the connection), so without
-		// this exclusion the phase would oscillate Rejected → Connected on its very next beat and
-		// silently re-admit robots. Only a fresh, compatible handshake clears it.
-		if s.Phase != fleetv1.FleetAdapterPhaseConnected && s.Phase != fleetv1.FleetAdapterPhaseRejected {
-			s.Phase = fleetv1.FleetAdapterPhaseConnected
-			s.Message = "adapter live"
-		}
-	})
-	r.projectLiveness(ctx, id)
+	r.AdapterHeartbeatAt(ctx, id, r.clock())
 }
 
-// AdapterDisconnected moves a live adapter to Disconnected on stream loss.
+// AdapterHeartbeatAt records a liveness probe received at receivedAt. lastHeartbeat is the time
+// the heartbeat was received, not the time of this write: the write can wait behind other
+// FleetAdapter writes, and the adapter was alive when it answered. The served Robots are stamped
+// by the adapter's liveness worker, not here.
+//
+// lastHeartbeat is when the control plane last confirmed the adapter's liveness (RFC-0001
+// §9.1.13.3): every heartbeat received after the one recorded is written, to the second. A burst
+// of heartbeats is not a burst of writes: the stream's presence pump writes the latest one once
+// the write before it is done. A heartbeat re-asserts Connected
+// only while it is younger than one interval; an older one is left to the staleness check. The
+// write carries the resourceVersion it was derived from. A write that conflicts was derived from
+// an older copy, usually a cache behind the previous write: it is derived once more from the API
+// server, so the new copy's phase (Rejected, say) is kept, and a second conflict is dropped until
+// the next heartbeat.
+//
+// Once ctx has ended (the stream is gone), no stamp run starts.
+func (r *FleetAdapterReconciler) AdapterHeartbeatAt(ctx context.Context, id controlstream.TLSIdentity, receivedAt time.Time) {
+	receivedAt = receivedAt.Truncate(time.Second) // status times are stored to the second
+	logger := log.FromContext(ctx)
+	var reader client.Reader = r.Client
+	for attempt := 1; ; attempt++ {
+		err := r.writePresence(ctx, reader, id, receivedAt)
+		if err != nil && errors.IsConflict(err) && attempt == 1 {
+			if r.APIReader != nil {
+				reader = r.APIReader
+			}
+			continue
+		}
+		switch {
+		case err == nil:
+		case errors.IsConflict(err):
+			logger.V(1).Info("presence write lost to a newer FleetAdapter status twice; the next heartbeat writes again",
+				"adapter", id.AdapterName)
+		default:
+			logger.Error(err, "writing FleetAdapter presence status", "adapter", id.AdapterName)
+		}
+		break
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	r.liveness.signal(r, id, receivedAt)
+}
+
+// writePresence is one attempt of AdapterHeartbeatAt's write, derived from the FleetAdapter as
+// reader holds it. A FleetAdapter that does not exist is not an error.
+func (r *FleetAdapterReconciler) writePresence(ctx context.Context, reader client.Reader, id controlstream.TLSIdentity,
+	receivedAt time.Time) error {
+	fa := &fleetv1.FleetAdapter{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: id.AdapterName, Namespace: id.Namespace}, fa); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	interval := adapterInterval(fa.Spec.HeartbeatIntervalSeconds)
+	base := fa.DeepCopy()
+	st := &fa.Status
+	if last := st.LastHeartbeat; last == nil || receivedAt.After(last.Time) {
+		t := metav1.NewTime(receivedAt)
+		st.LastHeartbeat = &t
+	}
+	// Rejected is a NEGOTIATION verdict, not a liveness one: a heartbeat proves the adapter is
+	// alive, never that it became version-compatible. A rejected adapter deliberately keeps
+	// heartbeating (the handshake gate refuses registration, not the connection), so without this
+	// exclusion the phase would oscillate Rejected → Connected on its very next beat and silently
+	// re-admit robots. Only a fresh, compatible handshake clears it.
+	fresh := r.clock().Sub(receivedAt) < interval
+	if fresh && st.Phase != fleetv1.FleetAdapterPhaseConnected && st.Phase != fleetv1.FleetAdapterPhaseRejected {
+		st.Phase = fleetv1.FleetAdapterPhaseConnected
+		st.Message = "adapter live"
+	}
+	if reflect.DeepEqual(base.Status, fa.Status) {
+		return nil
+	}
+	return r.Status().Patch(ctx, fa, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+// AdapterDisconnected moves a live adapter to Disconnected on stream loss. Its liveness worker
+// stops first: no stamp starts after the stream is gone.
 func (r *FleetAdapterReconciler) AdapterDisconnected(ctx context.Context, id controlstream.TLSIdentity) {
+	r.liveness.stop(id)
 	r.mutateStatus(ctx, id, func(s *fleetv1.FleetAdapterStatus) {
 		if s.Phase == fleetv1.FleetAdapterPhaseConnected || s.Phase == fleetv1.FleetAdapterPhaseDegraded {
 			s.Phase = fleetv1.FleetAdapterPhaseDisconnected
@@ -603,7 +677,7 @@ func (r *FleetAdapterReconciler) countConnectedRobots(ctx context.Context, fa *f
 	return n, nil
 }
 
-func (r *FleetAdapterReconciler) projectLiveness(ctx context.Context, id controlstream.TLSIdentity) {
+func (r *FleetAdapterReconciler) projectLiveness(ctx context.Context, id controlstream.TLSIdentity, now time.Time) {
 	if id.AdapterName == "" || id.Namespace == "" {
 		return
 	}
@@ -620,16 +694,31 @@ func (r *FleetAdapterReconciler) projectLiveness(ctx context.Context, id control
 	}
 	// One config read for the namespace, reused for all served Robots.
 	refresh := robotOfflineTimeout(ctx, r.Client, id.Namespace) / 2
-	now := r.clock()
+	adapter := types.NamespacedName{Namespace: id.Namespace, Name: id.AdapterName}
+	served := make(map[types.NamespacedName]bool, len(robots.Items))
+	defer func() { r.liveness.forgetUnserved(adapter, served) }()
 	for i := range robots.Items {
+		if ctx.Err() != nil {
+			return // the adapter's stream is gone: no stamp starts after it
+		}
 		robot := &robots.Items[i]
+		key := client.ObjectKeyFromObject(robot)
+		served[key] = true
 		if conn := robot.Status.Connectivity; conn != nil && conn.LastSeenAt != nil &&
 			now.Sub(conn.LastSeenAt.Time) < refresh {
 			continue // throttle: refreshed recently enough
 		}
-		if err := r.stampLastSeen(ctx, client.ObjectKeyFromObject(robot), now); err != nil {
-			logger.Error(err, "stamping robot lastSeenAt", "robot", robot.Name, "namespace", robot.Namespace)
+		// At most once per half the offline threshold in real time, too (RFC-0001
+		// #robot-connectivity): a stamp carries its heartbeat's receipt time, and two runs can carry
+		// receipt times that far apart while their writes land closer together.
+		if r.liveness.stampedWithin(key, r.clock(), refresh) {
+			continue
 		}
+		if err := r.stampLastSeen(ctx, key, now); err != nil {
+			logger.Error(err, "stamping robot lastSeenAt", "robot", robot.Name, "namespace", robot.Namespace)
+			continue
+		}
+		r.liveness.noteStamped(adapter, key, r.clock())
 	}
 }
 
@@ -646,6 +735,9 @@ func (r *FleetAdapterReconciler) stampLastSeen(ctx context.Context, key client.O
 		base := robot.DeepCopy()
 		if robot.Status.Connectivity == nil {
 			robot.Status.Connectivity = &fleetv1.ConnectivityStatus{}
+		}
+		if last := robot.Status.Connectivity.LastSeenAt; last != nil && !now.After(last.Time) {
+			return nil // never moved back: a stamp of an older heartbeat, written late
 		}
 		t := metav1.NewTime(now)
 		robot.Status.Connectivity.LastSeenAt = &t
@@ -706,4 +798,122 @@ func (r *FleetAdapterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}}}
 			})).
 		Complete(r)
+}
+
+// livenessWorkers runs projectLiveness for each adapter, one run at a time per adapter, off the
+// ControlStream and off the heartbeat's own write. Heartbeats that arrive during a run collapse
+// into one more run, stamped with the latest heartbeat's receipt time. A stamp is the adapter's
+// presence at that heartbeat, so it is never later than the heartbeat itself.
+type livenessWorkers struct {
+	mu   sync.Mutex
+	runs map[types.NamespacedName]*livenessWorker
+	idle sync.WaitGroup // one count per running worker; flush waits for it
+	// stamped is, per Robot, when its last stamp was written, by the clock, and which adapter's run
+	// wrote it: the stamps are spaced in real time as well as by the receipt times they carry. An
+	// entry lasts while that adapter still serves the Robot.
+	stamped map[types.NamespacedName]robotStamp
+}
+
+type robotStamp struct {
+	adapter types.NamespacedName
+	at      time.Time
+}
+
+// stampedWithin reports whether robot's last stamp was written less than d before now.
+func (l *livenessWorkers) stampedWithin(robot types.NamespacedName, now time.Time, d time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.stamped[robot]
+	return ok && now.Sub(s.at) < d
+}
+
+// noteStamped records that adapter's run wrote robot's stamp at at.
+func (l *livenessWorkers) noteStamped(adapter, robot types.NamespacedName, at time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stamped == nil {
+		l.stamped = map[types.NamespacedName]robotStamp{}
+	}
+	l.stamped[robot] = robotStamp{adapter: adapter, at: at}
+}
+
+// forgetUnserved drops the stamps adapter's runs wrote for Robots it no longer serves.
+func (l *livenessWorkers) forgetUnserved(adapter types.NamespacedName, served map[types.NamespacedName]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for robot, s := range l.stamped {
+		if s.adapter == adapter && !served[robot] {
+			delete(l.stamped, robot)
+		}
+	}
+}
+
+type livenessWorker struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	latest  time.Time
+	pending bool
+	running bool
+}
+
+// signal asks for a stamp of the adapter's Robots at receivedAt.
+func (l *livenessWorkers) signal(r *FleetAdapterReconciler, id controlstream.TLSIdentity, receivedAt time.Time) {
+	if id.AdapterName == "" || id.Namespace == "" {
+		return
+	}
+	key := types.NamespacedName{Namespace: id.Namespace, Name: id.AdapterName}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.runs == nil {
+		l.runs = map[types.NamespacedName]*livenessWorker{}
+	}
+	w := l.runs[key]
+	if w == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		w = &livenessWorker{ctx: ctx, cancel: cancel}
+		l.runs[key] = w
+	}
+	if receivedAt.After(w.latest) {
+		w.latest = receivedAt
+	}
+	w.pending = true
+	if w.running {
+		return
+	}
+	w.running = true
+	l.idle.Add(1)
+	go l.run(r, id, w)
+}
+
+func (l *livenessWorkers) run(r *FleetAdapterReconciler, id controlstream.TLSIdentity, w *livenessWorker) {
+	defer l.idle.Done()
+	for {
+		l.mu.Lock()
+		if !w.pending || w.ctx.Err() != nil {
+			w.running = false
+			l.mu.Unlock()
+			return
+		}
+		at := w.latest
+		w.pending = false
+		l.mu.Unlock()
+		r.projectLiveness(w.ctx, id, at)
+	}
+}
+
+// stop cancels the adapter's worker: a run in progress stops before its next Robot, and a pending
+// run does not start. The next heartbeat starts a new worker.
+func (l *livenessWorkers) stop(id controlstream.TLSIdentity) {
+	key := types.NamespacedName{Namespace: id.Namespace, Name: id.AdapterName}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if w := l.runs[key]; w != nil {
+		w.cancel()
+		delete(l.runs, key)
+	}
+}
+
+// flush waits until no worker is running. For tests.
+func (l *livenessWorkers) flush() {
+	l.idle.Wait()
 }

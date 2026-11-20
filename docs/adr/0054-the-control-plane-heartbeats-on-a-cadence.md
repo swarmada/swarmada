@@ -188,3 +188,61 @@ It is tracked as its own decision.
 - **Add an unsolicited adapter heartbeat arm to the protocol** (option 4). A wire change
   that moves the cadence to the side of the boundary that cannot be trusted to keep it.
   Liveness asserted by the thing being measured is not liveness.
+
+## Amendment 1 — a heartbeat is recorded as it arrives
+
+The Decision makes `Degraded` mean that a probe was missed. That held only while the manager handled each
+heartbeat as it arrived. An adapter's `ControlStream` was handled one message at a time, and a heartbeat waited
+behind the messages read before it. Two things in that queue wait on the API server:
+- each robot's position frame, which can read the `Robot` past the cache while a stop is being written;
+- the heartbeat's own stamps of the adapter's Robots (`projectLiveness`), on the manager's Robot write budget.
+
+During a stop of 100 robots both waited for about 20 s. Every adapter went `Degraded` while its heartbeats kept
+arriving, and the dispatch gate withheld its robots.
+
+- **A heartbeat is recorded where it is read.**
+  - The stream's messages are read into a bounded queue (2,048 messages, 16 MiB), handled in order as before.
+  - A heartbeat skips the queue. Its adapter presence is written by a goroutine of its own, one write at a time, of
+    the latest heartbeat read. A heartbeat naming a robot also answers that robot's confirming exchange there.
+  - `lastHeartbeat` is the heartbeat's receipt time.
+  - The phase is still judged from `lastHeartbeat`'s age, as above.
+- **A wedged manager still shows.** A heartbeat skips the queue only while the loop has been handling its current
+  message for less than 30 s: three intervals at the default, and the default offline threshold. Past that,
+  heartbeats take their turn in the queue, recorded at the time they were read, so a manager stuck on one of an
+  adapter's messages makes the adapter `Degraded`, then `Disconnected`, as it did before.
+  - A backlog of messages each handled in turn, such as a stop's fan-out, keeps the adapter `Connected` while its
+    oldest message was read less than three intervals ago (30 s at the default), the same bound as a message the
+    manager is stuck on. Past that, heartbeats take their turn in the queue as well, so a loop that has fallen
+    behind on what the adapter's robots report shows in the adapter's phase and its robots' liveness, however
+    quickly each message is handled. Stops, their clears and their acknowledgements travel on the `SafetyStream`,
+    never in this queue, so the bound decides only when the adapter's phase follows the loop, and with it whether
+    its robots are given new work.
+  - Once the queue is full the stream is not read, so heartbeats are not read either, and the adapter goes
+    `Degraded`.
+  - A heartbeat naming a robot that waited in the queue more than 10 s answers no confirming exchange: the robot was
+    alive when the heartbeat was read, which says nothing about a probe opened since.
+- **Presence writes follow every confirmation.** `lastHeartbeat` is rewritten for every heartbeat read after the one
+  recorded, to the second: it is when the control plane last confirmed the adapter's liveness (RFC-0001
+  §9.1.13.3). A burst of per-robot heartbeats is not a burst of writes: one write runs at a time, of the latest
+  heartbeat read.
+  - A heartbeat re-asserts `Connected` only while it is younger than one interval.
+  - Each write carries the `resourceVersion` it was derived from. A write that conflicts, usually because the cache
+    is behind the previous write, is derived once more from the API server, keeping that copy's phase (`Rejected`,
+    say). A second conflict is dropped until the next heartbeat.
+  - Once a newer stream holds the adapter's identity, the older stream writes no presence and answers no
+    confirming exchange, whether its heartbeats skip the queue or wait in it.
+- **The Robot stamps run on a worker per adapter.** One run at a time, and heartbeats arriving during a run
+  collapse into one more run, stamped with the latest heartbeat's receipt time. A stamp is not written over a later
+  one, and each Robot is stamped at most once per `heartbeatTimeout/2` both by the stamped time and in real time.
+- **Unchanged:** a heartbeat that is denied, or names a robot that is not admitted, is handled in the queue's
+  order as before, and a denial is still sealed.
+- **Stream end:** a clean close is queued after the messages read before it, so the stream is drained. A broken
+  stream, a superseded one or a loss of leadership drops what was queued, as the transport's own window was dropped
+  before, and the drop is logged.
+- **No presence write follows the stream's disconnect.** The presence goroutine is joined first, and the adapter's
+  stamp worker stops on the disconnect. A presence write whose stream has ended starts no stamp run.
+- **A short backlog no longer shows as `Degraded`.** A backlog whose oldest message was read less than three
+  intervals ago keeps the adapter `Connected`. A message that waited more than 10 s in the queue is logged
+  with the wait and the queue's depth, at most once per 10 s per stream. A robot whose telemetry waits in the queue
+  past its silence threshold is still marked `Offline` by its own frame clock (`RobotSilent`), while its adapter
+  reads `Connected`.

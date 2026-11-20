@@ -369,9 +369,10 @@ func main() {
 	// adapter connectivity. It doubles as the ControlStream presence sink (wired
 	// into the server below) and the liveness-staleness backstop.
 	fleetAdapterReconciler := &controller.FleetAdapterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("fleetadapter-controller"),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("fleetadapter-controller"),
+		APIReader: mgr.GetAPIReader(),
 	}
 	if err = fleetAdapterReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "FleetAdapter")
