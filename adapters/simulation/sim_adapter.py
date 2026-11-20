@@ -1026,11 +1026,9 @@ class SimAdapter:
     def _stopping_ack(self, estop_id: str, initiated_ms: int, message: str = ""):
         """The first answer to a stop, once it is commanded: ESTOP_STATE_STOPPING, with the
         moment it was commanded (C5.3). RFC-0001 allows it, and it is what meets the
-        SafetyStream's 500 ms budget whatever the robot does next; STOPPED or FAILED follows
-        from the lane. A robot served beside others answers each stop once, from its lane
-        (SimFleet): None."""
-        if self._fleet is not None:
-            return None
+        SafetyStream's 500 ms budget whatever the robot does next, a robot of a fleet whose
+        earlier stop is still being confirmed in its lane included; STOPPED or FAILED follows
+        from the lane."""
         return self._pb.EstopAck(estop_id=estop_id, state=self._pb.ESTOP_STATE_STOPPING,
                                  stop_initiated_at=initiated_ms, message=message)
 
@@ -2996,13 +2994,13 @@ class SimFleet:
       fast.
     * LANES. Confirming that a robot is at rest waits. The SafetyStream reader, the
       ControlStream reader and the tick thread each serve every robot, so none of them waits
-      for one: each commands the stop at once and hands the confirmation and the answer to
-      the robot's lane (`_Lane`). A fleet-wide stop is commanded for every robot before any
-      one robot's rest is awaited.
+      for one: each commands the stop at once, answers it ESTOP_STATE_STOPPING, and hands the
+      confirmation and the final answer to the robot's lane (`_Lane`). A fleet-wide stop is
+      commanded for every robot before any one robot's rest is awaited.
     * EDGE NODES. One EdgeStream per node. An edge-issued Estop names no robot; it stops every
-      robot whose RegisterAck listed that node, and its one EstopAck is STOPPED only once
-      every one of them is confirmed at rest, FAILED otherwise
-      (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
+      robot whose RegisterAck listed that node, is answered STOPPING on the reader, and its
+      terminal EstopAck, from the node's own lane, is STOPPED only once every one of them is
+      confirmed at rest, FAILED otherwise (RFC-0001 #fleet-adapter-protocol-the-edge-stream).
 
     Every robot runs the same scenario: each fires its own estop drill, and a scenario stream
     drop drops the one connection. All robots spawn at the origin, as one adapter per robot
@@ -3051,6 +3049,7 @@ class SimFleet:
         self._edge_lock = threading.Lock()
         self._edge_robots: dict[str, list] = {}     # edge address -> robots served through it
         self._edge_outboxes: dict[str, queue.Queue] = {}
+        self._edge_lanes: dict[str, _Lane] = {}     # edge address -> where its stops are confirmed
 
     def robot(self, robot_id: str) -> SimAdapter:
         return self._robots[robot_id]
@@ -3499,7 +3498,7 @@ class SimFleet:
                 for ec in estub.EdgeStream(requests()):
                     backoff = 0.5   # the stream is up: the next failure starts short again
                     if ec.WhichOneof("msg") == "estop":  # C8.3: same confirmed discipline as C5
-                        outbox.put(self._edge_estop(address, ec.estop))
+                        self._edge_estop(address, ec.estop, outbox)
             except grpc.RpcError as exc:
                 if self.shutdown_event.is_set():
                     return
@@ -3514,16 +3513,25 @@ class SimFleet:
                 return
             backoff = min(backoff * 2, 5.0)
 
-    def _edge_estop(self, address: str, estop):
-        """Stop every robot served through `address`; one ack, STOPPED only if all rest."""
+    def _edge_estop(self, address: str, estop, outbox: queue.Queue) -> None:
+        """Stop every robot served through `address`, on its EdgeStream reader, which never
+        waits for rest: each robot's stop is commanded, then ESTOP_STATE_STOPPING is sent. The
+        node's lane then confirms each robot's rest and sends the one terminal ack, STOPPED only
+        if every robot is confirmed at rest, FAILED otherwise. If a robot's stop could not be
+        commanded, the answer is already FAILED: it is sent at once, on the reader, and the lane
+        only confirms the other robots' rest, which their held work waits on."""
         pb = self._pb
         with self._edge_lock:
             robots = list(self._edge_robots.get(address, []))
+            lane = self._edge_lanes.get(address)
+            if lane is None:
+                lane = self._edge_lanes[address] = _Lane(f"edge-{address}")
         # Every robot's stop is commanded before any one robot's rest is awaited, and a fault
         # in one robot's stop neither skips the others nor withholds the ack: that robot is
         # counted not confirmed, so the ack is FAILED.
         begun = []
         failed = []
+        initiated = int(time.time() * 1000)
         for robot in robots:
             try:
                 with robot._latch_lock:
@@ -3536,27 +3544,49 @@ class SimFleet:
                 print(f"EDGE_ESTOP_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr,
                       flush=True)
                 failed.append(robot._robot)
-        states = [(rid, pb.ESTOP_STATE_FAILED) for rid in failed]
-        for robot in begun:
-            state = pb.ESTOP_STATE_FAILED
-            try:
+        if failed:
+            outbox.put(pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
+                estop_id=estop.estop_id, state=pb.ESTOP_STATE_FAILED, stop_initiated_at=initiated,
+                message=f"the stop could not be commanded for {', '.join(failed)}")))
+        elif begun:
+            outbox.put(pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
+                estop_id=estop.estop_id, state=pb.ESTOP_STATE_STOPPING,
+                stop_initiated_at=initiated)))
+
+        def finish() -> None:
+            states = [(rid, pb.ESTOP_STATE_FAILED) for rid in failed]
+            for robot in begun:
+                state = pb.ESTOP_STATE_FAILED
+                try:
+                    if robot._robot not in failed:
+                        state = self._await_rest(robot._robot)
+                except Exception as exc:  # noqa: BLE001 -- that robot is not confirmed: FAILED
+                    print(f"EDGE_ESTOP_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr,
+                          flush=True)
+                finally:
+                    try:
+                        robot._fleet_stop_answered(state)
+                    except Exception as exc:  # noqa: BLE001 -- the other robots are still answered
+                        print(f"EDGE_ESTOP_ERROR robot={robot._robot}: {exc!r}",
+                              file=sys.stderr, flush=True)
                 if robot._robot not in failed:
-                    state = self._await_rest(robot._robot)
-            except Exception as exc:  # noqa: BLE001 -- that robot is not confirmed: FAILED
-                print(f"EDGE_ESTOP_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr,
-                      flush=True)
-            finally:
-                robot._fleet_stop_answered(state)
-            if robot._robot not in failed:
-                states.append((robot._robot, state))
-        stopped = bool(states) and all(s == pb.ESTOP_STATE_STOPPED for _, s in states)
-        for rid, state in states:
-            print(f"EDGE_ESTOP_CONFIRMED robot={rid} id={estop.estop_id} "
-                  f"state={'STOPPED' if state == pb.ESTOP_STATE_STOPPED else 'FAILED'}",
-                  file=sys.stderr, flush=True)
-        return pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
-            estop_id=estop.estop_id,
-            state=pb.ESTOP_STATE_STOPPED if stopped else pb.ESTOP_STATE_FAILED))
+                    states.append((robot._robot, state))
+            stopped = bool(states) and all(s == pb.ESTOP_STATE_STOPPED for _, s in states)
+            for rid, state in states:
+                print(f"EDGE_ESTOP_CONFIRMED robot={rid} id={estop.estop_id} "
+                      f"state={'STOPPED' if state == pb.ESTOP_STATE_STOPPED else 'FAILED'}",
+                      file=sys.stderr, flush=True)
+            if not failed:   # with a robot whose stop faulted, FAILED went out on the reader
+                answered.append(True)
+                outbox.put(pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
+                    estop_id=estop.estop_id, stop_initiated_at=initiated,
+                    state=pb.ESTOP_STATE_STOPPED if stopped else pb.ESTOP_STATE_FAILED)))
+
+        answered: list = []   # the terminal ack, once sent; the stop is never answered twice
+        lane.submit(finish, on_error=lambda: None if (answered or failed) else outbox.put(
+            pb.AdapterEdgeMessage(estop_ack=pb.EstopAck(
+                estop_id=estop.estop_id, state=pb.ESTOP_STATE_FAILED,
+                message="rest could not be confirmed"))))
 
 
 class ModelArtifacts:
