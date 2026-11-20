@@ -116,6 +116,10 @@ func TestLiveness_LastHeartbeatDoesNotWaitForTheRobotStamps(t *testing.T) {
 func TestLiveness_HeartbeatsDuringARunCollapseIntoOne(t *testing.T) {
 	now := time.Unix(20000, 0)
 	r, c, release, writes := heldRobotWrites(t, now, "ra1")
+	// The clock moves 20 s at each reading, so the stamps' spacing in real time (T1/2) does not
+	// decide which run writes either.
+	var ticks atomic.Int64
+	r.now = func() time.Time { return now.Add(time.Duration(ticks.Add(1)) * 20 * time.Second) }
 	id := controlstream.TLSIdentity{AdapterName: "acme", Namespace: faNS, Verified: true}
 
 	var wg sync.WaitGroup
@@ -192,25 +196,55 @@ func adapterPhase(t *testing.T, c client.Client) fleetv1.FleetAdapterPhase {
 	return fa.Status.Phase
 }
 
-// While the adapter reads Connected, lastHeartbeat is rewritten at most once per quarter interval
-// (2.5 s at the default 10 s): a burst of heartbeats is not a burst of writes, and lastHeartbeat
-// stays younger than the interval while they arrive every half interval.
-func TestLiveness_PresenceWritesAreSpacedByAQuarterInterval(t *testing.T) {
+// lastHeartbeat is when the control plane last confirmed the adapter's liveness (RFC-0001
+// §9.1.13.3): every heartbeat received after the one recorded is written, to the second, and one
+// received before it is not.
+func TestLiveness_EveryNewerHeartbeatIsWrittenToLastHeartbeat(t *testing.T) {
 	now := time.Unix(20000, 0)
 	r, c, release, _ := heldRobotWrites(t, now)
 	close(release)
 	id := controlstream.TLSIdentity{AdapterName: "acme", Namespace: faNS, Verified: true}
 
 	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-9*time.Second))
-	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-8*time.Second)) // 1 s later: not written
-	if got := lastHeartbeat(t, c); !got.Equal(now.Add(-9 * time.Second)) {
-		t.Errorf("lastHeartbeat = %v, want %v: a heartbeat within a quarter interval is not written", got, now.Add(-9*time.Second))
+	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-8*time.Second)) // 1 s later
+	if got := lastHeartbeat(t, c); !got.Equal(now.Add(-8 * time.Second)) {
+		t.Errorf("lastHeartbeat = %v, want %v: the latest confirmation", got, now.Add(-8*time.Second))
 	}
-	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-6*time.Second)) // 3 s after the one written
-	if got := lastHeartbeat(t, c); !got.Equal(now.Add(-6 * time.Second)) {
-		t.Errorf("lastHeartbeat = %v, want %v", got, now.Add(-6*time.Second))
+	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-10*time.Second)) // read before the one recorded
+	if got := lastHeartbeat(t, c); !got.Equal(now.Add(-8 * time.Second)) {
+		t.Errorf("lastHeartbeat = %v, want %v: an older heartbeat is not written", got, now.Add(-8*time.Second))
 	}
 	r.liveness.flush()
+}
+
+// A Robot is stamped at most once per half the offline threshold (15 s by default) in real time,
+// whatever receipt times the stamps carry: two heartbeats read 20 s apart write one stamp while the
+// clock has not moved, and the next is written once it has moved past the threshold.
+func TestLiveness_StampsAreSpacedInRealTime(t *testing.T) {
+	now := time.Unix(20000, 0)
+	r, c, release, writes := heldRobotWrites(t, now, "ra1")
+	close(release)
+	var clock atomic.Int64
+	clock.Store(now.UnixNano())
+	r.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	id := controlstream.TLSIdentity{AdapterName: "acme", Namespace: faNS, Verified: true}
+
+	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-40*time.Second))
+	r.liveness.flush()
+	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-20*time.Second)) // 20 s later by receipt, none by the clock
+	r.liveness.flush()
+	if n := writes.Load(); n != 1 {
+		t.Fatalf("%d Robot stamp writes with no time between them, want 1", n)
+	}
+	clock.Add(int64(16 * time.Second))
+	r.AdapterHeartbeatAt(context.Background(), id, now.Add(-4*time.Second))
+	r.liveness.flush()
+	if n := writes.Load(); n != 2 {
+		t.Fatalf("%d Robot stamp writes once 16 s had passed, want 2", n)
+	}
+	if got := getRobot(t, c, "ra1", faNS).Status.Connectivity.LastSeenAt.Time; !got.Equal(now.Add(-4 * time.Second)) {
+		t.Errorf("lastSeenAt = %v, want %v", got, now.Add(-4*time.Second))
+	}
 }
 
 // A heartbeat older than one interval does not re-assert Connected: the staleness check decides.

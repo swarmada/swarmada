@@ -390,6 +390,8 @@ type ResourceGrantNotifier interface {
 type Server struct {
 	// presenceWedge overrides presenceWedgeDefault (tests).
 	presenceWedge time.Duration
+	// presenceBacklog overrides presenceBacklogDefault (tests).
+	presenceBacklog time.Duration
 	fav1.UnimplementedFleetAdapterServiceServer
 
 	// Registrar answers Discover/Register. Nil rejects all registrations.
@@ -868,11 +870,13 @@ func (s *Server) ControlStream(stream fav1.FleetAdapterService_ControlStreamServ
 	defer func() { pcancel(); <-pumpDone }()
 	// handling is when the loop started handling its current message (UnixNano), 0 while it is
 	// idle: a loop held on one message longer than the presence limit takes heartbeats back into
-	// its own order. A backlog of messages each handled in turn is not a wedge, however far
-	// behind it runs.
-	var handling atomic.Int64
+	// its own order. behind is when the oldest message not handled yet was read (UnixNano), 0 once
+	// the queue is empty: a backlog older than the backlog limit takes them back too, however
+	// quickly each of its messages is handled, so the adapter's phase shows a loop that has fallen
+	// that far behind, and its robots are not stamped live while what they report waits.
+	var handling, behind atomic.Int64
 	q := recvControl(stream, done, func(msg *fav1.AdapterMessage) bool {
-		return s.heartbeatOnArrival(ctx, identity, msg, pump, &handling, done)
+		return s.heartbeatOnArrival(ctx, identity, msg, pump, &handling, &behind, done)
 	})
 	var lagLogged time.Time
 	for {
@@ -900,9 +904,13 @@ func (s *Server) ControlStream(stream fav1.FleetAdapterService_ControlStreamServ
 				log.Info("adapter ControlStream is behind: a message waited before it was handled",
 					"lag", lag.Round(time.Second), "queued", len(q.items))
 			}
+			behind.Store(it.at.UnixNano())
 			handling.Store(time.Now().UnixNano())
 			err := s.dispatch(withReceivedAt(ctx, it.at), w, id, identity, it.msg)
 			handling.Store(0)
+			if len(q.items) == 0 {
+				behind.Store(0)
+			}
 			if err != nil {
 				return err
 			}
@@ -928,6 +936,15 @@ const controlLagReported = 10 * time.Second
 // default offline threshold T1. Past it the manager is wedged on this adapter, not catching up, and
 // the adapter's presence follows the loop again, so the phase shows it.
 const presenceWedgeDefault = 30 * time.Second
+
+// presenceBacklogDefault is how long ago the oldest message not handled yet may have been read
+// before heartbeats stop skipping the queue: three heartbeat intervals at the default, the same
+// bound as presenceWedgeDefault. Past it the loop is behind on what the adapter's robots report,
+// and the adapter's presence follows the loop again, so its phase and its robots' liveness show
+// the backlog. Stops, their clears and their acknowledgements travel on the SafetyStream, never in
+// this queue: the limit decides only when the adapter's phase follows the loop, and with it whether
+// its robots are given new work.
+const presenceBacklogDefault = 30 * time.Second
 
 // recvItem is one message read from the ControlStream, with when it was read and the queue credit
 // it holds, or the clean close (io.EOF) that ends the stream.
@@ -1052,7 +1069,7 @@ func receivedAt(ctx context.Context) time.Time {
 // (an unverified stream, a denial, a robot not admitted) is left to the stream's loop, which
 // decides it in order as before and seals a denial; nothing here writes.
 func (s *Server) heartbeatOnArrival(ctx context.Context, tlsID TLSIdentity, msg *fav1.AdapterMessage,
-	pump *presencePump, handling *atomic.Int64, done <-chan struct{}) bool {
+	pump *presencePump, handling, behind *atomic.Int64, done <-chan struct{}) bool {
 	hb := msg.GetHeartbeat()
 	if hb == nil || !tlsID.Verified {
 		return false
@@ -1062,6 +1079,11 @@ func (s *Server) heartbeatOnArrival(ctx context.Context, tlsID TLSIdentity, msg 
 	// turn in the queue, recorded then at the time it was read, so the adapter's phase shows the
 	// wedge as before.
 	if busy := handling.Load(); busy != 0 && at.Sub(time.Unix(0, busy)) > s.presenceWedgeLimit() {
+		return false
+	}
+	// A backlog whose oldest message was read longer ago than the backlog limit is behind on what
+	// the adapter reports: the heartbeat takes its turn as well.
+	if oldest := behind.Load(); oldest != 0 && at.Sub(time.Unix(0, oldest)) > s.presenceBacklogLimit() {
 		return false
 	}
 	select {
@@ -1086,6 +1108,14 @@ func (s *Server) heartbeatOnArrival(ctx context.Context, tlsID TLSIdentity, msg 
 	}
 	pump.note(at)
 	return true
+}
+
+// presenceBacklogLimit is presenceBacklog, or presenceBacklogDefault when it is not set.
+func (s *Server) presenceBacklogLimit() time.Duration {
+	if s.presenceBacklog > 0 {
+		return s.presenceBacklog
+	}
+	return presenceBacklogDefault
 }
 
 // presenceWedgeLimit is presenceWedge, or presenceWedgeDefault when it is not set.
