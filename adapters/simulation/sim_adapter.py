@@ -1149,10 +1149,12 @@ class SimAdapter:
             print(f"FENCE_ERROR robot={self._robot} id={estop_id}: {exc!r}", file=sys.stderr,
                   flush=True)
             self._fleet_stop_answered(pb.ESTOP_STATE_FAILED, estop_id)
-            self._answer_fence(command, pb.EstopAck(
-                estop_id=estop_id, state=pb.ESTOP_STATE_FAILED,
-                message="fence: the stop could not be completed"), control_outbox)
-            self._fence_arrived(estop_id)
+            try:
+                self._answer_fence(command, pb.EstopAck(
+                    estop_id=estop_id, state=pb.ESTOP_STATE_FAILED,
+                    message="fence: the stop could not be completed"), control_outbox)
+            finally:
+                self._fence_arrived(estop_id)
             return
         first = self._stopping_ack(estop_id, initiated, "fence")
         if first is not None:
@@ -1176,12 +1178,17 @@ class SimAdapter:
 
         def failed() -> None:
             # The lane could not finish: escalate, unless the fence was already answered. The
-            # ID stays latched; its state reads FAILED (_fleet_stop_answered).
-            if not answered_once:
-                self._answer_fence(command, pb.EstopAck(
-                    estop_id=estop_id, state=pb.ESTOP_STATE_FAILED, stop_initiated_at=initiated,
-                    message="fence: rest could not be confirmed"), control_outbox)
-            self._fence_arrived(estop_id)
+            # ID stays latched; its state reads FAILED (_fleet_stop_answered). The fence has
+            # arrived even if its answer cannot be sent: a clear for it then takes effect, and
+            # is answered, rather than waiting for a fence that will never be recorded.
+            try:
+                if not answered_once:
+                    self._answer_fence(command, pb.EstopAck(
+                        estop_id=estop_id, state=pb.ESTOP_STATE_FAILED,
+                        stop_initiated_at=initiated,
+                        message="fence: rest could not be confirmed"), control_outbox)
+            finally:
+                self._fence_arrived(estop_id)
 
         self._my_lane().submit(finish, on_error=failed)
 

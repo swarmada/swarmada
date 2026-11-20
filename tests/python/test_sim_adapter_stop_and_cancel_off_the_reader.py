@@ -584,3 +584,27 @@ def test_a_cancel_naming_another_action_on_a_command_derived_plant_is_not_a_safe
     finally:
         a._shutdown.set()
         reader.close()
+
+
+def test_a_fault_answering_a_fence_does_not_strand_its_clear(tmp_path, monkeypatch):
+    """The fence is answered from the robot's worker. If sending that answer faults, the fence
+    has still arrived: a clear for it takes effect, is answered, and work is taken again."""
+    a, _plant, log = _adapter(tmp_path, monkeypatch)
+
+    def answer_fence(*_args, **_kwargs):
+        raise RuntimeError("a fault answering the fence")
+    monkeypatch.setattr(a, "_answer_fence", answer_fence)
+    a._handle_command(pb.Command(command_id=901, robot_id=ROBOT, leader_term=1,
+                                 estop=_estop("e1")))
+    a._clear_in_lane(pb.ControlPlaneSafetyMessage(robot_id=ROBOT, estop_clear=pb.EstopClear(
+        estop_id="e1", leader_term=1)), a._safety_outbox)
+    assert a._solo_lane.idle(5.0), "the fence and its clear were not handled within 5 s"
+    cleared = [rest[0] for _t, kind, *rest in log.snapshot()
+               if kind == "put" and rest[0].DESCRIPTOR.name == "AdapterSafetyMessage"
+               and rest[0].HasField("estop_clear_ack")
+               and rest[0].estop_clear_ack.estop_id == "e1"]
+    assert cleared, "the clear was never answered: the fence was never recorded"
+    assert not a._latched, "the clear did not lift the latch"
+    a._handle_command(_assignment("t1", 1, command_id=902))
+    (res,) = _results(log, 902)
+    assert res.assign_action.accepted, f"work was refused after the clear: {res.assign_action}"
