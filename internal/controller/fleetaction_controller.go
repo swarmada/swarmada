@@ -2744,7 +2744,8 @@ func (r *FleetActionReconciler) stopsOverWork(ctx context.Context, action *fleet
 
 // holdRequeueUnderEstop holds a requeue asked before the stop that now covers the robot: the
 // action keeps its phase, the message says the request is held and why, and a Warning Event
-// tells the operator once. The Paused hold applies on the next pass.
+// tells the operator once. The Paused hold applies on the next pass, which the status write's own
+// event brings: the hold schedules no pass of its own.
 func (r *FleetActionReconciler) holdRequeueUnderEstop(ctx context.Context, action, original *fleetv1.FleetAction, msg string) (ctrl.Result, error) {
 	action.Status.Message = msg
 	if err := r.patchActionStatus(ctx, action, original); err != nil {
@@ -2753,7 +2754,7 @@ func (r *FleetActionReconciler) holdRequeueUnderEstop(ctx context.Context, actio
 	log.FromContext(ctx).Info("requeue request held: it was asked before the stop that now covers the robot",
 		"task", action.Name, "robot", action.Status.AssignedRobot)
 	warnActionAndTask(r.Recorder, action, EventRequeueHeldByEstop, msg)
-	return ctrl.Result{RequeueAfter: time.Second}, nil
+	return ctrl.Result{}, nil
 }
 
 // stopOver reads robot from the API server and reports the stops that cover it and whether it
