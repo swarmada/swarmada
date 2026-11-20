@@ -162,12 +162,12 @@ class LatchingSimAdapter(SimAdapter):
             return None, None, "x and y are required, as numbers in metres"
         return _KEYED_ENTRY, target, ""
 
-    def _answer_fence(self, command, ack) -> None:
+    def _answer_fence(self, command, ack, control_outbox=None) -> None:
         if self._plant != "receipt-only":
-            super()._answer_fence(command, ack)
+            super()._answer_fence(command, ack, control_outbox)
             return
         pb = self._pb
-        self._outbox.put(pb.AdapterMessage(command_result=pb.CommandResult(
+        (control_outbox or self._outbox).put(pb.AdapterMessage(command_result=pb.CommandResult(
             command_id=command.command_id, robot_id=command.robot_id, estop=ack)))
 
     def _take_clear(self, clear, outbox) -> None:
