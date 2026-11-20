@@ -1164,51 +1164,26 @@ first.
 
 **What you will see.** The earlier stream closes with gRPC `ABORTED` and the message
 `superseded: a newer ControlStream for adapter "<name>" in namespace "<ns>" was accepted`, and the
-`FleetAdapter` gets a `ControlStreamSuperseded` Warning Event. Two processes sharing one identity
-displace each other in turn. Under RFC-0001 each displacement is also a register again, an abnormal
-event, so every robot of that identity is held again each time, and a process whose streams were
-replaced may still drive a robot it held work for. RFC-0001 requires one live process per adapter
-identity.
+`FleetAdapter` gets a `ControlStreamSuperseded` Warning Event. The simulation adapter and the
+adapter template take any `ABORTED` on either stream as superseded. Each stops every robot it
+drives, gives up the work it holds, closes its other stream and logs `SUPERSEDED` on stderr. It then
+stays up and idle, and doesn't dial again until it is restarted. An adapter that redials instead
+displaces the stream that replaced it, and the two processes displace each other in turn. Under
+RFC-0001 each displacement is also a register again, an abnormal event, so every robot of that
+identity is held again each time, and a process whose streams were replaced may still drive a robot
+it held work for. RFC-0001 requires one live process per adapter identity.
 
 **Where a stop goes.** While both processes run, a stop for any robot of that identity goes down
 the `SafetyStream` of the process that connected last. If that process does not drive the robot,
 it cannot stop it: the simulation adapter answers `FAILED`, and the robot is recorded `Failed`.
-The robot stops only when its own process connects again and the stop is sent again on its new
-stream, at least 0.5 s later for the simulation adapter and the full backoff for an adapter that
-waits longer. An adapter that stops its robots when its stream is replaced, as RFC-0001 requires,
-has stopped them already.
+The simulation adapter and the adapter template stopped their robots when their streams were
+replaced, as RFC-0001 requires. An adapter that redials instead has its robot stopped only when its
+own process connects again and the stop is sent again on its new stream, after its backoff.
 
 **Instead.** Run one process per adapter identity. For more capacity, give each process its own
-`FleetAdapter` and client certificate. See
-[RFC-0001, Connection lifecycle](../rfcs/dist/RFC-0001-core-spec.md#fleet-adapter-protocol-connection-lifecycle).
-
-### The adapter template redials a stream closed as superseded
-
-**Limitation.** The adapter template handles a stream closed with `ABORTED`, superseded by a newer
-stream under the same identity, like any other stream error: it redials on its backoff. It doesn't
-stop its robot or give up the work it holds. RFC-0001 requires a process whose stream is superseded
-to stop every robot it drives and to hold no work.
-
-**What you will see.** Two processes under one identity keep displacing each other, as in "One live
-stream per Fleet Adapter identity", and the process whose streams were replaced keeps driving the
-work it held.
-
-**Instead.** Run one process per adapter identity. In an adapter built from the template, treat
-`ABORTED` on either stream as superseded: stop the robot, give up its work, and don't redial. See
-[RFC-0001, Connection lifecycle](../rfcs/dist/RFC-0001-core-spec.md#fleet-adapter-protocol-connection-lifecycle).
-
-### The simulation adapter redials a stream closed as superseded
-
-**Limitation.** The simulation adapter handles a stream closed with `ABORTED`, superseded by a newer
-stream under the same identity, like any other stream error: it redials after 0.5 s. It doesn't stop
-its robots or give up the work it holds. RFC-0001 requires a process whose stream is superseded to
-stop every robot it drives and to hold no work.
-
-**What you will see.** Two simulation adapters under one identity keep displacing each other, as in
-"One live stream per Fleet Adapter identity", and the one whose streams were replaced keeps driving
-the work it held.
-
-**Instead.** Run one simulation adapter per adapter identity. See
+`FleetAdapter` and client certificate. A simulation adapter or an adapter built from the template
+that was superseded stays idle: stop the process that shouldn't serve the identity, then restart
+the one that should. See
 [RFC-0001, Connection lifecycle](../rfcs/dist/RFC-0001-core-spec.md#fleet-adapter-protocol-connection-lifecycle).
 
 ### A maintenance window does not requeue paused work

@@ -276,6 +276,37 @@ def _predates(version: str, major: int, minor: int) -> bool:
     return got_major == major and got_minor < minor
 
 
+def _is_superseded(exc: grpc.RpcError) -> bool:
+    """Whether a stream ended as superseded by a newer stream under this adapter identity.
+
+    The control plane ends a stream ABORTED for that and for nothing else
+    (internal/controlstream/server.go, supersededStatus and supersededSafetyStatus), so any
+    ABORTED counts, whatever its details say. Every other code is a drop, redialled, UNAVAILABLE
+    included, even with "superseded" in its details.
+    """
+    return exc.code() == grpc.StatusCode.ABORTED
+
+
+def _cancel(call) -> None:
+    """Cancel an in-flight stream call, best-effort: its reader then ends with CANCELLED."""
+    cancel = getattr(call, "cancel", None)
+    if cancel is not None:
+        try:
+            cancel()
+        except Exception:  # noqa: BLE001 -- best-effort; the request side is closed as well
+            pass
+
+
+def _too_late(superseded: threading.Event, call, outbox: queue.Queue) -> bool:
+    """Whether `call` was dialled after a supersession, which can land between a loop's check
+    and its dial; if so, it is closed at once and never served."""
+    if not superseded.is_set():
+        return False
+    _cancel(call)
+    outbox.put(None)
+    return True
+
+
 def _unhonourable(constraints, honoured) -> list[str]:
     """The subjects in `constraints` this adapter cannot honour (FA-R5 and FA-R6).
 
@@ -483,6 +514,10 @@ class SimAdapter:
         self._estop_drilled = False          # estop-drill fires exactly once
         self._reconnect_pending = False      # comms-flaky: a stream drop is in progress
         self._active_call = None             # live ControlStream call, for cancel-on-drop
+        self._safety_call = None             # live SafetyStream call, closed when superseded
+        # Set once a stream is closed as superseded (_on_superseded): the robot is stopped, its
+        # work dropped and no new work taken, and neither stream is dialled again.
+        self._superseded = threading.Event()
 
         self._fence = FenceGuard()                              # C3
         self._lease = LeaseMonitor(on_expiry=self._self_stop)   # C4
@@ -645,7 +680,7 @@ class SimAdapter:
             # server-side close, exit. The gRPC channel auto-heals once connectivity
             # returns. The conformance suite DOES fault this stream on purpose (the
             # accepting-reconnect checks C6.1/C2.2), so the re-open below is exercised.
-            while not self._shutdown.is_set():
+            while not self._shutdown.is_set() and not self._superseded.is_set():
                 try:
                     # Fresh outbox per session. The dying generator is not stopped the
                     # instant its stream faults — it can still be blocked in get() — and
@@ -654,28 +689,48 @@ class SimAdapter:
                     # re-registration
                     # RFC-0001 #fleet-adapter-protocol-connection-lifecycle (b) requires.
                     self._outbox = queue.Queue()
-                    for cp in stub.ControlStream(self._control_requests()):
+                    # Opened only after the previous ControlStream has ended, so an ABORTED is never
+                    # this process's own redial; if that changed, a stray ABORTED would stop the
+                    # robot, which fails safe.
+                    call = stub.ControlStream(self._control_requests())
+                    self._active_call = call
+                    if _too_late(self._superseded, call, self._outbox):
+                        break
+                    for cp in call:
                         self._handle_control_plane(cp, stub)
                 except grpc.RpcError as exc:
                     if self._shutdown.is_set():
                         break
+                    if _is_superseded(exc):
+                        self._on_superseded("ControlStream")
+                    if self._superseded.is_set():
+                        break
                     print(f"control stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
                     time.sleep(0.5)
                     continue
+                finally:
+                    self._active_call = None
                 break  # clean close (response iterator ended without error)
+            self._idle_once_superseded()
             self._shutdown.set()
             return
 
         # comms-flaky: reconnect across a scenario-driven stream drop. Each pass is a
         # full Hello/Register handshake, so this exercises the RegisterRobot reconnect
         # and the persisted fencing/lease state (C3/C4) across the outage.
-        while not self._shutdown.is_set():
+        while not self._shutdown.is_set() and not self._superseded.is_set():
             self._reconnect_pending = False
             # Fresh outbox per session: anything still queued belonged to the stream that
             # just died, and replaying it on a new stream would be wrong anyway.
             self._outbox = queue.Queue()
+            # Opened only after the previous ControlStream has ended, so an ABORTED is never
+            # this process's own redial; if that changed, a stray ABORTED would stop the
+            # robot, which fails safe.
             call = stub.ControlStream(self._control_requests())
             self._active_call = call
+            if _too_late(self._superseded, call, self._outbox):
+                self._active_call = None
+                break
             dropped = False
             try:
                 for cp in call:
@@ -684,11 +739,15 @@ class SimAdapter:
                 if self._shutdown.is_set():
                     self._active_call = None
                     break
+                if _is_superseded(exc):
+                    self._on_superseded("ControlStream")
                 dropped = True
-                print(f"control stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
+                if not self._superseded.is_set():
+                    print(f"control stream dropped ({exc.code()}); reconnecting",
+                          file=sys.stderr)
             finally:
                 self._active_call = None
-            if self._shutdown.is_set():
+            if self._shutdown.is_set() or self._superseded.is_set():
                 break
             if self._reconnect_pending:
                 # Scenario-driven drop: hold the outage open for its full window so the
@@ -705,7 +764,18 @@ class SimAdapter:
                 time.sleep(0.5)
                 continue
             break  # clean close (response iterator ended without error)
+        self._idle_once_superseded()
         self._shutdown.set()
+
+    def _idle_once_superseded(self) -> None:
+        """Superseded, stay up and idle until terminated, dialling nothing.
+
+        A process that exited would be restarted by whatever supervises it, dial again, and
+        displace the stream that replaced it, which RFC-0001 rules out: one adapter identity is
+        served by one live process at a time.
+        """
+        if self._superseded.is_set():
+            self._shutdown.wait()
 
     def _handle_control_plane(self, cp, stub) -> None:
         pb = self._pb
@@ -2015,6 +2085,13 @@ class SimAdapter:
 
     def _on_assign(self, task, result) -> None:
         pb = self._pb
+        if self._superseded.is_set():
+            # Run under the latch lock (_LOCKED_ARMS), as _give_up is: work either came first
+            # and was dropped, or comes after and is refused.
+            result.assign_action.CopyFrom(pb.AssignActionResult(
+                accepted=False, rejection=pb.ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE,
+                message="this process's stream was superseded; it drives no robot"))
+            return
         decision = self._fence.check(
             self._robot, task.HasField("fencing_token"), task.fencing_token, task.assignment_id)
         if decision is FenceDecision.MISSING:
@@ -2358,8 +2435,9 @@ class SimAdapter:
             last_sent = now
             # comms-flaky: suppress the telemetry stream during a scenario gap so the
             # control plane sees the outage. The sim (and lease/estop checks) keep
-            # ticking — only the outbound TelemetryPayload is withheld.
-            if self._scenario_telemetry_gap(elapsed):
+            # ticking — only the outbound TelemetryPayload is withheld. Superseded, there is
+            # no stream to send it on.
+            if self._superseded.is_set() or self._scenario_telemetry_gap(elapsed):
                 time.sleep(_TICK_DT)
                 continue
             self._outbox.put(self._telemetry_message(elapsed, pose, sim_battery))
@@ -2617,7 +2695,7 @@ class SimAdapter:
         # log and RE-OPEN SafetyStream (an adapter must always have a live estop path,
         # {{ref:safety}}); on shutdown, exit quietly. The gRPC channel auto-heals, so
         # the reconnect succeeds once connectivity returns.
-        while not self._shutdown.is_set():
+        while not self._shutdown.is_set() and not self._superseded.is_set():
             # Fresh outbox per session, as for the ControlStream. The dying generator is
             # not stopped the instant its stream faults: it can still be blocked in get(),
             # and with a shared queue it takes the EstopAck for the next estop on the NEW
@@ -2631,7 +2709,13 @@ class SimAdapter:
                 with self._latch_lock:
                     self._report_latch(outbox)  # on each SafetyStream that opens
             try:
-                for cp in stub.SafetyStream(requests(outbox)):
+                # Opened only after the previous SafetyStream has ended, so an ABORTED is never
+                # this process's own redial; if that changed, a stray ABORTED would stop the
+                # robot, which fails safe.
+                call = self._safety_call = stub.SafetyStream(requests(outbox))
+                if _too_late(self._superseded, call, outbox):
+                    return
+                for cp in call:
                     if cp.WhichOneof("payload") == "estop" and cp.robot_id != self._robot:
                         # An estop for a robot this adapter does not serve. It cannot confirm
                         # that robot is at rest, so the only true answer is FAILED, which
@@ -2654,11 +2738,73 @@ class SimAdapter:
                 outbox.put(None)  # release the dead stream's generator
                 if self._shutdown.is_set():
                     return
+                if _is_superseded(exc):
+                    self._on_superseded("SafetyStream")
+                if self._superseded.is_set():
+                    return  # never dialled again
                 print(f"safety stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
                 time.sleep(0.5)
                 continue
             # The request generator returned its None sentinel: a clean close → exit.
             return
+
+    def _on_superseded(self, stream: str) -> None:
+        """A stream of this robot's was closed as superseded: stop the robot, hold no work, and
+        close the other stream. Once, whichever stream it is.
+
+        RFC-0001 #fleet-adapter-protocol-connection-lifecycle: a process whose stream is closed
+        as superseded by a stream it did not open itself MUST stop every robot it drives and
+        hold no work. This adapter opens a stream of a kind only once the previous one of that
+        kind has ended, so a stream closed as superseded was replaced by another process. The
+        other stream is closed too, so a fence on it can't arrive with no SafetyStream left to
+        answer it. Neither is dialled again (_idle_once_superseded).
+        """
+        with self._latch_lock:
+            if self._superseded.is_set():
+                return
+            self._give_up()
+        self._outbox.put(None)
+        self._safety_outbox.put(None)
+        _cancel(self._active_call)
+        _cancel(self._safety_call)
+        print(f"SUPERSEDED stream={stream} robots={self._robot}: closed ABORTED, superseded by "
+              f"a newer stream under this adapter identity. The robot is stopped and holds no "
+              f"work, and neither stream is dialled again; restart this process to serve it "
+              f"again.", file=sys.stderr, flush=True)
+
+    def _give_up(self) -> None:
+        """Superseded: stop this robot and drop its work, then confirm its rest in its lane and
+        log it, as there is no stream left to report it on. Work that arrives afterwards is
+        refused (_on_assign), and held motion is never released (_fleet_stop_answered)."""
+        with self._latch_lock:
+            if self._superseded.is_set():
+                return
+            self._superseded.set()
+            self._motion_held = False
+            try:
+                self._interrupt_work()
+            except Exception as exc:  # noqa: BLE001 -- dropped and stopped all the same
+                print(f"SUPERSEDED_STOP_ERROR robot={self._robot}: {exc!r}", file=sys.stderr,
+                      flush=True)
+            self._lease.release(self._robot)
+            self._current_action = ""
+            self._lease_action = ""
+            self._job = None
+            self._move_target = None
+            try:
+                self._command_stop_now()
+            except Exception as exc:  # noqa: BLE001 -- logged; the rest check below reports it
+                print(f"SUPERSEDED_STOP_ERROR robot={self._robot}: {exc!r}", file=sys.stderr,
+                      flush=True)
+
+        def confirm() -> None:
+            rest = self._await_rest()
+            print(f"SUPERSEDED_REST robot={self._robot}: "
+                  + ("at rest" if rest == self._pb.ESTOP_STATE_STOPPED
+                     else "rest not confirmed within the stopping budget"),
+                  file=sys.stderr, flush=True)
+
+        self._my_lane().submit(confirm)
 
     def _estop_on_reader(self, cp, outbox: queue.Queue) -> None:
         """An Estop for this robot, on the SafetyStream reader, which never waits for rest.
@@ -3057,6 +3203,9 @@ class SimFleet:
         self._tick_start = 0.0
         self._world_at: float | None = None       # monotonic time the world was moved to
         self._active_call = None
+        self._safety_call = None
+        self._superseded = threading.Event()      # set once by _on_superseded
+        self._superseded_lock = threading.Lock()
         self._reconnect_pending = False
         self._edge_lock = threading.Lock()
         self._edge_robots: dict[str, list] = {}     # edge address -> robots served through it
@@ -3129,15 +3278,21 @@ class SimFleet:
             for rid in self._ids:
                 self._sim.spawn(rid, 0.0, 0.0)
         threading.Thread(target=self._stream_lease_loop, daemon=True).start()
-        while not self.shutdown_event.is_set():
+        while not self.shutdown_event.is_set() and not self._superseded.is_set():
             self._reconnect_pending = False
             # A fresh outbox per session, swapped for every robot at once (the shared link),
             # and no register of the old session is left waiting for an ack.
             with self._register_lock:
                 self.link.outbox = queue.Queue()
                 self._unanswered.clear()
+            # Opened only after the previous ControlStream has ended, so an ABORTED is never
+            # this process's own redial; if that changed, a stray ABORTED would stop the
+            # robot, which fails safe.
             call = stub.ControlStream(self._control_requests())
             self._active_call = call
+            if _too_late(self._superseded, call, self.link.outbox):
+                self._active_call = None
+                break
             dropped = False
             try:
                 for cp in call:
@@ -3145,11 +3300,15 @@ class SimFleet:
             except grpc.RpcError as exc:
                 if self.shutdown_event.is_set():
                     break
+                if _is_superseded(exc):
+                    self._on_superseded("ControlStream")
                 dropped = True
-                print(f"control stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
+                if not self._superseded.is_set():
+                    print(f"control stream dropped ({exc.code()}); reconnecting",
+                          file=sys.stderr)
             finally:
                 self._active_call = None
-            if self.shutdown_event.is_set():
+            if self.shutdown_event.is_set() or self._superseded.is_set():
                 break
             if self._reconnect_pending:
                 self._await_reconnect()
@@ -3158,6 +3317,8 @@ class SimFleet:
                 time.sleep(0.5)
                 continue
             break  # clean close (response iterator ended without error)
+        if self._superseded.is_set():
+            self.shutdown_event.wait()   # idle until terminated (SimAdapter._idle_once_superseded)
         self.shutdown_event.set()
 
     def _handle_control_plane(self, cp) -> None:
@@ -3310,8 +3471,8 @@ class SimFleet:
                 if now - last_sent[robot._robot] < robot._telemetry_interval:
                     continue
                 last_sent[robot._robot] = now
-                if robot._scenario_telemetry_gap(elapsed):
-                    continue
+                if self._superseded.is_set() or robot._scenario_telemetry_gap(elapsed):
+                    continue   # superseded, there is no stream to send it on
                 self._guarded(robot, lambda r=robot, p=pose, b=battery: r._outbox.put(
                     r._telemetry_message(elapsed, p, b)))
             # Fine passes while a stop is being confirmed, and a confirmation that starts
@@ -3386,7 +3547,7 @@ class SimFleet:
                 yield msg
 
         # Resilient as SimAdapter.run_safety_stream, with a fresh queue per session.
-        while not self.shutdown_event.is_set():
+        while not self.shutdown_event.is_set() and not self._superseded.is_set():
             outbox = self.link.safety_outbox = queue.Queue()
             if self.shutdown_event.is_set():
                 return
@@ -3395,16 +3556,48 @@ class SimFleet:
                     with robot._latch_lock:
                         robot._report_latch(outbox)  # on each SafetyStream that opens
             try:
-                for cp in stub.SafetyStream(requests(outbox)):
+                # Opened only after the previous SafetyStream has ended, so an ABORTED is never
+                # this process's own redial; if that changed, a stray ABORTED would stop the
+                # robot, which fails safe.
+                call = self._safety_call = stub.SafetyStream(requests(outbox))
+                if _too_late(self._superseded, call, outbox):
+                    return
+                for cp in call:
                     self._on_safety(cp, outbox)
             except grpc.RpcError as exc:
                 outbox.put(None)
                 if self.shutdown_event.is_set():
                     return
+                if _is_superseded(exc):
+                    self._on_superseded("SafetyStream")
+                if self._superseded.is_set():
+                    return  # never dialled again
                 print(f"safety stream dropped ({exc.code()}); reconnecting", file=sys.stderr)
                 time.sleep(0.5)
                 continue
             return
+
+    def _on_superseded(self, stream: str) -> None:
+        """SimAdapter._on_superseded for every robot of the fleet: each is stopped and holds no
+        work, its rest confirmed in its own lane, and the other stream is closed. Once."""
+        with self._superseded_lock:
+            if self._superseded.is_set():
+                return
+            self._superseded.set()
+        for robot in self._robots.values():
+            try:
+                robot._give_up()
+            except Exception as exc:  # noqa: BLE001 -- one robot's fault leaves no other moving
+                print(f"SUPERSEDED_ERROR robot={robot._robot}: {exc!r}", file=sys.stderr,
+                      flush=True)
+        self.link.outbox.put(None)
+        self.link.safety_outbox.put(None)
+        _cancel(self._active_call)
+        _cancel(self._safety_call)
+        print(f"SUPERSEDED stream={stream} robots={','.join(self._ids)}: closed ABORTED, "
+              f"superseded by a newer stream under this adapter identity. Every robot is "
+              f"stopped and holds no work, and neither stream is dialled again; restart this "
+              f"process to serve them again.", file=sys.stderr, flush=True)
 
     def _on_safety(self, cp, outbox: queue.Queue) -> None:
         """Route one SafetyStream message. The reader never waits for a robot to rest."""

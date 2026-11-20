@@ -6,8 +6,10 @@
 Feature-basic (ADR-0005): the CONFORMANCE.md safety MUSTs are wired from the
 shared `swarmada_sdk` primitives; optional commands are declined
 with `unsupported = true` (C7). A dropped ControlStream or SafetyStream is redialled
-with bounded, jittered exponential backoff (C1.5). It keeps the stop latch of contract
-1.4.0 (RFC-0001 #fleet-adapter-protocol-the-stop-latch; conformance C5.8). Bind
+with bounded, jittered exponential backoff (C1.5); one closed ABORTED, as superseded by a
+newer stream under this identity, is not, and the robot is stopped (_on_superseded). It
+keeps the stop latch of contract 1.4.0 (RFC-0001 #fleet-adapter-protocol-the-stop-latch;
+conformance C5.8). Bind
 `RobotBinding` (see robot.py) to your fleet API — every `TODO(vendor)` marks a point where
 you do so.
 
@@ -68,6 +70,36 @@ _BACKOFF_CAP = 30.0
 def _backoff_delay(attempt: int) -> float:
     """Seconds to wait before redial number `attempt` (0-based)."""
     return random.uniform(0.0, min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** attempt)))
+
+
+def _is_superseded(exc: grpc.RpcError) -> bool:
+    """Whether a stream ended as superseded by a newer stream under this adapter identity.
+
+    The control plane ends a stream ABORTED for that and for nothing else, so any ABORTED
+    counts, whatever its details say. Every other code is a drop, redialled on the backoff
+    above, UNAVAILABLE included, even with "superseded" in its details.
+    """
+    return exc.code() == grpc.StatusCode.ABORTED
+
+
+def _cancel(call) -> None:
+    """Cancel an in-flight stream call, best-effort: its reader then ends with CANCELLED."""
+    cancel = getattr(call, "cancel", None)
+    if cancel is not None:
+        try:
+            cancel()
+        except Exception:  # noqa: BLE001 -- best-effort; the request side is closed as well
+            pass
+
+
+def _too_late(superseded: threading.Event, call, outbox: queue.Queue) -> bool:
+    """Whether `call` was dialled after a supersession, which can land between a loop's check
+    and its dial; if so, it is closed at once and never served."""
+    if not superseded.is_set():
+        return False
+    _cancel(call)
+    outbox.put(None)
+    return True
 
 
 # The fleet-adapter CONTRACT version this adapter implements (ADR-0032). Distinct from
@@ -335,6 +367,11 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         self._current_generation = 0
         self._outbox: queue.Queue = queue.Queue()
         self._shutdown = threading.Event()
+        # Set once a stream is closed as superseded (_on_superseded): the robot is stopped, its
+        # work dropped and no new work taken, and neither stream is dialled again.
+        self._superseded = threading.Event()
+        self._control_call = None   # the live ControlStream call, closed when superseded
+        self._safety_call = None    # the live SafetyStream call, likewise
         self._telemetry_started = False
         self._telemetry_interval = _TELEMETRY_INTERVAL
         # True only between an ACCEPTED RegisterAck and the end of that session. Work
@@ -393,7 +430,7 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
             self._robot.spawn(self._robot_id)
         attempt = 0
         try:
-            while not self._shutdown.is_set():
+            while not self._shutdown.is_set() and not self._superseded.is_set():
                 # A fresh outbox per session. The generator of a stream that just died can
                 # still be blocked in get(); on a shared queue it would swallow the
                 # RegisterRobot the NEW session enqueues, and the control plane would never
@@ -403,12 +440,23 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 self._registered = False
                 self._session_ready = False
                 try:
-                    for cp in stub.ControlStream(self._control_requests(outbox)):
+                    # Opened only after the previous ControlStream has ended, so an ABORTED is never
+                    # this process's own redial; if that changed, a stray ABORTED would stop the
+                    # robot, which fails safe.
+                    call = self._control_call = stub.ControlStream(
+                        self._control_requests(outbox))
+                    if _too_late(self._superseded, call, outbox):
+                        break
+                    for cp in call:
                         if cp.WhichOneof("payload") == "hello_ack" and cp.hello_ack.accepted:
                             attempt = 0  # a handshake completed: the next outage starts over
                         self._handle_control_plane(cp, stub)
                 except grpc.RpcError as exc:
                     if self._shutdown.is_set():
+                        break
+                    if _is_superseded(exc):
+                        self._on_superseded("ControlStream")
+                    if self._superseded.is_set():
                         break
                     delay = _backoff_delay(attempt)
                     attempt += 1
@@ -419,6 +467,11 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 finally:
                     outbox.put(None)  # release the old session's request generator
                 break  # the control plane closed the stream cleanly: stop
+            if self._superseded.is_set():
+                # Superseded: stay up and idle until terminated, dialling nothing. A process
+                # that exited would be restarted by whatever supervises it, dial again, and
+                # displace the stream that replaced it.
+                self._shutdown.wait()
         finally:
             self._shutdown.set()
 
@@ -605,8 +658,9 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
             result.pause.CopyFrom(pb.PauseResult(
                 paused=paused, message="" if paused else "the robot could not be paused"))
         elif which == "resume":
-            with self._robot_lock:
-                resumed = self._robot.resume(self._robot_id)
+            with self._robot_lock:   # never once superseded (_on_superseded)
+                resumed = (not self._superseded.is_set()
+                           and self._robot.resume(self._robot_id))
             result.resume.CopyFrom(pb.ResumeResult(
                 resumed=resumed, message="" if resumed else "the robot could not be resumed"))
         elif which == "cancel_action":
@@ -915,16 +969,24 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 rejection=pb.ASSIGN_ACTION_REJECTION_OPERATING_CONSTRAINT_UNMET,
                 unhonourable_subjects=unhonourable))
             return
-        # One step under the lock, so _complete_on_arrival never sees half an assignment.
+        # One step under the lock, so _complete_on_arrival never sees half an assignment, and a
+        # supersession (_on_superseded) either drops this work or comes first and refuses it.
         with self._robot_lock:
-            self._robot.command_move(self._robot_id, *target)
-            self._current_action = task.action_id
-            self._action_fencing_token = task.fencing_token
-            if task.lease_duration_ms:
-                self._current_generation = task.lease_generation
-                self._lease_action = task.action_id  # which action this lease belongs to
-                self._lease.grant(
-                    self._robot_id, task.lease_duration_ms / 1000.0, task.lease_generation)
+            superseded = self._superseded.is_set()
+            if not superseded:
+                self._robot.command_move(self._robot_id, *target)
+                self._current_action = task.action_id
+                self._action_fencing_token = task.fencing_token
+                if task.lease_duration_ms:
+                    self._current_generation = task.lease_generation
+                    self._lease_action = task.action_id  # which action this lease belongs to
+                    self._lease.grant(
+                        self._robot_id, task.lease_duration_ms / 1000.0, task.lease_generation)
+        if superseded:
+            result.assign_action.CopyFrom(pb.AssignActionResult(
+                accepted=False, rejection=pb.ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE,
+                message="this process's stream was superseded; it drives no robot"))
+            return
         result.assign_action.CopyFrom(pb.AssignActionResult(
             accepted=True, accepted_fencing_token=task.fencing_token))  # C3.5
         # C16.1: report the phase transition. SUCCEEDED follows from _complete_on_arrival.
@@ -1064,7 +1126,7 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         # The estop path must always be up (C1.1), so a dropped SafetyStream is redialled on
         # the same backoff as the ControlStream, and independently of it.
         attempt = 0
-        while not self._shutdown.is_set():
+        while not self._shutdown.is_set() and not self._superseded.is_set():
             # A fresh outbox per session, as for the ControlStream. The generator of a stream
             # that just died can still be blocked in get(); on a shared queue it would take
             # the EstopAck for the next estop on the NEW stream and drop it with the dead
@@ -1074,7 +1136,13 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 self._safety_outbox = outbox
                 self._report_latch(outbox)  # on each SafetyStream that opens
             try:
-                for cp in stub.SafetyStream(requests(outbox)):
+                # Opened only after the previous SafetyStream has ended, so an ABORTED is never
+                # this process's own redial; if that changed, a stray ABORTED would stop the
+                # robot, which fails safe.
+                call = self._safety_call = stub.SafetyStream(requests(outbox))
+                if _too_late(self._superseded, call, outbox):
+                    return
+                for cp in call:
                     attempt = 0
                     if cp.WhichOneof("payload") == "estop" and cp.robot_id != self._robot_id:
                         # An estop for a robot this adapter does not serve. It cannot confirm
@@ -1108,6 +1176,10 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 outbox.put(None)  # release the dead stream's generator
                 if self._shutdown.is_set():
                     return
+                if _is_superseded(exc):
+                    self._on_superseded("SafetyStream")
+                if self._superseded.is_set():
+                    return  # never dialled again
                 delay = _backoff_delay(attempt)
                 attempt += 1
                 print(f"safety stream lost ({exc.code()}); redialling in {delay:.1f}s",
@@ -1115,6 +1187,53 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 self._shutdown.wait(delay)
                 continue
             return  # closed cleanly
+
+    def _on_superseded(self, stream: str) -> None:
+        """A stream was closed as superseded: stop the robot, hold no work, and close the other
+        stream. Once, whichever stream it is.
+
+        RFC-0001, Connection lifecycle: a process whose stream is closed as superseded by a
+        stream it did not open itself MUST stop every robot it drives and hold no work. This
+        adapter opens a stream of a kind only once the previous one of that kind has ended, so
+        a stream closed as superseded was replaced by another process. The other stream is
+        closed too, so a fence on it can't arrive with no SafetyStream left to answer it, and
+        neither is dialled again (run_control_stream, run_safety_stream).
+
+        TODO(vendor): a binding that drives several robots stops each of them here.
+        """
+        with self._robot_lock:   # as _on_assign: work either came first and is dropped here,
+            if self._superseded.is_set():   # or comes after and is refused
+                return
+            self._superseded.set()
+            self._session_ready = False   # no telemetry and no PositionFrame from here on
+            if self._current_action:
+                self._lease.release(self._robot_id)
+            self._current_action = ""
+            self._lease_action = ""
+        since = None
+        try:
+            since = command_estop(self._plant, self._robot_id)   # the stop first
+        except Exception as exc:  # noqa: BLE001 -- logged; there is no stream to report it on
+            print(f"SUPERSEDED_STOP_ERROR robot={self._robot_id}: {exc!r}", file=sys.stderr,
+                  flush=True)
+        self._outbox.put(None)
+        self._safety_outbox.put(None)
+        _cancel(self._control_call)
+        _cancel(self._safety_call)
+        print(f"SUPERSEDED stream={stream} robots={self._robot_id}: closed ABORTED, superseded "
+              f"by a newer stream under this adapter identity. The robot is stopped and holds "
+              f"no work, and neither stream is dialled again; restart this process to serve it "
+              f"again.", file=sys.stderr, flush=True)
+
+        def confirm() -> None:
+            # There is no stream left to report rest on, so it is logged.
+            rest = await_estop_confirmation(self._plant, self._robot_id, since=since)
+            print(f"SUPERSEDED_REST robot={self._robot_id}: "
+                  + ("at rest" if rest == ESTOP_STOPPED
+                     else "rest not confirmed within the stopping budget"),
+                  file=sys.stderr, flush=True)
+
+        self._lane.submit(confirm)
 
     def _begin_stop(self, estop_id: str, send, then=None) -> None:
         """Stop the robot, on the reader the stop came on, and answer it twice (C5.2, C5.3, C5.5;

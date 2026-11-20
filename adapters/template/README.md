@@ -25,7 +25,10 @@ A generated adapter that is **feature-basic**, with the safety paths wired:
   control plane's authoritative action state (C2.2), sends a full hardware snapshot
   in its first telemetry (C6.1), and takes up the advertised telemetry interval
   (C2.3). Work arriving on a session whose registration was refused is declined
-  (C13.2).
+  (C13.2). A stream closed `ABORTED`, superseded by a newer stream under the same
+  identity, is not redialled: the adapter stops its robot, gives up its work, closes
+  its other stream and stays idle until it is restarted (RFC-0001, Connection
+  lifecycle).
 - An `ActionStatusUpdate` on acceptance (`RUNNING`), on arrival at the target
   (`SUCCEEDED`) and on cancel (`CANCELLED`) (C16.1), echoing the executing fencing
   token (C6.4). A cancel that names an action the robot is no longer running, which
