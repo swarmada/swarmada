@@ -201,11 +201,11 @@ Way 1 is the adapter-driven path.
 > plane](adapters.md#against-a-real-running-control-plane)). `quickstart-mtls` issues that
 > certificate for one adapter, `sim-fleet-adapter`; each adapter below needs its own
 > `FleetAdapter` and certificate. Each external adapter's repository documents how it takes TLS
-> material, so the commands below show binding selection only. Each external reference
-> adapter also reports contract `1.0.0`, outside the `>=1.3.0 <1.5.0` range the control plane
-> accepts ([REGISTRY.md](../adapters/REGISTRY.md)): its `FleetAdapter` is set `Rejected` and
-> its robots are refused registration and admission until the adapter declares a contract
-> version inside that range. The range is not widened.
+> material, so the commands below show binding selection only. An adapter that
+> reports a contract version outside the `>=1.3.0 <1.5.0` range the control plane accepts has its
+> `FleetAdapter` set `Rejected`, and its robots are refused registration and admission until it
+> declares a version inside that range. The range is not widened. The contract version of each
+> reference adapter release is in [COMPATIBILITY.md](../adapters/COMPATIBILITY.md).
 
 The default `--binding simulated` needs no ROS 2 install at all. Once you have
 a sourced ROS 2 + Nav2 workspace (real hardware or a Gazebo-simulated robot),
@@ -258,8 +258,8 @@ certified flight-safety systems.
 
 The target shape: several adapters speaking different protocols against the same
 running control plane, each surfacing its robots as `Robot` objects the scheduler
-treats uniformly. At v0.4 none of the three reference adapters can register a robot;
-see the note at the start of §4.
+treats uniformly. An adapter registers robots only at a contract version the control
+plane accepts; see the note at the start of §4.
 
 ```bash
 # Terminal 1 — a simulated ROS 2 robot:

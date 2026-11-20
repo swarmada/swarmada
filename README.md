@@ -292,9 +292,9 @@ Swarmada is pre-release; public claims track the code:
   `adapters/external/`, which is not checked in here (see
   [docs/adapters.md](docs/adapters.md)). ROS 2 is event-driven and
   VDA5050 is request/response, so the set spans two structurally different
-  integration paradigms. All three declare contract `1.0.0`, outside the
-  supported range `>=1.3.0 <1.5.0`, so this release refuses their robots (see
-  [adapters/REGISTRY.md](adapters/REGISTRY.md)). No conformance grade has been earned on physical
+  integration paradigms. This release accepts contract
+  versions `>=1.3.0 <1.5.0`; the contract version of each adapter release is in
+  [adapters/COMPATIBILITY.md](adapters/COMPATIBILITY.md). No conformance grade has been earned on physical
   hardware; development measurements taken on a physical robot are recorded in
   [ADR-0063](docs/adr/0063-a-field-this-tree-cannot-evaluate-is-absent-not-inert.md)
   and [ADR-0069](docs/adr/0069-exclusions-are-child-zones-with-denial-semantics.md).

@@ -47,7 +47,7 @@ import (
 //
 // # A DEBT REGISTER, NOT AN ALLOW-LIST
 //
-// The three external rows are out of range TODAY and cannot be repaired from here: they live in
+// An external row that is out of range cannot be repaired from here: the adapters live in
 // three repositories this checkout does not contain (ADR-0005, independent cadence). A gate that
 // simply failed would be red for weeks for a reason no session could clear, and
 // the specification's citation baseline already records what that costs — "a gate that is red on
@@ -74,7 +74,6 @@ type evictedRow struct {
 // REMOVE AN ENTRY WHEN THE VENDOR PR LANDS AND THE ROW MOVES. The test fails if an entry is
 // left behind, so the removal is not a courtesy.
 var knownEvictions = []evictedRow{
-	{"fleet-adapter-vda5050", "declares 1.0.0; needs a vendor PR raising CONTRACT_VERSION into the current range, then an ADR-0007 registry PR."},
 	{"fleet-adapter-mavlink", "declares 1.0.0; needs a vendor PR raising CONTRACT_VERSION into the current range, then an ADR-0007 registry PR."},
 }
 

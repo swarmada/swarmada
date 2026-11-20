@@ -1379,8 +1379,9 @@ and the work they hold are kept.
 
 **Limitation.** The control plane implements contract `1.4.0` and accepts `>=1.3.0 <1.5.0`, N and
 N-1 within one major version. A later minor release moves the window, and it is not widened.
-An adapter that declares `1.2.0` or below, such as the three external reference adapters at
-`1.0.0`, can no longer bring robots under management.
+An adapter that declares `1.2.0` or below can no longer bring robots under management. The
+contract version of each reference adapter release is in
+[Adapter compatibility](../adapters/COMPATIBILITY.md).
 
 **What you will see.** Registration and discovery are refused with
 `REGISTRATION_REJECTION_VERSION_MISMATCH` and a message starting `VERSION_MISMATCH:` that names the
