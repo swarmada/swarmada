@@ -162,6 +162,11 @@ class LatchingSimAdapter(SimAdapter):
             return None, None, "x and y are required, as numbers in metres"
         return _KEYED_ENTRY, target, ""
 
+    def _stopping_ack(self, estop_id: str, initiated_ms: int, message: str = ""):
+        if self._plant == "receipt-only" and message == "fence":
+            return None   # a fence's first answer goes nowhere; its last only as a receipt
+        return super()._stopping_ack(estop_id, initiated_ms, message)
+
     def _answer_fence(self, command, ack, control_outbox=None) -> None:
         if self._plant != "receipt-only":
             super()._answer_fence(command, ack, control_outbox)

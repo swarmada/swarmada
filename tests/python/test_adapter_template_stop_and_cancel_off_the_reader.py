@@ -609,3 +609,80 @@ def test_a_cancel_naming_an_action_not_running_stops_nothing_and_is_not_confirme
     assert (res.acknowledged, res.disposition) == (acknowledged, disposition)
     assert _event_at(log, "stop") is None, "a cancel for an action not running stopped the robot"
     assert a._current_action == "t1" and not robot.is_stopped(ROBOT)
+
+
+# ── a fault answering a fence does not strand the clear that follows it ──────────────
+
+def _clear_acks(log: _Log, estop_id: str) -> list[float]:
+    return [t for t, kind, *rest in log.snapshot()
+            if kind == "put" and rest[0].DESCRIPTOR.name == "AdapterSafetyMessage"
+            and rest[0].HasField("estop_clear_ack")
+            and rest[0].estop_clear_ack.estop_id == estop_id]
+
+
+def _assign_accepted(log: _Log, command_id: int, timeout: float = 3.0):
+    def results():
+        return [rest[0].command_result.assign_action for _t, kind, *rest in log.snapshot()
+                if kind == "put" and rest[0].DESCRIPTOR.name == "AdapterMessage"
+                and rest[0].HasField("command_result")
+                and rest[0].command_result.command_id == command_id]
+    return _wait(results, timeout)
+
+
+def _faulting_put(target, fails):
+    """Make `target.put` raise, once, for the first message `fails` picks out."""
+    real, faulted = target.put, []
+
+    def put(item, *args, **kwargs):
+        if not faulted and hasattr(item, "DESCRIPTOR") and fails(item):
+            faulted.append(item)
+            raise RuntimeError("a fault sending the fence's answer")
+        return real(item, *args, **kwargs)
+    target.put = put
+    return faulted
+
+
+FAULTS = ["the final answer", "the receipt", "the stop command"]
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_a_fault_answering_a_fence_does_not_strand_its_clear(via, fault):
+    """Stop, fence, EstopClear: the clear takes effect once the fence has arrived, and is
+    answered with an EstopClearAck, and the robot takes work again. That holds when the fence's
+    final EstopAck cannot be sent, when its ControlStream receipt cannot, and when the stop
+    itself cannot be commanded (then the fence is answered FAILED at once): the fence has
+    arrived all the same, so the clear is not kept for a fence that is never recorded."""
+    v = via("fence", 0)
+    v.robot.command_move(ROBOT, 5.0, 0.0)
+    if fault == "the final answer":
+        faulted = _faulting_put(v.a._safety_outbox, lambda m: m.HasField("estop_ack")
+                                and m.estop_ack.state != pb.ESTOP_STATE_STOPPING)
+    elif fault == "the receipt":
+        faulted = _faulting_put(v.a._outbox, lambda m: m.HasField("command_result")
+                                and m.command_result.HasField("estop"))
+    else:
+        faulted, real_stop = [], v.robot.command_stop
+
+        def command_stop(robot_id):
+            if not faulted:
+                faulted.append(robot_id)
+                raise RuntimeError("a fault commanding the stop")
+            return real_stop(robot_id)
+        v.robot.command_stop = command_stop
+    v.stop("e1", 901)
+    # The reader is done with the fence (a fault that escapes it leaves no "handled").
+    _wait(lambda: [t for t, kind, *rest in v.log.snapshot()
+                   if kind == "handled" and rest[0] == 901], 2)
+    assert "e1" in v.a._latched, "the fence did not latch its stop"
+    assert v.a._lane.idle(BUDGET_S + 1.5), "the fence's confirmation never finished"
+    assert faulted, f"{fault} never faulted: the test proves nothing"
+    # The clear, as the SafetyStream reader hands it on: to the robot's lane.
+    v.a._lane.submit(lambda: v.a._on_estop_clear(pb.EstopClear(estop_id="e1", leader_term=1),
+                                                 v.a._safety_outbox))
+    assert v.a._lane.idle(2), "the clear was never taken"
+    assert _wait(lambda: _clear_acks(v.log, "e1"), 1.0), \
+        f"the clear was never answered when {fault} faulted: the fence was not recorded"
+    assert "e1" not in v.a._latched, "the clear did not lift the latch"
+    _assign(v._s, "t2", 902)
+    (result, *_) = _assign_accepted(v.log, 902) or [None]
+    assert result is not None and result.accepted, f"work after the clear was refused: {result}"

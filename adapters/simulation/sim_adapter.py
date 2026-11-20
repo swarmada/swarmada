@@ -1081,8 +1081,9 @@ class SimAdapter:
         """Every latched stop ID as an EstopAck, and the local latch as a LocalStopReport."""
         pb = self._pb
         for estop_id in sorted(self._latched):
-            # A stop a fleet is still confirming reads STOPPING, and one it could not confirm
-            # FAILED (_stop_states); every other latched stop was confirmed before it latched.
+            # A stop still being confirmed reads STOPPING, and one whose rest could not be
+            # confirmed FAILED (_stop_states), for a robot served alone or in a fleet; one
+            # confirmed reads STOPPED.
             state = self._stop_states.get(estop_id, pb.ESTOP_STATE_STOPPED)
             ack = pb.EstopAck(estop_id=estop_id, state=state, message="latched (report)")
             if state == pb.ESTOP_STATE_STOPPED:
@@ -2258,7 +2259,9 @@ class SimAdapter:
                 self._emit_action_status(expired, "STOPPED", "assignment lease expired")
             except Exception:
                 self._fleet_stop_answered(pb.ESTOP_STATE_FAILED)
-                raise   # logged by the tick loop (SimFleet._guarded)
+                # In a fleet, the tick loop logs it (SimFleet._guarded); a robot served alone
+                # has no such guard, and the fault ends its telemetry loop.
+                raise
 
         reported: list = []   # the end is reported once
 
@@ -2450,7 +2453,9 @@ class SimAdapter:
                     robot_id=self._robot, estop_ack=pb.EstopAck(
                         estop_id=f"drill-{self._robot}", state=pb.ESTOP_STATE_FAILED,
                         message="estop drill (scenario): the stop could not be completed")))
-                raise   # logged by the tick loop (SimFleet._guarded)
+                # In a fleet, the tick loop logs it (SimFleet._guarded); a robot served alone
+                # has no such guard, and the fault ends its telemetry loop.
+                raise
 
         acked: list = []   # the drill is answered once
 
