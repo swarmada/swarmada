@@ -779,17 +779,19 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         control_outbox = self._outbox   # the stream this fence came on, for its receipt
 
         def answered(ack) -> None:
-            # A receipt RFC-0001 permits; the control plane never reads it.
-            control_outbox.put(pb.AdapterMessage(command_result=pb.CommandResult(
-                command_id=command.command_id, robot_id=command.robot_id, estop=ack)))
-            # The fence is recorded once it is answered, STOPPED or FAILED. A clear that arrived
-            # meanwhile was kept, and is taken now, so its ack never goes out ahead of the
-            # stop's.
-            with self._latch_lock:
-                self._fenced.add(estop_id)
-                clear = self._pending_clears.pop(estop_id, None)
-                if clear is not None:
-                    self._take_clear(clear, self._safety_outbox)
+            try:
+                # A receipt RFC-0001 permits; the control plane never reads it.
+                control_outbox.put(pb.AdapterMessage(command_result=pb.CommandResult(
+                    command_id=command.command_id, robot_id=command.robot_id, estop=ack)))
+            finally:
+                # The fence is recorded once it is answered, STOPPED or FAILED, even if that
+                # answer or its receipt could not be sent. A clear that arrived meanwhile was
+                # kept, and is taken now, so its ack never goes out ahead of the stop's.
+                with self._latch_lock:
+                    self._fenced.add(estop_id)
+                    clear = self._pending_clears.pop(estop_id, None)
+                    if clear is not None:
+                        self._take_clear(clear, self._safety_outbox)
 
         self._begin_stop(estop_id, lambda ack: self._safety_outbox.put(pb.AdapterSafetyMessage(
             robot_id=self._robot_id, estop_ack=ack)), then=answered)
@@ -1122,40 +1124,56 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         it was commanded. RFC-0001 allows that first answer, and it is what meets the
         SafetyStream's 500 ms budget whatever the robot does next. In the lane: rest is
         confirmed from a state counted after the stop, never inferred, and STOPPED or FAILED is
-        sent once it is, or once the stopping budget runs out. `then`, if given, runs in the lane
-        after that final answer. The reader never waits for rest, so a second stop behind this
-        one is commanded and answered at once.
+        sent once it is, or once the stopping budget runs out. A stop that cannot be commanded
+        is answered FAILED at once, on the reader. `then`, if given, runs after that final
+        answer, even if the answer could not be sent. The reader never waits for rest, so a
+        second stop behind this one is commanded and answered at once.
         """
         pb = self._pb
+        answered: list = []   # the final answer, once sent; a stop is never answered twice
+
+        def answer(ack) -> None:
+            if answered:
+                return
+            answered.append(ack.state)
+            with self._latch_lock:
+                if estop_id in self._stop_states:
+                    self._stop_states[estop_id] = ack.state
+            try:
+                send(ack)
+            finally:
+                # A fence is recorded by `then`, so a clear kept for it still takes effect,
+                # and is answered, when its answer cannot be sent.
+                if then is not None:
+                    then(ack)
+
         # C5.3: stamp the moment the hardware stop is COMMANDED, before waiting for
         # confirmation. An adapter that inferred the stop has no such moment to report.
         initiated_ms = int(time.time() * 1000)
-        since = command_estop(self._plant, self._robot_id)
+        try:
+            since = command_estop(self._plant, self._robot_id)
+        except Exception as exc:  # noqa: BLE001 -- a stop is answered whatever happened
+            print(f"ESTOP_ERROR robot={self._robot_id} id={estop_id}: {exc!r}", file=sys.stderr,
+                  flush=True)
+            answer(pb.EstopAck(estop_id=estop_id, state=pb.ESTOP_STATE_FAILED,
+                               message="the stop could not be commanded"))
+            return
         with self._latch_lock:
             if estop_id in self._latched:
                 self._stop_states[estop_id] = pb.ESTOP_STATE_STOPPING
         send(pb.EstopAck(estop_id=estop_id, state=pb.ESTOP_STATE_STOPPING,
                          stop_initiated_at=initiated_ms))
-        answered: list = []   # the final answer, once sent; a stop is never answered twice
 
-        def answer(state) -> None:
-            if answered:
-                return
-            answered.append(state)
-            with self._latch_lock:
-                if estop_id in self._stop_states:
-                    self._stop_states[estop_id] = state
-            ack = pb.EstopAck(estop_id=estop_id, stop_initiated_at=initiated_ms,
-                              confirmed_at_ms=int(time.time() * 1000), state=state)
-            send(ack)
-            if then is not None:
-                then(ack)
+        def final(state) -> object:
+            return pb.EstopAck(estop_id=estop_id, stop_initiated_at=initiated_ms,
+                               confirmed_at_ms=int(time.time() * 1000), state=state)
 
         def finish() -> None:
             state = await_estop_confirmation(self._plant, self._robot_id, since=since)  # C5
-            answer(pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED else pb.ESTOP_STATE_FAILED)
+            answer(final(pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED
+                         else pb.ESTOP_STATE_FAILED))
 
-        self._lane.submit(finish, on_error=lambda: answer(pb.ESTOP_STATE_FAILED))
+        self._lane.submit(finish, on_error=lambda: answer(final(pb.ESTOP_STATE_FAILED)))
 
     # ── EdgeStream (C8) ──────────────────────────────────────────────────────
 
