@@ -485,9 +485,10 @@ func (r *FleetAdapterReconciler) AdapterHeartbeat(ctx context.Context, id contro
 // FleetAdapter writes, and the adapter was alive when it answered. The served Robots are stamped
 // by the adapter's liveness worker, not here.
 //
-// While the adapter reads Connected, lastHeartbeat is rewritten at most once per quarter interval:
-// heartbeats come every half interval, so it stays younger than the interval while they arrive,
-// and a burst of per-robot heartbeats is not a burst of writes. A heartbeat re-asserts Connected
+// lastHeartbeat is when the control plane last confirmed the adapter's liveness (RFC-0001
+// §9.1.13.3): every heartbeat received after the one recorded is written, to the second. A burst
+// of heartbeats is not a burst of writes: the stream's presence pump writes the latest one once
+// the write before it is done. A heartbeat re-asserts Connected
 // only while it is younger than one interval; an older one is left to the staleness check. The
 // write carries the resourceVersion it was derived from. A write that conflicts was derived from
 // an older copy, usually a cache behind the previous write: it is derived once more from the API
@@ -535,11 +536,8 @@ func (r *FleetAdapterReconciler) writePresence(ctx context.Context, reader clien
 	base := fa.DeepCopy()
 	st := &fa.Status
 	if last := st.LastHeartbeat; last == nil || receivedAt.After(last.Time) {
-		throttled := st.Phase == fleetv1.FleetAdapterPhaseConnected && last != nil && receivedAt.Sub(last.Time) < interval/4
-		if !throttled {
-			t := metav1.NewTime(receivedAt)
-			st.LastHeartbeat = &t
-		}
+		t := metav1.NewTime(receivedAt)
+		st.LastHeartbeat = &t
 	}
 	// Rejected is a NEGOTIATION verdict, not a liveness one: a heartbeat proves the adapter is
 	// alive, never that it became version-compatible. A rejected adapter deliberately keeps
@@ -696,18 +694,31 @@ func (r *FleetAdapterReconciler) projectLiveness(ctx context.Context, id control
 	}
 	// One config read for the namespace, reused for all served Robots.
 	refresh := robotOfflineTimeout(ctx, r.Client, id.Namespace) / 2
+	adapter := types.NamespacedName{Namespace: id.Namespace, Name: id.AdapterName}
+	served := make(map[types.NamespacedName]bool, len(robots.Items))
+	defer func() { r.liveness.forgetUnserved(adapter, served) }()
 	for i := range robots.Items {
 		if ctx.Err() != nil {
 			return // the adapter's stream is gone: no stamp starts after it
 		}
 		robot := &robots.Items[i]
+		key := client.ObjectKeyFromObject(robot)
+		served[key] = true
 		if conn := robot.Status.Connectivity; conn != nil && conn.LastSeenAt != nil &&
 			now.Sub(conn.LastSeenAt.Time) < refresh {
 			continue // throttle: refreshed recently enough
 		}
-		if err := r.stampLastSeen(ctx, client.ObjectKeyFromObject(robot), now); err != nil {
-			logger.Error(err, "stamping robot lastSeenAt", "robot", robot.Name, "namespace", robot.Namespace)
+		// At most once per half the offline threshold in real time, too (RFC-0001
+		// #robot-connectivity): a stamp carries its heartbeat's receipt time, and two runs can carry
+		// receipt times that far apart while their writes land closer together.
+		if r.liveness.stampedWithin(key, r.clock(), refresh) {
+			continue
 		}
+		if err := r.stampLastSeen(ctx, key, now); err != nil {
+			logger.Error(err, "stamping robot lastSeenAt", "robot", robot.Name, "namespace", robot.Namespace)
+			continue
+		}
+		r.liveness.noteStamped(adapter, key, r.clock())
 	}
 }
 
@@ -797,6 +808,44 @@ type livenessWorkers struct {
 	mu   sync.Mutex
 	runs map[types.NamespacedName]*livenessWorker
 	idle sync.WaitGroup // one count per running worker; flush waits for it
+	// stamped is, per Robot, when its last stamp was written, by the clock, and which adapter's run
+	// wrote it: the stamps are spaced in real time as well as by the receipt times they carry. An
+	// entry lasts while that adapter still serves the Robot.
+	stamped map[types.NamespacedName]robotStamp
+}
+
+type robotStamp struct {
+	adapter types.NamespacedName
+	at      time.Time
+}
+
+// stampedWithin reports whether robot's last stamp was written less than d before now.
+func (l *livenessWorkers) stampedWithin(robot types.NamespacedName, now time.Time, d time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.stamped[robot]
+	return ok && now.Sub(s.at) < d
+}
+
+// noteStamped records that adapter's run wrote robot's stamp at at.
+func (l *livenessWorkers) noteStamped(adapter, robot types.NamespacedName, at time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stamped == nil {
+		l.stamped = map[types.NamespacedName]robotStamp{}
+	}
+	l.stamped[robot] = robotStamp{adapter: adapter, at: at}
+}
+
+// forgetUnserved drops the stamps adapter's runs wrote for Robots it no longer serves.
+func (l *livenessWorkers) forgetUnserved(adapter types.NamespacedName, served map[types.NamespacedName]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for robot, s := range l.stamped {
+		if s.adapter == adapter && !served[robot] {
+			delete(l.stamped, robot)
+		}
+	}
 }
 
 type livenessWorker struct {

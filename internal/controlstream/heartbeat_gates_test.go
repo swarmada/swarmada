@@ -74,9 +74,9 @@ func TestHeartbeatOnArrival_ASupersededStreamOrAFollowerRecordsNothing(t *testin
 	} {
 		beats := &routedBeats{}
 		pump := &presencePump{notify: make(chan struct{}, 1)}
-		var handling atomic.Int64
+		var handling, behind atomic.Int64
 		s := &Server{Commands: beats, Leadership: c.lead}
-		if s.heartbeatOnArrival(c.ctx, gateID, heartbeatMsg("robot-3"), pump, &handling, open) {
+		if s.heartbeatOnArrival(c.ctx, gateID, heartbeatMsg("robot-3"), pump, &handling, &behind, open) {
 			t.Errorf("%s: the heartbeat was recorded on arrival", c.name)
 		}
 		if got := beats.snapshot(); len(got) != 0 {
@@ -85,9 +85,9 @@ func TestHeartbeatOnArrival_ASupersededStreamOrAFollowerRecordsNothing(t *testin
 	}
 	beats := &routedBeats{}
 	pump := &presencePump{notify: make(chan struct{}, 1)}
-	var handling atomic.Int64
+	var handling, behind atomic.Int64
 	if !(&Server{Commands: beats}).heartbeatOnArrival(withSuperseded(ctx, make(chan struct{})), gateID,
-		heartbeatMsg("robot-3"), pump, &handling, open) {
+		heartbeatMsg("robot-3"), pump, &handling, &behind, open) {
 		t.Fatal("the stream holding the identity did not record its heartbeat on arrival")
 	}
 	if got := beats.snapshot(); len(got) != 1 {
@@ -175,6 +175,52 @@ func TestControlStream_ABacklogHandledInTurnIsNotAWedge(t *testing.T) {
 	if n := ing.handled(); n >= frames {
 		t.Fatalf("the heartbeat was recorded only after the whole backlog (%d frames) was handled; "+
 			"a loop running behind is not wedged", n)
+	}
+	_ = stream.CloseSend()
+}
+
+// The backlog limit is the wedge bound: three heartbeat intervals at the default. A stop never waits
+// in this queue, so the limit only decides when the adapter's phase follows the loop.
+func TestControlStream_TheBacklogLimitIsTheWedgeBound(t *testing.T) {
+	s := &Server{}
+	if got := s.presenceBacklogLimit(); got != 30*time.Second || got != s.presenceWedgeLimit() {
+		t.Fatalf("backlog limit = %s, want 30 s, the wedge bound (%s)", got, s.presenceWedgeLimit())
+	}
+}
+
+// A loop that has fallen behind, its oldest message read longer ago than the backlog limit, takes
+// heartbeats back into its own order, however quickly each message is handled: the adapter's
+// presence, and its robots' liveness, follow what the loop has handled again.
+func TestControlStream_ABacklogOlderThanTheLimitTakesTheHeartbeatsBack(t *testing.T) {
+	ca := newTestCA(t)
+	server := ca.issue(t, []string{"localhost"}, time.Now().Add(time.Hour), false)
+	client := ca.issue(t, []string{goodSAN}, time.Now().Add(time.Hour), true)
+	ing := &slowIngestor{each: 100 * time.Millisecond}
+	pres := &presenceLog{}
+	addr, stop := startMTLSRunnable(t, &Server{Ingestor: ing, Presence: pres, presenceWedge: time.Minute,
+		presenceBacklog: 300 * time.Millisecond, Authorizer: &recordAuthorizer{failUnverified: true}},
+		mtlsServerConfig(server, ca.pool))
+	defer stop()
+	stream := openHello(t, tlsClient(t, addr, clientConfig(ca.pool, &client)))
+	if !waitFor(5*time.Second, func() bool { return pres.count("connected") == 1 }) {
+		t.Fatal("the stream never connected")
+	}
+	const frames = 15
+	for i := 0; i < frames; i++ {
+		if err := stream.Send(telemetryMsg("robot-1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(700 * time.Millisecond) // the oldest frame not handled yet was read past the limit
+	if err := stream.Send(heartbeatMsg("")); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(5*time.Second, func() bool { return pres.count("heartbeat") == 1 }) {
+		t.Fatal("the heartbeat was never recorded")
+	}
+	if n := ing.handled(); n < frames {
+		t.Fatalf("the heartbeat was recorded with %d of %d frames handled, ahead of a backlog older than "+
+			"the limit; the adapter would read live while what it reports waits", n, frames)
 	}
 	_ = stream.CloseSend()
 }
