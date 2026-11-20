@@ -345,10 +345,10 @@ Swarmada is pre-release and evolving. Public claims track the code:
   conformance report verifies and records `conformant: true` (no MUST or MUST
   NOT check failed among the checks that ran). Robot admission also requires
   that result to have been earned against a contract version inside the
-  supported range; each reference adapter records contract `1.0.0`, outside the
-  `>=1.3.0 <1.5.0` range, which is what keeps their robots out at v0.4. That range
-  is not widened: each adapter moves to a version inside it in its own
-  repository. The lease self-stop (C4.2) and the
+  supported range, `>=1.3.0 <1.5.0`; an adapter outside it has its robots kept
+  out. That range is not widened: an adapter moves to a version inside it in its
+  own repository. The contract version of each reference adapter release is in
+  `adapters/COMPATIBILITY.md`. The lease self-stop (C4.2) and the
   telemetry-path checks (C6.x) are asserted in the suite itself, not separately:
   an adapter reports the stop it performs, which is what makes the primary
   dual-execution safeguard observable rather than assumed. Bindings
