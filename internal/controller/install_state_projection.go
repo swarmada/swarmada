@@ -53,12 +53,18 @@ import (
 // robot with the same id — a cluster-wide lookup sees two matches and refuses as though the
 // state were invalid, breaking projection for both. Every ingestor knows the namespace the
 // message arrived on, so there is no reason to search outside it.
+//
+// It runs on every telemetry frame (findTelemetryRobot), so it lists without a deep copy
+// (client.UnsafeDisableDeepCopy) and deep-copies only the Robot it returns: a cached List
+// otherwise copies every Robot of the namespace per frame. The listed objects share their maps
+// and slices with the cache, so nothing here changes them, and the caller gets a copy of its own.
+// On a client that does not read from a cache the option does nothing.
 func findRobotByIDInNamespace(ctx context.Context, c client.Client, namespace, robotID string) (*fleetv1.Robot, error) {
 	if robotID == "" || namespace == "" {
 		return nil, nil
 	}
 	var list fleetv1.RobotList
-	if err := c.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+	if err := c.List(ctx, &list, client.InNamespace(namespace), client.UnsafeDisableDeepCopy); err != nil {
 		return nil, fmt.Errorf("listing robots in %q to resolve robot_id %q: %w", namespace, robotID, err)
 	}
 	var match *fleetv1.Robot
@@ -73,7 +79,10 @@ func findRobotByIDInNamespace(ctx context.Context, c client.Client, namespace, r
 		}
 		match = &list.Items[i]
 	}
-	return match, nil
+	if match == nil {
+		return nil, nil
+	}
+	return match.DeepCopy(), nil
 }
 
 // applyInstallState patches Robot.status with a mutation, but only if it changes something.

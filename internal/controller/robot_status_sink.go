@@ -186,9 +186,8 @@ func reportedPhaseTransition(robot *fleetv1.Robot, reported fleetv1.RobotPhase) 
 // there is nothing to scope to, and the lookup falls back to a cluster-wide search.
 // One match resolves. More than one is refused, because nothing on the frame says
 // which robot it describes, and the error names that reason rather than calling the
-// id duplicated. The List is served from the
-// controller cache; material writes and zone transitions are rare, so no field indexer
-// backs it yet.
+// id duplicated. The List is served from the controller cache without a deep copy, and
+// only the Robot returned is copied, as in findRobotByIDInNamespace.
 func findTelemetryRobot(ctx context.Context, c client.Client, namespace, robotID string) (*fleetv1.Robot, error) {
 	if robotID == "" {
 		return nil, nil
@@ -197,7 +196,7 @@ func findTelemetryRobot(ctx context.Context, c client.Client, namespace, robotID
 		return findRobotByIDInNamespace(ctx, c, namespace, robotID)
 	}
 	var list fleetv1.RobotList
-	if err := c.List(ctx, &list); err != nil {
+	if err := c.List(ctx, &list, client.UnsafeDisableDeepCopy); err != nil {
 		return nil, fmt.Errorf("listing robots to resolve robot_id %q: %w", robotID, err)
 	}
 	var match *fleetv1.Robot
@@ -219,7 +218,10 @@ func findTelemetryRobot(ctx context.Context, c client.Client, namespace, robotID
 		}
 		match = &list.Items[i]
 	}
-	return match, nil
+	if match == nil {
+		return nil, nil
+	}
+	return match.DeepCopy(), nil
 }
 
 // CO-OWNERSHIP (RFC-0001 #robotprobe-probe-failure-effect-what-happens-downstream): Robot.status.hardware[] is ALSO written by the RobotProbe controller,
