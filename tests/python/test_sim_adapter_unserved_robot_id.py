@@ -244,7 +244,9 @@ def test_estop_for_the_served_robot_is_still_confirmed() -> None:
     a = _adapter()
     _running(a)
     a.run_safety_stream(_OneEstopStub(ROBOT))
+    assert a._solo_lane.idle(5.0), "the stop was not answered within 5 s"
     acks = _acks(a)
-    assert len(acks) == 1 and acks[0].robot_id == ROBOT
-    assert acks[0].estop_ack.state in (pb.ESTOP_STATE_STOPPED, pb.ESTOP_STATE_FAILED)
-    assert acks[0].estop_ack.HasField("stop_initiated_at"), "the stop was commanded"
+    assert len(acks) == 2 and {m.robot_id for m in acks} == {ROBOT}
+    assert acks[0].estop_ack.state == pb.ESTOP_STATE_STOPPING, "answered once it is commanded"
+    assert acks[1].estop_ack.state in (pb.ESTOP_STATE_STOPPED, pb.ESTOP_STATE_FAILED)
+    assert all(m.estop_ack.HasField("stop_initiated_at") for m in acks), "the stop was commanded"

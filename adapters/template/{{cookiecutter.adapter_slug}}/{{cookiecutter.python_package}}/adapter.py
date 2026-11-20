@@ -38,7 +38,8 @@ from swarmada_sdk.safety import (  # noqa: E402
     FenceDecision,
     FenceGuard,
     LeaseMonitor,
-    confirm_estop,
+    await_estop_confirmation,
+    command_estop,
 )
 
 from {{cookiecutter.python_package}}.robot import SimulatedRobot  # noqa: E402
@@ -102,8 +103,10 @@ def _backoff_delay(attempt: int) -> float:
 # (SupportedAction.custom_type, the optional fourth element of a catalog() entry) and the
 # verb read from AssignAction.custom_type before the payload's `operation` (_servable). The
 # default binding serves no Custom verb, so it declares none. 1.4.0 also added
-# CANCEL_DISPOSITION_STOP_UNCONFIRMED, for an adapter that cannot witness rest; the default
-# binding confirms rest (is_stopped), so it answers STOPPED_SAFELY and never sends it.
+# CANCEL_DISPOSITION_STOP_UNCONFIRMED, for an adapter that cannot witness rest. A cancel is
+# answered STOPPED_SAFELY only once a state counted after its stop shows the robot at rest
+# (is_stopped), within the stopping budget, and STOP_UNCONFIRMED otherwise; so is a cancel for an
+# action replaced in place, which stops nothing and which this binding cannot read the robot off.
 # And 1.4.0 added the stop latch (RFC-0001 #fleet-adapter-protocol-the-stop-latch), which
 # this adapter keeps: see "The stop latch" in the adapter class. An adapter that reports
 # 1.4.0 and keeps no latch fails conformance C5.8.
@@ -148,6 +151,114 @@ def _predates(version: str, major: int, minor: int) -> bool:
     except (IndexError, ValueError):
         return False
     return got_major == major and got_minor < minor
+
+
+def _at_least(version: str, major: int, minor: int) -> bool:
+    """Whether a contract version reads as major.minor or later within that major. False for a
+    version that cannot be read, so an unknown version is never taken to allow a 1.4.0 value."""
+    parts = version.split(".")
+    try:
+        got_major, got_minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return False
+    return got_major == major and got_minor >= minor
+
+
+class _Lane:
+    """The robot's waiting work, in the order it came, on a thread of its own.
+
+    Confirming a stop waits up to the stopping budget (2 s) for the robot to come to rest, and so
+    does answering a cancel. No stream reader waits for that: the reader latches the stop,
+    commands it and answers ESTOP_STATE_STOPPING, then hands the wait and the final answer here.
+    One lane keeps the robot's stops, clears and cancels answered in the order they came.
+    """
+
+    def __init__(self, robot_id: str) -> None:
+        self._robot = robot_id
+        self._tasks: queue.Queue = queue.Queue()
+        self._pending = 0                    # submitted and not yet run, under _done
+        self._done = threading.Condition()
+        threading.Thread(target=self._run, daemon=True, name=f"lane-{robot_id}").start()
+
+    def submit(self, fn, on_error=None) -> None:
+        """Run `fn` after everything already submitted; run `on_error` if it raises."""
+        with self._done:
+            self._pending += 1
+        self._tasks.put((fn, on_error))
+
+    def idle(self, timeout: float) -> bool:
+        """Wait until everything submitted has run; whether it had within `timeout` s."""
+        with self._done:
+            return self._done.wait_for(lambda: self._pending == 0, timeout)
+
+    def _run(self) -> None:
+        while True:
+            fn, on_error = self._tasks.get()
+            try:
+                self._run_one(fn, on_error)
+            finally:
+                with self._done:
+                    self._pending -= 1
+                    self._done.notify_all()
+
+    def _run_one(self, fn, on_error) -> None:
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001 -- the lane outlives any one task
+            print(f"LANE_ERROR robot={self._robot}: {exc!r}", file=sys.stderr, flush=True)
+            if on_error is None:
+                return
+            try:
+                on_error()  # each wait's on_error answers it as not confirmed
+            except BaseException as exc2:  # noqa: BLE001
+                print(f"LANE_ERROR robot={self._robot} (on_error): {exc2!r}",
+                      file=sys.stderr, flush=True)
+
+
+class _LockedRobot:
+    """The binding as a stop's confirmation reads it: each call under the robot lock, and the
+    lock never held across the wait between two looks, so a stop or a command that arrives
+    meanwhile is not held up behind the wait.
+
+    A stop is commanded through this object too, because the SDK ties a stop's token to the
+    object the stop was commanded through (`swarmada_sdk.safety.EstopToken`).
+
+    `tick` advances the binding only while the telemetry loop does not run: that loop ticks it
+    while it runs, and two tickers would move the robot at twice its speed. Which one ticks is
+    decided under the robot lock (`ticking`), so both never tick at once.
+    """
+
+    def __init__(self, robot, lock: threading.Lock) -> None:
+        self._robot = robot
+        self._lock = lock
+        self.ticking = False   # set under the lock while the telemetry loop runs
+
+    def command_stop(self, robot_id: str) -> None:
+        with self._lock:
+            self._robot.command_stop(robot_id)
+
+    def tick(self, dt: float) -> None:
+        with self._lock:
+            if not self.ticking:
+                self._robot.tick(dt)
+
+    def is_stopped(self, robot_id: str) -> bool:
+        with self._lock:
+            return self._robot.is_stopped(robot_id)
+
+    def __getattr__(self, name: str):
+        # state_seq, when the binding counts its state reports (absent on the binding, absent
+        # here), and any other attribute. The SDK reads tick_keeps_state_current from the class,
+        # so it is not forwarded: a binding without state_seq is warned about, as it should be,
+        # since a real robot's binding needs one.
+        attr = getattr(self._robot, name)
+        if name != "state_seq" or not callable(attr):
+            return attr
+
+        def state_seq(robot_id: str):
+            with self._lock:
+                return attr(robot_id)
+        return state_seq
 
 
 # The Command arms this adapter carries out on the robot: its motion, its lease, a hold. Each
@@ -211,7 +322,11 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         self._pb_grpc = pb_grpc
         self._robot = robot
         self._robot_lock = threading.Lock()
+        # What a stop's or a cancel's wait for rest reads, a call at a time under the robot
+        # lock, and the lane that wait runs on, off every stream reader.
+        self._plant = _LockedRobot(robot, self._robot_lock)
         self._robot_id = robot_id
+        self._lane = _Lane(robot_id)
         self._namespace = namespace
         self._fence = FenceGuard()                              # C3
         self._lease = LeaseMonitor(on_expiry=self._self_stop)   # C4
@@ -251,6 +366,9 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         self._local_set_id = ""              # the latest set whose clear has not taken effect
         self._local_changed_ms = 0
         self._interrupted: dict[str, int] = {}  # action_id -> fencing token, of interrupted work
+        # Latched stop ID -> its EstopState: STOPPING until the lane answers it, then that answer,
+        # so a latch report never says STOPPED for a stop whose rest is not confirmed.
+        self._stop_states: dict = {}
         self._action_fencing_token = 0       # the token the current action was accepted under
         # HelloAck.negotiated_contract_version of the current session: whether the leader-term
         # rule binds (_latch_command). Set by each session's HelloAck, before any Command.
@@ -501,29 +619,72 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 # that replaced it, which the contract forbids (a stale cancel "cannot
                 # abort a newer assignment": RFC-0001
                 # #fleet-adapter-protocol-the-controlstream-service).
-                result.cancel_action.CopyFrom(pb.CancelActionResult(
-                    acknowledged=True, disposition=pb.CANCEL_DISPOSITION_STOPPED_SAFELY))
+                # Nothing is stopped, so no rest answers for it. STOPPED_SAFELY would say the
+                # robot is off the action named, which only a reading of the action the robot
+                # is on can show, and this binding has none.
+                # TODO(vendor): if your fleet API reports which order a robot runs, answer
+                # STOPPED_SAFELY once a state received after the cancel shows it on the
+                # replacing one.
+                self._cancel_not_confirmed(result, "no reading shows the robot off the action "
+                                                   "named; nothing was stopped")
                 self._outbox.put(pb.AdapterMessage(command_result=result))
                 return
-            with self._robot_lock:
-                self._robot.command_stop(self._robot_id)
+            since = command_estop(self._plant, self._robot_id)
             self._lease.release(self._robot_id)
             # C16.1: a task that ends reports its terminal state; without it the control
             # plane can resolve the task only by lease expiry.
             self._emit_action_status(self._current_action, "CANCELLED", "cancel_action honoured")
             self._current_action = ""
             self._lease_action = ""
-            # On a capability-loss cancel, set disposition from the robot's state:
-            # STOPPED_SAFELY (safe stop → task requeued), COMPLETED (finished; cancel
-            # moot), or RECOVERED (mid-commitment, could not hand off → task Failed).
-            result.cancel_action.CopyFrom(pb.CancelActionResult(
-                acknowledged=True,
-                disposition=pb.CANCEL_DISPOSITION_STOPPED_SAFELY))
+            self._answer_cancel_at_rest(result, since)
+            return
         else:
             # C7.1: decline every optional command not implemented.
             # TODO(vendor): implement any optional commands your robots support.
             result.unsupported = True
         self._outbox.put(pb.AdapterMessage(command_result=result))
+
+    def _answer_cancel_at_rest(self, result, since) -> None:
+        """Answer a cancel whose stop is commanded, from the lane: STOPPED_SAFELY once a state
+        counted after the stop shows the robot at rest, within the stopping budget; otherwise not
+        a safe stop (`_cancel_not_confirmed`). The answer goes on the outbox of the session the
+        cancel came on: a newer session never had this cancel.
+
+        On a capability-loss cancel, set disposition from the robot's state: STOPPED_SAFELY (safe
+        stop → task requeued), COMPLETED (finished; cancel moot), or RECOVERED (mid-commitment,
+        could not hand off → task Failed).
+        """
+        pb = self._pb
+        outbox = self._outbox
+
+        def finish() -> None:
+            if await_estop_confirmation(self._plant, self._robot_id, since=since) == ESTOP_STOPPED:
+                result.cancel_action.CopyFrom(pb.CancelActionResult(
+                    acknowledged=True, disposition=pb.CANCEL_DISPOSITION_STOPPED_SAFELY))
+            else:
+                self._cancel_not_confirmed(result, "rest was not confirmed within the "
+                                                   "stopping budget")
+            outbox.put(pb.AdapterMessage(command_result=result))
+
+        def failed() -> None:
+            self._cancel_not_confirmed(result, "the wait for rest failed")
+            outbox.put(pb.AdapterMessage(command_result=result))
+
+        self._lane.submit(finish, on_error=failed)
+
+    def _cancel_not_confirmed(self, result, why: str) -> None:
+        """A cancel the robot's rest does not answer for. A connection that negotiated contract
+        1.4.0 has a value for it, CANCEL_DISPOSITION_STOP_UNCONFIRMED, acknowledged. An older
+        one reads any value it does not know as a safe stop, so it is told nothing: the cancel is
+        not acknowledged, and the control plane holds the robot until its lease is provably
+        dead."""
+        pb = self._pb
+        if _at_least(CONTRACT_VERSION, 1, 4) and _at_least(self._negotiated_contract, 1, 4):
+            result.cancel_action.CopyFrom(pb.CancelActionResult(
+                acknowledged=True, disposition=pb.CANCEL_DISPOSITION_STOP_UNCONFIRMED,
+                message=why))
+        else:
+            result.cancel_action.CopyFrom(pb.CancelActionResult(acknowledged=False, message=why))
 
     # ── The stop latch (contract 1.4.0) ──────────────────────────────────────
     #
@@ -572,9 +733,13 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         """Every latched stop ID as an EstopAck, and the local latch as a LocalStopReport."""
         pb = self._pb
         for estop_id in sorted(self._latched):
-            outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot_id, estop_ack=pb.EstopAck(
-                estop_id=estop_id, state=pb.ESTOP_STATE_STOPPED,
-                confirmed_at_ms=int(time.time() * 1000), message="latched (report)")))
+            # A stop still being confirmed reads STOPPING, and one that could not be confirmed
+            # FAILED; only a confirmed stop reads STOPPED, with the moment it is reported.
+            state = self._stop_states.get(estop_id, pb.ESTOP_STATE_STOPPED)
+            ack = pb.EstopAck(estop_id=estop_id, state=state, message="latched (report)")
+            if state == pb.ESTOP_STATE_STOPPED:
+                ack.confirmed_at_ms = int(time.time() * 1000)
+            outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot_id, estop_ack=ack))
         outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot_id, local_stop=pb.LocalStopReport(
             latched=self._local_set, changed_at_ms=self._local_changed_ms, source="robot",
             set_id=self._local_set_id)))
@@ -609,16 +774,25 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         if estop_id in self._cleared:
             return  # a fence for an ID already cleared is ignored
         self._latched.add(estop_id)
-        self._fenced.add(estop_id)
+        self._stop_states[estop_id] = pb.ESTOP_STATE_STOPPING   # latched and STOPPING in one step
         self._interrupt_work()
-        ack = self._estop_ack(estop_id)
-        self._safety_outbox.put(pb.AdapterSafetyMessage(robot_id=self._robot_id, estop_ack=ack))
-        # A receipt RFC-0001 permits; the control plane never reads it.
-        self._outbox.put(pb.AdapterMessage(command_result=pb.CommandResult(
-            command_id=command.command_id, robot_id=command.robot_id, estop=ack)))
-        clear = self._pending_clears.pop(estop_id, None)
-        if clear is not None:
-            self._take_clear(clear, self._safety_outbox)
+        control_outbox = self._outbox   # the stream this fence came on, for its receipt
+
+        def answered(ack) -> None:
+            # A receipt RFC-0001 permits; the control plane never reads it.
+            control_outbox.put(pb.AdapterMessage(command_result=pb.CommandResult(
+                command_id=command.command_id, robot_id=command.robot_id, estop=ack)))
+            # The fence is recorded once it is answered, STOPPED or FAILED. A clear that arrived
+            # meanwhile was kept, and is taken now, so its ack never goes out ahead of the
+            # stop's.
+            with self._latch_lock:
+                self._fenced.add(estop_id)
+                clear = self._pending_clears.pop(estop_id, None)
+                if clear is not None:
+                    self._take_clear(clear, self._safety_outbox)
+
+        self._begin_stop(estop_id, lambda ack: self._safety_outbox.put(pb.AdapterSafetyMessage(
+            robot_id=self._robot_id, estop_ack=ack)), then=answered)
 
     def _refuse_under_latch(self, command) -> None:
         pb = self._pb
@@ -653,6 +827,7 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         if estop_id not in self._cleared:
             self._latched.discard(estop_id)
             self._cleared.add(estop_id)
+            self._stop_states.pop(estop_id, None)
             if clear.ends_local_set and clear.ends_local_set == self._local_set_id:
                 self._local_set_id = ""  # the refusal from that set ends; a reset lifts the latch
         # Sent again for an ID already lifted.
@@ -800,22 +975,40 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         expired = self._lease_action
         if not expired or expired != self._current_action:
             return
-        with self._robot_lock:
-            self._robot.command_stop(robot_id)
+        since = command_estop(self._plant, robot_id)
         token = self._action_fencing_token   # the token the expired action was accepted under
         self._emit_action_status(expired, "STOPPED", "assignment lease expired")
-        with self._robot_lock:
-            rest = confirm_estop(self._robot, robot_id)  # confirmed, never inferred
-        pb = self._pb
-        self._outbox.put(pb.AdapterMessage(action_status=pb.ActionStatusUpdate(
-            action_id=expired, state=pb.ACTION_STATE_FAILED, fencing_token=token,
-            message=("ended by lease expiry" if rest == ESTOP_STOPPED else
-                     "ended by lease expiry; rest not confirmed within the stopping budget"),
-            end_cause=pb.ACTION_END_CAUSE_LEASE_EXPIRED)))
+        # The action is dropped at once, so arrival cannot be read as completion while rest is
+        # awaited. The wait runs in the lane: the lease expires on the telemetry loop, which is
+        # what ticks the robot, so that loop cannot be the one that waits for it to come to rest.
         self._current_action = ""
         self._lease_action = ""
+        pb = self._pb
+        outbox = self._outbox
+
+        def report(rest) -> None:
+            outbox.put(pb.AdapterMessage(action_status=pb.ActionStatusUpdate(
+                action_id=expired, state=pb.ACTION_STATE_FAILED, fencing_token=token,
+                message=("ended by lease expiry" if rest == ESTOP_STOPPED else
+                         "ended by lease expiry; rest not confirmed within the stopping budget"),
+                end_cause=pb.ACTION_END_CAUSE_LEASE_EXPIRED)))
+
+        self._lane.submit(lambda: report(await_estop_confirmation(self._plant, robot_id,
+                                                                  since=since)),
+                          on_error=lambda: report(None))
 
     def _telemetry_loop(self, stub) -> None:
+        """The robot's ticker while it runs: a wait for rest ticks it only before this starts
+        and after it ends (_LockedRobot), decided under the robot lock."""
+        with self._robot_lock:
+            self._plant.ticking = True
+        try:
+            self._telemetry_passes(stub)
+        finally:
+            with self._robot_lock:
+                self._plant.ticking = False
+
+    def _telemetry_passes(self, stub) -> None:
         # The robot advances _TICK_DT per pass and a pass takes _TICK_DT of wall time, so it
         # moves at its own speed. Telemetry goes out once per _telemetry_interval, which a
         # RegisterAck may set to several seconds (C2.3): that cadence must not set how fast
@@ -898,11 +1091,17 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                         with self._latch_lock:
                             if cp.estop.estop_id not in self._cleared:
                                 self._latched.add(cp.estop.estop_id)
+                                # Latched and STOPPING in one step: a refusal on another
+                                # reader never reports this stop before it is answered.
+                                self._stop_states[cp.estop.estop_id] = pb.ESTOP_STATE_STOPPING
                             self._interrupt_work()
-                        outbox.put(pb.AdapterSafetyMessage(
-                            robot_id=cp.robot_id, estop_ack=self._estop_ack(cp.estop.estop_id)))
+                        self._begin_stop(cp.estop.estop_id, lambda ack, o=outbox, r=cp.robot_id:
+                                         o.put(pb.AdapterSafetyMessage(robot_id=r, estop_ack=ack)))
                     elif cp.WhichOneof("payload") == "estop_clear":
-                        self._on_estop_clear(cp.estop_clear, outbox)
+                        # In the lane, behind any stop still being confirmed, so a clear's ack
+                        # never goes out ahead of the ack of a stop that came before it.
+                        self._lane.submit(lambda c=cp.estop_clear, o=outbox:
+                                          self._on_estop_clear(c, o))
             except grpc.RpcError as exc:
                 outbox.put(None)  # release the dead stream's generator
                 if self._shutdown.is_set():
@@ -915,19 +1114,48 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
                 continue
             return  # closed cleanly
 
-    def _estop_ack(self, estop_id: str):
-        """Stop the robot and build a CONFIRMED EstopAck (C5.2, C5.3; C8.3 on the edge)."""
+    def _begin_stop(self, estop_id: str, send, then=None) -> None:
+        """Stop the robot, on the reader the stop came on, and answer it twice (C5.2, C5.3, C5.5;
+        C8.3 on the edge).
+
+        On the reader: the stop is commanded, then ESTOP_STATE_STOPPING is sent with the moment
+        it was commanded. RFC-0001 allows that first answer, and it is what meets the
+        SafetyStream's 500 ms budget whatever the robot does next. In the lane: rest is
+        confirmed from a state counted after the stop, never inferred, and STOPPED or FAILED is
+        sent once it is, or once the stopping budget runs out. `then`, if given, runs in the lane
+        after that final answer. The reader never waits for rest, so a second stop behind this
+        one is commanded and answered at once.
+        """
         pb = self._pb
-        with self._robot_lock:
-            # C5.3: stamp the moment the hardware stop is COMMANDED, before waiting for
-            # confirmation. An adapter that inferred the stop has no such moment to report.
-            initiated_ms = int(time.time() * 1000)
-            state = confirm_estop(self._robot, self._robot_id)  # C5: confirmed, never inferred
-        return pb.EstopAck(
-            estop_id=estop_id, stop_initiated_at=initiated_ms,
-            confirmed_at_ms=int(time.time() * 1000),
-            state=(pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED
-                   else pb.ESTOP_STATE_FAILED))
+        # C5.3: stamp the moment the hardware stop is COMMANDED, before waiting for
+        # confirmation. An adapter that inferred the stop has no such moment to report.
+        initiated_ms = int(time.time() * 1000)
+        since = command_estop(self._plant, self._robot_id)
+        with self._latch_lock:
+            if estop_id in self._latched:
+                self._stop_states[estop_id] = pb.ESTOP_STATE_STOPPING
+        send(pb.EstopAck(estop_id=estop_id, state=pb.ESTOP_STATE_STOPPING,
+                         stop_initiated_at=initiated_ms))
+        answered: list = []   # the final answer, once sent; a stop is never answered twice
+
+        def answer(state) -> None:
+            if answered:
+                return
+            answered.append(state)
+            with self._latch_lock:
+                if estop_id in self._stop_states:
+                    self._stop_states[estop_id] = state
+            ack = pb.EstopAck(estop_id=estop_id, stop_initiated_at=initiated_ms,
+                              confirmed_at_ms=int(time.time() * 1000), state=state)
+            send(ack)
+            if then is not None:
+                then(ack)
+
+        def finish() -> None:
+            state = await_estop_confirmation(self._plant, self._robot_id, since=since)  # C5
+            answer(pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED else pb.ESTOP_STATE_FAILED)
+
+        self._lane.submit(finish, on_error=lambda: answer(pb.ESTOP_STATE_FAILED))
 
     # ── EdgeStream (C8) ──────────────────────────────────────────────────────
 
@@ -975,7 +1203,8 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
             for ec in estub.EdgeStream(requests()):
                 if ec.WhichOneof("msg") == "estop":  # C8.3: same confirmed discipline as C5
                     self._set_local_latch()
-                    outbox.put(pb.AdapterEdgeMessage(estop_ack=self._estop_ack(ec.estop.estop_id)))
+                    self._begin_stop(ec.estop.estop_id, lambda ack: outbox.put(
+                        pb.AdapterEdgeMessage(estop_ack=ack)))
         except grpc.RpcError:
             pass
         finally:

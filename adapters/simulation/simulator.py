@@ -161,6 +161,11 @@ class KinematicSim:
         r = self._robots[robot_id]
         return r.vx == 0.0 and r.vy == 0.0  # confirmed ground truth
 
+    def heading_to(self, robot_id: str) -> tuple[float, float] | None:
+        """The target the robot is driving to now, or None if it is stopping or has none."""
+        r = self._robots[robot_id]
+        return None if r.stopping or r.target is None else r.target
+
     def pose(self, robot_id: str) -> Pose:
         return self._robots[robot_id].pose
 

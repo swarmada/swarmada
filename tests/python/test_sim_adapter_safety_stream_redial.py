@@ -102,9 +102,18 @@ def test_the_first_estop_after_a_redial_is_answered_on_the_new_stream(late: floa
     a.run_safety_stream(stub)
 
     assert stub.calls == 2
-    ids = [m.estop_ack.estop_id for m in stub.acks if m.WhichOneof("payload") == "estop_ack"]
-    assert ids == ["e-after-redial"], (
-        "the EstopAck for the first estop after the redial did not arrive on the new stream: "
-        "the dropped stream's request reader took it")
+    # The estop is answered twice, STOPPING from the reader and STOPPED from the robot's lane,
+    # and both answers must come on the new stream.
+    assert a._solo_lane.idle(5.0), "the estop's final answer was not sent within 5 s"
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and len(
+            [m for m in list(stub.acks) if m.WhichOneof("payload") == "estop_ack"]) < 2:
+        time.sleep(0.01)
+    acks = [(m.estop_ack.estop_id, m.estop_ack.state) for m in list(stub.acks)
+            if m.WhichOneof("payload") == "estop_ack"]
+    assert acks == [("e-after-redial", pb.ESTOP_STATE_STOPPING),
+                    ("e-after-redial", pb.ESTOP_STATE_STOPPED)], (
+        "the EstopAcks for the first estop after the redial did not arrive on the new stream: "
+        f"the dropped stream's request reader took one ({acks})")
     assert stub.dead_reader_released.wait(timeout=late + 1.0), (
         "the dropped stream's request generator is still blocked; one is left per redial")

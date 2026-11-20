@@ -39,6 +39,12 @@ runs it (``--latch``, 1.4.0), with ``--command-derived-plant`` too; and under th
 ``estop-drill`` scenario with a lease that lapses, for the scenario drill's confirmed stop
 and the lease self-stop. The third golden file was recorded from 2b099f7 as well.
 
+The adapter answers some messages from its robot's lane, after the reader has moved on: a stop's
+STOPPED or FAILED, a clear, a cancel whose rest it waits for, a lease self-stop's end. So the
+stub hands the adapter its next message, and the test reads a queue, only once that lane is idle
+(`_paced`, `_idle`): each stream's order is then the order the adapter answered in, not a race
+between the lane and the reader.
+
 What is normalised, and only that: wall-clock timestamps (each is replaced by 1 when set,
 so presence is still pinned), and the lease seconds an ActivateStream reply prints, which
 are computed from the wall clock. Everything else -- every message, every field, the order
@@ -131,6 +137,23 @@ class _Clock:
             self._adapter._shutdown.set()
 
 
+def _idle(adapter: SimAdapter) -> None:
+    """Wait until the robot's lane has answered everything handed to it."""
+    assert adapter._solo_lane.idle(10.0), "the robot's lane did not go idle within 10 s"
+
+
+def _paced(adapter: SimAdapter, messages):
+    """The scripted messages, each handed over only once the lane is idle, the end included."""
+    it = iter(messages)
+    while True:
+        _idle(adapter)
+        try:
+            msg = next(it)
+        except StopIteration:
+            return
+        yield msg
+
+
 class _Stub:
     """The FleetAdapterService stub the adapter dials: scripted sessions, recorded queues."""
 
@@ -145,11 +168,11 @@ class _Stub:
         queue_ = self._adapter._outbox
         hello = next(requests)
         self.control.append((hello, queue_))
-        return self._sessions.pop(0)()
+        return _paced(self._adapter, self._sessions.pop(0)())
 
     def SafetyStream(self, requests):  # noqa: N802 -- the gRPC method name
         self.safety_queues.append(self._adapter._safety_outbox)
-        return iter(self._safety)
+        return _paced(self._adapter, self._safety)
 
 
 def _is_repeated(fd) -> bool:
@@ -376,6 +399,7 @@ def _transcript(latch: bool, drill: bool = False) -> str:
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         adapter.run_control_stream(stub)
+        _idle(adapter)
         for n, (hello, queue_) in enumerate(stub.control, start=1):
             lines.append(_line(f"control {n}", hello))
             lines.extend(_drain(f"control {n}", queue_))
@@ -388,10 +412,12 @@ def _transcript(latch: bool, drill: bool = False) -> str:
             adapter._telemetry_loop(stub)
         finally:
             sim_adapter.time = real_time
+        _idle(adapter)
         lines.extend(_drain("telemetry", stub.control[-1][1]))
         lines.extend(_drain("safety during telemetry", pre_safety))
         adapter._shutdown.clear()
         adapter.run_safety_stream(stub)
+        _idle(adapter)
         for queue_ in stub.safety_queues:
             lines.extend(_drain("safety", queue_))
         lines.extend(_drain("control after safety", stub.control[-1][1]))

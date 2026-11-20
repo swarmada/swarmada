@@ -104,8 +104,10 @@ def _assign(a, action_id: str, token: int, *, term: int = 1):
 
 
 def _fence(a, estop_id: str, *, term: int = 1) -> None:
+    """A fence, and its answers: STOPPING from the reader, then the terminal one from the lane."""
     a._handle_command(pb.Command(command_id=900, robot_id=ROBOT, leader_term=term,
                                  estop=pb.Estop(estop_id=estop_id, issued_by="test")))
+    assert a._lane.idle(5.0), "the fence was not answered within 5 s"
 
 
 def _clear(a, estop_id: str, *, term: int = 1) -> list:
@@ -121,9 +123,10 @@ def test_the_template_reports_1_4_0(rendered):
 def test_work_is_refused_under_a_stop_until_its_clear_lifts_it(rendered):
     a = _adapter(rendered)
     _fence(a, "e1")
-    acks = [m.estop_ack.estop_id for m in _drain(a._safety_outbox)
+    acks = [(m.estop_ack.estop_id, m.estop_ack.state) for m in _drain(a._safety_outbox)
             if m.WhichOneof("payload") == "estop_ack"]
-    assert acks == ["e1"], "the fence is answered with an EstopAck on SafetyStream"
+    assert acks == [("e1", pb.ESTOP_STATE_STOPPING), ("e1", pb.ESTOP_STATE_STOPPED)], \
+        "the fence is answered on SafetyStream: STOPPING, then STOPPED"
     held = _assign(a, "t1", 1)
     assert not held.accepted
     assert held.rejection == pb.ASSIGN_ACTION_REJECTION_ROBOT_UNAVAILABLE
