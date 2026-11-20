@@ -70,8 +70,11 @@ def _assign(a, action_id: str, token: int, *, term: int = 1, command_id: int | N
 
 
 def _fence(a, estop_id: str, *, term: int = 1):
+    """A fence, and its answers: STOPPING from the reader, then the terminal one from the lane."""
     a._handle_command(pb.Command(command_id=900, robot_id=ROBOT, leader_term=term,
                                  estop=pb.Estop(estop_id=estop_id, issued_by="test")))
+    if a._latching:
+        assert a._solo_lane.idle(5.0), "the fence was not answered within 5 s"
 
 
 def _clear(a, estop_id: str, *, term: int = 1) -> list:
@@ -97,7 +100,9 @@ def test_a_fence_latches_and_work_is_refused_until_the_clear_lifts_it(tmp_path):
     a = _adapter(tmp_path)
     _fence(a, "e1")
     acks = [m.estop_ack for m in _drain(a._safety_outbox) if m.WhichOneof("payload") == "estop_ack"]
-    assert [x.estop_id for x in acks] == ["e1"], "the fence is answered on SafetyStream"
+    assert [(x.estop_id, x.state) for x in acks] == [
+        ("e1", pb.ESTOP_STATE_STOPPING), ("e1", pb.ESTOP_STATE_STOPPED)], \
+        "the fence is answered on SafetyStream: STOPPING, then STOPPED"
     receipts = [m.command_result for m in _drain(a._outbox)
                 if m.WhichOneof("payload") == "command_result"]
     assert receipts and receipts[0].HasField("estop"), "the permitted receipt"

@@ -245,9 +245,14 @@ def test_cancel_naming_another_action_leaves_the_running_one_alone(
     its action_id is the only thing that says it is not about the running action. An
     adapter that ignores action_id stops the robot on the new action, which then never
     completes. The quickstart's healthy-fleet scenario failed exactly so.
+
+    The robot is driving to the running action's target, and a reading of the world shows it:
+    that is what witnesses the named action off the robot, so the reply is a safe stop.
     """
     a = _adapter()
     a._current_action = "deliver-pallet-001"
+    a._move_target = (5.0, 0.0)
+    a._sim.command_move(_ROBOT, 5.0, 0.0)
     stops: list[str] = []
     releases: list[str] = []
     a._sim.command_stop = lambda robot: stops.append(robot)  # type: ignore[method-assign]

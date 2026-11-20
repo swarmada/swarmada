@@ -30,6 +30,7 @@ _pb = SimpleNamespace(
     AdapterSafetyMessage=lambda **kw: SimpleNamespace(**kw),
     EstopAck=lambda **kw: SimpleNamespace(**kw),
     LocalStopReport=lambda **kw: SimpleNamespace(**kw),
+    ESTOP_STATE_STOPPING=1,
     ESTOP_STATE_STOPPED=2,
     ESTOP_STATE_FAILED=3,
 )
@@ -104,8 +105,10 @@ def test_the_first_estop_after_a_redial_is_answered_on_the_new_stream(late: floa
 
     assert stub.calls == 2
     # The adapter also reports its local latch on the new stream; only the acks are asserted here.
-    acked = [m.estop_ack.estop_id for m in stub.acks if hasattr(m, "estop_ack")]
-    assert acked == ["e-after-redial"], (
+    # The first answer to a commanded stop is STOPPING, sent by the reader that read the stop.
+    acked = [(m.estop_ack.estop_id, m.estop_ack.state) for m in stub.acks
+             if hasattr(m, "estop_ack")]
+    assert acked[:1] == [("e-after-redial", _pb.ESTOP_STATE_STOPPING)], (
         "the EstopAck for the first estop after the redial did not arrive on the new stream: "
         "the dropped stream's request reader took it")
     assert stub.dead_reader_released.wait(timeout=late + 1.0), (

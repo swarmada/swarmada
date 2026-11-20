@@ -115,6 +115,7 @@ def _assign(robot_id: str, action_id: str, token: int, x: float = 2.0):
 def _result(a, cmd):
     _drain(a)
     a._handle_command(cmd)
+    assert a._lane.idle(5.0), "the robot's lane did not answer within 5 s"  # a cancel's answer
     results = [m.command_result for m in _drain(a) if m.WhichOneof("payload") == "command_result"]
     assert len(results) == 1, results
     return results[0]
@@ -197,13 +198,15 @@ class _OneEstop:
         def responses():
             yield self._cp
             # At contract 1.4.0 the adapter also reports its latch on each SafetyStream that
-            # opens (RFC-0001 #fleet-adapter-protocol-the-stop-latch). The answer to this estop
-            # is the EstopAck that names it.
+            # opens (RFC-0001 #fleet-adapter-protocol-the-stop-latch). The answers to this estop
+            # are the EstopAcks that name it, up to the terminal one: STOPPING comes first for a
+            # stop that was commanded.
             for msg in requests:
                 if (msg.WhichOneof("payload") == "estop_ack"
                         and msg.estop_ack.estop_id == self._cp.estop.estop_id):
                     self.acks.append(msg)
-                    return
+                    if msg.estop_ack.state != pb.ESTOP_STATE_STOPPING:
+                        return
 
         return responses()
 
@@ -228,7 +231,8 @@ def test_an_estop_for_the_served_robot_is_still_confirmed(rendered) -> None:
     a, robot = _adapter(rendered)
     stub = _OneEstop(ROBOT)
     a.run_safety_stream(stub)
-    (ack,) = stub.acks
+    stopping, ack = stub.acks
+    assert stopping.estop_ack.state == pb.ESTOP_STATE_STOPPING
     assert ack.robot_id == ROBOT
     assert ack.estop_ack.state == pb.ESTOP_STATE_STOPPED
     assert ack.estop_ack.HasField("stop_initiated_at")

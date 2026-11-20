@@ -51,6 +51,7 @@ def test_the_simulation_adapter_ends_a_lapsed_lease_after_the_stop() -> None:
     a._action_fencing_token = 11
 
     a._self_stop(robot)
+    assert a._solo_lane.idle(5.0), "the end was not reported within 5 s"   # from the lane
 
     sent = _drain(a._outbox)
     assert [(u.action_id, u.state) for u in sent] == [
