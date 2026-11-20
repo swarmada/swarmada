@@ -122,9 +122,19 @@ def _result(fleet: SimFleet, cid: int):
 
 
 def _estop_ack(fleet: SimFleet, estop_id: str, timeout: float = 3.0):
+    """The stop's terminal EstopAck, STOPPED or FAILED: the STOPPING before it is passed over."""
     return _take(fleet.link.safety_outbox,
                  lambda m: m.WhichOneof("payload") == "estop_ack"
-                 and m.estop_ack.estop_id == estop_id, timeout)
+                 and m.estop_ack.estop_id == estop_id
+                 and m.estop_ack.state != pb.ESTOP_STATE_STOPPING, timeout)
+
+
+def _edge_stop(fleet: SimFleet, address: str, estop_id: str = "edge-stop"):
+    """An edge stop through `address`, and its terminal EstopAck on the node's stream."""
+    outbox: queue.Queue = queue.Queue()
+    fleet._edge_estop(address, pb.Estop(estop_id=estop_id), outbox)
+    return _take(outbox, lambda m: m.WhichOneof("msg") == "estop_ack"
+                 and m.estop_ack.state != pb.ESTOP_STATE_STOPPING, 4.0)
 
 
 def _x(fleet: SimFleet, rid: str) -> float:
@@ -421,6 +431,8 @@ def test_a_fleet_wide_stop_is_commanded_for_every_robot_at_once(make_fleet) -> N
             continue
         rid = msg.robot_id   # the acks come back in whatever order the robots come to rest
         assert msg.estop_ack.estop_id == f"stop-{rid}"
+        if msg.estop_ack.state == pb.ESTOP_STATE_STOPPING:
+            continue         # each stop's first answer, sent as it is commanded
         assert msg.estop_ack.state == pb.ESTOP_STATE_STOPPED
         latest[rid] = time.monotonic() - sent[rid]
     assert set(latest) == set(fleet._ids), f"no ack for {set(fleet._ids) - set(latest)}"
@@ -441,8 +453,11 @@ def test_an_estop_and_its_clear_are_answered_in_order(make_fleet) -> None:
     _safety(fleet, a, estop=pb.Estop(estop_id="stop-a"))
     _safety(fleet, a, estop_clear=pb.EstopClear(estop_id="stop-a", leader_term=1))
     time.sleep(1.0)
-    kinds = [m.WhichOneof("payload") for m in _drain(fleet.link.safety_outbox)]
-    assert kinds == ["estop_ack", "estop_clear_ack"]
+    answers = [(m.WhichOneof("payload"), m.estop_ack.state)
+               for m in _drain(fleet.link.safety_outbox)]
+    assert answers == [("estop_ack", pb.ESTOP_STATE_STOPPING),
+                       ("estop_ack", pb.ESTOP_STATE_STOPPED),
+                       ("estop_clear_ack", pb.ESTOP_STATE_UNSPECIFIED)]
 
 
 def test_a_failed_confirmation_is_answered_failed(make_fleet, monkeypatch) -> None:
@@ -592,7 +607,7 @@ def test_a_zone_admit_under_an_edge_stop_moves_nothing_until_it_is_confirmed(mak
     fleet._edge_robots["edge-1:9600"] = [fleet.robot(a)]
     box = {}
     worker = threading.Thread(target=lambda: box.setdefault(
-        "ack", fleet._edge_estop("edge-1:9600", pb.Estop(estop_id="edge-stop"))))
+        "ack", _edge_stop(fleet, "edge-1:9600")))
     worker.start()
     deadline = time.monotonic() + 1.0
     while fleet.robot(a)._stops_in_flight == 0 and time.monotonic() < deadline:
@@ -717,7 +732,7 @@ def test_an_edge_stop_stops_every_robot_served_through_the_node(make_fleet, caps
         _command(fleet, n, rid, assign_action=_assign(f"act-{n}", 5))
     time.sleep(0.6)
     fleet._edge_robots["edge-1:9600"] = [fleet.robot(a), fleet.robot(b)]
-    ack = fleet._edge_estop("edge-1:9600", pb.Estop(estop_id="edge-stop"))
+    ack = _edge_stop(fleet, "edge-1:9600")
     assert ack.estop_ack.estop_id == "edge-stop"
     assert ack.estop_ack.state == pb.ESTOP_STATE_STOPPED
     assert not _moving(fleet, a) and not _moving(fleet, b)
@@ -735,13 +750,13 @@ def test_an_edge_stop_is_failed_if_any_robot_is_not_confirmed(make_fleet, monkey
     real = fleet._await_rest
     monkeypatch.setattr(fleet, "_await_rest", lambda rid: (
         pb.ESTOP_STATE_FAILED if rid == b else real(rid)))
-    ack = fleet._edge_estop("edge-1:9600", pb.Estop(estop_id="edge-stop"))
+    ack = _edge_stop(fleet, "edge-1:9600")
     assert ack.estop_ack.state == pb.ESTOP_STATE_FAILED
 
 
 def test_an_edge_stop_through_a_node_no_robot_uses_is_failed(make_fleet) -> None:
     fleet = make_fleet(2)
-    ack = fleet._edge_estop("edge-9:9600", pb.Estop(estop_id="edge-stop"))
+    ack = _edge_stop(fleet, "edge-9:9600")
     assert ack.estop_ack.state == pb.ESTOP_STATE_FAILED
 
 
@@ -819,7 +834,8 @@ def test_an_edge_stream_that_drops_is_redialled(make_fleet) -> None:
     outbox = fleet._edge_outboxes["edge-1:9600"]
     frame = _take(outbox, lambda m: m.WhichOneof("msg") == "position")
     assert frame.position.robot_id == a   # the new stream gets the node's robots' poses
-    ack = _take(outbox, lambda m: m.WhichOneof("msg") == "estop_ack")
+    ack = _take(outbox, lambda m: m.WhichOneof("msg") == "estop_ack"
+                and m.estop_ack.state != pb.ESTOP_STATE_STOPPING)
     assert ack.estop_ack.state == pb.ESTOP_STATE_STOPPED
     assert not _moving(fleet, a) and _moving(fleet, b)
 
@@ -905,7 +921,7 @@ def test_an_edge_stop_whose_confirmation_faults_answers_every_robot(make_fleet,
         return real(rid)
 
     monkeypatch.setattr(fleet, "_await_rest", await_rest)
-    ack = fleet._edge_estop("edge-1:9600", pb.Estop(estop_id="edge-stop"))
+    ack = _edge_stop(fleet, "edge-1:9600")
     assert ack.estop_ack.state == pb.ESTOP_STATE_FAILED
     assert [fleet.robot(r)._stops_in_flight for r in (a, b, c)] == [0, 0, 0]
 
@@ -1004,7 +1020,8 @@ def test_a_stop_confirmed_after_its_safety_stream_dropped_and_the_report_on_the_
         # The stop's own ack went to the stream it came on, never to the new one.
         ack = _take(stub.safety_queues[0],
                     lambda m: m.WhichOneof("payload") == "estop_ack"
-                    and m.estop_ack.message == "")
+                    and m.estop_ack.message == ""
+                    and m.estop_ack.state != pb.ESTOP_STATE_STOPPING)
         assert ack.estop_ack.state == pb.ESTOP_STATE_STOPPED
         assert not _moving(fleet, a)
     finally:
