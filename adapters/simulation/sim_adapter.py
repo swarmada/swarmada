@@ -84,10 +84,18 @@ from adapters.simulation.simulator import make_simulator  # noqa: E402
 
 _TELEMETRY_INTERVAL = 0.2  # seconds between telemetry payloads
 _TICK_DT = 0.2             # sim advance per loop pass, in step with wall-clock time
-# A cancel is answered from readings of the world taken this often, within the stopping budget
-# a stop's confirmation has (40 x 0.05 s, swarmada_sdk.safety.confirm_estop).
+# A cancel is answered from readings of the world taken this often.
 _CANCEL_LOOK_S = 0.05
-_CANCEL_LOOKS = 40
+# And within this long of its arrival, whatever waits in the robot's lane before it. The control
+# plane waits 2 s for a cancel's answer and drops a later one (internal/controller: wireTimeout,
+# pushCancel), and RFC-0001 sets no deadline of its own, so 0.5 s is left for the cancel's trip
+# here and its answer's trip back. A cancel whose reading has not come by then is answered as not
+# confirmed (_cancel_not_confirmed): a late answer is recorded as a safe stop once the lease is
+# provably dead, an answer in time as an unwitnessed one.
+_CANCEL_BUDGET_S = 1.5
+# A stop's own confirmation keeps the SDK's budget (40 x 0.05 s, swarmada_sdk.safety): its first
+# answer, ESTOP_STATE_STOPPING, is sent at once, and its final one has a window of its own.
+_STOP_LOOKS = 40
 # How close to its target a robot at rest must be for the action to count as arrived. The
 # kinematic sim snaps the pose onto the target on arrival, so this only absorbs float noise;
 # a robot brought to rest short of the target (estop, pause, zone hold, lease self-stop)
@@ -881,6 +889,7 @@ class SimAdapter:
             self._telemetry_interval = max(1.0, min(30.0, float(secs)))
 
     def _handle_command(self, command) -> None:
+        arrived = time.monotonic()   # a cancel's budget counts from here (_CANCEL_BUDGET_S)
         if command.WhichOneof("command") in _LOCKED_ARMS:
             # A robot has its stops begun on other threads (the SafetyStream reader, the
             # telemetry or tick thread, an edge thread), each under this lock. So the latch
@@ -888,11 +897,11 @@ class SimAdapter:
             # work is refused or held, or comes after, and interrupts it. A cancel and the
             # release of motion a stop held are likewise one or the other.
             with self._latch_lock:
-                self._handle_command_now(command)
+                self._handle_command_now(command, arrived)
             return
-        self._handle_command_now(command)
+        self._handle_command_now(command, arrived)
 
-    def _handle_command_now(self, command) -> None:
+    def _handle_command_now(self, command, arrived: float) -> None:
         pb = self._pb
         if self._latching and command.robot_id == self._robot and self._latch_command(command):
             return
@@ -928,7 +937,8 @@ class SimAdapter:
                     self._cancel_answered(command, named, result, self._outbox, marker=False)
                     return
                 self._answer_cancel(command, result, named, self._on_replacing_action,
-                                    self._wait_on_replacing_action, marker=False)
+                                    self._wait_on_replacing_action,
+                                    arrived + _CANCEL_BUDGET_S, marker=False)
                 return
             # Captured before the clear below: the marker and the status emit both
             # name the action being cancelled, and self._current_action is "" by then.
@@ -950,7 +960,7 @@ class SimAdapter:
             # task to a capable robot). A real adapter reports COMPLETED or RECOVERED instead
             # when the robot is mid-commitment.
             self._answer_cancel(command, result, cancelled_action, self._at_rest,
-                                lambda: self._await_rest() == pb.ESTOP_STATE_STOPPED)
+                                self._wait_at_rest, arrived + _CANCEL_BUDGET_S)
             return
         elif which in ("verify_hardware", "verify_capability", "verify_model"):
             self._on_verify(getattr(command, which), result)
@@ -982,36 +992,46 @@ class SimAdapter:
         while self._after_ack:
             threading.Thread(target=self._after_ack.pop(0), daemon=True).start()
 
-    def _answer_cancel(self, command, result, action: str, look, wait, *,
+    def _answer_cancel(self, command, result, action: str, look, wait, deadline: float, *,
                        marker: bool = True) -> None:
-        """Answer a cancel STOPPED_SAFELY once a reading of the world shows what it needs, within
-        the stopping budget; otherwise not as a safe stop (_cancel_not_confirmed).
+        """Answer a cancel STOPPED_SAFELY once a reading of the world shows what it needs, by
+        `deadline` (monotonic: _CANCEL_BUDGET_S after the cancel arrived); otherwise not as a
+        safe stop (_cancel_not_confirmed), by the deadline too.
 
         `look()` takes one reading, here on the reader: a robot already at rest, or already on
-        the replacing action, is answered at once. Otherwise `wait()`, true once a later reading
-        shows it within the budget, and the answer run in the robot's lane, so no command
-        behind the cancel waits for it, a fence least of all. The answer goes on the outbox of
-        the session the cancel came on: a newer session never had this cancel. A cancel for an
-        action not running has its own marker (CANCEL_NOT_RUNNING) and no CANCEL_HONOURED:
+        the replacing action, is answered at once. Otherwise `wait(deadline)`, true once a later
+        reading before the deadline shows it, and the answer run in the robot's lane, so no
+        command behind the cancel waits for it, a fence least of all. The lane may still be
+        busy with a stop at the deadline, so a timer answers the cancel as not confirmed then;
+        whichever answers first is the one answer (_OneAnswer). The answer goes on the outbox
+        of the session the cancel came on: a newer session never had this cancel. A cancel for
+        an action not running has its own marker (CANCEL_NOT_RUNNING) and no CANCEL_HONOURED:
         `marker` is False for it."""
         outbox = self._outbox
         if look():
             self._cancel_safe(result)
             self._cancel_answered(command, action, result, outbox, marker)
             return
+        once = _OneAnswer()
 
-        def finish() -> None:
-            if wait():
-                self._cancel_safe(result)
-            else:
-                self._cancel_not_confirmed(result)
+        def safe() -> None:
+            self._cancel_safe(result)
             self._cancel_answered(command, action, result, outbox, marker)
 
-        def failed() -> None:
+        def not_confirmed() -> None:
             self._cancel_not_confirmed(result)
             self._cancel_answered(command, action, result, outbox, marker)
 
-        self._my_lane().submit(finish, on_error=failed)
+        timer = threading.Timer(max(0.0, deadline - time.monotonic()),
+                                lambda: once.give(not_confirmed))
+        timer.daemon = True
+        timer.start()
+
+        def finish() -> None:
+            once.give(safe if wait(deadline) else not_confirmed)
+            timer.cancel()
+
+        self._my_lane().submit(finish, on_error=lambda: once.give(not_confirmed))
 
     def _cancel_safe(self, result) -> None:
         result.cancel_action.CopyFrom(self._pb.CancelActionResult(
@@ -1069,10 +1089,10 @@ class SimAdapter:
             return (target is not None and callable(heading)
                     and heading(self._robot) == tuple(target))
 
-    def _wait_on_replacing_action(self) -> bool:
-        """Readings of the world within the stopping budget, in the robot's lane: True once one
-        shows the robot on the action it runs (_on_replacing_action)."""
-        for _ in range(_CANCEL_LOOKS):
+    def _wait_on_replacing_action(self, deadline: float) -> bool:
+        """Readings of the world until `deadline`, in the robot's lane: True once one shows the
+        robot on the action it runs (_on_replacing_action)."""
+        for _ in range(_looks_until(deadline)):
             if self._solo_plant is not None:
                 self._solo_plant.tick(_CANCEL_LOOK_S)   # moves the world only if nothing else does
             if self._on_replacing_action():
@@ -1080,16 +1100,23 @@ class SimAdapter:
             time.sleep(_CANCEL_LOOK_S)
         return False
 
+    def _wait_at_rest(self, deadline: float) -> bool:
+        """Readings of the world until `deadline`, in the robot's lane: True once one confirms
+        the robot at rest. No reading is taken once the deadline has passed."""
+        looks = _looks_until(deadline)
+        return looks > 0 and self._await_rest(looks) == self._pb.ESTOP_STATE_STOPPED
+
     def _my_lane(self) -> _Lane:
         """This robot's lane: its own when served alone, the fleet's for it otherwise."""
         return self._solo_lane if self._fleet is None else self._fleet._lane(self._robot)
 
-    def _await_rest(self):
-        """Wait for this robot's CONFIRMED rest; the proto EstopState. Run in its lane only:
-        never on a stream reader, and never on the thread that moves the world."""
+    def _await_rest(self, looks: int = _STOP_LOOKS):
+        """Wait for this robot's CONFIRMED rest, up to `looks` looks (a stop's budget by
+        default); the proto EstopState. Run in its lane only: never on a stream reader, and
+        never on the thread that moves the world."""
         if self._fleet is not None:
-            return self._fleet._await_rest(self._robot)
-        state = await_estop_confirmation(self._solo_plant, self._robot)
+            return self._fleet._await_rest(self._robot, looks)
+        state = await_estop_confirmation(self._solo_plant, self._robot, max_ticks=looks)
         return (self._pb.ESTOP_STATE_STOPPED if state == ESTOP_STOPPED
                 else self._pb.ESTOP_STATE_FAILED)
 
@@ -3075,6 +3102,29 @@ class _FleetWorld:
         return getattr(self._sim, name)
 
 
+def _looks_until(deadline: float) -> int:
+    """How many readings _CANCEL_LOOK_S apart fit before `deadline` (monotonic), from now."""
+    return max(0, int((deadline - time.monotonic()) // _CANCEL_LOOK_S))
+
+
+class _OneAnswer:
+    """A cancel's one answer. Its robot's lane and its deadline's timer may each try to answer
+    it; the first to call give() sends its answer, and every later call sends nothing."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._given = False
+
+    def give(self, send) -> bool:
+        """Call `send()` if no answer has been given; whether this call gave it."""
+        with self._lock:
+            if self._given:
+                return False
+            self._given = True
+            send()
+            return True
+
+
 class _Lane:
     """One robot's waiting work, in arrival order, on a thread of its own.
 
@@ -3218,14 +3268,15 @@ class SimFleet:
     def _lane(self, robot_id: str) -> _Lane:
         return self._lanes[robot_id]
 
-    def _await_rest(self, robot_id: str):
-        """Wait for `robot_id`'s CONFIRMED rest; the proto EstopState. Never on the tick thread."""
+    def _await_rest(self, robot_id: str, looks: int = _STOP_LOOKS):
+        """Wait for `robot_id`'s CONFIRMED rest, up to `looks` looks; the proto EstopState.
+        Never on the tick thread."""
         pb = self._pb
         with self._confirm_lock:
             self._confirming += 1
         self._tick_wake.set()
         try:
-            state = await_estop_confirmation(self._plant, robot_id)
+            state = await_estop_confirmation(self._plant, robot_id, max_ticks=looks)
         finally:
             with self._confirm_lock:
                 self._confirming -= 1

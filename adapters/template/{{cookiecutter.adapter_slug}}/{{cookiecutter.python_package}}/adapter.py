@@ -58,6 +58,14 @@ _DISCOVER_ACK_WAIT_S = 5.0
 def _provisioning_interval(ttl_seconds: int) -> float:
     return min(ttl_seconds / 2.0, 300.0) if ttl_seconds > 0 else _PROVISIONING_INTERVAL_S
 _TICK_DT = 0.2
+# A cancel is answered within this long of its arrival, whatever waits in the robot's lane before
+# it. The control plane waits 2 s for a cancel's answer and drops a later one, and RFC-0001 sets
+# no deadline of its own, so 0.5 s is left for the cancel's trip here and its answer's trip back.
+# A cancel whose rest is not confirmed by then is answered as not confirmed
+# (_cancel_not_confirmed): a late answer is recorded as a safe stop once the lease is provably
+# dead, an answer in time as an unwitnessed one. Rest is read every _CANCEL_LOOK_S meanwhile.
+_CANCEL_BUDGET_S = 1.5
+_CANCEL_LOOK_S = 0.05
 
 # C1.5: reconnect with bounded exponential backoff. The first redial comes within
 # _BACKOFF_BASE seconds; each consecutive failure doubles the ceiling up to _BACKOFF_CAP.
@@ -137,8 +145,9 @@ def _too_late(superseded: threading.Event, call, outbox: queue.Queue) -> bool:
 # default binding serves no Custom verb, so it declares none. 1.4.0 also added
 # CANCEL_DISPOSITION_STOP_UNCONFIRMED, for an adapter that cannot witness rest. A cancel is
 # answered STOPPED_SAFELY only once a state counted after its stop shows the robot at rest
-# (is_stopped), within the stopping budget, and STOP_UNCONFIRMED otherwise; so is a cancel for an
-# action replaced in place, which stops nothing and which this binding cannot read the robot off.
+# (is_stopped), within _CANCEL_BUDGET_S of its arrival, and STOP_UNCONFIRMED otherwise; so is a
+# cancel for an action replaced in place, which stops nothing and which this binding cannot read
+# the robot off.
 # And 1.4.0 added the stop latch (RFC-0001 #fleet-adapter-protocol-the-stop-latch), which
 # this adapter keeps: see "The stop latch" in the adapter class. An adapter that reports
 # 1.4.0 and keeps no latch fails conformance C5.8.
@@ -196,11 +205,30 @@ def _at_least(version: str, major: int, minor: int) -> bool:
     return got_major == major and got_minor >= minor
 
 
+class _OneAnswer:
+    """A cancel's one answer. The robot's lane and the cancel's deadline timer may each try to
+    answer it; the first to call give() sends its answer, and every later call sends nothing."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._given = False
+
+    def give(self, send) -> bool:
+        """Call `send()` if no answer has been given; whether this call gave it."""
+        with self._lock:
+            if self._given:
+                return False
+            self._given = True
+            send()
+            return True
+
+
 class _Lane:
     """The robot's waiting work, in the order it came, on a thread of its own.
 
-    Confirming a stop waits up to the stopping budget (2 s) for the robot to come to rest, and so
-    does answering a cancel. No stream reader waits for that: the reader latches the stop,
+    Confirming a stop waits up to the stopping budget (2 s) for the robot to come to rest, and
+    answering a cancel up to the cancel's own (_CANCEL_BUDGET_S from its arrival, a stop ahead of
+    it in the lane included). No stream reader waits for that: the reader latches the stop,
     commands it and answers ESTOP_STATE_STOPPING, then hands the wait and the final answer here.
     One lane keeps the robot's stops, clears and cancels answered in the order they came.
     """
@@ -633,6 +661,7 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
 
     def _handle_command(self, command) -> None:
         pb = self._pb
+        arrived = time.monotonic()   # a cancel's budget counts from here (_CANCEL_BUDGET_S)
         if command.robot_id == self._robot_id and self._latch_command(command):
             return
         result = pb.CommandResult(command_id=command.command_id, robot_id=command.robot_id)
@@ -690,7 +719,7 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
             self._emit_action_status(self._current_action, "CANCELLED", "cancel_action honoured")
             self._current_action = ""
             self._lease_action = ""
-            self._answer_cancel_at_rest(result, since)
+            self._answer_cancel_at_rest(result, since, arrived + _CANCEL_BUDGET_S)
             return
         else:
             # C7.1: decline every optional command not implemented.
@@ -698,10 +727,13 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
             result.unsupported = True
         self._outbox.put(pb.AdapterMessage(command_result=result))
 
-    def _answer_cancel_at_rest(self, result, since) -> None:
+    def _answer_cancel_at_rest(self, result, since, deadline: float) -> None:
         """Answer a cancel whose stop is commanded, from the lane: STOPPED_SAFELY once a state
-        counted after the stop shows the robot at rest, within the stopping budget; otherwise not
-        a safe stop (`_cancel_not_confirmed`). The answer goes on the outbox of the session the
+        counted after the stop shows the robot at rest, by `deadline` (monotonic:
+        _CANCEL_BUDGET_S after the cancel arrived); otherwise not a safe stop
+        (`_cancel_not_confirmed`), by the deadline too. The lane may still be busy with a stop at
+        the deadline, so a timer answers the cancel as not confirmed then; whichever answers
+        first is the one answer (`_OneAnswer`). The answer goes on the outbox of the session the
         cancel came on: a newer session never had this cancel.
 
         On a capability-loss cancel, set disposition from the robot's state: STOPPED_SAFELY (safe
@@ -710,21 +742,33 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         """
         pb = self._pb
         outbox = self._outbox
+        once = _OneAnswer()
+
+        def safe() -> None:
+            result.cancel_action.CopyFrom(pb.CancelActionResult(
+                acknowledged=True, disposition=pb.CANCEL_DISPOSITION_STOPPED_SAFELY))
+            outbox.put(pb.AdapterMessage(command_result=result))
+
+        def not_confirmed(why: str):
+            def send() -> None:
+                self._cancel_not_confirmed(result, why)
+                outbox.put(pb.AdapterMessage(command_result=result))
+            return send
+
+        late = not_confirmed(f"rest was not confirmed within {_CANCEL_BUDGET_S:g} s of the cancel")
+        timer = threading.Timer(max(0.0, deadline - time.monotonic()), lambda: once.give(late))
+        timer.daemon = True
+        timer.start()
 
         def finish() -> None:
-            if await_estop_confirmation(self._plant, self._robot_id, since=since) == ESTOP_STOPPED:
-                result.cancel_action.CopyFrom(pb.CancelActionResult(
-                    acknowledged=True, disposition=pb.CANCEL_DISPOSITION_STOPPED_SAFELY))
-            else:
-                self._cancel_not_confirmed(result, "rest was not confirmed within the "
-                                                   "stopping budget")
-            outbox.put(pb.AdapterMessage(command_result=result))
+            looks = max(0, int((deadline - time.monotonic()) // _CANCEL_LOOK_S))
+            rested = looks > 0 and await_estop_confirmation(
+                self._plant, self._robot_id, _CANCEL_LOOK_S, looks, since=since) == ESTOP_STOPPED
+            once.give(safe if rested else late)
+            timer.cancel()
 
-        def failed() -> None:
-            self._cancel_not_confirmed(result, "the wait for rest failed")
-            outbox.put(pb.AdapterMessage(command_result=result))
-
-        self._lane.submit(finish, on_error=failed)
+        self._lane.submit(finish, on_error=lambda: once.give(
+            not_confirmed("the wait for rest failed")))
 
     def _cancel_not_confirmed(self, result, why: str) -> None:
         """A cancel the robot's rest does not answer for. A connection that negotiated contract
