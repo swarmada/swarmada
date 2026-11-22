@@ -57,6 +57,7 @@ ROBOT = "amr-1"
 FIRST_ACK_S = 0.5     # the SafetyStream budget for a stop's first EstopAck
 READER_S = 0.2        # how long the reader may spend on one message
 BUDGET_S = 2.0        # the stop's confirmation budget (40 looks of 0.05 s)
+CANCEL_S = 1.5        # a cancel's answer budget, from its arrival
 
 
 class _Log:
@@ -478,16 +479,16 @@ def test_a_cancel_is_answered_stopped_safely_only_after_rest_and_off_the_reader(
     (False, "1.4.0", False, pb.CANCEL_DISPOSITION_UNSPECIFIED),   # declares 1.3.0
     (False, "", False, pb.CANCEL_DISPOSITION_UNSPECIFIED),
 ])
-def test_a_cancel_whose_rest_is_not_witnessed_in_2_s_is_not_answered_as_a_safe_stop(
+def test_a_cancel_whose_rest_is_not_witnessed_in_its_budget_is_not_a_safe_stop(
         control, latch, negotiated, acknowledged, disposition):
     _a, _plant, log, reader = control(never=True, latch=latch, negotiated=negotiated)
     _cancel(reader, "t1")
     answer = _cancel_answer(log)
-    assert answer, "the cancel was never answered within the stop's budget"
+    assert answer, "the cancel was never answered"
     t, res = answer[0]
     assert (res.acknowledged, res.disposition) == (acknowledged, disposition)
     waited = t - _sent_at(log, lambda m: m.command_id == 50)
-    assert BUDGET_S - 0.2 <= waited <= BUDGET_S + 1.0, f"answered after {waited:.2f} s"
+    assert CANCEL_S - 0.1 <= waited <= CANCEL_S + 0.25, f"answered after {waited:.2f} s"
 
 
 def test_a_cancel_naming_an_action_replaced_in_place_stops_nothing_and_is_a_safe_stop(control):
