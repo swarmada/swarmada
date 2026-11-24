@@ -242,6 +242,24 @@ records it.
 **Instead.** Bind `swarmada:admin` with a `RoleBinding` in each namespace. Give CRD management to
 a separate cluster role, held only by people trusted with the cluster's API.
 
+### Automation bound to cluster-admin can clear an estop
+
+**Limitation.** The control plane authorizes an estop clear by the `estop-clear` verb alone, and
+does not tell a person from a ServiceAccount. A role whose verbs include `*` grants `estop-clear`,
+because `*` matches every verb, custom verbs included. `cluster-admin` is such a role. Automation
+bound to it, such as a GitOps controller, can clear a stop and release robots after it, though no
+Swarmada role grants it the verb.
+
+**What you will see.** A sync that writes a `FleetZone`, `Robot` or `SwarmadaConfig` without its
+`swarmada.io/estop-triggered` annotation clears that stop, and the write is admitted. Each robot
+the clear reaches that no other stop holds goes to `Resuming`, withheld from dispatch, and stays
+there until someone releases it with `swarmctl estop resume <robot>` (see *Automatic release after
+an estop clear is not in this draft*). A robot another stop still holds keeps its state.
+
+**Instead.** Don't bind automation to `cluster-admin`, cluster-wide or in a namespace that holds
+Swarmada's resources. Give it a Role or ClusterRole that names the verbs it needs, with no `*` and
+no custom verb. A sync that would remove the annotation is then refused, and the stop stands.
+
 ### The audit log names the controller for some operator actions
 
 **Limitation.** Estop trigger and clear, rollout resume and `SwarmadaConfig` changes record the
