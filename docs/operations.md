@@ -31,6 +31,14 @@ not be granted `estop-clear`. That is a deployment obligation: the control plane
 a clear by the verb alone and does not tell a person from a service account
 (RFC-0001 #safety-estop-state-machine).
 
+A role whose verbs include `*` grants `estop-clear` too, because `*` matches every verb, custom
+verbs included. `cluster-admin` is such a role. Automation such as a GitOps controller must not
+run with `cluster-admin`, cluster-wide or in a namespace that holds Swarmada's resources. If it
+does, a sync that removes the `swarmada.io/estop-triggered` annotation from a `FleetZone`, `Robot`
+or `SwarmadaConfig` clears that stop. The robots the clear reaches go to `Resuming` and stay
+there, withheld from dispatch, until an operator releases them with `swarmctl estop resume`
+([Known limitations](known-limitations.md#automation-bound-to-cluster-admin-can-clear-an-estop)).
+
 ## 2. API surface and RBAC (the contract)
 
 Every operation is a Kubernetes API call on a `swarmada.io` CRD. **In Kubernetes the
