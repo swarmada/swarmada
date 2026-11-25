@@ -402,9 +402,9 @@ func TestZoneObserver_MemosThatDisagreeWithTheRecordAreCorrected(t *testing.T) {
 	}
 }
 
-// A write by anyone else to the robot (here its phase) costs its next frame one read past the
-// cache; the frames after it are decided on the cache again.
-func TestZoneObserver_AnotherWriteToTheRobotCostsOneRead(t *testing.T) {
+// A write by anyone else to the robot that leaves its zone fields as they are (here its phase)
+// costs its frames no read past the cache: they move nothing, and are decided on the cache.
+func TestZoneObserver_AnotherWriteToTheRobotCostsNoRead(t *testing.T) {
 	zr := newZoneReads(t, []client.Object{robotAt("rk", "rid-k", "a")}, nil, true)
 	ctx := context.Background()
 	zr.frame("rid-k", 5)
@@ -421,8 +421,8 @@ func TestZoneObserver_AnotherWriteToTheRobotCostsOneRead(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		zr.frame("rid-k", 5)
 	}
-	if gets, _ := zr.reads.counts(); gets != 1 {
-		t.Fatalf("three frames after a phase write read %d robots past the cache, want 1", gets)
+	if gets, _ := zr.reads.counts(); gets != 0 {
+		t.Fatalf("three frames after a phase write read %d robots past the cache, want none", gets)
 	}
 	if n := zr.currentZoneWrites.Load() - writes; n != 0 {
 		t.Fatalf("frames that move nothing wrote currentZone %d times", n)
@@ -430,7 +430,9 @@ func TestZoneObserver_AnotherWriteToTheRobotCostsOneRead(t *testing.T) {
 }
 
 // recordsHold compares the containment set as well as the zone: a frame whose containment set
-// moves while its zone does not is not decided on the cache.
+// moves while its zone does not is not decided on the cache. It does not compare the cached
+// copy's version, and a memo a move has advanced decides nothing on the cache until the move's
+// write returns.
 func TestRecordsHold_ComparesTheContainmentSet(t *testing.T) {
 	z := &ZoneController{}
 	key := zoneMemoKey(actionNS, "rid-k")
@@ -451,8 +453,8 @@ func TestRecordsHold_ComparesTheContainmentSet(t *testing.T) {
 	}
 	other := robot.DeepCopy()
 	other.ResourceVersion = "8"
-	if z.recordsHold(key, other, "a", []string{"a"}) {
-		t.Fatal("a cached copy newer than the version last read was decided on the cache")
+	if !z.recordsHold(key, other, "a", []string{"a"}) {
+		t.Fatal("a cached copy newer than the version last read, recording what the memos hold, does not hold")
 	}
 	edited := robot.DeepCopy()
 	edited.Status.CurrentZone = "c"
@@ -463,6 +465,34 @@ func TestRecordsHold_ComparesTheContainmentSet(t *testing.T) {
 	otherSet.Status.ContainingZones = []string{"a", "big"}
 	if z.recordsHold(key, otherSet, "a", []string{"a"}) {
 		t.Fatal("a cached copy recording another containment set than the memos was decided on the cache")
+	}
+
+	// A move advances the zone memo before its write: a cached copy that already shows the new
+	// zone (a cache behind an earlier write of it) decides nothing until the write returns.
+	if !z.recordZone(key, "b", "a") {
+		t.Fatal("the move a → b did not advance the zone memo")
+	}
+	inB := robot.DeepCopy()
+	inB.Status.CurrentZone = "b"
+	if z.recordsHold(key, inB, "b", []string{"a"}) {
+		t.Fatal("a zone memo ahead of what is recorded, its write in flight, decided a frame on the cache")
+	}
+	z.noteRead(key, "9")
+	if !z.recordsHold(key, inB, "b", []string{"a"}) {
+		t.Fatal("once the move's write returned, an unchanged frame does not hold")
+	}
+	// The same for the containment memo.
+	if !z.recordContainment(key, []string{"a", "big"}, []string{"a"}) {
+		t.Fatal("the containment move did not advance the set memo")
+	}
+	inBig := inB.DeepCopy()
+	inBig.Status.ContainingZones = []string{"a", "big"}
+	if z.recordsHold(key, inBig, "b", []string{"a", "big"}) {
+		t.Fatal("a set memo ahead of what is recorded, its write in flight, decided a frame on the cache")
+	}
+	z.noteRead(key, "10")
+	if !z.recordsHold(key, inBig, "b", []string{"a", "big"}) {
+		t.Fatal("once the containment write returned, an unchanged frame does not hold")
 	}
 }
 
