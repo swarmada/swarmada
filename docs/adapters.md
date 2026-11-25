@@ -17,9 +17,10 @@ their own repository.
 
 ## Prerequisites
 
-- Python 3.10 or newer for the SDK and an adapter (`sdk/python/pyproject.toml`). The
-  repository's own `swarmada` package — simulation, ML and tooling, the root
-  `pyproject.toml` — needs Python 3.12 or newer.
+- Python 3.10 or newer for the SDK (`sdk/python/pyproject.toml`). Each adapter states its
+  own floor in its `pyproject.toml`: the ROS 2 adapter needs 3.10 or newer, the VDA 5050
+  adapter 3.12 or newer. The repository's own `swarmada` package — simulation, ML and
+  tooling, the root `pyproject.toml` — needs Python 3.12 or newer.
 - The generated protocol stubs, committed under `proto/`. Regenerate them with
   `make proto-py` only after changing a `.proto` file; that needs uv, or
   `pip install '.[codegen]'`.
@@ -108,9 +109,9 @@ the conformance harness's own test server (see below) or a bare
 python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py \
     --endpoint localhost:9090
 
-# VDA5050 (simulated protocol profile):
+# VDA5050 (simulated protocol profile; --insecure: a local test without TLS):
 python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py \
-    --endpoint localhost:9090 --comms simulated
+    --endpoint localhost:9090 --comms simulated --insecure
 
 # MAVLink (simulated link):
 python3 adapters/external/fleet-adapter-mavlink/fleet_adapter_mavlink/adapter.py \
@@ -198,7 +199,7 @@ control-plane side, for test purposes.
 make conformance-sim
 
 # Any other adapter, in its default (simulated-binding) mode:
-make conformance ADAPTER='python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py --endpoint localhost:{port}'
+make conformance ADAPTER="python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py --endpoint localhost:{port} --edge-latch-file $(mktemp -d)/edge-latch"
 make conformance ADAPTER='python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py --endpoint localhost:{port} --comms simulated --insecure'
 make conformance ADAPTER='python3 adapters/external/fleet-adapter-mavlink/fleet_adapter_mavlink/adapter.py --endpoint localhost:{port} --link simulated'
 ```
@@ -207,7 +208,9 @@ make conformance ADAPTER='python3 adapters/external/fleet-adapter-mavlink/fleet_
 `9090`). The harness serves plaintext, and the VDA5050 adapter refuses to start
 without TLS unless it is given `--insecure`, which is for local tests such as this
 one; a checkout of the adapter from before that flag rejects it as an unrecognized
-argument. Add `CONFORMANCE_ARGS='--json report.json'` to also write a machine-readable
+argument. The ROS 2 command gives each run a latch file of its own: the run ends with the
+harness's edge estop (C8.3), which sets the adapter's latch, and the adapter does not start
+while its default latch file (`~/.local/state/swarmada/edge-latch-<robot-id>`) is there. Add `CONFORMANCE_ARGS='--json report.json'` to also write a machine-readable
 report; `--json` given to `make` directly is a `make` option and fails. A conforming
 adapter has no failed MUST/MUST NOT among the checks that ran; a `skip` is
 not a pass — it means the harness could not observe that behavior in this
