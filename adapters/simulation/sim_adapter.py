@@ -86,12 +86,12 @@ _TELEMETRY_INTERVAL = 0.2  # seconds between telemetry payloads
 _TICK_DT = 0.2             # sim advance per loop pass, in step with wall-clock time
 # A cancel is answered from readings of the world taken this often.
 _CANCEL_LOOK_S = 0.05
-# And within this long of its arrival, whatever waits in the robot's lane before it. The control
-# plane waits 2 s for a cancel's answer and drops a later one (internal/controller: wireTimeout,
-# pushCancel), and RFC-0001 sets no deadline of its own, so 0.5 s is left for the cancel's trip
-# here and its answer's trip back. A cancel whose reading has not come by then is answered as not
-# confirmed (_cancel_not_confirmed): a late answer is recorded as a safe stop once the lease is
-# provably dead, an answer in time as an unwitnessed one.
+# Its deadline is this long after its arrival, whatever waits in the robot's lane before it. The
+# control plane waits 2 s for a cancel's answer and drops a later one (internal/controller:
+# wireTimeout, pushCancel), and RFC-0001 sets no deadline of its own, so 0.5 s is left for the
+# cancel's trip here and its answer's trip back. A cancel whose reading has not come by then is
+# answered as not confirmed (_cancel_not_confirmed): a late answer is recorded as a safe stop once
+# the lease is provably dead, an answer in time as an unwitnessed one.
 _CANCEL_BUDGET_S = 1.5
 # A stop's own confirmation keeps the SDK's budget (40 x 0.05 s, swarmada_sdk.safety): its first
 # answer, ESTOP_STATE_STOPPING, is sent at once, and its final one has a window of its own.
@@ -996,7 +996,7 @@ class SimAdapter:
                        marker: bool = True) -> None:
         """Answer a cancel STOPPED_SAFELY once a reading of the world shows what it needs, by
         `deadline` (monotonic: _CANCEL_BUDGET_S after the cancel arrived); otherwise not as a
-        safe stop (_cancel_not_confirmed), by the deadline too.
+        safe stop (_cancel_not_confirmed), when the deadline's timer fires.
 
         `look()` takes one reading, here on the reader: a robot already at rest, or already on
         the replacing action, is answered at once. Otherwise `wait(deadline)`, true once a later
