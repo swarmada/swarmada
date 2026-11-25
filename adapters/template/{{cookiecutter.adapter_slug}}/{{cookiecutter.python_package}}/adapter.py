@@ -731,10 +731,10 @@ class {{cookiecutter.python_package}}Adapter:  # noqa: N801  (generated class na
         """Answer a cancel whose stop is commanded, from the lane: STOPPED_SAFELY once a state
         counted after the stop shows the robot at rest, by `deadline` (monotonic:
         _CANCEL_BUDGET_S after the cancel arrived); otherwise not a safe stop
-        (`_cancel_not_confirmed`), by the deadline too. The lane may still be busy with a stop at
-        the deadline, so a timer answers the cancel as not confirmed then; whichever answers
-        first is the one answer (`_OneAnswer`). The answer goes on the outbox of the session the
-        cancel came on: a newer session never had this cancel.
+        (`_cancel_not_confirmed`), when the deadline's timer fires. The lane may still be busy
+        with a stop at the deadline, so a timer answers the cancel as not confirmed then;
+        whichever answers first is the one answer (`_OneAnswer`). The answer goes on the outbox
+        of the session the cancel came on: a newer session never had this cancel.
 
         On a capability-loss cancel, set disposition from the robot's state: STOPPED_SAFELY (safe
         stop → task requeued), COMPLETED (finished; cancel moot), or RECOVERED (mid-commitment,
