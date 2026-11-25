@@ -141,6 +141,8 @@ func (z *ZoneController) recordContainment(key string, newSet, statusSet []strin
 		return false
 	}
 	z.lastContaining[key] = newSet
+	// As in recordZone: no frame is decided on the cache until this move's write returns.
+	delete(z.lastRead, key)
 	return true
 }
 

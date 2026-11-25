@@ -99,10 +99,12 @@ type ZoneController struct {
 	// containment and changes nothing an adapter must do (ADR-0059; zone_containment.go).
 	lastContaining map[string][]string
 	// lastRead is the robot's resourceVersion the memos were last decided against: the copy a
-	// frame read past the cache, or the one a write returned. It saves reads, and is not what
-	// makes the cache-decided frame safe (that is recordsHold's check that the cached copy
-	// records what the frame derives): once the informer delivers a write by anyone else, the
-	// cached version differs from it, and the robot's next frame reads it past the cache.
+	// frame read past the cache, or the one a write returned. recordsHold uses only whether it is
+	// set: the memos were decided on the API server's copy (with an APIReader, as in the manager)
+	// since this process started, and no move has advanced them since (recordZone and
+	// recordContainment clear it until the move's write returns). It is not what makes the
+	// cache-decided frame safe: that is recordsHold's check that the cached copy records what the
+	// frame derives.
 	lastRead   map[string]string
 	lastPushed map[types.NamespacedName]pushedConstraints
 	// unsurePush records, per zoneMemoKey, a containment write whose outcome is unknown: it failed
@@ -556,8 +558,9 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 	// differ is a write the cache has not delivered yet (an edit by someone else; only this
 	// controller writes these fields otherwise), and that only delays the write-back: once the
 	// informer delivers it, the cached copy no longer matches and the next frame reads the robot
-	// past the cache. The cached copy must also be the version last decided on (lastRead), which
-	// saves the reads a version already decided would cost.
+	// past the cache. The memos must also have been decided on a copy read past the cache since
+	// this process started, with no move of theirs still in flight (lastRead). Other writes to
+	// the robot (a stop's status writes, a liveness stamp) do not cost its next frame a read.
 	if z.frameMovesNothing(f, robot) {
 		return
 	}
@@ -604,9 +607,9 @@ func (z *ZoneController) ObservePosition(ctx context.Context, f telemetry.Frame)
 }
 
 // frameMovesNothing marks the robot positioned and reports whether the frame moves nothing: the
-// cached robot is the version last decided on, recorded as the memos hold, and the frame derives
-// that zone and containment set (recordsHold). applyFrame would then write nothing. It reads no
-// API: the robot is the cache's copy.
+// memos are decided and no move of theirs is in flight, the cached robot is recorded as they
+// hold, and the frame derives that zone and containment set (recordsHold). applyFrame would
+// then write nothing. It reads no API: the robot is the cache's copy.
 func (z *ZoneController) frameMovesNothing(f telemetry.Frame, robot *fleetv1.Robot) bool {
 	memo := zoneMemoKey(robot.Namespace, f.RobotID)
 	z.zonesMu.RLock()
@@ -840,10 +843,14 @@ func (z *ZoneController) zoneReader(caller string) client.Reader {
 //
 //   - both memos have been seen: a robot this process has not decided on since it started (a
 //     restart, a leadership change, ForgetRobot, a refused write) has none;
-//   - the cached copy is the version the memos were last decided against (lastRead): this only
-//     saves reads, since a version already decided needs no second look;
-//   - that copy records what the memos hold, and the frame derives it. This is what makes the
-//     skip safe: applyFrame, given that copy, would write nothing.
+//   - the memos were decided against a copy read past the cache, or returned by their write,
+//     since then (lastRead is set), and no move has advanced them since (recordZone and
+//     recordContainment clear lastRead until the move's write returns);
+//   - the cached copy records what the memos hold, and the frame derives it. This is what makes
+//     the skip safe: applyFrame, given that copy, would write nothing.
+//
+// The cached copy's resourceVersion is not compared: writes that leave the zone fields as they
+// are (a stop's record, estopState and estopHeldBy; a lastSeenAt stamp) cost no read.
 //
 // Anything else takes the read past the cache, where applyFrame compares the memos with what
 // the API server records and corrects either.
@@ -853,7 +860,7 @@ func (z *ZoneController) recordsHold(key string, robot *fleetv1.Robot, zone stri
 	prevZone, zoneSeen := z.lastZone[key]
 	prevSet, setSeen := z.lastContaining[key]
 	read, readSeen := z.lastRead[key]
-	return zoneSeen && setSeen && readSeen && read != "" && read == robot.ResourceVersion &&
+	return zoneSeen && setSeen && readSeen && read != "" &&
 		robot.Status.CurrentZone == prevZone && sameZoneSet(robot.Status.ContainingZones, prevSet) &&
 		prevZone == zone && sameZoneSet(prevSet, containing)
 }
@@ -906,6 +913,11 @@ func (z *ZoneController) recordZone(key, newZone, statusZone string) bool {
 		return false
 	}
 	z.lastZone[key] = newZone
+	// Called before a frame's write, the memo is now ahead of every copy of the robot until the
+	// write lands: no frame may be decided on the cache meanwhile (recordsHold). The write's own
+	// version, or forgetMemos on its failure, ends that. Called after a write
+	// (placeDeclaredMember), the caller's noteRead follows at once.
+	delete(z.lastRead, key)
 	return true
 }
 
