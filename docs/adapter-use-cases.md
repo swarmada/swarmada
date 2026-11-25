@@ -32,15 +32,17 @@ after cloning, or after changing an adapter's own code.
 ```bash
 # Terminal 1 — a bare gRPC endpoint standing in for the control plane:
 python -m adapters.conformance --stub-path proto --adapter-name smoke-test \
-    --adapter-cmd 'python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py --endpoint localhost:{port}'
+    --adapter-cmd "python3 adapters/external/fleet-adapter-ros2/fleet_adapter_ros2/adapter.py --endpoint localhost:{port} --edge-latch-file $(mktemp -d)/edge-latch"
 ```
 
 This is `make conformance` under the hood — it starts the test server, launches
-the adapter, and exits non-zero on any failed MUST/MUST NOT. Swap the
+the adapter, and exits non-zero on any failed MUST/MUST NOT. The run ends with an
+edge estop, which sets the ROS 2 adapter's latch, so the command gives it a latch
+file of its own; without one, the adapter does not start for the next run. Swap the
 `--adapter-cmd` for VDA5050 or MAVLink to smoke-test those instead:
 
 ```bash
-make conformance ADAPTER='python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py --endpoint localhost:{port} --comms simulated'
+make conformance ADAPTER='python3 adapters/external/fleet-adapter-vda5050/fleet_adapter_vda5050/adapter.py --endpoint localhost:{port} --comms simulated --insecure'
 make conformance ADAPTER='python3 adapters/external/fleet-adapter-mavlink/fleet_adapter_mavlink/adapter.py --endpoint localhost:{port} --link simulated'
 make conformance-sim   # in-tree simulation adapter (KinematicSim)
 ```
@@ -227,8 +229,14 @@ cancel + hold (never inferred — `is_stopped` comes from the odom twist).
 pip install -e 'adapters/external/fleet-adapter-vda5050[vda5050]'   # adds paho-mqtt
 
 python -m fleet_adapter_vda5050.adapter --endpoint localhost:9445 \
-    --comms vda5050 --mqtt-host broker.local --mqtt-port 1883
+    --comms vda5050 --mqtt-host broker.local --mqtt-port 1883 \
+    --tls-ca ca.crt --tls-cert tls.crt --tls-key tls.key \
+    --tls-server-name swarmada-controlstream.system.svc
 ```
+
+The three `--tls-*` files are this adapter's own client certificate, issued for its `FleetAdapter`
+([`adapters.md`](adapters.md#against-a-real-running-control-plane) says how). Without them the
+adapter does not start, and `--insecure` is for local tests only.
 
 A `FleetAction` assignment (`assign_action`) becomes a VDA5050 `order` (monotonic `headerId`/
 `orderUpdateId`); task status comes from `state`; a confirmed estop is a
