@@ -31,9 +31,10 @@
 
 FROM python:3.12-slim
 
-# Runtime dependencies, pinned to the versions uv.lock resolves for the repository
-# (pyproject.toml: grpcio>=1.62, protobuf>=6.33.5 — the stubs are gencode 6.33.5 and
-# refuse an older runtime — and pyyaml>=6.0 for the scenario presets).
+# Runtime dependencies, pinned. grpcio and pyyaml are the versions uv.lock resolves
+# for the repository; protobuf is pinned above the 5.29.6 it resolves. The floors are
+# pyproject.toml's: grpcio>=1.64.1 and protobuf>=3.20.3 (the committed stubs carry no
+# protobuf runtime-version check), and pyyaml>=6.0 for the scenario presets.
 RUN pip install --no-cache-dir grpcio==1.83.0 protobuf==6.33.6 pyyaml==6.0.3
 
 WORKDIR /app
