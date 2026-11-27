@@ -61,9 +61,10 @@ type invocation struct {
 func (i invocation) String() string { return fmt.Sprintf("%s:%d: %s", i.File, i.Line, i.Text) }
 
 // swarmctlLine matches an invocation at the start of a code line or after a
-// shell prompt or pipe. The trailing capture runs to end-of-line; splitInvocation
+// shell prompt or pipe, as `swarmctl`, `./swarmctl`, `bin/swarmctl` or
+// `./bin/swarmctl`. The trailing capture runs to end-of-line; splitInvocation
 // trims what is not part of the command.
-var swarmctlLine = regexp.MustCompile("(?:^|[\\s`$|(])swarmctl\\s+([^`\n]*)")
+var swarmctlLine = regexp.MustCompile("(?:^|[\\s`$|(])(?:\\./)?(?:bin/)?swarmctl\\s+([^`\n]*)")
 
 // repoRoot walks up from the package directory to the directory holding go.mod.
 // Tests run with the package directory as their working directory, so the corpus
