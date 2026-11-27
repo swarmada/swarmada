@@ -306,12 +306,22 @@ def running(rendered):
         run.stop()
 
 
-def _telemetry_queued(outbox: queue.Queue) -> int:
-    """How many TelemetryPayloads wait on `outbox`. A stream's release sentinel (None) and the
-    work's last status reports are not telemetry, and may land after a supersession."""
-    with outbox.mutex:
-        items = list(outbox.queue)
-    return sum(1 for m in items if m is not None and m.WhichOneof("payload") == "telemetry")
+class _TelemetryPut:
+    """Counts the TelemetryPayloads put on `outbox` from now on. It counts puts, not what waits
+    on the queue: the ended session's request reader may still be taking off frames queued
+    before the supersession, and a frame it takes off is not one queued after. A stream's
+    release sentinel (None) and the work's last status reports are not telemetry, and may land
+    after a supersession."""
+
+    def __init__(self, outbox: queue.Queue) -> None:
+        self.outbox, self.count = outbox, 0
+        put = outbox.put
+
+        def counting_put(item, *args, **kwargs):
+            if item is not None and item.WhichOneof("payload") == "telemetry":
+                self.count += 1
+            return put(item, *args, **kwargs)
+        outbox.put = counting_put
 
 
 def _wait(pred, timeout: float):
@@ -347,15 +357,16 @@ def test_a_stream_closed_as_superseded_stops_every_robot_and_is_not_redialled(
     assert not [r for r in run.robots if run.holds_work(r)], (
         "superseded, the adapter still holds work: "
         f"{ {r: run.holds_work(r) for r in run.robots if run.holds_work(r)} }")
-    queued = _telemetry_queued(run.outbox())
+    telemetry = _TelemetryPut(run.outbox())
     time.sleep(REDIAL_S)
     assert plane.calls == {"control": 1, "safety": 1}, (
         f"superseded, the adapter dialled again: {plane.calls}")
     assert run.control_thread.is_alive(), (
         "superseded, the adapter's ControlStream loop returned: a process that exits is "
         "restarted, and displaces the stream that replaced it")
-    assert _telemetry_queued(run.outbox()) == queued, (
-        "superseded, the adapter still queues telemetry for a stream that is gone")
+    assert run.outbox() is telemetry.outbox and telemetry.count == 0, (
+        "superseded, the adapter still queues telemetry for a stream that is gone: "
+        f"{telemetry.count} frame(s) queued after the supersession")
     err = capfd.readouterr().err
     assert "SUPERSEDED stream=" in err, "the reason was not written to stderr"
     unlogged = [r for r in run.robots if f"SUPERSEDED_REST robot={r}:" not in err]
