@@ -168,6 +168,19 @@ longer, and the manager's client logs waits on its rate limiter.
 `--kube-api-qps` and `--kube-api-burst`. The trade-off is more load on the API server from the
 manager, so raise them only as far as your API server can serve.
 
+### Each dispatch pass reads every robot in its namespace
+
+**Limitation.** Each dispatch pass for a `Pending` action reads every `Robot` in the namespace
+twice, whether or not a stop is in progress: once from the manager's cache, which copies each
+robot, and once from the API server, past the cache, to check that no other robot carries the
+chosen robot's robot-id. So the cost of a pass grows with the number of robots in the namespace.
+
+**What you will see.** In a large namespace, assignments take longer as the fleet grows, and with
+many `Pending` actions the manager's client waits on its rate limiter.
+
+**Instead.** For hundreds of robots in one namespace, raise `--kube-api-qps` and
+`--kube-api-burst`, as for a large stop above. A fix is planned for a later release.
+
 ## Security and audit
 
 ### Some custom RBAC verbs are checked only by swarmctl
@@ -1322,6 +1335,22 @@ unaffected.
 **Instead.** Move the adapter to a build that declares a contract version inside the range, run
 its conformance suite at that version, and replace its report. See
 [Contract versions and re-qualification](adapters.md#contract-versions-and-re-qualification).
+
+### A 1.3.x adapter connection is given work, unlike RFC-0001's candidate filter 9
+
+**Limitation.** RFC-0001's candidate filter 9 gives work only to a robot whose adapter's connection
+negotiated contract `1.4.0`, the version the Stop Latch binds; a `1.3.x` connection is sent every
+stop and no work. A 0.4.x control plane applies that version condition only when the manager runs
+with `--require-latch-contract`. The flag is off by default, because the in-tree deployments run the
+simulation adapter at `1.3.0`.
+
+**What you will see.** The robots of an adapter at contract `1.3.x` are assigned work, and the
+adapter is sent every stop. The conformance harness grades such a connection as the RFC asks: the
+rows that need an assignment record `contract-predates-obligation`.
+
+**Instead.** Run adapters at contract `1.4.0` where you can. To hold a `1.3.x` connection to every
+stop and no work, as RFC-0001 asks, start the manager with `--require-latch-contract`; the
+simulation adapter then needs `--latch` to be given work.
 
 ### Conformance does not check that an aerial robot's stop is a hover or a land
 
