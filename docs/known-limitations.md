@@ -155,19 +155,18 @@ manager serving too.
 ### A large stop slows reads and writes on the manager's client budget
 
 **Limitation.** The manager shares one client budget with the API server (`--kube-api-qps`,
-default 20). During a zone or namespace stop, position frames that may move a robot read the
-`Robot` from the API server rather than the cache, and each dispatch pass for a `Pending` action
-lists every robot in the namespace. These reads compete with the stop's own reads and status
-writes. In a test with 25 robots per stop, about one uncached read in eight during the stops was
-a position frame's.
+default 20). During a zone or namespace stop, a position frame that moves a robot reads the `Robot`
+from the API server rather than the cache, and each dispatch pass for a `Pending` action lists
+every robot in the namespace. These reads compete with the stop's own reads and status writes.
+From 0.4.2, a position frame that leaves its robot where it is no longer reads the `Robot` past the
+cache because of the stop's own writes to it.
 
 **What you will see.** In large namespaces a stop's status writes and the next assignments take
 longer, and the manager's client logs waits on its rate limiter.
 
 **Instead.** Keep the defaults for small fleets. For hundreds of robots in one namespace, raise
 `--kube-api-qps` and `--kube-api-burst`. The trade-off is more load on the API server from the
-manager, so raise them only as far as your API server can serve. A fix is planned for the next
-patch release.
+manager, so raise them only as far as your API server can serve.
 
 ## Security and audit
 
@@ -850,23 +849,25 @@ higher value is the healthier one. See
 
 **Limitation.** RFC-0001 v0.4 requires every robot in a zone or namespace stop to reach its outcome
 (`Stopped` or `Failed`, recorded) within 2 s of the operator's trigger, for a fleet of 50 robots.
-The stop itself goes out at once: in tests with simulated robots, every robot was sent its stop
-within about 1 s and acknowledged it within 0.2 s. Recording each robot's outcome takes longer,
-because the outcome writes queue behind the manager's other writes to `Robot` objects. On the
-default client budget it took 3.83 s at the 95th percentile with 25 robots per stop, and about 19 s
-with 100 robots per stop. All four figures were measured before 0.4.1's last stop and dispatch
-changes, and were timed from the stop's processing pass, not from the operator's trigger.
+The stop itself goes out at once: in tests with 100 simulated robots per stop, every robot
+acknowledged its stop within about 0.2 s, and the simulated robots came to rest about 0.25 s after
+it. Recording each robot's outcome takes longer. A stop writes about three status updates per robot
+(the stop's record, its outcome and the hold), and these writes queue on the manager's client
+budget with its other writes to `Robot` objects. In the same tests, on the default budget, the last
+robot's outcome was recorded about 12 to 13 s after the operator's trigger (the median of 38 stops;
+16 s at most). Stops of 50 robots have not been measured on 0.4.1 or later.
 
 **What you will see.** `swarmada_estop_fanout_duration_seconds` above 2 s for large stops. From
 0.4.1 it counts from when the control plane first sees the operator's trigger, not from when the
 stop's pass starts; admission and the watch's own delay come before that. After a manager restart
 or a change of leader, a stop whose trigger was already written is timed from its pass.
 
-**Instead.** Expect a robot's recorded outcome to lag its stop in large namespaces. To shorten the
-lag, see
+**Instead.** Expect a robot's recorded outcome to lag its stop in large namespaces. You can raise
+`--kube-api-qps` and `--kube-api-burst`, as in
 [A large stop slows reads and writes on the manager's client budget](#a-large-stop-slows-reads-and-writes-on-the-managers-client-budget).
-Whether a different implementation could meet the bound, and what would change, is being worked out
-for a later release.
+That setting has not been tested under load, and it raises every one of the manager's client
+budgets, not only the stop's. A change to how a stop writes its outcomes is planned for a later
+release.
 
 ### A robot can stay stopped after both of its stops are cleared
 
