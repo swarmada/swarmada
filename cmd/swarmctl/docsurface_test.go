@@ -227,6 +227,45 @@ func TestDocGateCanFail(t *testing.T) {
 	}
 }
 
+// TestDocGateReadsPathPrefixedInvocations: a command printed as `bin/swarmctl …`,
+// `./bin/swarmctl …` or `./swarmctl …` is read and resolved like a bare `swarmctl …`.
+// The docs build swarmctl into bin/ and run it from there, so a gate that reads
+// only the bare name lets those commands go unchecked. Building the binary is not
+// an invocation: `go build -o bin/swarmctl ./cmd/swarmctl` and `make swarmctl` are
+// not read.
+func TestDocGateReadsPathPrefixedInvocations(t *testing.T) {
+	root, _ := newRootCommand(cli.IOStreams{})
+	const doc = "```\nbin/swarmctl get widget\n./bin/swarmctl get robot\n./swarmctl get robot\n" +
+		"go build -o bin/swarmctl ./cmd/swarmctl\nmake swarmctl\n```\n"
+	var got [][]string
+	inFence := false
+	for _, line := range strings.Split(doc, "\n") {
+		if fenceLine.MatchString(line) {
+			inFence = !inFence
+			continue
+		}
+		for _, span := range codeSpans(line, inFence) {
+			for _, m := range swarmctlLine.FindAllStringSubmatch(span, -1) {
+				if _, args, ok := splitInvocation(m[1]); ok {
+					got = append(got, args)
+				}
+			}
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("extractor found %d invocations %v, want 3 (the bin/, ./bin/ and ./ commands; "+
+			"not the go build line, not make swarmctl)", len(got), got)
+	}
+	if err := resolveInvocation(root, got[0]); err == nil {
+		t.Errorf("gate accepted %v from `bin/swarmctl get widget` — it must reject this", got[0])
+	}
+	for _, args := range got[1:] {
+		if err := resolveInvocation(root, args); err != nil {
+			t.Errorf("gate rejected the valid invocation %v: %v", args, err)
+		}
+	}
+}
+
 // TestDocWalkDoesNotEscapeTheCorpus holds the gosec G122 fix in collectDocInvocations. The
 // collector reads through an os.Root scoped to each corpus directory, so an entry
 // that resolves outside it is never read. Before that change the walk handed
