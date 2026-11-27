@@ -1444,8 +1444,9 @@ class _Driver:
 
         RFC-0001 #fleet-adapter-protocol-package-and-versioning: a 1.3.x adapter's connection
         negotiates 1.3.x and is held to it: "it is sent every stop, and no AssignAction"
-        (candidate filter 9). The harness does as a 1.4.0 control plane does, so a row that needs
-        an assignment does not bind such a connection, and records ``contract-predates-obligation``.
+        (candidate filter 9). The harness does as the RFC asks, so a row that needs an assignment
+        does not bind such a connection, and records ``contract-predates-obligation``. A 0.4.x
+        control plane applies filter 9's version condition only with --require-latch-contract.
         A connection that agreed no version at all is graded as before (C13.1 fails it).
         """
         return self._contract_ok and not self._latch_binds()
@@ -1454,8 +1455,8 @@ class _Driver:
         """The skip detail of a row that needs ``needs`` on a connection held to 1.3.x."""
         agreed = _negotiate(self._reported_contract)
         return (SkipCause.CONTRACT_PREDATES_OBLIGATION.value
-                + f": the connection negotiated contract {agreed}, and a control plane "
-                  f"sends a 1.3.x connection every stop and no AssignAction (RFC-0001 "
+                + f": the connection negotiated contract {agreed}, and under RFC-0001 a 1.3.x "
+                  f"connection is sent every stop and no AssignAction (RFC-0001 "
                   f"#fleet-adapter-protocol-package-and-versioning), so this row, which needs "
                   f"{needs}, does not bind it")
 
