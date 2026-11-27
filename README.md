@@ -230,6 +230,8 @@ kubectl get robots,fleettasks -n warehouse-a
 
 - [Getting started](docs/getting-started.md) — three tiers, from a simulated robot on a
   local cluster to your own robot
+- [Swarmada at home](docs/home/README.md) — simulated robots, then one ROS 2 hobby
+  robot, then a routine for it, all on one computer
 - [Architecture](docs/architecture.md) — the two-plane control/data model, the
   control-plane components, and the CRDs
 - [Quickstart](docs/quickstart.md) — run the demos on a local `kind` cluster and

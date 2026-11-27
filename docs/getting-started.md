@@ -11,6 +11,8 @@ building on what a tier shows, read [Known limitations](known-limitations.md).
 | 3. Your own robot | An adapter for your robot | A cluster, an adapter inside the contract window, images you build | The tier 2 sequence, with your robot |
 
 No tier needs hardware. Tiers 1 and 2 each create their own `kind` cluster.
+[Swarmada at home](home/README.md) takes the same path on one computer, with a ROS 2
+hobby robot as your own robot, and ends with a routine for it.
 
 ## Tier 1: try it
 
